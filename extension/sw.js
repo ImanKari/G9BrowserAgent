@@ -56,7 +56,12 @@ async function bootstrap() {
 }
 
 api.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'g9-heartbeat' && !transport.isConnected()) {
+  if (alarm.name !== 'g9-heartbeat') return;
+  // Only step in when the backoff cycle is NOT already handling it. The alarm
+  // exists to revive a worker that was torn down mid-backoff (its timers die
+  // with it); firing alongside a live backoff just doubles the failed attempts
+  // the browser logs to the extension error console.
+  if (!transport.isConnected() && !transport.isReconnectPending()) {
     transport.connect();
   }
 });
@@ -334,9 +339,16 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   (async () => {
     switch (msg.cmd) {
-      case 'getState':
+      case 'getState': {
+        // The panel polls this. If it is open and we are disconnected, the user
+        // is looking at the problem — retry immediately rather than making them
+        // wait out a 60s backoff.
+        if (msg.nudge && !transport.isConnected() && !transport.isReconnectPending()) {
+          transport.connectNow();
+        }
         sendResponse({ ok: true, state: await getState(), status: await status() });
         break;
+      }
       case 'attachActive': {
         const active = await tabsTool.getActiveTab();
         if (!active) throw new Error('No active tab.');
@@ -359,11 +371,12 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         break;
       case 'setBridge':
         await setState({ bridge: { host: msg.host, port: Number(msg.port), token: msg.token ?? '' } });
-        transport.connect({ force: true });
+        transport.connectNow();
         sendResponse({ ok: true });
         break;
       case 'reconnect':
-        transport.connect({ force: true });
+        // User is watching — skip any pending backoff and try right now.
+        transport.connectNow();
         sendResponse({ ok: true });
         break;
       case 'halt':

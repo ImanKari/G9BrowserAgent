@@ -39,9 +39,13 @@ function cmd(payload) {
   return api.runtime.sendMessage({ __g9cmd: true, ...payload });
 }
 
+/** Opening the panel counts as "the user wants this connected now". */
+let firstRefresh = true;
+
 async function refresh() {
   try {
-    const res = await cmd({ cmd: 'getState' });
+    const res = await cmd({ cmd: 'getState', nudge: firstRefresh });
+    firstRefresh = false;
     if (res?.ok) render(res.state, res.status);
   } catch {
     // The worker may be starting up; the next event or poll will catch it.

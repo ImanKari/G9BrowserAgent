@@ -2,7 +2,7 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v1.0.3 — self-tested (20/20) and live-tested (19/19) against real Edge. Live CDP confirmed end to end. Test-page defect detection still unverified.
+**Status:** v1.0.4 — self-tested (20/20) and live-tested (19/19) against real Edge. Live CDP confirmed end to end. Test-page defect detection still unverified.
 **Created:** 2026-08-31
 
 ---
@@ -276,6 +276,47 @@ Covers: MCP handshake, instruction delivery, tool count and schema validity, res
 ## 9. Change log
 
 Newest first. **Every change to this repo gets an entry.**
+
+### 2026-08-31 — v1.0.4, two bugs from the user's own install
+
+Both surfaced from screenshots of the Edge extensions page after a reload.
+
+**1. The side panel forgot the bridge path.** `serverPath` arrives in the
+`welcome` handshake and was written only to `chrome.storage.session`, which is
+cleared on every extension reload and browser restart. So the panel reverted to
+`REPLACE_WITH_ABSOLUTE_PATH` even though the bridge had connected successfully
+minutes earlier. The repo does not move between sessions, so the path belongs in
+`chrome.storage.local` alongside host/port/token. `state.js` now persists
+`serverPath` and `repoRoot`, and both are declared in `DEFAULTS`.
+
+**2. `ERR_CONNECTION_REFUSED` accumulating in the extension error console.**
+The error itself is honest — it means no bridge is listening — and it cannot be
+suppressed: the browser logs failed WebSocket handshakes below our JavaScript,
+before any handler runs. So the only lever is *attempting less often*, and two
+independent retry sources were competing:
+
+- `transport.scheduleReconnect()` with a 15s backoff ceiling, and
+- the `g9-heartbeat` alarm in `sw.js` firing every 30s and calling `connect()`
+  regardless of whether a backoff was already pending.
+
+Together they produced roughly four console entries a minute, indefinitely,
+whenever the bridge was not running. Changes:
+
+- Backoff ceiling raised from 15s to 60s (`[0.5, 1, 2, 5, 10, 20, 40, 60]`).
+- `reconnectTimer` tracked, with `isReconnectPending()` exported. The alarm now
+  stands down when a backoff is already queued — it exists only to revive a
+  worker that was torn down mid-backoff, since the worker's timers die with it.
+- `connectNow()` added for user-initiated retries: cancels the pending backoff,
+  resets the attempt counter, connects immediately. Wired to the panel's
+  Reconnect button, to Save-and-reconnect, and to the panel's first poll after
+  it opens — when the user is looking at the problem, a 60s wait reads as broken.
+
+Net effect: about one console entry a minute while idle, and an instant
+connection the moment the user opens the panel or starts the bridge.
+
+Worth stating plainly for future readers: **a red entry in the extension error
+console does not mean the extension is broken.** When the bridge is not running
+it is the correct, expected report. Do not "fix" it by swallowing the error.
 
 ### 2026-08-31 — v1.0.3, first live CDP run
 

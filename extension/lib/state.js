@@ -23,6 +23,9 @@ const DEFAULTS = {
     lastError: null,
     /** optional shared secret; empty means "rely on Origin checking" */
     token: '',
+    /** absolute path the bridge reported; persisted so the panel keeps it */
+    serverPath: null,
+    repoRoot: null,
   },
   /** rolling activity log shown in the side panel */
   activity: [],
@@ -57,10 +60,13 @@ export async function setState(patch) {
   await api.storage.session.set({ state: next });
 
   // Mirror durable settings so host/port/mode survive a browser restart.
+  // serverPath/repoRoot belong here too: the repo does not move between
+  // sessions, and keeping them only in session storage meant the side panel
+  // fell back to a placeholder path after every extension reload.
   if (PERSISTED_KEYS.some((k) => k in patch)) {
-    const { host, port, token } = next.bridge;
+    const { host, port, token, serverPath, repoRoot } = next.bridge;
     await api.storage.local.set({
-      settings: { mode: next.mode, bridge: { host, port, token } },
+      settings: { mode: next.mode, bridge: { host, port, token, serverPath, repoRoot } },
     });
   }
 

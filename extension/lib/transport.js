@@ -17,16 +17,49 @@ import { getState, setState, broadcast } from './state.js';
 const api = globalThis.browser ?? globalThis.chrome;
 
 const PING_INTERVAL_MS = 20_000;
-const BACKOFF_MS = [500, 1_000, 2_000, 5_000, 10_000, 15_000];
+
+/**
+ * Reconnect backoff, climbing to a one-minute ceiling.
+ *
+ * Every failed attempt makes the BROWSER log
+ * "WebSocket connection failed: ERR_CONNECTION_REFUSED" into the extension's
+ * error console. That log happens below our JavaScript — we cannot catch or
+ * suppress it. So the only way to keep the console readable when the bridge is
+ * simply not running is to attempt less often. A 15s ceiling produced roughly
+ * four entries a minute, forever; 60s produces one, and a user who actually
+ * wants to connect gets an instant retry via connectNow().
+ */
+const BACKOFF_MS = [500, 1_000, 2_000, 5_000, 10_000, 20_000, 40_000, 60_000];
 
 let socket = null;
 let pingTimer = null;
+let reconnectTimer = null;
 let attempt = 0;
 let handler = null;
 let wantConnection = false;
 
 export function onMessage(fn) {
   handler = fn;
+}
+
+/** True while a backoff reconnect is already queued. */
+export function isReconnectPending() {
+  return reconnectTimer !== null;
+}
+
+/**
+ * User-initiated reconnect: cancel any pending backoff, reset the counter, and
+ * try immediately. Called when someone opens the side panel or presses
+ * Reconnect — at that moment they are watching, so waiting out a 60s backoff
+ * would feel broken.
+ */
+export function connectNow() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  attempt = 0;
+  return connect({ force: true });
 }
 
 export async function connect({ force = false } = {}) {
@@ -49,6 +82,10 @@ export async function connect({ force = false } = {}) {
 
   socket.addEventListener('open', async () => {
     attempt = 0;
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     await setState({ bridge: { connected: true, lastError: null } });
     startPing();
     send({ type: 'hello', role: 'extension', version: api.runtime.getManifest().version });
@@ -106,6 +143,10 @@ export function disconnect() {
 
 function teardown() {
   stopPing();
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   if (socket) {
     try {
       socket.close(1000, 'client shutdown');
@@ -148,10 +189,17 @@ function stopPing() {
 }
 
 function scheduleReconnect() {
+  // Never stack reconnects. The heartbeat alarm also calls connect(), and
+  // without this guard the two sources interleaved and roughly doubled the
+  // number of failed attempts (and therefore console errors).
+  if (reconnectTimer) return;
+
   const delay = BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)];
   attempt += 1;
   broadcast({ type: 'reconnecting', in: delay, attempt });
-  setTimeout(() => {
+
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
     if (wantConnection) connect();
   }, delay);
 }
