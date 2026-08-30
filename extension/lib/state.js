@@ -52,26 +52,50 @@ export async function getState() {
   };
 }
 
-export async function setState(patch) {
-  const current = await getState();
-  const next = { ...current, ...patch };
-  if (patch.bridge) next.bridge = { ...current.bridge, ...patch.bridge };
+/**
+ * Serializes every state mutation.
+ *
+ * getState/set is a read-modify-write against one storage key, and there are
+ * ~24 call sites firing from independent async contexts: tool calls, debugger
+ * events, connection changes, and the activity log. Two that interleave will
+ * both read the same base state and the second write silently discards the
+ * first. That surfaced as vanishing activity entries and, worse, a
+ * `pinnedTabId` or `attachedTabs` that reverted under load.
+ *
+ * A promise chain costs nothing here — writes are infrequent and tiny — and it
+ * makes every mutation atomic with respect to the others.
+ */
+let writeQueue = Promise.resolve();
 
-  await api.storage.session.set({ state: next });
+function serialize(fn) {
+  const run = writeQueue.then(fn, fn);
+  // Keep the chain alive even if one mutation throws.
+  writeQueue = run.catch(() => {});
+  return run;
+}
 
-  // Mirror durable settings so host/port/mode survive a browser restart.
-  // serverPath/repoRoot belong here too: the repo does not move between
-  // sessions, and keeping them only in session storage meant the side panel
-  // fell back to a placeholder path after every extension reload.
-  if (PERSISTED_KEYS.some((k) => k in patch)) {
-    const { host, port, token, serverPath, repoRoot } = next.bridge;
-    await api.storage.local.set({
-      settings: { mode: next.mode, bridge: { host, port, token, serverPath, repoRoot } },
-    });
-  }
+export function setState(patch) {
+  return serialize(async () => {
+    const current = await getState();
+    const next = { ...current, ...patch };
+    if (patch.bridge) next.bridge = { ...current.bridge, ...patch.bridge };
 
-  broadcast({ type: 'state', state: next });
-  return next;
+    await api.storage.session.set({ state: next });
+
+    // Mirror durable settings so host/port/mode survive a browser restart.
+    // serverPath/repoRoot belong here too: the repo does not move between
+    // sessions, and keeping them only in session storage meant the side panel
+    // fell back to a placeholder path after every extension reload.
+    if (PERSISTED_KEYS.some((k) => k in patch)) {
+      const { host, port, token, serverPath, repoRoot } = next.bridge;
+      await api.storage.local.set({
+        settings: { mode: next.mode, bridge: { host, port, token, serverPath, repoRoot } },
+      });
+    }
+
+    broadcast({ type: 'state', state: next });
+    return next;
+  });
 }
 
 /**
@@ -79,23 +103,27 @@ export async function setState(patch) {
  * to see exactly what the agent did, in order, with results. Never silently
  * drop entries — truncate the oldest instead.
  */
-export async function logActivity(entry) {
-  const state = await getState();
-  const record = {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    at: Date.now(),
-    ...entry,
-  };
-  const activity = [record, ...state.activity].slice(0, MAX_ACTIVITY);
-  await api.storage.session.set({ state: { ...state, activity } });
-  broadcast({ type: 'activity', entry: record });
-  return record;
+export function logActivity(entry) {
+  return serialize(async () => {
+    const state = await getState();
+    const record = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      at: Date.now(),
+      ...entry,
+    };
+    const activity = [record, ...state.activity].slice(0, MAX_ACTIVITY);
+    await api.storage.session.set({ state: { ...state, activity } });
+    broadcast({ type: 'activity', entry: record });
+    return record;
+  });
 }
 
-export async function clearActivity() {
-  const state = await getState();
-  await api.storage.session.set({ state: { ...state, activity: [] } });
-  broadcast({ type: 'state', state: { ...state, activity: [] } });
+export function clearActivity() {
+  return serialize(async () => {
+    const state = await getState();
+    await api.storage.session.set({ state: { ...state, activity: [] } });
+    broadcast({ type: 'state', state: { ...state, activity: [] } });
+  });
 }
 
 /**

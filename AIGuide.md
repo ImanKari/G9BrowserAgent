@@ -2,7 +2,7 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v1.0.4 — self-tested (20/20) and live-tested (19/19) against real Edge. Live CDP confirmed end to end. Test-page defect detection still unverified.
+**Status:** v1.0.5 — self-tested (20/20) and live-tested (19/19) against real Edge. Live CDP confirmed end to end. Test-page defect detection still unverified.
 **Created:** 2026-08-31
 
 ---
@@ -109,6 +109,10 @@ Every non-obvious decision traces back to one of these. Do not "simplify" past t
 - `transport.js` pings every **20s**. WebSocket traffic resets the idle timer; Chrome 116+ supports WS in service workers.
 - A `chrome.alarms` heartbeat every 30s revives the worker if it died while the bridge was unreachable. Alarms have a 30s floor — too slow to keep the worker alive on its own, which is why the 20s ping exists separately.
 - `bootstrap()` runs on module evaluation, not just on `onInstalled`, because a revived worker re-evaluates the module.
+- All state mutations are **serialized** through one promise chain in
+  `state.js`. Storage is a read-modify-write against a single key from ~24
+  independent async call sites; without serialization, interleaved writes lose
+  updates (see the v1.0.5 change-log entry).
 
 ### 4.2 Agents are bad at CSS selectors
 
@@ -276,6 +280,31 @@ Covers: MCP handshake, instruction delivery, tool count and schema validity, res
 ## 9. Change log
 
 Newest first. **Every change to this repo gets an entry.**
+
+### 2026-08-31 — v1.0.5, serialized state writes
+
+Found while re-reading `state.js` during the v1.0.4 follow-up, not from a
+reported symptom — but it is a genuine correctness bug, so it is recorded here.
+
+`getState()` + `storage.session.set()` is a read-modify-write against a single
+key, and there are ~24 call sites firing from independent async contexts: tool
+calls, `chrome.debugger` events, connection state changes, and every
+`logActivity()`. Two that interleave both read the same base state, and the
+second write silently discards the first.
+
+Observable consequences were: activity-log entries vanishing under concurrent
+tool calls, and — more seriously — `pinnedTabId` or `attachedTabs` reverting to
+an older value, which would let a later `resolveTarget()` refuse a tab that was
+genuinely attached, or lose track of a debugger session.
+
+`setState`, `logActivity`, and `clearActivity` now run through a single
+`serialize()` promise chain, making every mutation atomic with respect to the
+others. The chain survives a throwing mutation (`writeQueue = run.catch(...)`),
+so one failure cannot wedge all later writes. Cost is negligible — these writes
+are small and infrequent.
+
+This is the kind of bug that would have surfaced later as rare, unreproducible
+state corruption under a busy agent session. Worth fixing before that happened.
 
 ### 2026-08-31 — v1.0.4, two bugs from the user's own install
 
