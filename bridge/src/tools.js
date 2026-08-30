@@ -55,6 +55,13 @@ it before running several narrower tools.
 JavaScript in the page. \`browser_network\` lists requests; pass a requestId to
 get full headers and the response body.
 
+**Capture starts when the tab is attached, not when the page loaded.** If the
+user attached a tab that was already open, \`browser_network\` will show zero
+requests and the console may be missing earlier messages — the page's load
+traffic happened before you were listening. When you need that data, reload:
+\`browser_navigate action:"reload"\`, then read again. Say what you are doing so
+the user is not surprised by a page refresh.
+
 ## Boundaries
 - Modes: "pinned" (default) locks you to one tab; "follow" tracks the active
   tab; "multi" lets you open and switch tabs. Only the user changes the mode.
@@ -223,7 +230,7 @@ export const TOOLS = [
   {
     name: 'browser_network',
     description:
-      'List network requests, or pass a requestId to get one request in full — headers, timing, POST body, and the response body. Requests are captured continuously since the tab was attached.',
+      'List network requests, or pass a requestId to get one request in full — headers, timing, POST body, and the response body. Capture begins when the tab is ATTACHED, not when the page loaded — if this returns 0 requests on an already-open page, reload it first (browser_navigate action:"reload") and read again.',
     inputSchema: {
       type: 'object',
       properties: {

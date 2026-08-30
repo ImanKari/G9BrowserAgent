@@ -131,6 +131,18 @@ A test page with six deliberate defects is included:
 node setup/serve.mjs      # http://127.0.0.1:5199/
 ```
 
+Then, with that page open and attached, run the **live** test — it drives real
+CDP against your browser and acts as the MCP client itself, so it needs no
+agent configured:
+
+```powershell
+node setup/livetest.mjs
+```
+
+It exercises snapshot, computed styles, storage, cookies, console, network,
+diagnose, trusted-event login, obstruction detection, screenshots, and device
+emulation, then checks that all six seeded defects were actually found.
+
 ---
 
 ## Security
@@ -158,6 +170,7 @@ This tool has full control of your logged-in browser sessions. Treat it as you w
 | Symptom | Cause and fix |
 |---|---|
 | *"The G9 browser extension is not connected"* | The browser is closed, the extension is disabled, or no tab is attached. Open the side panel and press **Attach & Pin**. |
+| `browser_network` returns 0 requests | Capture starts when the tab is **attached**, not when it loaded. Reload the page, then read again. |
 | Agent shows no `browser_*` tools | The MCP config path is wrong, or the client was not restarted. MCP servers load at client start — restart it after editing the config. |
 | `Cannot find module ...server.js` | The config still has a placeholder path. Use `setup/mcp.json`, which `install.ps1` fills in with the real absolute path. |
 | Side panel says **Bridge offline**, or `ERR_CONNECTION_REFUSED` in the extension console | Nothing is listening on the port — the bridge is not running. Either restart your MCP client (it launches the bridge), or start it yourself: `node bridge/src/server.js`. That command stays up in standalone mode, so you can watch the extension connect. |
