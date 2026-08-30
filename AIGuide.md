@@ -2,7 +2,7 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v1.0.5 — self-tested (20/20) and live-tested (19/19) against real Edge. Live CDP confirmed end to end. Test-page defect detection still unverified.
+**Status:** v1.0.6 — self-tested (20/20) and live-tested (20/20) against real Edge. Live CDP confirmed end to end. Test-page defect detection still unverified.
 **Created:** 2026-08-31
 
 ---
@@ -280,6 +280,34 @@ Covers: MCP handshake, instruction delivery, tool count and schema validity, res
 ## 9. Change log
 
 Newest first. **Every change to this repo gets an entry.**
+
+### 2026-08-31 — v1.0.6, livetest ergonomics
+
+Both changes come from the user asking "why does it say Bridge offline right
+after your tests pass — is that normal?" It is normal, and that it needed
+asking is the defect.
+
+`livetest.mjs` spawns its own bridge (it has to: it speaks MCP over that
+process's stdio and cannot attach to a bridge someone else started), then kills
+it on exit so no stray process is left behind. The side panel therefore flips to
+"Bridge offline" a second after a fully green run, which reads as though the
+test broke something.
+
+- The test now prints an explicit closing note saying the bridge it started has
+  stopped, that the panel will say "Bridge offline", and that an MCP client
+  keeps its own bridge up for the whole session.
+- Added a port pre-flight. Previously, running livetest while another bridge
+  held 8765 let the child die with EADDRINUSE and surfaced ~70s later as an
+  opaque "initialize timed out". It now probes `/health` first and exits
+  immediately with instructions for stopping the other bridge.
+
+Latest live run: **20 passed, 0 failed, 2 skipped** — one better than v1.0.3,
+because the page had accumulated real traffic by then and `request detail`
+exercised `Network.getResponseBody` against a live request for the first time.
+
+Still skipped, and still the one real gap: the six seeded defects in
+`setup/testpage.html`, plus trusted-event login and obstruction detection. Every
+live run so far has been against `time.ir`, which cannot exercise them.
 
 ### 2026-08-31 — v1.0.5, serialized state writes
 

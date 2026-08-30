@@ -96,6 +96,26 @@ class Mcp {
 console.log('\n\x1b[1mG9 Browser Agent — LIVE test\x1b[0m');
 console.log(`\x1b[90mport ${PORT} · needs the extension attached to a tab\x1b[0m`);
 
+/**
+ * This test must run its OWN bridge, because it speaks MCP over that process's
+ * stdio — it cannot attach to a bridge someone else started. If the port is
+ * already taken, say so plainly rather than letting the child die with
+ * EADDRINUSE and surfacing later as a confusing handshake timeout.
+ */
+try {
+  const probe = await fetch(`http://127.0.0.1:${PORT}/health`, { signal: AbortSignal.timeout(1500) });
+  if (probe.ok) {
+    console.log(`\n\x1b[31mPort ${PORT} is already in use by another bridge.\x1b[0m`);
+    console.log('This test needs its own bridge so it can speak MCP over stdio.');
+    console.log('Stop the other one first:');
+    console.log('  \x1b[90m- started in a terminal? press Ctrl+C there\x1b[0m');
+    console.log('  \x1b[90m- launched by your MCP client? close the client\x1b[0m\n');
+    process.exit(1);
+  }
+} catch {
+  // Nothing listening, which is exactly what we want.
+}
+
 const child = spawn(process.execPath, [SERVER], {
   env: { ...process.env, G9_PORT: String(PORT) },
   stdio: ['pipe', 'pipe', 'pipe'],
@@ -353,6 +373,18 @@ try {
 const colour = failed === 0 ? '\x1b[32m' : '\x1b[31m';
 console.log(`\n${colour}${passed} passed, ${failed} failed${skipped ? `, ${skipped} skipped` : ''}\x1b[0m`);
 if (failed === 0 && passed > 10) {
-  console.log('\x1b[90mLive CDP against a real browser works end to end.\x1b[0m\n');
+  console.log('\x1b[90mLive CDP against a real browser works end to end.\x1b[0m');
 }
+
+// This test owns the bridge it spawned, so exiting takes the bridge down with
+// it and the side panel flips to "Bridge offline" within a second. That is
+// expected — but the timing makes it look like the test broke something, so
+// say so out loud rather than leaving the user to guess.
+console.log(
+  '\n\x1b[90mThe test bridge has now stopped, so the side panel will say\n' +
+    '"Bridge offline". That is expected: this test runs its own bridge and\n' +
+    'cleans it up afterwards. Your MCP client starts its own when you use the\n' +
+    'agent, and that one stays up for the whole session.\x1b[0m\n',
+);
+
 process.exit(failed === 0 ? 0 : 1);
