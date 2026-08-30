@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>G9 Agent Test Page</title>
+  <style>
+    :root {
+      --bg: #f6f6f9; --card: #fff; --ink: #1a1a20; --muted: #6b6b7a;
+      --line: #e2e2ea; --accent: #4f46e5; --err: #c4362f; --ok: #12855a;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg:#151519; --card:#1e1e25; --ink:#ededf2; --muted:#9a9aa8; --line:#2e2e39; --accent:#7c74f0; --err:#ff7b72; --ok:#3ecf8e; }
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; padding:24px; background:var(--bg); color:var(--ink);
+           font:14px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif; }
+    main { max-width: 820px; margin: 0 auto; display: grid; gap: 16px; }
+    h1 { font-size: 22px; margin: 0; letter-spacing: -0.02em; }
+    .lede { color: var(--muted); margin: 0 0 8px; }
+    section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; }
+    h2 { font-size: 14px; margin: 0 0 10px; text-transform: uppercase;
+         letter-spacing: 0.06em; color: var(--muted); }
+    button { font: inherit; padding: 7px 13px; border-radius:7px; border:1px solid var(--line);
+             background:var(--card); color:var(--ink); cursor:pointer; }
+    button:hover { border-color: var(--accent); }
+    button.primary { background:var(--accent); color:#fff; border-color:var(--accent); font-weight:600; }
+    input, select { font: inherit; padding:7px 9px; border:1px solid var(--line);
+                    border-radius:7px; background:var(--bg); color:var(--ink); width:100%; }
+    label { display:grid; gap:4px; font-size:12.5px; color:var(--muted); }
+    .row { display:flex; gap:8px; flex-wrap:wrap; align-items:end; }
+    .row > * { flex: 1 1 180px; }
+    .row > button { flex: 0 0 auto; }
+    #status { font-weight:600; }
+    .ok { color: var(--ok); } .bad { color: var(--err); }
+    /* Deliberate bug #5: this element overflows the viewport horizontally. */
+    .too-wide { width: 2400px; height: 8px; background:
+      repeating-linear-gradient(90deg, var(--err) 0 12px, transparent 12px 24px);
+      border-radius: 4px; }
+    dialog { border:1px solid var(--line); border-radius:10px; padding:20px;
+             background:var(--card); color:var(--ink); max-width:360px; }
+    dialog::backdrop { background: rgba(0,0,0,.4); }
+    .cover { position:relative; }
+    /* Deliberate bug #6: an invisible overlay swallows clicks on the button. */
+    .cover::after { content:''; position:absolute; inset:0; background:transparent; }
+    ul { margin:0; padding-left:18px; color:var(--muted); font-size:13px; }
+    code { font-family: ui-monospace, Consolas, monospace; font-size:12px;
+           background:var(--bg); padding:1px 5px; border-radius:4px; border:1px solid var(--line); }
+  </style>
+</head>
+<body>
+<main>
+  <div>
+    <h1>G9 Agent Test Page</h1>
+    <p class="lede">Every section below hides a defect the agent should find.</p>
+  </div>
+
+  <section>
+    <h2>1 · Login form (interaction test)</h2>
+    <div class="row">
+      <label>Username <input id="user" name="username" autocomplete="off" /></label>
+      <!-- Deliberate bug #1: no label, no aria-label. -->
+      <input id="pass" type="password" placeholder="password" autocomplete="off" />
+      <button class="primary" id="login">Sign in</button>
+    </div>
+    <p id="status" style="margin:10px 0 0">Not signed in.</p>
+    <p style="margin:6px 0 0; color:var(--muted); font-size:12px">
+      Correct credentials: <code>admin</code> / <code>g9secret</code>
+    </p>
+  </section>
+
+  <section>
+    <h2>2 · Controls</h2>
+    <div class="row">
+      <label>Environment
+        <select id="env">
+          <option value="dev">Development</option>
+          <option value="stg">Staging</option>
+          <option value="prd">Production</option>
+        </select>
+      </label>
+      <button id="fetchOk">Fetch (works)</button>
+      <button id="fetchBad">Fetch (404)</button>
+      <button id="throwErr">Throw error</button>
+      <button id="openDialog">Open confirm()</button>
+    </div>
+  </section>
+
+  <section class="cover">
+    <h2>3 · Covered button (obstruction test)</h2>
+    <button id="covered">You cannot click me</button>
+    <p style="margin:8px 0 0; color:var(--muted); font-size:12px">
+      A transparent overlay sits on top. <code>browser_interact</code> should
+      refuse and name the covering element.
+    </p>
+  </section>
+
+  <section>
+    <h2>4 · Broken assets</h2>
+    <img src="/definitely-missing-image.png" alt="A chart that fails to load" width="120" height="70" />
+  </section>
+
+  <section>
+    <h2>5 · Layout overflow</h2>
+    <div class="too-wide"></div>
+  </section>
+
+  <section>
+    <h2>6 · Duplicate IDs</h2>
+    <span id="dupe">first</span> · <span id="dupe">second</span>
+  </section>
+
+  <section>
+    <h2>Expected findings</h2>
+    <ul>
+      <li>2 console errors on load (deliberate), plus any you trigger</li>
+      <li>1 failed request: <code>/api/missing</code> → 404</li>
+      <li>1 broken image</li>
+      <li>1 unlabelled form control (<code>#pass</code>)</li>
+      <li>Horizontal overflow (2400px content)</li>
+      <li>Duplicate element ID <code>dupe</code></li>
+    </ul>
+  </section>
+
+  <dialog id="modal">
+    <h3 style="margin:0 0 8px">Confirm deletion</h3>
+    <p style="margin:0 0 14px; color:var(--muted)">This cannot be undone.</p>
+    <button class="primary" id="modalOk">Delete</button>
+    <button id="modalCancel">Cancel</button>
+  </dialog>
+</main>
+
+<script>
+  // --- deliberate console noise on load -----------------------------------
+  console.log('[TestPage] booted at', new Date().toISOString());
+  console.warn('[TestPage] deprecated config key "legacyMode" is still in use');
+  console.error('[TestPage] failed to initialise analytics: missing tracking id');
+  setTimeout(() => { undefinedFunctionCall(); }, 300); // uncaught ReferenceError
+
+  // --- deliberate failing request on load ---------------------------------
+  fetch('/api/missing').catch(() => {});
+
+  const $ = (id) => document.getElementById(id);
+  const status = $('status');
+
+  $('login').addEventListener('click', () => {
+    const u = $('user').value.trim();
+    const p = $('pass').value;
+    if (u === 'admin' && p === 'g9secret') {
+      status.textContent = 'Signed in as admin.';
+      status.className = 'ok';
+      localStorage.setItem('g9_session', JSON.stringify({ user: u, at: Date.now() }));
+      document.cookie = 'g9_test_session=' + btoa(u) + '; path=/; SameSite=Lax';
+      console.log('[TestPage] login succeeded for', u);
+    } else {
+      status.textContent = 'Invalid credentials.';
+      status.className = 'bad';
+      console.error('[TestPage] login failed for user:', u || '(empty)');
+    }
+  });
+
+  $('env').addEventListener('change', (e) =>
+    console.log('[TestPage] environment switched to', e.target.value));
+
+  $('fetchOk').addEventListener('click', async () => {
+    const r = await fetch('data:application/json,' + encodeURIComponent(JSON.stringify({ ok: true, items: 3 })));
+    console.log('[TestPage] fetch ok:', await r.json());
+  });
+
+  $('fetchBad').addEventListener('click', () =>
+    fetch('/api/also-missing').catch((e) => console.error('[TestPage] fetch failed:', e.message)));
+
+  $('throwErr').addEventListener('click', () => {
+    throw new Error('Deliberate error from the Throw error button');
+  });
+
+  $('openDialog').addEventListener('click', () => {
+    const answer = confirm('Proceed with the destructive action?');
+    console.log('[TestPage] confirm() returned', answer);
+    status.textContent = 'confirm() returned ' + answer;
+    status.className = answer ? 'ok' : 'bad';
+  });
+
+  $('covered').addEventListener('click', () =>
+    console.log('[TestPage] the covered button was somehow clicked'));
+
+  $('modalCancel').addEventListener('click', () => $('modal').close());
+  $('modalOk').addEventListener('click', () => $('modal').close());
+</script>
+</body>
+</html>

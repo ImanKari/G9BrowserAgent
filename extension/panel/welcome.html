@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>G9 Browser Agent — installed</title>
+  <style>
+    :root {
+      --bg: #f7f7f9; --card: #fff; --ink: #17171c; --muted: #6a6a78;
+      --line: #e3e3ea; --accent: #4f46e5;
+      --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg:#16161a; --card:#1e1e24; --ink:#ececf1; --muted:#9a9aa8; --line:#2e2e38; --accent:#7c74f0; }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 48px 24px; background: var(--bg); color: var(--ink);
+      font: 15px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    main { max-width: 640px; margin: 0 auto; }
+    h1 { font-size: 26px; letter-spacing: -0.02em; margin: 0 0 6px; }
+    .lede { color: var(--muted); margin: 0 0 28px; }
+    ol { padding-left: 0; list-style: none; counter-reset: s; display: grid; gap: 12px; }
+    li {
+      counter-increment: s; background: var(--card); border: 1px solid var(--line);
+      border-radius: 10px; padding: 14px 16px 14px 52px; position: relative;
+    }
+    li::before {
+      content: counter(s); position: absolute; left: 14px; top: 14px;
+      width: 24px; height: 24px; border-radius: 50%;
+      background: var(--accent); color: #fff; font-size: 13px; font-weight: 700;
+      display: grid; place-items: center;
+    }
+    li strong { display: block; margin-bottom: 2px; }
+    li p { margin: 0; color: var(--muted); font-size: 13.5px; }
+    code {
+      font: 12.5px var(--mono); background: var(--bg);
+      border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px;
+    }
+    pre {
+      font: 12.5px/1.5 var(--mono); background: var(--bg); border: 1px solid var(--line);
+      border-radius: 8px; padding: 12px; overflow-x: auto; margin: 8px 0 0;
+    }
+    .note {
+      margin-top: 28px; padding: 14px 16px; border-radius: 10px;
+      background: color-mix(in srgb, var(--accent) 8%, transparent);
+      border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+      font-size: 13.5px;
+    }
+    .note strong { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>G9 Browser Agent is installed</h1>
+    <p class="lede">Three steps and your AI agent can drive this browser.</p>
+
+    <ol>
+      <li>
+        <strong>Start the bridge</strong>
+        <p>From the repo root — or let your MCP client launch it for you.</p>
+        <pre>node bridge/src/server.js</pre>
+      </li>
+      <li>
+        <strong>Point your agent at it</strong>
+        <p>Copy <code>setup/mcp.json</code> into your MCP client config.</p>
+      </li>
+      <li>
+        <strong>Attach a tab</strong>
+        <p>Open the page you want tested, click the G9 toolbar icon, then press
+        <em>Attach &amp; Pin current tab</em>. The agent is now locked to that tab
+        and cannot wander into your other windows.</p>
+      </li>
+    </ol>
+
+    <p class="note">
+      <strong>What the agent can do:</strong> read the DOM, computed styles, console,
+      network bodies, storage and cookies; click, type, drag and scroll with real
+      trusted input events; navigate, emulate devices, throttle the network, and
+      capture screenshots. Everything it does is listed live in the side panel,
+      and <strong>Stop</strong> halts it instantly.
+    </p>
+  </main>
+</body>
+</html>

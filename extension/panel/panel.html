@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>G9 Browser Agent</title>
+  <link rel="stylesheet" href="panel.css" />
+</head>
+<body>
+  <header class="hd">
+    <div class="brand">
+      <img src="icon48.png" alt="" width="20" height="20" />
+      <span>G9 Browser Agent</span>
+    </div>
+    <button id="stop" class="stop" title="Immediately block all agent actions">Stop</button>
+  </header>
+
+  <section class="card" id="bridgeCard">
+    <div class="row">
+      <span class="dot" id="bridgeDot"></span>
+      <strong id="bridgeLabel">Connecting…</strong>
+      <button class="link" id="bridgeToggle" type="button">settings</button>
+    </div>
+    <p class="muted" id="bridgeHint">Waiting for the local bridge.</p>
+    <div class="settings" id="bridgeSettings" hidden>
+      <label>Host <input id="host" value="127.0.0.1" spellcheck="false" /></label>
+      <label>Port <input id="port" value="8765" inputmode="numeric" /></label>
+      <label>Token <input id="token" placeholder="(optional)" spellcheck="false" /></label>
+      <button id="saveBridge" class="primary sm">Save &amp; reconnect</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="row spread">
+      <strong>Attached tab</strong>
+      <div class="modes" id="modes">
+        <button data-mode="pinned" title="Agent is locked to one tab">Pinned</button>
+        <button data-mode="follow" title="Agent follows whichever tab is active">Follow</button>
+        <button data-mode="multi" title="Agent may switch and open tabs">Multi</button>
+      </div>
+    </div>
+
+    <div id="attached" class="attached empty">
+      <p class="muted">No tab attached yet.</p>
+    </div>
+
+    <div class="btnrow">
+      <button id="attachActive" class="primary">Attach &amp; Pin current tab</button>
+      <button id="detach" class="ghost" hidden>Detach</button>
+    </div>
+    <p class="warn" id="modeWarn" hidden></p>
+  </section>
+
+  <section class="card">
+    <div class="row spread">
+      <strong>Connect your agent</strong>
+      <button class="link" id="copyGuide" type="button">copy guide</button>
+    </div>
+    <p class="muted">
+      Point any MCP client at the bridge. Most clients read
+      <code>setup/mcp.json</code> — copy it into your client config.
+    </p>
+    <pre class="snippet" id="snippet"></pre>
+  </section>
+
+  <section class="card grow">
+    <div class="row spread">
+      <strong>Activity</strong>
+      <button class="link" id="clearLog" type="button">clear</button>
+    </div>
+    <ul class="log" id="log">
+      <li class="muted pad">Nothing yet. Agent actions will appear here in real time.</li>
+    </ul>
+  </section>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="panel.js" type="module"></script>
+</body>
+</html>

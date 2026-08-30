@@ -1,0 +1,28 @@
+# Secrets — never commit these.
+.azpat
+*.pat
+.env
+.env.*
+!.env.example
+
+# setup/mcp.json is generated per-machine with an absolute path.
+# install.ps1 recreates it; committing one machine's path just confuses the next.
+setup/mcp.json
+
+# Node
+node_modules/
+npm-debug.log*
+package-lock.json
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and scratch
+*.log
+tmp/
+scratch/

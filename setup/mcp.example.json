@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "g9-browser": {
+      "command": "node",
+      "args": [
+        "REPLACE_WITH_ABSOLUTE_PATH/g9-browser-agent/bridge/src/server.js"
+      ],
+      "env": {
+        "G9_HOST": "127.0.0.1",
+        "G9_PORT": "8765"
+      }
+    }
+  }
+}
