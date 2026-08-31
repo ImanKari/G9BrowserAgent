@@ -11,7 +11,8 @@
     "cookies",
     "storage",
     "alarms",
-    "sidePanel"
+    "sidePanel",
+    "unlimitedStorage"
   ],
   "host_permissions": [
     "<all_urls>"

@@ -31,6 +31,20 @@ const server = http.createServer(async (req, res) => {
   let pathname = decodeURIComponent(url.pathname);
   if (pathname === '/') pathname = '/testpage.html';
 
+  // Read-only view of the extension modules that get injected into pages, so
+  // they can be smoke-tested against a real DOM before being wired into the
+  // service worker. Injected code is the hardest thing here to test any other
+  // way: it only misbehaves inside a page.
+  if (pathname.startsWith('/lib/')) {
+    const lib = path.join(HERE, '..', 'extension', 'lib', path.basename(pathname));
+    try {
+      const body = await fs.readFile(lib);
+      res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' });
+      return res.end(body);
+    } catch {
+      res.writeHead(404); return res.end('no such lib module');
+    }
+  }
   // Accepts the connection and never answers. The only reliable way to observe
   // `browser_network status:"pending"` — network throttling does not help,
   // because an agent's round trip is slower than any latency you can emulate.

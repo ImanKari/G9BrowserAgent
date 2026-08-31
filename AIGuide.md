@@ -322,6 +322,113 @@ Covers: MCP handshake, instruction delivery, tool count and schema validity, res
 
 ---
 
+## 8b. In progress — recorder, replay, and issue capture
+
+Design settled 2026-08-31, being built now. Recorded here before the code exists
+because the decisions are the expensive part; the implementation follows from
+them.
+
+### The problem that shapes it
+
+A recorded test is only worth keeping if it still finds the same input next
+month. No single selector does that — a CSS path breaks on a refactor, an id
+breaks when the framework regenerates it, text breaks on a copy edit. So each
+element gets **several independent locators**, ranked by durability, and replay
+tries them in order:
+
+| # | Locator | Survives |
+|---|---|---|
+| 1 | `data-testid` / `-test` / `-qa` / `-cy` | anything — it is a promise not to move |
+| 2 | **role + accessible name** | restyling, DOM restructuring, class churn |
+| 3 | bound `<label>` text | everything but a copy change |
+| 4 | shortest unique visible text | good for buttons and links |
+| 5 | CSS from stable attributes only | refactors that keep `name`/`type` |
+| 6 | XPath | nothing much — last resort |
+
+Priority 2 is the one that makes this ours rather than a copy of Chrome's
+Recorder: the extension already perceives pages as an accessibility tree, so the
+recorder and the agent address elements the same way. Role+name is also the best
+answer to "how do I not lose an input", because it is derived from what the
+control *means* rather than where it sits.
+
+`lib/locators.js` also refuses to build a locator from anything
+machine-generated — CSS Modules, styled-components, emotion, React `useId`,
+Radix, Angular `ng-tns`, raw hashes, bare digits. Those are the single largest
+source of recorded-test flakiness: stable within one build, different in the
+next.
+
+**A locator only counts when it matches exactly one visible element.** Two
+matches is not a near miss, it is ambiguity, and resolving it by picking the
+first is how a replay silently does the wrong thing.
+
+**Replay reports which locator won.** Matching on `testid` means the page is
+behaving; falling through to `xpath` means every durable identity has changed
+and the step is one refactor from breaking. That is a warning worth having
+before the failure, not after.
+
+**When nothing matches, the fingerprint answers.** Tag, type, role, name, label,
+placeholder, nearest heading, ordinal — none of it used to find the element, all
+of it used to explain the miss: *"looked for a textbox labelled 'Email' under
+'Billing details'; the nearest match is a textbox labelled 'E-mail address'"*
+instead of "selector not found".
+
+### Timing
+
+Gaps between steps are recorded, because a QA session's rhythm is part of what
+it reproduces. But replay does **not** sleep blindly — that is exactly what makes
+recorded tests flaky. The gap is treated as a budget while the step waits on a
+real condition (element present, stable, actionable). Modes: `recorded`,
+`fast`, `adaptive`.
+
+### Recording transport
+
+`Page.addScriptToEvaluateOnNewDocument` + `Runtime.addBinding`, over the
+`chrome.debugger` session already open. Injects before the page's own scripts,
+survives navigation by construction, and gives the injected listener a direct
+channel back — with **no content script and no new permission**. It also keeps
+§6's rule intact: all browser logic goes through CDP.
+
+### Storage
+
+`chrome.storage.local` for structured records, **IndexedDB for attachment
+bytes**. Screenshots and tab video are the only things that get large, and
+`storage.local` is a JSON store — megabytes of base64 there would be
+deserialised on every read of any key. The split is what keeps listing issues
+fast when one of them has a 20MB video. Adds `unlimitedStorage`; it is the first
+thing in this extension that deliberately touches disk, which §4.1 otherwise
+forbids, and the exception is the point: a test or a bug report that dies with
+the browser session is not one.
+
+Backup and restore is a single self-contained JSON bundle with attachments
+inlined — a manifest plus a folder is the kind of backup that arrives
+incomplete. Import defaults to `merge`; `replace` has to be asked for by name.
+
+### Media (decided with the user)
+
+Screenshot plus **tab video via `Page.startScreencast`**. No microphone, no
+desktop capture: CDP screencast captures exactly the attached tab, needs no
+permission, and has no source-picker in the way of a QA who is trying to report
+a bug. Audio and full-desktop capture would cost an offscreen document, a
+microphone prompt, and a picker dialog on every recording.
+
+### Filing to Jira / Azure DevOps happens in the bridge
+
+Tokens (`G9_JIRA_TOKEN`, `G9_AZDO_TOKEN`) live beside `G9_TOKEN` as bridge
+environment variables and **never enter the browser**. The extension holds
+`<all_urls>` and a full CDP channel; if it is ever compromised, issue-tracker
+credentials should not be part of the blast radius.
+
+This does not violate §6's "the bridge is deliberately dumb". That rule is about
+*browser* logic — the bridge must not decide anything about a page, because only
+the extension can see one. Posting JSON to a REST API is not browser logic, and
+the bridge is the only side with a network stack and a secret store.
+
+### MCP surface
+
+Two grouped tools, keeping §4.4's discipline (12 → 14, not 12 → 30):
+`browser_recording` (list/get/start/stop/replay/delete/export/import) and
+`browser_issue` (list/get/create/update/delete/attach/file/export).
+
 ## 9. Change log
 
 Newest first. **Every change to this repo gets an entry.**
