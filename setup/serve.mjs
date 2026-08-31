@@ -31,6 +31,34 @@ const server = http.createServer(async (req, res) => {
   let pathname = decodeURIComponent(url.pathname);
   if (pathname === '/') pathname = '/testpage.html';
 
+  // Accept a base64 artifact from the page and write it into setup/out/.
+  //
+  // The browser can produce bytes — a rendered card, a canvas export — that the
+  // agent then needs as a FILE, because file inputs take paths and not blobs.
+  // Routing them back out through the tool result would mean carrying a
+  // megabyte of base64 through the agent's context to achieve a disk write.
+  //
+  // Local-only, one fixed directory, name sanitised to a basename: this server
+  // already binds 127.0.0.1 and exists only for testing, but a write endpoint
+  // deserves the limits stated out loud.
+  if (req.method === 'POST' && pathname === '/save') {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    try {
+      const { name, dataBase64 } = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      const safe = path.basename(String(name || 'artifact.bin')).replace(/[^\w.-]/g, '_');
+      const dir = path.join(HERE, 'out');
+      await fs.mkdir(dir, { recursive: true });
+      const file = path.join(dir, safe);
+      await fs.writeFile(file, Buffer.from(dataBase64, 'base64'));
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, path: file, bytes: Buffer.from(dataBase64, 'base64').length }));
+    } catch (err) {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ ok: false, error: String(err.message) }));
+    }
+  }
+
   // Read-only view of the extension modules that get injected into pages, so
   // they can be smoke-tested against a real DOM before being wired into the
   // service worker. Injected code is the hardest thing here to test any other

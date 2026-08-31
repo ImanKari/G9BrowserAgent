@@ -102,8 +102,10 @@ The side panel shows every action live, and **Stop** halts the agent instantly.
 | `browser_emulate` | Device, viewport, network throttle, CPU, colour scheme, locale, timezone |
 | `browser_dialog` | Accept or dismiss `alert` / `confirm` / `prompt` |
 | `browser_tabs` | List tabs; open, close, focus, pin — the last four only in multi-tab mode |
+| `browser_recording` | Record a flow in the side panel, replay it as a test — list · replay · export |
+| `browser_issue` | Defects with screenshot, console, failed requests and page context attached |
 
-Twelve tools rather than fifty: definitions are re-sent on every request, so a wide surface would burn thousands of context tokens before the agent did anything.
+Fourteen tools rather than fifty: definitions are re-sent on every request, so a wide surface would burn thousands of context tokens before the agent did anything.
 
 ### Element refs, not CSS selectors
 
@@ -116,6 +118,51 @@ Twelve tools rather than fifty: definitions are re-sent on every request, so a w
 ```
 
 The agent passes `ref: "e7"` to `browser_interact`. Refs are versioned per snapshot — a stale ref produces a clear error telling the agent to re-snapshot, rather than silently clicking the wrong element.
+
+---
+
+## Record a flow, replay it as a test
+
+Side panel → **Automation** → *Start recording*. Use the page exactly as you would when testing it, then stop. Every click, entry, and selection is captured.
+
+The question that decides whether a recorded test is worth keeping is how it finds the same input after a redeploy. One selector cannot: a CSS path breaks on a refactor, an id breaks when the framework regenerates it, text breaks on a copy edit. So each element is recorded with **several independent locators**, tried in order of how well they survive change:
+
+| # | Locator | Survives |
+|---|---|---|
+| 1 | `data-testid` / `-test` / `-qa` / `-cy` | anything — it is a promise not to move |
+| 2 | **role + accessible name** | restyling, DOM restructuring, class churn |
+| 3 | bound `<label>` text | everything but a copy change |
+| 4 | shortest unique visible text | buttons and links |
+| 5 | CSS from stable attributes only | refactors that keep `name` / `type` |
+| 6 | XPath | last resort |
+
+Anything machine-generated is refused outright — CSS Modules, styled-components, emotion, React `useId`, Radix, `ng-tns`, hashes. Those are stable within one build and different in the next, and they are the largest single source of flaky recorded tests.
+
+**Replay tells you when a flow is rotting, before it breaks.** A step that used to match on `testid` and now matches only on `xpath` still passes — and is one refactor away from not. That comes back as a warning.
+
+**When a step does fail, you get the sentence you need:**
+
+```
+Could not find textbox "Username" under "Billing details".
+Tried 4 recorded locators: role (0 matches), label (0), css (0), xpath (0).
+The closest thing on the page now is textbox "User name (email)" —
+this usually means it was renamed.
+```
+
+Timing is reproduced by default. A ten-second session replayed in 200ms is not the same test — it never lets a debounce fire or an animation finish. Recorded gaps are a **budget for waiting**, never a blind sleep: every step waits for the page to be loaded and the element to be visible, enabled, and no longer moving. `timing: "fast"` when you trust the flow.
+
+## Report a defect while it is still on screen
+
+Side panel → **Issues** → *New issue*. It captures first and asks questions second, because the evidence is only true at that instant:
+
+- screenshot of the viewport
+- the console tail and every failed request
+- URL, referring page, viewport, user agent
+- the DOM around the element under suspicion — impossible to recover once the tab moves on
+
+All of it is written as **real attachments** (`console.log`, `failed-requests.log`, `page-context.json`, `page-fragment.html`), so an agent filing to Jira or Azure DevOps uploads files a developer can open, rather than pasting a truncated blob into a description.
+
+Then enrich it: more screenshots, a tab video, the file you were testing an upload with, edits, re-capture. `browser_issue` gives the agent the whole thing.
 
 ---
 

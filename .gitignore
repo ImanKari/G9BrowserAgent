@@ -31,3 +31,6 @@ scratch/
 
 # Visual Studio
 .vs/
+
+# Artefacts the browser writes back through serve.mjs /save.
+setup/out/

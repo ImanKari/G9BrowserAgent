@@ -148,8 +148,9 @@ export const TOOLS = [
           description: 'For action:"select" — option value(s), label(s), or visible text.',
           anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
         },
+        selector: str('CSS selector, for action:"upload" when the file input is hidden and has no ref — which is the usual case on real sites. Try "input[type=file]".'),
         files: {
-          description: 'For action:"upload" — absolute local file path(s). No native picker is opened.',
+          description: 'For action:"upload" — absolute local file path(s). No native picker is opened. Pair with selector when the input is hidden behind a styled button.',
           anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
         },
         x: num('Fallback X coordinate when no ref exists (canvas, custom widgets).'),
@@ -347,10 +348,8 @@ export const TOOLS = [
         id: str('Recording id, for get / replay / delete.'),
         name: str('For action:"start" — a name for the recording.'),
         timing: str(
-          'For action:"replay". "adaptive" (default) waits only as long as each step needs. ' +
-            '"recorded" also honours the original pause, for pages whose behaviour depends on pacing. ' +
-            '"fast" skips the waits. Recorded gaps are always a budget, never a blind sleep.',
-          { enum: ['adaptive', 'recorded', 'fast'], default: 'adaptive' },
+          'For action:"replay". "recorded" (DEFAULT) reproduces the pace the person worked at — a ten-second session replayed in 200ms never lets a debounce fire or an animation finish, so it is not the same test. "adaptive" waits only as long as each step needs. "fast" barely waits. Every mode gates each step on the page being loaded and the element being visible, enabled, and no longer moving — the recorded gap is a budget for that wait, never a blind sleep.',
+          { enum: ['recorded', 'adaptive', 'fast'], default: 'recorded' },
         ),
         dryRun: bool('For action:"replay" — resolve every element and change nothing. The cheapest way to find out whether a recording has rotted.', false),
         stopOnFailure: bool('For action:"replay" — stop at the first failing step.', true),

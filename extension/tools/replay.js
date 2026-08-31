@@ -34,16 +34,35 @@ import { saveRefs, getRefs } from '../lib/refs.js';
 import * as interact from './interact.js';
 import * as nav from './navigate.js';
 
+/** Two consecutive identical boxes is the cheapest proof an element has settled. */
+const POLL_MS = 120;
+/** Even a zero-gap step gets this long to become ready. */
+const MIN_WAIT_MS = 2000;
+
 /** Locator kinds that mean the page still identifies this element well. */
 const HEALTHY_MATCH = new Set(['testid', 'role', 'label']);
 
+/**
+ * How the recorded gap between steps is spent.
+ *
+ * `budget` multiplies it into how long we are willing to WAIT for the page to
+ * be ready. `honourPause` decides whether to also sit out the remainder once it
+ * is ready.
+ *
+ * "recorded" is the default, and that is a change from the first version, which
+ * defaulted to running as fast as the page allowed. A ten-second session
+ * replayed in 200ms is not the same test: it never gives a debounce a chance to
+ * fire, an animation a chance to finish, or an autosave a chance to race. The
+ * QA's pace is part of what they were testing, and speed is the thing you opt
+ * into once you trust the flow — not the thing you get by surprise.
+ */
 const TIMING = {
-  fast: { budget: 0, floor: 0 },
-  adaptive: { budget: 1, floor: 0 },
-  recorded: { budget: 1, floor: 1 },
+  fast: { budget: 0.1, honourPause: false },
+  adaptive: { budget: 1, honourPause: false },
+  recorded: { budget: 1.5, honourPause: true },
 };
 
-export async function replay(tabId, { id, timing = 'adaptive', stopOnFailure = true, dryRun = false } = {}) {
+export async function replay(tabId, { id, timing = 'recorded', stopOnFailure = true, dryRun = false } = {}) {
   const recording = await getRecording(id);
   if (!recording) throw new Error(`No recording with id "${id}". Call browser_recording action:"list" to see them.`);
 
@@ -121,7 +140,7 @@ async function ensureLocators(tabId) {
  * where, what was tried, and what is there now instead.
  */
 async function locate(tabId, step, { budgetMs }) {
-  const deadline = Date.now() + Math.max(budgetMs, 1500);
+  const deadline = Date.now() + Math.max(budgetMs, MIN_WAIT_MS);
   let last = null;
 
   for (;;) {
@@ -131,33 +150,75 @@ async function locate(tabId, step, { budgetMs }) {
       `(() => {
          const t = ${JSON.stringify(step.target)};
          if (!window.__g9loc) return { ok: false, noEngine: true };
+
+         // Page readiness first. A step that runs while the document is still
+         // loading acts on a page that is not the one that was recorded — the
+         // element may exist and be about to move, or the section it belongs to
+         // may not have arrived. On a fast connection this never shows up,
+         // which is exactly why it has to be checked rather than assumed.
+         const loading = document.readyState !== 'complete';
+
          const r = window.__g9loc.resolve(t);
-         if (!r.ok) return { ok: false, tried: r.tried, nearest: r.nearest };
+         if (!r.ok) return { ok: false, loading, tried: r.tried, nearest: r.nearest };
+
          window.__g9target = r.el;
          const box = r.el.getBoundingClientRect();
+         const style = getComputedStyle(r.el);
+
+         // Stability: an element mid-animation or mid-reflow is still moving,
+         // and clicking where it WAS is how a replay hits the wrong thing.
+         const key = [box.x, box.y, box.width, box.height].map(Math.round).join(',');
+         const settled = window.__g9lastBox === key;
+         window.__g9lastBox = key;
+
          return {
            ok: true,
+           loading,
+           settled,
            matchedBy: r.matchedBy,
            tried: r.tried,
            describe: window.__g9loc.describeBriefly(r.el),
-           actionable: box.width > 0 && box.height > 0,
+           visible: box.width > 0 && box.height > 0 && style.visibility !== 'hidden',
+           enabled: !r.el.disabled && style.pointerEvents !== 'none',
          };
        })()`,
     ).catch(() => null);
 
-    if (last?.ok && last.actionable) return last;
+    if (last?.ok && last.visible && last.enabled && last.settled && !last.loading) return last;
     if (Date.now() >= deadline) break;
-    await sleep(120);
+    await sleep(POLL_MS);
   }
 
   const fp = step.target?.fingerprint ?? {};
   const sought = `${fp.role || fp.tag || 'element'}${fp.name ? ` "${fp.name}"` : ''}`;
   const where = fp.heading ? ` under "${fp.heading}"` : '';
 
-  if (last?.ok && !last.actionable) {
+  // Each of these is a different problem with a different fix, so each says so
+  // rather than collapsing into "element not ready".
+  if (last?.ok) {
+    if (last.loading) {
+      throw new Error(
+        `Found ${sought}${where}, but the page is still loading after ${Math.round((Date.now() - deadline + Math.max(budgetMs, MIN_WAIT_MS)) / 1000)}s. ` +
+          `Acting now would use a page that is not finished building. If this page is genuinely slow, ` +
+          `re-record it so the step carries a longer gap, or replay with timing:"recorded".`,
+      );
+    }
+    if (!last.visible) {
+      throw new Error(
+        `Found ${sought}${where}, but it is not visible — zero size or hidden. ` +
+          `It is probably inside a collapsed section, or a step that should have opened it did not.`,
+      );
+    }
+    if (!last.enabled) {
+      throw new Error(
+        `Found ${sought}${where}, but it is disabled or does not accept pointer events. ` +
+          `Something earlier in the flow normally enables it.`,
+      );
+    }
     throw new Error(
-      `Found ${sought}${where}, but it is not visible or has zero size, so it cannot be used. ` +
-        `Something is probably still loading, or it is inside a collapsed section.`,
+      `Found ${sought}${where}, but it never stopped moving — its position was still changing ` +
+        `after the wait. An animation or a reflow is still running; clicking now would hit whatever ` +
+        `lands there instead.`,
     );
   }
 
@@ -184,6 +245,7 @@ async function probe(tabId, step) {
 // ----------------------------------------------------------------- execution
 
 async function runStep(tabId, step, mode) {
+  const stepStart = Date.now();
   const budgetMs = Math.round((step.waitMs ?? 0) * mode.budget);
 
   if (step.type === 'navigate') {
@@ -206,6 +268,15 @@ async function runStep(tabId, step, mode) {
   }
 
   const found = await locate(tabId, step, { budgetMs });
+
+  // The page was ready sooner than the person was. In "recorded" mode that
+  // difference is kept, because a flow that only works when you go slowly is a
+  // finding, not a detail to optimise away.
+  if (mode.honourPause) {
+    const remaining = (step.waitMs ?? 0) - (Date.now() - stepStart);
+    if (remaining > 0) await sleep(Math.min(remaining, 10_000));
+  }
+
   const backendNodeId = await resolvedNodeId(tabId);
   const common = { matchedBy: found.matchedBy, resolved: found.describe };
 

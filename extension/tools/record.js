@@ -338,6 +338,18 @@ export function normalize(raw) {
     }
 
     if (e.type === 'scroll') {
+      // Most recorded scrolls were never a decision. Focusing a field on a page
+      // wider than the viewport makes the browser scroll to reveal it, and the
+      // recorder sees that as an event — which is how a horizontal scroll the
+      // user never performed ends up in the flow.
+      //
+      // A scroll only earns a step when nothing element-bound follows it,
+      // because every element-bound step scrolls its own target into view
+      // anyway. What survives is the case that matters: the user scrolled to
+      // look at something and stopped there.
+      const next = raw.slice(i + 1).find((n) => n.type !== 'scroll');
+      if (next && next.target) continue;
+
       const last = steps[steps.length - 1];
       if (last && last.type === 'scroll') { last.x = e.x; last.y = e.y; last.at = e.at; continue; }
       steps.push({ type: 'scroll', x: e.x, y: e.y, at: e.at });

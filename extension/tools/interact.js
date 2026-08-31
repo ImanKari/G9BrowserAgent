@@ -493,13 +493,43 @@ export async function select(tabId, { ref, values, url } = {}) {
   return { selected: result.chosen };
 }
 
-/** Set files on an <input type=file> without opening the native picker. */
-export async function upload(tabId, { ref, files, url } = {}) {
-  const node = await resolveRef(tabId, ref, url);
+/**
+ * Set files on an <input type=file> without opening the native picker.
+ *
+ * Accepts a `selector` as well as a `ref`, and on real sites the selector is
+ * the one that works. Every upload UI worth the name hides its file input
+ * behind a styled button — Instagram, Gmail, GitHub all do — and a hidden input
+ * is not in the accessibility tree, so `browser_snapshot` never gives it a ref.
+ * Requiring one made this tool usable only on pages that had not bothered to
+ * style their upload control.
+ *
+ * Clicking the visible button instead is not an option: that opens the OS file
+ * picker, which is outside the browser and outside anything CDP can reach.
+ * Setting the input directly is the whole reason this tool exists.
+ */
+export async function upload(tabId, { ref, selector, files, url } = {}) {
+  let backendNodeId;
+
+  if (ref) {
+    backendNodeId = (await resolveRef(tabId, ref, url)).backendNodeId;
+  } else if (selector) {
+    const { root } = await send(tabId, 'DOM.getDocument', { depth: 0 });
+    const { nodeId } = await send(tabId, 'DOM.querySelector', { nodeId: root.nodeId, selector });
+    if (!nodeId) {
+      throw new Error(
+        `No element matches ${JSON.stringify(selector)}. For a hidden upload control, ` +
+          `'input[type=file]' usually finds it — check with browser_console action:"evaluate".`,
+      );
+    }
+    ({ node: { backendNodeId } } = await send(tabId, 'DOM.describeNode', { nodeId }));
+  } else {
+    throw new Error(
+      'upload needs a ref or a selector. File inputs are usually hidden behind a styled button, ' +
+        'so they have no ref — pass selector:"input[type=file]" instead.',
+    );
+  }
+
   const list = Array.isArray(files) ? files : [files];
-  await send(tabId, 'DOM.setFileInputFiles', {
-    backendNodeId: node.backendNodeId,
-    files: list,
-  });
-  return { uploaded: list };
+  await send(tabId, 'DOM.setFileInputFiles', { backendNodeId, files: list });
+  return { uploaded: list, via: ref ? `ref ${ref}` : `selector ${selector}` };
 }
