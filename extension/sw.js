@@ -14,7 +14,7 @@
 
 import { getState, setState, logActivity, clearActivity, broadcast } from './lib/state.js';
 import * as transport from './lib/transport.js';
-import { detachAll, evaluate } from './lib/cdp.js';
+import { detachAll, evaluate, attachedTabIds } from './lib/cdp.js';
 import { clearRefs } from './lib/refs.js';
 
 import * as tabsTool from './tools/tabs.js';
@@ -28,6 +28,9 @@ import * as diagnose from './tools/diagnose.js';
 import * as emulate from './tools/emulate.js';
 
 const api = globalThis.browser ?? globalThis.chrome;
+
+/** Matches the slice in panel.js renderLog(). Keep the two in step. */
+const PANEL_ACTIVITY_LIMIT = 120;
 
 // ------------------------------------------------------------------ lifecycle
 
@@ -70,17 +73,32 @@ api.alarms.onAlarm.addListener((alarm) => {
 
 api.debugger.onEvent.addListener((source, method, params) => {
   if (source.tabId == null) return;
-  observe.ingest(source.tabId, method, params).catch(() => {});
+  // Capture failures used to be swallowed here, which meant a full storage
+  // quota silently stopped console and network capture while the agent went on
+  // believing the buffers were complete. Report it — a red line in the
+  // extension console is the honest outcome.
+  observe.ingest(source.tabId, method, params).catch((err) => {
+    console.error('[G9] event capture failed', method, err);
+  });
 
-  // A committed navigation invalidates every element ref for that tab.
+  // A committed navigation invalidates every element ref for that tab, and
+  // everything captured for the document we just left. Pruning here as well as
+  // in navigate.js is what closes the gap: the outgoing page keeps emitting
+  // until the new one commits, so a pre-navigation clear alone leaves residue.
   if (method === 'Page.frameNavigated' && !params.frame.parentId) {
     clearRefs(source.tabId).catch(() => {});
+    observe.pruneToLoader(source.tabId, params.frame.loaderId).catch(() => {});
   }
 
   // Surface dialogs immediately — they block the page until handled.
   if (method === 'Page.javascriptDialogOpening') {
+    setState({ dialogOpen: { tabId: source.tabId, type: params.type, message: params.message } }).catch(() => {});
     broadcast({ type: 'dialog', tabId: source.tabId, message: params.message, dialogType: params.type });
     transport.send({ type: 'event', event: 'dialog', tabId: source.tabId, data: params });
+  }
+
+  if (method === 'Page.javascriptDialogClosed') {
+    setState({ dialogOpen: null }).catch(() => {});
   }
 });
 
@@ -101,6 +119,9 @@ api.tabs.onRemoved.addListener(async (tabId) => {
     await logActivity({ kind: 'system', ok: false, detail: 'Pinned tab was closed' });
   }
   await clearRefs(tabId).catch(() => {});
+  // Console and network buffers are keyed by tabId and nothing else reclaims
+  // them; without this they sat in session storage until the browser closed.
+  await observe.clearBuffers(tabId).catch(() => {});
 });
 
 // --------------------------------------------------------------- tool routing
@@ -112,12 +133,20 @@ api.tabs.onRemoved.addListener(async (tabId) => {
  */
 const TOOLS = {
   // --- session -------------------------------------------------------------
-  browser_status: { needsTab: false, run: () => status() },
+  // Orientation is the one thing that must still work while halted — otherwise
+  // the agent cannot discover *why* everything else is failing.
+  browser_status: { needsTab: false, allowWhenHalted: true, run: () => status() },
 
   browser_tabs: {
     needsTab: false,
     run: async ({ args }) => {
-      switch (args.action ?? 'list') {
+      const action = args.action ?? 'list';
+      // browser_tabs is the only tool that never goes through resolveTarget(),
+      // because it has no target to resolve. Every action except "list" still
+      // changes what the agent can reach, so it gets the same mode boundary.
+      if (action !== 'list') await tabsTool.requireMultiMode(action);
+
+      switch (action) {
         case 'list':
           return { tabs: await tabsTool.listTabs() };
         case 'open': {
@@ -139,7 +168,7 @@ const TOOLS = {
           await tabsTool.unpinTab();
           return { unpinned: true };
         default:
-          throw new Error(`Unknown tabs action "${args.action}".`);
+          throw new Error(`Unknown tabs action "${action}".`);
       }
     },
   },
@@ -239,13 +268,18 @@ function requireTabId(args) {
 async function status() {
   const state = await getState();
   const tabs = await tabsTool.listTabs();
-  const pinned = tabs.find((t) => t.tabId === state.pinnedTabId) ?? null;
+
+  // The tab the agent will ACT on, which in follow mode is the active tab, not
+  // the pinned one. Reporting the pinned tab there oriented the agent to a page
+  // it was not about to touch — the orientation tool describing the wrong page
+  // is the one error it must never make.
+  const target = tabs.find((t) => t.target) ?? null;
 
   let health = null;
-  if (pinned) {
+  if (target) {
     const [logs, net] = await Promise.all([
-      observe.consoleLog(state.pinnedTabId, { limit: 0 }).catch(() => null),
-      observe.network(state.pinnedTabId, { limit: 0 }).catch(() => null),
+      observe.consoleLog(target.tabId, { limit: 0 }).catch(() => null),
+      observe.network(target.tabId, { limit: 0 }).catch(() => null),
     ]);
     health = {
       consoleErrors: logs?.counts?.error ?? 0,
@@ -256,20 +290,30 @@ async function status() {
     };
   }
 
+  // What the browser says, not only what we think we hold. A drift between
+  // the two is exactly what makes a stuck debugger banner invisible.
+  const reallyAttached = await attachedTabIds().catch(() => []);
+  const held = state.attachedTabs.filter((id) => reallyAttached.includes(id));
+
   return {
     connected: transport.isConnected(),
     mode: state.mode,
     halted: state.halted,
+    debuggedTabs: held.length,
     bridge: { host: state.bridge.host, port: state.bridge.port },
-    attached: pinned
-      ? { tabId: pinned.tabId, title: pinned.title, url: pinned.url, active: pinned.active }
+    attached: target
+      ? { tabId: target.tabId, title: target.title, url: target.url, active: target.active }
       : null,
     health,
-    otherTabs: tabs
-      .filter((t) => t.tabId !== state.pinnedTabId && t.attachable)
-      .slice(0, 25)
-      .map((t) => ({ tabId: t.tabId, title: t.title, url: t.url, active: t.active })),
-    hint: pinned
+    // Redaction is not applied here any more — listTabs() owns that rule, so
+    // there is exactly one place it can be got wrong. See tabs.js.
+    otherTabs: tabs.filter((t) => !t.target && t.attachable).slice(0, 25),
+    otherTabsNote:
+      state.mode === 'multi'
+        ? undefined
+        : `Mode is "${state.mode}", so other tabs are listed by origin only — their titles and ` +
+          `URLs are withheld. The user can change this from the G9 side panel.`,
+    hint: target
       ? 'Ready. Start with browser_snapshot to see the page, then use the refs it returns.'
       : 'No tab is attached. Ask the user to open the G9 side panel and press "Attach & Pin".',
   };
@@ -286,6 +330,29 @@ async function handleBridgeMessage(msg) {
   try {
     const entry = TOOLS[tool];
     if (!entry) throw new Error(`Unknown tool "${tool}".`);
+
+    // The Stop button is checked here, at the router, as well as inside
+    // cdp.send(). cdp.send() alone was not enough: browser_tabs never reaches
+    // it — chrome.tabs.* is not CDP — so a halted agent could still open,
+    // close, focus, and pin tabs. Every tool now stops at the same line.
+    if (entry.allowWhenHalted !== true) {
+      const { halted, dialogOpen } = await getState();
+      if (halted) {
+        throw new Error(
+          'The user pressed Stop. Every browser action is blocked until they press Resume in the ' +
+            'G9 side panel — you cannot lift this yourself. Tell them, and wait.',
+        );
+      }
+      // A blocked renderer answers nothing, so without this every call sits
+      // until its 60s timeout before the agent learns why.
+      if (dialogOpen && tool !== 'browser_dialog') {
+        throw new Error(
+          `The page is blocked by a JavaScript ${dialogOpen.type} dialog: ` +
+            `"${String(dialogOpen.message ?? '').slice(0, 200)}". Nothing else will run until it is ` +
+            `handled — call browser_dialog to accept or dismiss it, then retry this.`,
+        );
+      }
+    }
 
     let tabId = null;
     let tab = null;
@@ -346,25 +413,54 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         if (msg.nudge && !transport.isConnected() && !transport.isReconnectPending()) {
           transport.connectNow();
         }
-        sendResponse({ ok: true, state: await getState(), status: await status() });
+        // Send only the activity the panel actually renders. The full 200-entry
+        // log rides in every poll otherwise — 2.5s apart, for as long as the
+        // panel is open — and none of it past the first 120 is ever drawn.
+        const full = await getState();
+        sendResponse({
+          ok: true,
+          state: { ...full, activity: full.activity.slice(0, PANEL_ACTIVITY_LIMIT) },
+          status: await status(),
+        });
         break;
       }
+      // clearHalt is passed only on these two paths. They are the user's own
+      // gesture in the side panel, and someone pressing "Attach & Pin" after a
+      // Stop plainly means "carry on". The agent's own pin path does not get it.
       case 'attachActive': {
         const active = await tabsTool.getActiveTab();
         if (!active) throw new Error('No active tab.');
-        const tab = await tabsTool.pinTab(active.id);
+        const tab = await tabsTool.pinTab(active.id, { clearHalt: true });
         sendResponse({ ok: true, tab: { id: tab.id, title: tab.title, url: tab.url } });
         break;
       }
       case 'attachTab': {
-        const tab = await tabsTool.pinTab(msg.tabId);
+        const tab = await tabsTool.pinTab(msg.tabId, { clearHalt: true });
         sendResponse({ ok: true, tab: { id: tab.id, title: tab.title, url: tab.url } });
         break;
       }
-      case 'detach':
-        await tabsTool.unpinTab();
-        sendResponse({ ok: true });
+      case 'detach': {
+        const t0 = Date.now();
+        const results = await tabsTool.unpinTab();
+        const stuck = results.filter((r) => r.stillAttached);
+        sendResponse({
+          ok: true,
+          detached: results.length - stuck.length,
+          // Timed so a slow banner can be attributed. If this reads ~50ms and
+          // the banner lingers for seconds, the delay is the browser's, not ours.
+          ms: Date.now() - t0,
+          // The user can see the debugger banner. If it is still up, say why
+          // rather than letting the panel claim a clean detach.
+          ...(stuck.length
+            ? {
+                warning:
+                  `${stuck.length} tab(s) are still being debugged — an open DevTools window holds them. ` +
+                  `The banner stays until that window closes.`,
+              }
+            : {}),
+        });
         break;
+      }
       case 'setMode':
         await setState({ mode: msg.mode });
         sendResponse({ ok: true });

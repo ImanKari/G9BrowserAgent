@@ -31,6 +31,23 @@ const server = http.createServer(async (req, res) => {
   let pathname = decodeURIComponent(url.pathname);
   if (pathname === '/') pathname = '/testpage.html';
 
+  // Accepts the connection and never answers. The only reliable way to observe
+  // `browser_network status:"pending"` — network throttling does not help,
+  // because an agent's round trip is slower than any latency you can emulate.
+  if (pathname === '/hang') {
+    req.socket.setKeepAlive(true);
+    return; // deliberately no response
+  }
+
+  // Answers after ?ms= milliseconds, for wait/idle scenarios.
+  if (pathname === '/slow') {
+    const ms = Math.min(Number(url.searchParams.get('ms') ?? 1000), 30_000);
+    return setTimeout(() => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, delayedMs: ms }));
+    }, ms);
+  }
+
   // The test page deliberately requests these; 404 is the point.
   if (pathname.startsWith('/api/') || pathname.includes('missing')) {
     res.writeHead(404, { 'content-type': 'application/json' });

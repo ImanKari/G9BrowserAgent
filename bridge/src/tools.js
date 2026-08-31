@@ -1,7 +1,7 @@
 /**
  * Tool schemas and the agent-facing instructions.
  *
- * Design note: there are 11 tools rather than 50, each with an `action` or
+ * Design note: there are 12 tools rather than 50, each with an `action` or
  * `what` discriminator. Tool definitions are sent on every request, so a wide
  * flat surface costs thousands of tokens of context before the agent has done
  * anything. Grouping keeps the whole toolset around 3k tokens.
@@ -63,15 +63,26 @@ traffic happened before you were listening. When you need that data, reload:
 the user is not surprised by a page refresh.
 
 ## Boundaries
+These are enforced, not advisory. Do not try to work around them — report them
+to the user instead, because only the user can lift them.
+
 - Modes: "pinned" (default) locks you to one tab; "follow" tracks the active
-  tab; "multi" lets you open and switch tabs. Only the user changes the mode.
+  tab; "multi" lets you open and switch tabs. Only the user changes the mode,
+  from the G9 side panel.
+- Outside multi mode, \`browser_tabs\` may only \`list\`. Opening, closing,
+  focusing, pinning, and unpinning are refused — pinning another tab would be a
+  way around the mode, so it is treated as one.
+- Outside multi mode, \`browser_status\` shows other tabs by ORIGIN only. Their
+  titles and full URLs are deliberately withheld; that is the point of pinned
+  mode, not a bug to route around.
 - Browser-internal pages (chrome://, edge://, the extension stores) can never be
   controlled. This is a browser restriction, not a configuration problem.
 - Native OS dialogs (print, basic auth, file picker) are outside the browser.
   For file uploads use \`browser_interact action:"upload"\`, which sets the file
   directly without opening a picker.
-- The user can press Stop at any moment. If tool calls start failing with
-  "halted", stop and tell them.
+- The user can press Stop at any moment. Every tool then fails with a message
+  saying so, and you cannot clear it — only Resume in the side panel can. If you
+  see it, stop working and tell the user.
 
 ## Working on the user's own application
 When asked to test or debug a local app, prefer this loop: snapshot to orient,
@@ -83,7 +94,7 @@ export const TOOLS = [
   {
     name: 'browser_status',
     description:
-      'Live session state: bridge connection, which tab is attached, its URL and title, current console-error and failed-request counts, and the other tabs available. CALL THIS FIRST in any browser task to orient yourself.',
+      'Live session state: bridge connection, which tab is attached, its URL and title, current console-error and failed-request counts, and the other tabs available. CALL THIS FIRST in any browser task to orient yourself. Outside multi-tab mode, other tabs are listed by origin only — their titles and URLs are withheld on purpose. This is also the one tool that still answers while the user has pressed Stop, so use it to find out why everything else is failing.',
     inputSchema: { type: 'object', properties: {} },
     annotations: { readOnlyHint: true },
   },
@@ -122,7 +133,7 @@ export const TOOLS = [
         clear: bool('For action:"type" — select-all and delete before typing.', false),
         fast: bool('For action:"type" — insert the whole string at once. Faster, but masked or key-filtered inputs may need the default per-character mode.', false),
         pressEnter: bool('For action:"type" — press Enter afterwards.', false),
-        key: str('For action:"key" — Enter, Tab, Escape, ArrowDown, Home, PageDown, or a single character.'),
+        key: str('For action:"key" — a named key (Enter, Tab, Escape, ArrowDown, Home, PageDown, Space, F1-F12) or a single character. Digits and punctuation get their correct physical key code, so key-filtered inputs behave as they do for a human.'),
         modifiers: {
           type: 'array',
           description: 'Modifier keys held during the action, e.g. ["Control"] for Ctrl+click or Ctrl+S.',
@@ -168,7 +179,7 @@ export const TOOLS = [
           enum: ['load', 'domcontentloaded', 'idle'],
           default: 'load',
         }),
-        timeoutMs: num('Deadline in milliseconds.', { default: 15000 }),
+        timeoutMs: num('Deadline in milliseconds. Defaults to 30000 for goto/reload and 15000 for wait.'),
         tabId: num('Only in multi-tab mode.'),
       },
     },
@@ -193,12 +204,13 @@ export const TOOLS = [
           items: { type: 'string' },
         },
         all: bool('For what:"styles" — include every property, not just non-default ones.', false),
-        depth: num('For what:"dom" with no ref/selector — document depth.', { default: 3 }),
+        depth: num('For what:"dom" with no ref/selector — how many levels of structure to show. Deeper subtrees collapse to a comment. Pass a ref or selector instead when you want one element in full.', { default: 3 }),
         kind: str('For what:"storage".', {
           enum: ['all', 'local', 'session', 'indexeddb', 'cache', 'serviceworker'],
           default: 'all',
         }),
-        url: str('For what:"cookies" — override the URL whose cookies to read.'),
+        url: str('For what:"cookies" — override the URL whose cookies to read. Outside multi-tab mode this must be the attached tab\'s own origin: chrome.cookies can see every site the user is signed in to, so cross-origin reads are refused.'),
+        limit: num('For what:"cookies" — max cookies to return.', { default: 40 }),
         tabId: num('Only in multi-tab mode.'),
       },
     },
@@ -269,7 +281,7 @@ export const TOOLS = [
   {
     name: 'browser_screenshot',
     description:
-      'Capture an image. Use SPARINGLY — browser_snapshot is cheaper and more precise for anything structural. Reach for this only for visual questions: rendering, spacing, canvas content, or confirming what the user is describing.',
+      'Capture an image. Use SPARINGLY — browser_snapshot is cheaper and more precise for anything structural. Reach for this only for visual questions: rendering, spacing, canvas content, or confirming what the user is describing. Oversized captures are scaled down, never cropped, so a fullpage shot of a horizontally overflowing page still shows the overflow; the result reports the `scale` applied.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -324,7 +336,7 @@ export const TOOLS = [
   {
     name: 'browser_tabs',
     description:
-      'List, open, close, focus, or pin tabs. In pinned mode (the default) you may list tabs but not act on others — only the user changes that, from the side panel.',
+      'List, open, close, focus, or pin tabs. Outside multi-tab mode, list shows every tab by ORIGIN only except the one you are driving — titles and URLs are withheld on purpose. Also outside multi-tab mode, ONLY action:"list" is allowed — open/close/focus/pin/unpin are refused, because pinning a different tab would otherwise be a way around the mode. Only the user changes the mode, from the side panel.',
     inputSchema: {
       type: 'object',
       properties: {

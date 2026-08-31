@@ -6,15 +6,32 @@
  * so a service-worker restart does not lose the log the agent is about to ask
  * for. Buffers are ring buffers with hard caps — an app that logs in a render
  * loop must not be able to exhaust storage.
+ *
+ * Both buffers are read-modify-write against a single storage key, driven by
+ * chrome.debugger events that arrive in bursts (one page load fires dozens of
+ * Network events in the same tick). They therefore run through the shared
+ * `serialize()` chain in lib/state.js — without it, interleaved writers drop
+ * requests and console lines, and the agent is handed a log that looks complete
+ * but is not.
  */
 
 import { send } from '../lib/cdp.js';
+import { serialize } from '../lib/state.js';
 
 const api = globalThis.browser ?? globalThis.chrome;
 
 const MAX_CONSOLE = 500;
 const MAX_NETWORK = 400;
 const MAX_BODY_BYTES = 512 * 1024;
+
+/**
+ * Cap on a single console entry AT WRITE TIME.
+ *
+ * Truncating only on read is not enough: the untruncated text still had to fit
+ * in storage first, so a page logging megabyte strings could reach the
+ * chrome.storage.session quota and take capture down with it.
+ */
+const MAX_ENTRY_CHARS = 4_000;
 
 const CONSOLE_KEY = (tabId) => `console:${tabId}`;
 const NETWORK_KEY = (tabId) => `network:${tabId}`;
@@ -53,16 +70,25 @@ export async function ingest(tabId, method, params) {
       });
 
     case 'Network.requestWillBeSent':
-      return upsertRequest(tabId, params.requestId, {
-        requestId: params.requestId,
-        url: params.request.url,
-        method: params.request.method,
-        resourceType: params.type,
-        startedAt: params.timestamp,
-        requestHeaders: params.request.headers,
-        hasPostData: !!params.request.hasPostData,
-        status: null,
-      });
+      // The only event that may CREATE a record. See upsertRequest.
+      return upsertRequest(
+        tabId,
+        params.requestId,
+        {
+          requestId: params.requestId,
+          // Which document this request belongs to. Used to drop the previous
+          // page's traffic the moment a new one commits — see pruneToLoader.
+          loaderId: params.loaderId,
+          url: params.request.url,
+          method: params.request.method,
+          resourceType: params.type,
+          startedAt: params.timestamp,
+          requestHeaders: params.request.headers,
+          hasPostData: !!params.request.hasPostData,
+          status: null,
+        },
+        { create: true },
+      );
 
     case 'Network.responseReceived':
       return upsertRequest(tabId, params.requestId, {
@@ -94,15 +120,81 @@ export async function ingest(tabId, method, params) {
   }
 }
 
+/**
+ * Drop both capture buffers for a tab.
+ *
+ * Without this they outlive the tab that produced them: closing a tab left
+ * `console:<id>` and `network:<id>` in session storage until the browser shut
+ * down, which is both a leak and a way to walk into the quota over a long
+ * session.
+ */
+export async function clearBuffers(tabId) {
+  await api.storage.session.remove([CONSOLE_KEY(tabId), NETWORK_KEY(tabId)]);
+}
+
+/**
+ * Keep only what belongs to the document that just committed.
+ *
+ * Clearing before `Page.navigate` is not enough on its own. The outgoing page
+ * keeps running until the new document commits, and its dying ad scripts,
+ * aborted requests, and tracking-prevention warnings all land in the buffer
+ * *after* the clear. Navigating from an ad-heavy site to a two-line test page
+ * still produced a health report of several hundred entries belonging to the
+ * page we had left — attributed, in the agent's reading, to the page now open.
+ *
+ * `loaderId` is the honest key: every request of a document carries the same
+ * one, including the document request itself, so pruning by it keeps the new
+ * page complete and drops the old page entirely. Console entries carry no
+ * loader, but a committed navigation means the old console is gone anyway.
+ *
+ * Same-document navigation (`pushState`) raises `Page.navigatedWithinDocument`,
+ * not `Page.frameNavigated`, so SPA route changes correctly keep their buffers.
+ */
+export async function pruneToLoader(tabId, loaderId) {
+  await serialize(async () => {
+    const key = NETWORK_KEY(tabId);
+    const stored = await api.storage.session.get(key);
+    const map = stored[key] ?? {};
+    const kept = {};
+    for (const [id, record] of Object.entries(map)) {
+      if (record.loaderId === loaderId) kept[id] = record;
+    }
+    await api.storage.session.set({ [key]: kept });
+  });
+  await api.storage.session.remove(CONSOLE_KEY(tabId));
+}
+
 // ------------------------------------------------------------------ console
 
-async function pushConsole(tabId, entry) {
-  const key = CONSOLE_KEY(tabId);
-  const stored = await api.storage.session.get(key);
-  const list = stored[key] ?? [];
-  list.push({ ...entry, seq: list.length ? list[list.length - 1].seq + 1 : 1 });
-  if (list.length > MAX_CONSOLE) list.splice(0, list.length - MAX_CONSOLE);
-  await api.storage.session.set({ [key]: list });
+function pushConsole(tabId, entry) {
+  return serialize(async () => {
+    const key = CONSOLE_KEY(tabId);
+    const stored = await api.storage.session.get(key);
+    const list = stored[key] ?? [];
+    list.push({
+      ...entry,
+      text: truncate(entry.text, MAX_ENTRY_CHARS),
+      seq: list.length ? list[list.length - 1].seq + 1 : 1,
+    });
+    if (list.length > MAX_CONSOLE) list.splice(0, list.length - MAX_CONSOLE);
+
+    try {
+      await api.storage.session.set({ [key]: list });
+    } catch {
+      // Quota reached. Keep the newest quarter and say so in the data the agent
+      // actually reads — failing silently here would leave it believing the log
+      // is complete.
+      const kept = list.slice(-Math.floor(MAX_CONSOLE / 4));
+      const dropped = list.length - kept.length;
+      kept.push({
+        level: 'warning',
+        text: `[G9] console buffer hit the browser storage quota; ${dropped} older entries were dropped.`,
+        at: Date.now() / 1000,
+        seq: (kept[kept.length - 1]?.seq ?? 0) + 1,
+      });
+      await api.storage.session.set({ [key]: kept });
+    }
+  });
 }
 
 export async function consoleLog(tabId, { level, limit = 100, since, contains, clear = false } = {}) {
@@ -152,20 +244,48 @@ export async function consoleLog(tabId, { level, limit = 100, since, contains, c
 
 // ------------------------------------------------------------------ network
 
-async function upsertRequest(tabId, requestId, patch) {
-  const key = NETWORK_KEY(tabId);
-  const stored = await api.storage.session.get(key);
-  const map = stored[key] ?? {};
-  map[requestId] = { ...(map[requestId] ?? {}), ...patch };
+/**
+ * Update one request record.
+ *
+ * Only `Network.requestWillBeSent` may create a record (`create: true`). Every
+ * other event describes a request that must already exist, and if it does not,
+ * we never saw it start — capture attached mid-flight, or the buffer was reset
+ * while it was in the air. Writing those patches anyway produced records with a
+ * status and no method or URL, which surfaced in the health report as the
+ * finding `undefined undefined -> FAILED: net::ERR_CONNECTION_CLOSED`. A
+ * finding that names nothing is worse than no finding: the agent cannot act on
+ * it and cannot tell it is meaningless.
+ */
+function upsertRequest(tabId, requestId, patch, { create = false } = {}) {
+  return serialize(async () => {
+    const key = NETWORK_KEY(tabId);
+    const stored = await api.storage.session.get(key);
+    const map = stored[key] ?? {};
 
+    if (!map[requestId] && !create) return;
+    map[requestId] = { ...(map[requestId] ?? {}), ...patch };
+
+    trimOldest(map, MAX_NETWORK);
+
+    try {
+      await api.storage.session.set({ [key]: map });
+    } catch {
+      // Quota reached — usually a page carrying very large header sets. Keep
+      // the newest quarter so capture keeps working instead of dying silently.
+      trimOldest(map, Math.floor(MAX_NETWORK / 4));
+      await api.storage.session.set({ [key]: map });
+    }
+  });
+}
+
+/** Drop the oldest entries until at most `keep` remain. Mutates `map`. */
+function trimOldest(map, keep) {
   const ids = Object.keys(map);
-  if (ids.length > MAX_NETWORK) {
-    ids
-      .sort((a, b) => (map[a].startedAt ?? 0) - (map[b].startedAt ?? 0))
-      .slice(0, ids.length - MAX_NETWORK)
-      .forEach((id) => delete map[id]);
-  }
-  await api.storage.session.set({ [key]: map });
+  if (ids.length <= keep) return;
+  ids
+    .sort((a, b) => (map[a].startedAt ?? 0) - (map[b].startedAt ?? 0))
+    .slice(0, ids.length - keep)
+    .forEach((id) => delete map[id]);
 }
 
 export async function network(tabId, { filter, status, method, limit = 50, clear = false } = {}) {

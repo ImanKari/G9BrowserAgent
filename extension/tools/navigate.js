@@ -8,11 +8,31 @@
 
 import { send, evaluate } from '../lib/cdp.js';
 import { clearRefs } from '../lib/refs.js';
+import { clearBuffers } from './observe.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export async function navigate(tabId, { url, waitUntil = 'load', timeoutMs = 30_000 } = {}) {
+/**
+ * Reset per-page state before leaving a page.
+ *
+ * Refs were always cleared here; the capture buffers were not, and that made
+ * `browser_diagnose` actively misleading. After navigating from a busy site to
+ * a fresh page, the health report was still full of the *previous* page's
+ * console errors and failed requests, each stamped with the old page's URL and
+ * presented as a finding about the new one. An agent reads that and reports a
+ * defect that does not exist.
+ *
+ * Clearing BEFORE `Page.navigate` rather than after is what makes the new
+ * page's traffic complete: the main document request is sent by the navigation
+ * itself, so anything cleared afterwards would throw that record away.
+ */
+async function resetPageState(tabId) {
   await clearRefs(tabId);
+  await clearBuffers(tabId);
+}
+
+export async function navigate(tabId, { url, waitUntil = 'load', timeoutMs = 30_000 } = {}) {
+  await resetPageState(tabId);
   const result = await send(tabId, 'Page.navigate', { url });
   if (result.errorText) throw new Error(`Navigation to ${url} failed: ${result.errorText}`);
   const settled = await waitForLoad(tabId, { waitUntil, timeoutMs });
@@ -20,14 +40,14 @@ export async function navigate(tabId, { url, waitUntil = 'load', timeoutMs = 30_
 }
 
 export async function reload(tabId, { hard = false, waitUntil = 'load', timeoutMs = 30_000 } = {}) {
-  await clearRefs(tabId);
+  await resetPageState(tabId);
   await send(tabId, 'Page.reload', { ignoreCache: hard });
   const settled = await waitForLoad(tabId, { waitUntil, timeoutMs });
   return { url: await currentUrl(tabId), hard, ...settled };
 }
 
 export async function history(tabId, { delta = -1 } = {}) {
-  await clearRefs(tabId);
+  await resetPageState(tabId);
   const { currentIndex, entries } = await send(tabId, 'Page.getNavigationHistory');
   const target = currentIndex + delta;
   if (target < 0 || target >= entries.length) {

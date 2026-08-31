@@ -37,7 +37,9 @@ cd g9-browser-agent
 .\setup\install.ps1
 ```
 
-The script checks Node, runs the self-test, and writes `setup/mcp.json` with the correct absolute path. Then two manual steps:
+The script checks Node, runs the self-test, and writes `setup/mcp.json` with the correct absolute path. Then two manual steps.
+
+Add **`-WriteProjectConfig`** and it also writes `.mcp.json` at the repo root — the location Claude Code reads — which turns step 2 below into "restart your client". It never overwrites an existing `.mcp.json`.
 
 **1. Load the extension**
 
@@ -99,7 +101,7 @@ The side panel shows every action live, and **Stop** halts the agent instantly.
 | `browser_screenshot` | viewport / fullpage / element |
 | `browser_emulate` | Device, viewport, network throttle, CPU, colour scheme, locale, timezone |
 | `browser_dialog` | Accept or dismiss `alert` / `confirm` / `prompt` |
-| `browser_tabs` | List, open, close, focus, pin |
+| `browser_tabs` | List tabs; open, close, focus, pin — the last four only in multi-tab mode |
 
 Twelve tools rather than fifty: definitions are re-sent on every request, so a wide surface would burn thousands of context tokens before the agent did anything.
 
@@ -123,7 +125,7 @@ The agent passes `ref: "e7"` to `browser_interact`. Refs are versioned per snaps
 node setup/selftest.mjs
 ```
 
-Spawns the real bridge, speaks real MCP over stdio, connects a fake extension over a real WebSocket, and checks 20 behaviours including Origin rejection, keepalive, and standalone survival. **No browser needed** — if this passes, the plumbing is sound and any remaining problem is in browser-side code.
+Spawns the real bridge, speaks real MCP over stdio, connects a fake extension over a real WebSocket, and checks 26 behaviours including Origin rejection, keepalive, standalone survival, and surviving a malformed frame. **No browser needed** — if this passes, the plumbing is sound and any remaining problem is in browser-side code.
 
 A test page with six deliberate defects is included:
 
@@ -141,7 +143,7 @@ node setup/livetest.mjs
 
 It exercises snapshot, computed styles, storage, cookies, console, network,
 diagnose, trusted-event login, obstruction detection, screenshots, and device
-emulation, then checks that all six seeded defects were actually found.
+emulation, then checks that all six seeded defects were actually found. As of v1.0.9 all six **are** found — verified against Edge.
 
 ---
 
@@ -154,9 +156,12 @@ This tool has full control of your logged-in browser sessions. Treat it as you w
 - The bridge binds to **127.0.0.1 only** — never `0.0.0.0`
 - **Origin validation**: only `chrome-extension://` / `edge-extension://` origins may connect. A malicious web page attempting `new WebSocket('ws://127.0.0.1:8765')` sends its own `https://` origin and is rejected with 403. *(The self-test asserts this.)*
 - **Single client** — a second connection displaces the first rather than silently sharing
-- **Pinned mode** — the agent reaches exactly one tab, the one you consented to
-- **Stop button** — blocks every tool call immediately
+- **Pinned mode** — the agent reaches exactly one tab, the one you consented to. It also may not open, close, focus, pin, or unpin tabs; outside multi-tab mode `browser_tabs` can only *list*, because pinning a different tab would otherwise be a way around the mode
+- **Cookies stay scoped** — `chrome.cookies` can see every domain you are signed in to, so outside multi-tab mode the agent may only read cookies for the attached tab's own origin
+- **Other tabs stay private** — outside multi-tab mode the agent sees other tabs by origin only. Titles and URLs carry subject lines, document names, and search queries, so they are withheld
+- **Stop button** — blocks every tool call immediately, and **the agent cannot lift it**. Only Resume in the side panel does. (`browser_status` still answers, so the agent can tell you *why* it stopped rather than guessing.)
 - **Full activity log** in the side panel; nothing happens invisibly
+- **Least privilege** — seven permissions, all of them used. `scripting` and `downloads` were requested by earlier versions and never called, so they were dropped
 - **Zero dependencies** — no supply chain under a tool with this much access
 
 **Optional:** set `G9_TOKEN` in the MCP config and enter the same value in the side panel for a shared secret on top of Origin checking.
@@ -175,11 +180,15 @@ This tool has full control of your logged-in browser sessions. Treat it as you w
 | `Cannot find module ...server.js` | The config still has a placeholder path. Use `setup/mcp.json`, which `install.ps1` fills in with the real absolute path. |
 | `ERR_CONNECTION_REFUSED` in the extension's **Errors** page | **Expected when no bridge is running.** The browser logs failed WebSocket handshakes itself, below our code, so it cannot be suppressed. The extension retries on a backoff that climbs to 60s, so it stays to about one entry a minute. Start the bridge (or open the side panel) and it connects immediately. |
 | Side panel says **Bridge offline** | Nothing is listening on the port — the bridge is not running. Either restart your MCP client (it launches the bridge), or start it yourself: `node bridge/src/server.js`. That command stays up in standalone mode, so you can watch the extension connect. |
-| `EADDRINUSE` | Another bridge is running. Stop it, or change `G9_PORT` in **both** the MCP config and the side panel. |
+| MCP client says **Connection closed / Failed**, but the side panel says **Bridge connected** | Another bridge already holds the port, and the extension connected to *that* one. Usually a second editor window, or a leftover `node` process. Find it with `netstat -ano \| findstr 8765`, stop it, then hit **Reconnect** in your MCP client. The blocked bridge also retries every 5s on its own, and its tool calls now say exactly this. |
+| `EADDRINUSE` | Another bridge is running. Stop it, or change `G9_PORT` in **both** the MCP config and the side panel. The bridge no longer exits on this — it stays up and reports the conflict through the agent. |
 | *"Another debugger is already attached"* | A DevTools window is open on that tab. Close DevTools, or attach a different tab. |
 | Agent clicks the wrong thing | Its snapshot is stale. Ask it to take a fresh `browser_snapshot`. |
+| A dialog blocked everything | Handled: the call that opened it now fails immediately naming `browser_dialog`, and later calls fail instantly too rather than each waiting 60s. |
 | Tools hang, then time out | A JavaScript dialog is blocking the page. `browser_dialog` clears it. |
-| Everything fails with *"halted"* | **Stop** is engaged. Press **Resume** in the side panel. |
+| Everything fails with *"halted"* | **Stop** is engaged. Press **Resume** in the side panel — nothing the agent does can clear it, by design. |
+| Agent says it cannot open, close, or pin a tab | Correct, and deliberate: outside **Multi** mode `browser_tabs` may only list. Either do it yourself, or switch the side panel to Multi. |
+| Agent only sees other tabs as bare origins | Also deliberate. Pinned and Follow mode withhold other tabs' titles and URLs. Switch to Multi if you want the agent to see them. |
 
 ---
 
@@ -195,7 +204,7 @@ g9-browser-agent/
 │   └── panel/              side panel UI (the trust surface)
 ├── bridge/                 zero-dependency Node bridge
 │   └── src/                server · mcp · ws-server · tools (schemas)
-├── setup/                  install.ps1 · selftest.mjs · serve.mjs · testpage.html
+├── setup/                  install.ps1 · selftest.mjs · livetest.mjs · serve.mjs · testpage.html
 ├── README.md               this file
 └── AIGuide.md              build log + architecture reference
 ```

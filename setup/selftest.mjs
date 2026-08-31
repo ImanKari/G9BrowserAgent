@@ -376,6 +376,27 @@ try {
   // people to use for debugging — silently impossible.
   console.log('\n\x1b[1m10. Standalone mode (no MCP client)\x1b[0m');
   await standaloneCheck();
+
+  // -- 11. malformed frames must not kill the bridge -------------------------
+  // Regression guard: decodeFrame() throws on an oversized frame, and it throws
+  // inside a socket 'data' handler — where an uncaught exception took the whole
+  // process down. From the agent's side a bridge that dies mid-session looks
+  // exactly like one that never started, two layers away from the cause.
+  console.log('\n\x1b[1m11. Malformed WebSocket frames\x1b[0m');
+  await oversizedFrameCheck();
+
+  // -- 12. a taken port must not kill the bridge -----------------------------
+  // Regression guard: the bridge used to process.exit(1) on EADDRINUSE. The MCP
+  // client then reported only "Connection closed", and the actual reason —
+  // written to stderr — went to a log file nobody opens. The stdio channel does
+  // not depend on the WebSocket port, so the bridge can and must stay up and
+  // say what is wrong.
+  console.log('\n\x1b[1m12. Port already in use\x1b[0m');
+  await portConflictCheck();
+
+  // -- 13. injected-code escaping ------------------------------------------
+  console.log('\n\x1b[1m13. Escaping in injected page code\x1b[0m');
+  await injectedEscapeCheck();
 } catch (err) {
   bad('unexpected exception', String(err?.stack ?? err));
 } finally {
@@ -417,6 +438,161 @@ async function standaloneCheck() {
 
   solo.kill();
   await sleep(150);
+}
+
+/**
+ * Send a frame header claiming a 1TB payload and check the bridge survives.
+ *
+ * Only the header is sent — decodeFrame reads the 64-bit length and throws
+ * before it ever waits for a body, so this reproduces the crash in ten bytes
+ * rather than a terabyte.
+ */
+async function oversizedFrameCheck() {
+  const client = await wsConnect({
+    port: PORT,
+    origin: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop',
+  });
+
+  const header = Buffer.alloc(10);
+  header[0] = 0x81; // FIN + TEXT
+  header[1] = 0x7f; // 64-bit length follows
+  header.writeBigUInt64BE(1n << 40n, 2);
+  client.socket.write(header);
+
+  await sleep(500);
+
+  // The connection is expected to be gone; the process is not.
+  try {
+    const res = await fetch(`http://127.0.0.1:${PORT}/health`);
+    const body = await res.json();
+    if (body.ok === true) ok('bridge survives an oversized frame', 'connection dropped, process alive');
+    else bad('health body after oversized frame', JSON.stringify(body));
+  } catch (err) {
+    bad('bridge died on an oversized frame', String(err.message));
+  }
+
+  if (stderrLines.some((l) => l.includes('dropped the extension connection'))) {
+    ok('oversized frame reported on stderr');
+  } else bad('no protocol-error notice', stderrLines.slice(-3).join(' | ').slice(0, 140));
+
+  client.close();
+  await sleep(100);
+}
+
+/**
+ * Two bridges, one port. The second must survive and explain itself.
+ *
+ * It also has to tell the two causes apart: another G9 bridge (close the other
+ * window) versus an unrelated program (free the port). Here the holder IS a G9
+ * bridge, so the message must say so — a generic "port in use" would send the
+ * user looking in the wrong place.
+ */
+async function portConflictCheck() {
+  const port = PORT + 2;
+  const spawnBridge = () =>
+    spawn(process.execPath, [SERVER], {
+      env: { ...process.env, G9_PORT: String(port) },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+  const holder = spawnBridge();
+  await sleep(900);
+
+  const blocked = spawnBridge();
+  let exited = false;
+  blocked.on('exit', () => (exited = true));
+
+  const client = new McpClient(blocked);
+  try {
+    await client.request('initialize', {
+      protocolVersion: '2025-06-18',
+      capabilities: {},
+      clientInfo: { name: 'g9-selftest', version: '1.0.0' },
+    });
+    ok('port-blocked bridge still speaks MCP', 'no silent exit');
+  } catch {
+    bad('port-blocked bridge did not answer initialize', 'it probably exited — the regression is back');
+  }
+
+  const res = await client.request('tools/call', { name: 'browser_status', arguments: {} });
+  const text = res.result?.content?.[0]?.text ?? '';
+  if (res.result?.isError && text.includes(String(port))) {
+    ok('tool calls explain the port conflict', `names port ${port}`);
+  } else bad('port-conflict error unhelpful', text.slice(0, 120));
+
+  if (/another G9 bridge/i.test(text)) {
+    ok('distinguishes another G9 bridge from an unrelated program');
+  } else bad('port-conflict cause not identified', text.slice(0, 120));
+
+  await sleep(100);
+  if (exited) bad('port-blocked bridge exited', 'it must stay up to report the reason');
+
+  holder.kill();
+  blocked.kill();
+  await sleep(200);
+}
+
+/**
+ * A whole class of silent corruption, caught by reading the source.
+ *
+ * Half the extension's page logic is a template literal evaluated in the page,
+ * so every escape is parsed twice. `\s` is not a valid JavaScript string escape,
+ * so a template literal quietly reduces it to a bare `s` — and the page then
+ * runs `/s+/g`. `browser_snapshot mode:"a11y+text"` shipped that from v1.0.0 to
+ * v1.0.13, replacing every letter "s" in the extracted text with a space, and
+ * nothing failed: the output looked like text, just subtly wrong.
+ *
+ * Nothing catches this at parse time, so it is checked here instead. Inside a
+ * template literal, a regex escape MUST be written `\\s`.
+ */
+async function injectedEscapeCheck() {
+  const { readdir, readFile } = await import('node:fs/promises');
+  const dirs = ['lib', 'tools'].map((d) => path.join(HERE, '..', 'extension', d));
+
+  const offenders = [];
+  for (const dir of dirs) {
+    for (const name of await readdir(dir)) {
+      if (!name.endsWith('.js')) continue;
+      const src = stripComments(await readFile(path.join(dir, name), 'utf8'));
+      for (const body of templateLiterals(src)) {
+        // A single backslash before a regex class. Two backslashes is correct
+        // and must not match, hence the leading "not a backslash" guard.
+        const hit = body.match(/(?:^|[^\\])\\([sdwSDWbB])/);
+        if (hit) offenders.push(`${name}: \\${hit[1]}`);
+      }
+    }
+  }
+
+  if (!offenders.length) {
+    ok('no single-escaped regex classes in injected code', 'template literals are parsed twice');
+  } else {
+    bad('injected code has under-escaped regex classes', offenders.join(', '));
+  }
+}
+
+/**
+ * Drop comments before scanning.
+ *
+ * Comments explain this very bug, and they quote the offending escape inside
+ * backticks — which the template-literal scanner would otherwise read as code
+ * and report. A checker that fires on its own documentation trains people to
+ * ignore it.
+ */
+function stripComments(src) {
+  return src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:'"`])\/\/[^\n]*/g, '$1');
+}
+
+/** Bodies of every template literal in a source file, backslash-aware. */
+function templateLiterals(src) {
+  const bodies = [];
+  let i = 0;
+  while ((i = src.indexOf('`', i)) !== -1) {
+    let j = i + 1;
+    while (j < src.length && src[j] !== '`') j += src[j] === '\\' ? 2 : 1;
+    bodies.push(src.slice(i + 1, j));
+    i = j + 1;
+  }
+  return bodies;
 }
 
 console.log(

@@ -23,7 +23,12 @@ export async function health(tabId) {
     findings.push({
       severity: e.level === 'error' ? 'error' : 'warning',
       kind: 'console',
-      message: e.text,
+      // A finding is a pointer, not the payload. Console text is already capped
+      // at 2000 chars for browser_console, but 40 of those in one report is
+      // 80KB of the agent's context — and the worst offenders are tracking URLs
+      // whose first line already says everything. Read the full text with
+      // browser_console when a finding warrants it.
+      message: brief(e.text, 300),
       where: e.at ?? e.url ?? null,
     });
   }
@@ -40,7 +45,9 @@ export async function health(tabId) {
   findings.push(...page.findings);
 
   const rank = { error: 0, warning: 1, info: 2 };
-  findings.sort((a, b) => rank[a.severity] - rank[b.severity]);
+  findings.sort((a, b) => rank[a.severity] - rank[b.severity] || auditFirst(a) - auditFirst(b));
+
+  const { kept, omitted } = capPerSeverity(findings);
 
   return {
     summary: {
@@ -52,8 +59,65 @@ export async function health(tabId) {
       overflowing: page.overflowing,
     },
     metrics: page.metrics,
-    findings: findings.slice(0, 60),
+    ...(omitted ? { omittedFindings: omitted } : {}),
+    findings: kept,
   };
+}
+
+function brief(text, max) {
+  const s = String(text ?? '');
+  return s.length > max ? `${s.slice(0, max)}… [+${s.length - max} chars, see browser_console]` : s;
+}
+
+/**
+ * Kinds produced by the in-page audit rather than by console/network capture.
+ *
+ * These outrank capture noise at the same severity, and the reason is not
+ * aesthetic. They are the only findings this tool produces that no other tool
+ * does — an agent can read the console and the request list directly, but
+ * nothing else reports an unlabelled input or a horizontally overflowing
+ * layout. They are also bounded by construction (a few dozen at most), so
+ * giving them priority costs nothing.
+ *
+ * Learned the hard way, twice: a flat slice buried them, and then a
+ * per-severity budget buried them again when 500 console warnings arrived
+ * first. The summary said `formIssues: 7` while the findings list contained
+ * none of them — a report contradicting itself in the same response.
+ */
+const AUDIT_KINDS = new Set(['a11y', 'layout', 'dom', 'asset']);
+
+function auditFirst(finding) {
+  return AUDIT_KINDS.has(finding.kind) ? 0 : 1;
+}
+
+/** Per-severity budgets, tuned so the report stays readable in a context window. */
+const BUDGET = { error: 30, warning: 20, info: 10 };
+
+/**
+ * Cap the report without letting one severity crowd out another.
+ *
+ * A flat `slice(60)` after a severity sort looks reasonable and is not: a page
+ * with 60+ console errors (any site carrying ad tech clears that easily) pushed
+ * every warning past the cut. The findings lost were the accessibility, layout,
+ * and duplicate-ID checks — the ones nothing else in the toolset produces, and
+ * the whole reason to call this tool rather than reading the console.
+ */
+function capPerSeverity(findings) {
+  const seen = { error: 0, warning: 0, info: 0 };
+  const kept = [];
+  let omitted = 0;
+
+  for (const f of findings) {
+    const severity = f.severity in BUDGET ? f.severity : 'info';
+    if (seen[severity] < BUDGET[severity]) {
+      seen[severity] += 1;
+      kept.push(f);
+    } else {
+      omitted += 1;
+    }
+  }
+
+  return { kept, omitted };
 }
 
 /** In-page checks that need DOM access rather than CDP domains. */

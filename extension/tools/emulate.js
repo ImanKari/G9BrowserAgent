@@ -6,7 +6,26 @@
  * the user's browser. That is intentional.
  */
 
-import { send } from '../lib/cdp.js';
+import { send, evaluate } from '../lib/cdp.js';
+import { setState } from '../lib/state.js';
+
+const api = globalThis.browser ?? globalThis.chrome;
+
+/**
+ * CDP has no "clear user-agent override" command — you can only set another
+ * one — so the real one has to be captured before the first override, or it is
+ * gone for the life of the session. Kept in session storage because the
+ * service worker may restart between the override and the reset.
+ */
+const UA_KEY = (tabId) => `emulate-ua:${tabId}`;
+
+async function rememberUserAgent(tabId) {
+  const key = UA_KEY(tabId);
+  const stored = await api.storage.session.get(key);
+  if (stored[key]) return;
+  const userAgent = await evaluate(tabId, 'navigator.userAgent').catch(() => null);
+  if (userAgent) await api.storage.session.set({ [key]: userAgent });
+}
 
 const DEVICES = {
   'iphone-15': { width: 393, height: 852, deviceScaleFactor: 3, mobile: true,
@@ -32,13 +51,39 @@ export async function emulate(tabId, opts = {}) {
   const applied = {};
 
   if (reset) {
-    await send(tabId, 'Emulation.clearDeviceMetricsOverride').catch(() => {});
-    await send(tabId, 'Network.emulateNetworkConditions', {
+    // Reset every override this tool can apply. It used to clear four of the
+    // seven, so a page emulated as an iPhone in Tehran kept reporting an iPhone
+    // user agent and Asia/Tehran afterwards — and reported `reset: true` while
+    // doing it, which is the part that makes it a real bug rather than a gap.
+    const cleared = [];
+    const step = async (label, method, params = {}) => {
+      try {
+        await send(tabId, method, params);
+        cleared.push(label);
+      } catch {
+        /* domain unavailable on this target; not fatal */
+      }
+    };
+
+    await step('viewport', 'Emulation.clearDeviceMetricsOverride');
+    await step('network', 'Network.emulateNetworkConditions', {
       offline: false, downloadThroughput: -1, uploadThroughput: -1, latency: 0,
-    }).catch(() => {});
-    await send(tabId, 'Emulation.setCPUThrottlingRate', { rate: 1 }).catch(() => {});
-    await send(tabId, 'Emulation.setEmulatedMedia', { features: [] }).catch(() => {});
-    return { reset: true };
+    });
+    await step('cpu', 'Emulation.setCPUThrottlingRate', { rate: 1 });
+    await step('media', 'Emulation.setEmulatedMedia', { features: [] });
+    await step('touch', 'Emulation.setTouchEmulationEnabled', { enabled: false });
+    // Empty values disable these two and restore the host's own settings.
+    await step('timezone', 'Emulation.setTimezoneOverride', { timezoneId: '' });
+    await step('locale', 'Emulation.setLocaleOverride', {});
+
+    const key = UA_KEY(tabId);
+    const stored = await api.storage.session.get(key);
+    if (stored[key]) {
+      await step('userAgent', 'Emulation.setUserAgentOverride', { userAgent: stored[key] });
+      await api.storage.session.remove(key);
+    }
+
+    return { reset: true, cleared };
   }
 
   if (device || width || height) {
@@ -54,6 +99,8 @@ export async function emulate(tabId, opts = {}) {
     };
     await send(tabId, 'Emulation.setDeviceMetricsOverride', metrics);
     if (preset?.userAgent) {
+      // Capture the real one first — reset has no other way to get it back.
+      await rememberUserAgent(tabId);
       await send(tabId, 'Emulation.setUserAgentOverride', { userAgent: preset.userAgent }).catch(() => {});
     }
     if (preset?.mobile) {
@@ -111,10 +158,18 @@ export async function handleDialog(tabId, { accept = true, promptText } = {}) {
       accept,
       ...(promptText != null ? { promptText } : {}),
     });
+    await setState({ dialogOpen: null });
     return { handled: true, accept, promptText };
   } catch (err) {
     if (String(err.message).includes('No dialog')) {
-      return { handled: false, reason: 'No dialog is currently open.' };
+      // Self-healing, and the reason this tool is exempt from the dialog guard.
+      // The guard rejects every other tool while `dialogOpen` is set, so if that
+      // flag ever outlived its dialog — a missed `javascriptDialogClosed`, a
+      // service-worker restart at the wrong moment — the agent would be locked
+      // out with no way back. Clearing it here means the recovery the error
+      // message already names always works, whether or not a dialog was real.
+      await setState({ dialogOpen: null });
+      return { handled: false, reason: 'No dialog is currently open. Cleared the blocked state; retry your call.' };
     }
     throw err;
   }

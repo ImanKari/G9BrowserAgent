@@ -19,6 +19,16 @@ export function modifierMask(list = []) {
   return list.reduce((m, name) => m | (MODIFIERS[name] ?? 0), 0);
 }
 
+/**
+ * Select-all is Cmd+A on macOS and Ctrl+A everywhere else. The service worker
+ * has a navigator, so ask rather than assume — a hardcoded Control silently
+ * fails to clear a field on a Mac, and type({clear:true}) then appends instead
+ * of replacing.
+ */
+const SELECT_ALL_MODIFIER = /Mac/i.test(globalThis.navigator?.userAgent ?? '')
+  ? MODIFIERS.Meta
+  : MODIFIERS.Control;
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Scroll into view, then return viewport-relative interaction coordinates. */
@@ -61,23 +71,71 @@ async function pointFor(tabId, backendNodeId) {
   return rect;
 }
 
-/** Warn when a different element would actually receive the click. */
+/**
+ * Warn when a different element would actually receive the click.
+ *
+ * The obvious implementation — `elementFromPoint(x,y)`, pass if it is the
+ * target, a descendant, *or an ancestor* — has a false negative that matters,
+ * because the ancestor case is not symmetric with the descendant one:
+ *
+ *   - a DESCENDANT on top (a <span> inside the button) is fine: the event
+ *     fires on it and bubbles up to the target.
+ *   - an ANCESTOR on top means the target is covered. The event fires on the
+ *     ancestor and bubbles *away* from the target, which never sees it.
+ *
+ * An ancestor lands on top most often because of a `::before`/`::after`
+ * overlay. `elementFromPoint` never returns a pseudo-element — it returns the
+ * element that generated it — so a click-swallowing `.cover::after { inset:0 }`
+ * looked exactly like a harmless wrapper, and the click was allowed through.
+ * That is the silent misclick this function exists to prevent.
+ *
+ * `elementsFromPoint` (plural) gives the whole hit-test stack, so we can ask
+ * the real question: will a click at this point reach the target? The only
+ * ancestor that legitimately forwards activation is a <label>, so that stays
+ * allowed explicitly rather than by accident.
+ */
 async function checkObscured(tabId, backendNodeId, x, y) {
   const verdict = await callOnNode(
     tabId,
     backendNodeId,
     `function (px, py) {
-       const top = document.elementFromPoint(px, py);
-       if (!top) return { ok: false, reason: 'the point is outside the viewport' };
-       if (top === this || this.contains(top) || top.contains(this)) return { ok: true };
+       const stack = document.elementsFromPoint(px, py);
+       if (!stack.length) return { ok: false, reason: 'the point is outside the viewport' };
+
+       const top = stack[0];
+       if (top === this || this.contains(top)) return { ok: true };
+
+       // A <label> hands its activation to the control it labels.
+       if (top.tagName === 'LABEL' && (top.control === this || (this.id && top.htmlFor === this.id))) {
+         return { ok: true };
+       }
+
        const describe = (el) => {
          let s = el.tagName.toLowerCase();
          if (el.id) s += '#' + el.id;
          if (typeof el.className === 'string' && el.className.trim()) {
-           s += '.' + el.className.trim().split(/\s+/).slice(0, 2).join('.');
+           s += '.' + el.className.trim().split(/\\s+/).slice(0, 2).join('.');
          }
          return s;
        };
+
+       // Naming the ancestor alone reads as nonsense ("covered by its own
+       // container"), so say what is actually painting over it.
+       if (top.contains(this)) {
+         const pseudo = ['::after', '::before'].find((p) => {
+           const s = getComputedStyle(top, p);
+           return s && s.content !== 'none' && s.position === 'absolute' && s.pointerEvents !== 'none';
+         });
+         return {
+           ok: false,
+           reason:
+             'it is covered by its ancestor <' + describe(top) + '>' +
+             (pseudo
+               ? ', whose ' + pseudo + ' pseudo-element is painted over it (a click-shield overlay)'
+               : ', which paints something over it'),
+         };
+       }
+
        return { ok: false, reason: 'it is covered by <' + describe(top) + '>' };
      }`,
     [x, y],
@@ -159,8 +217,9 @@ export async function hover(tabId, { ref, x, y, url } = {}) {
 export async function type(tabId, opts = {}) {
   const { ref, text = '', clear = false, fast = false, pressEnter = false, delayMs = 12, url } = opts;
 
+  let node = null;
   if (ref) {
-    const node = await resolveRef(tabId, ref, url);
+    node = await resolveRef(tabId, ref, url);
     const point = await pointFor(tabId, node.backendNodeId);
     await mouse(tabId, 'mouseMoved', point.x, point.y, { button: 'none' });
     await mouse(tabId, 'mousePressed', point.x, point.y, {});
@@ -169,10 +228,47 @@ export async function type(tabId, opts = {}) {
   }
 
   if (clear) {
-    // Select-all then delete, so the framework observes a real edit rather
-    // than a value assignment it never hears about.
-    await key(tabId, { key: 'a', modifiers: MODIFIERS.Control });
+    if (node) {
+      // Select through the DOM, not Ctrl+A.
+      //
+      // Key-filtered fields — numeric inputs are full of them — commonly do
+      // `if (e.key.length === 1 && !/[0-9]/.test(e.key)) e.preventDefault()`,
+      // which swallows the "a" of the chord and leaves the old value selected
+      // by nothing. The typing that followed then APPENDED to the old value
+      // while the result still claimed `cleared: true`.
+      //
+      // Selecting is not an edit, so doing it directly costs nothing the
+      // framework needs to observe: the Delete below is still a real trusted
+      // key event, and that is what produces the input/change events.
+      await callOnNode(
+        tabId,
+        node.backendNodeId,
+        `function () {
+           if (typeof this.select === 'function') return this.select();
+           const r = document.createRange();
+           r.selectNodeContents(this);
+           const s = getSelection();
+           s.removeAllRanges();
+           s.addRange(r);
+         }`,
+      ).catch(() => {});
+    } else {
+      await key(tabId, { key: 'a', modifiers: SELECT_ALL_MODIFIER });
+    }
     await key(tabId, { key: 'Delete' });
+
+    // Verify, rather than assume. A clear that silently fails turns "replace"
+    // into "append", and the agent has no way to see it in the result.
+    if (node) {
+      const left = await readValue(tabId, node.backendNodeId);
+      if (left) {
+        throw new Error(
+          `Could not clear "${node.name || ref}" — it still contains ${JSON.stringify(truncateValue(left))}. ` +
+            `The page is intercepting the deletion. Nothing was typed, because typing now would append ` +
+            `to the old value instead of replacing it.`,
+        );
+      }
+    }
   }
 
   if (fast) {
@@ -183,13 +279,18 @@ export async function type(tabId, opts = {}) {
         await key(tabId, { key: 'Enter' });
         continue;
       }
+      // code and keyCode matter as much as text here: key-filtered numeric
+      // inputs and masked fields read event.code / event.keyCode, and sending
+      // the character alone is exactly what per-character mode exists to avoid.
+      const def = keyDefinition(ch);
       await send(tabId, 'Input.dispatchKeyEvent', {
         type: 'keyDown',
         text: ch,
-        key: ch,
+        key: def.key,
         unmodifiedText: ch,
+        ...physicalKey(def),
       });
-      await send(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', key: ch });
+      await send(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', key: def.key, ...physicalKey(def) });
       if (delayMs) await sleep(delayMs);
     }
   }
@@ -201,6 +302,20 @@ export async function type(tabId, opts = {}) {
     cleared: clear,
     pressedEnter: pressEnter,
   };
+}
+
+/** Current text of a field, for verifying an edit actually happened. */
+function readValue(tabId, backendNodeId) {
+  return callOnNode(
+    tabId,
+    backendNodeId,
+    `function () { return this.value != null ? this.value : (this.textContent || ''); }`,
+  ).catch(() => '');
+}
+
+function truncateValue(s) {
+  const str = String(s);
+  return str.length > 40 ? `${str.slice(0, 39)}…` : str;
 }
 
 const KEY_MAP = {
@@ -220,14 +335,64 @@ const KEY_MAP = {
   Space: { key: ' ', code: 'Space', keyCode: 32, text: ' ' },
 };
 
+/** Physical `code` and legacy keyCode for the printable US-layout keys. */
+const PUNCTUATION = {
+  '-': ['Minus', 189], '=': ['Equal', 187], '[': ['BracketLeft', 219],
+  ']': ['BracketRight', 221], '\\': ['Backslash', 220], ';': ['Semicolon', 186],
+  "'": ['Quote', 222], ',': ['Comma', 188], '.': ['Period', 190],
+  '/': ['Slash', 191], '`': ['Backquote', 192], ' ': ['Space', 32],
+};
+
+/**
+ * Build a CDP key descriptor for an arbitrary key name.
+ *
+ * `code` is the PHYSICAL key, and it does not follow from the character the
+ * obvious way: '1' is Digit1 (not Key1) and F5 is F5 (not KeyF5). The previous
+ * `Key${name.toUpperCase()}` produced garbage for every digit, symbol, and
+ * function key — and pages that filter numeric input read exactly event.code
+ * and event.keyCode, so it silently broke the inputs that most need real key
+ * events. Where a value cannot be known honestly, it is omitted: a fabricated
+ * keyCode is worse than none.
+ */
+function keyDefinition(name) {
+  if (KEY_MAP[name]) return KEY_MAP[name];
+  const s = String(name);
+
+  if (/^F([1-9]|1[0-2])$/.test(s)) {
+    return { key: s, code: s, keyCode: 111 + Number(s.slice(1)) };
+  }
+
+  if (s.length === 1) {
+    if (/[a-zA-Z]/.test(s)) {
+      return { key: s, code: `Key${s.toUpperCase()}`, keyCode: s.toUpperCase().charCodeAt(0), text: s };
+    }
+    if (/[0-9]/.test(s)) {
+      return { key: s, code: `Digit${s}`, keyCode: s.charCodeAt(0), text: s };
+    }
+    const punct = PUNCTUATION[s];
+    if (punct) return { key: s, code: punct[0], keyCode: punct[1], text: s };
+    // Shifted symbols and non-ASCII (Persian, emoji): send the character with
+    // no physical code rather than inventing one.
+    return { key: s, text: s };
+  }
+
+  // An unknown multi-character name — "F13", "AudioVolumeUp". Pass it through.
+  return { key: s, code: s };
+}
+
+/** Only emit code/keyCode when they are actually known. */
+function physicalKey(def) {
+  return {
+    ...(def.code ? { code: def.code } : {}),
+    ...(def.keyCode != null
+      ? { windowsVirtualKeyCode: def.keyCode, nativeVirtualKeyCode: def.keyCode }
+      : {}),
+  };
+}
+
 /** Named keys and chords: Enter, Tab, Escape, ArrowDown, Control+s … */
 export async function key(tabId, { key: name, modifiers = 0, repeat = 1 } = {}) {
-  const def = KEY_MAP[name] ?? {
-    key: name,
-    code: `Key${String(name).toUpperCase()}`,
-    keyCode: String(name).toUpperCase().charCodeAt(0),
-    text: String(name).length === 1 ? name : undefined,
-  };
+  const def = keyDefinition(name);
 
   for (let i = 0; i < repeat; i++) {
     await send(tabId, 'Input.dispatchKeyEvent', {
@@ -235,18 +400,14 @@ export async function key(tabId, { key: name, modifiers = 0, repeat = 1 } = {}) 
       // a literal character instead of the shortcut.
       type: !modifiers && def.text ? 'keyDown' : 'rawKeyDown',
       key: def.key,
-      code: def.code,
-      windowsVirtualKeyCode: def.keyCode,
-      nativeVirtualKeyCode: def.keyCode,
+      ...physicalKey(def),
       text: modifiers ? undefined : def.text,
       modifiers,
     });
     await send(tabId, 'Input.dispatchKeyEvent', {
       type: 'keyUp',
       key: def.key,
-      code: def.code,
-      windowsVirtualKeyCode: def.keyCode,
-      nativeVirtualKeyCode: def.keyCode,
+      ...physicalKey(def),
       modifiers,
     });
   }

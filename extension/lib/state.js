@@ -31,6 +31,13 @@ const DEFAULTS = {
   activity: [],
   /** hard stop — when true every tool call is rejected */
   halted: false,
+  /**
+   * Set while a JavaScript dialog is blocking a tab: { tabId, type, message }.
+   * A blocked renderer answers no CDP command, so every tool call would sit
+   * until its timeout. Knowing a dialog is open turns that into an instant,
+   * actionable error.
+   */
+  dialogOpen: null,
 };
 
 const MAX_ACTIVITY = 200;
@@ -53,21 +60,26 @@ export async function getState() {
 }
 
 /**
- * Serializes every state mutation.
+ * Serializes every session-storage mutation in the extension.
  *
- * getState/set is a read-modify-write against one storage key, and there are
- * ~24 call sites firing from independent async contexts: tool calls, debugger
- * events, connection changes, and the activity log. Two that interleave will
- * both read the same base state and the second write silently discards the
- * first. That surfaced as vanishing activity entries and, worse, a
- * `pinnedTabId` or `attachedTabs` that reverted under load.
+ * Read-modify-write against one storage key, from independent async contexts,
+ * loses updates: two writers that interleave both read the same base state and
+ * the second silently discards the first. That surfaced as vanishing activity
+ * entries and, worse, a `pinnedTabId` or `attachedTabs` that reverted under
+ * load.
  *
- * A promise chain costs nothing here — writes are infrequent and tiny — and it
- * makes every mutation atomic with respect to the others.
+ * This chain is exported because it must cover EVERY such writer, not just the
+ * ones in this file. `tools/observe.js` is the highest-frequency one by a wide
+ * margin — a single page load fires dozens of Network events into the same
+ * buffer — so it shares this chain rather than running unguarded.
+ *
+ * A promise chain costs nothing here: the writes are small and the operations
+ * are storage calls, not tool work. The only rule is that a serialized function
+ * must never itself call another serialized function, or it will deadlock.
  */
 let writeQueue = Promise.resolve();
 
-function serialize(fn) {
+export function serialize(fn) {
   const run = writeQueue.then(fn, fn);
   // Keep the chain alive even if one mutation throws.
   writeQueue = run.catch(() => {});

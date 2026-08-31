@@ -38,6 +38,18 @@ async function isAttached(tabId) {
   return targets.some((t) => t.tabId === tabId && t.attached);
 }
 
+/**
+ * Tab ids the BROWSER reports as being debugged, by anyone.
+ *
+ * This is the only source of truth for "is the banner still up". Our
+ * `attachedTabs` list is bookkeeping and can drift from it — which is exactly
+ * the drift that made a failed detach invisible.
+ */
+export async function attachedTabIds() {
+  const targets = await api.debugger.getTargets();
+  return targets.filter((t) => t.attached && t.tabId != null).map((t) => t.tabId);
+}
+
 export async function attach(tabId) {
   const state = await getState();
   if (state.attachedTabs.includes(tabId) && (await isAttached(tabId))) return;
@@ -72,21 +84,84 @@ export async function attach(tabId) {
   await logActivity({ kind: 'attach', tabId, ok: true });
 }
 
-export async function detach(tabId) {
-  try {
-    await api.debugger.detach({ tabId });
-  } catch {
-    /* already gone */
+/**
+ * Detach from a tab, and check that it worked.
+ *
+ * The old version swallowed the failure, dropped the tab from `attachedTabs`
+ * anyway, and logged `ok: true`. So when a detach did not take, the "browser is
+ * being debugged" banner stayed on the user's tab while the extension reported
+ * a clean detach and showed nothing attached — the user is left looking at
+ * evidence the tool says does not exist. Verify against the browser instead.
+ */
+/**
+ * Detach from several tabs at once, and check that it worked.
+ *
+ * Batched deliberately. The first version verified per tab, which meant N
+ * `getTargets()` round trips plus N pairs of serialized state writes — and the
+ * user is watching the debugger banner the whole time. Detaching is independent
+ * per tab, so the calls go out together and one `getTargets()` answers for all
+ * of them.
+ *
+ * The verification is the point: the old code caught the failure with
+ * `catch { /* already gone *​/ }`, dropped the tab from `attachedTabs` anyway,
+ * and logged `ok: true`. "Already gone" is a guess about why the call failed —
+ * the call never says that — and when the guess was wrong the banner stayed up
+ * while the extension reported a clean detach.
+ */
+export async function detachMany(tabIds) {
+  const started = Date.now();
+  const ids = [...new Set(tabIds)].filter((id) => id != null);
+  if (!ids.length) return [];
+
+  const errors = new Map();
+  await Promise.all(
+    ids.map(async (id) => {
+      try {
+        await api.debugger.detach({ tabId: id });
+      } catch (err) {
+        errors.set(id, String(err?.message ?? err));
+      }
+    }),
+  );
+
+  for (const key of [...enabled]) {
+    if (ids.some((id) => key.startsWith(`${id}:`))) enabled.delete(key);
   }
-  for (const key of [...enabled]) if (key.startsWith(`${tabId}:`)) enabled.delete(key);
+
+  const stillAttached = new Set(await attachedTabIds().catch(() => []));
+
   const state = await getState();
-  await setState({ attachedTabs: state.attachedTabs.filter((id) => id !== tabId) });
-  await logActivity({ kind: 'detach', tabId, ok: true });
+  await setState({ attachedTabs: state.attachedTabs.filter((id) => !ids.includes(id)) });
+
+  const results = ids.map((id) => ({
+    tabId: id,
+    detached: !stillAttached.has(id),
+    stillAttached: stillAttached.has(id),
+    error: errors.get(id) ?? null,
+  }));
+
+  const stuck = results.filter((r) => r.stillAttached);
+  await logActivity({
+    kind: 'detach',
+    ok: !stuck.length,
+    ms: Date.now() - started,
+    detail: stuck.length
+      ? `released ${ids.length - stuck.length}/${ids.length}; ${stuck.length} still debugged by another client (DevTools open on that tab)`
+      : `released ${ids.length} tab(s)`,
+  });
+
+  return results;
 }
 
+export async function detach(tabId) {
+  const [result] = await detachMany([tabId]);
+  return result ?? { tabId, detached: true, stillAttached: false, error: null };
+}
+
+/** Detach from every tab we hold. Returns one result per tab. */
 export async function detachAll() {
   const state = await getState();
-  await Promise.all(state.attachedTabs.map((id) => detach(id)));
+  return detachMany(state.attachedTabs);
 }
 
 /** Send without the attach guard — used during attach itself. */

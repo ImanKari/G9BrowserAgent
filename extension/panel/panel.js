@@ -31,6 +31,7 @@ const el = {
   snippet: $('snippet'),
   copyGuide: $('copyGuide'),
   toast: $('toast'),
+  panelError: $('panelError'),
 };
 
 let current = null;
@@ -42,13 +43,49 @@ function cmd(payload) {
 /** Opening the panel counts as "the user wants this connected now". */
 let firstRefresh = true;
 
+/**
+ * Show why the panel is not updating — or clear the notice.
+ *
+ * This used to be a bare `catch {}`. The reasoning ("the worker may be starting
+ * up; the next poll will catch it") is true for the first second and wrong
+ * after that: any lasting failure left the panel frozen mid-render, showing
+ * "No tab attached yet" while the agent was in fact working on an attached tab.
+ * The panel is the trust surface. A trust surface that silently shows stale
+ * state is worse than one that says it is broken.
+ */
+function showPanelError(message) {
+  el.panelError.hidden = !message;
+  if (message) {
+    el.panelError.textContent = `Panel could not read the extension state: ${message}`;
+    console.error('[G9 panel]', message);
+  }
+}
+
 async function refresh() {
+  let res;
   try {
-    const res = await cmd({ cmd: 'getState', nudge: firstRefresh });
-    firstRefresh = false;
-    if (res?.ok) render(res.state, res.status);
-  } catch {
-    // The worker may be starting up; the next event or poll will catch it.
+    res = await cmd({ cmd: 'getState', nudge: firstRefresh });
+  } catch (err) {
+    // A missing receiver during the worker's first moments is normal; anything
+    // that persists is not, and the next poll will report it.
+    showPanelError(firstRefresh ? null : String(err?.message ?? err));
+    return;
+  }
+  firstRefresh = false;
+
+  if (!res?.ok) {
+    showPanelError(res?.error ?? 'the extension returned no state');
+    return;
+  }
+
+  // render() mutates the DOM section by section, so a throw halfway leaves the
+  // panel half-updated. Catch it here rather than letting it look like nothing
+  // happened.
+  try {
+    render(res.state, res.status);
+    showPanelError(null);
+  } catch (err) {
+    showPanelError(`rendering failed — ${err?.message ?? err}`);
   }
 }
 
@@ -209,8 +246,9 @@ el.attachActive.addEventListener('click', async () => {
 });
 
 el.detach.addEventListener('click', async () => {
-  await cmd({ cmd: 'detach' });
-  toast('Detached');
+  const res = await cmd({ cmd: 'detach' });
+  // Say when the banner will not go away, and why. The user can see it.
+  toast(res?.warning ?? `Detached${res?.ms != null ? ` in ${res.ms}ms` : ''}`);
   refresh();
 });
 

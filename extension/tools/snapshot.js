@@ -21,7 +21,7 @@ const INTERACTIVE = new Set([
   'button', 'link', 'textbox', 'searchbox', 'combobox', 'listbox', 'option',
   'checkbox', 'radio', 'switch', 'slider', 'spinbutton', 'menuitem',
   'menuitemcheckbox', 'menuitemradio', 'tab', 'treeitem', 'gridcell',
-  'columnheader', 'rowheader', 'progressbar', 'scrollbar', 'searchbox',
+  'columnheader', 'rowheader', 'progressbar', 'scrollbar',
 ]);
 
 /** Roles that give the agent structural bearings. */
@@ -149,7 +149,17 @@ function describeProps(node) {
   return out.length ? ` (${out.join(', ')})` : '';
 }
 
-/** Visible text, for content questions the AX tree answers poorly. */
+/**
+ * Visible text, for content questions the AX tree answers poorly.
+ *
+ * NOTE THE DOUBLE BACKSLASHES. This function body is a template literal that
+ * gets evaluated in the page, so every regex escape has to survive being parsed
+ * twice. `\s` is not a valid JavaScript string escape, so a template literal
+ * silently reduces it to a plain `s` — the page then ran `/s+/g` and replaced
+ * every letter "s" with a space. "browser_interact" arrived as "brow er_interact"
+ * and "/api/missing" as "/api/mi ing", from v1.0.0 until it was finally read in
+ * v1.0.13. Self-test section 13 now scans for this.
+ */
 async function extractText(tabId) {
   const { result } = await send(tabId, 'Runtime.evaluate', {
     expression: `(() => {
@@ -165,7 +175,7 @@ async function extractText(tabId) {
       });
       const out = []; let n;
       while ((n = walker.nextNode()) && out.length < 4000) out.push(n.textContent.trim());
-      return out.join(' ').replace(/\s+/g, ' ').slice(0, 24000);
+      return out.join(' ').replace(/\\s+/g, ' ').slice(0, 24000);
     })()`,
     returnByValue: true,
   });

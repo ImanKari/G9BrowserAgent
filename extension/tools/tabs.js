@@ -7,8 +7,9 @@
  */
 
 import { getState, setState } from '../lib/state.js';
-import { attach, detach } from '../lib/cdp.js';
+import { attach, detach, detachMany } from '../lib/cdp.js';
 import { clearRefs } from '../lib/refs.js';
+import { clearBuffers } from './observe.js';
 
 const api = globalThis.browser ?? globalThis.chrome;
 
@@ -63,6 +64,30 @@ export async function resolveTarget(explicitTabId) {
   return requireTab(state.pinnedTabId);
 }
 
+/**
+ * The second half of the safety boundary.
+ *
+ * `resolveTarget()` guards actions that happen *inside* a tab. It is reached
+ * only by tools that declare `needsTab`, and `browser_tabs` deliberately does
+ * not — it has no target to resolve. That left opening, closing, focusing,
+ * pinning, and unpinning completely ungoverned: an agent in pinned mode could
+ * pin the user's mail tab and then operate on it legitimately, which is exactly
+ * the scenario pinned mode exists to prevent.
+ *
+ * Anything that changes which tabs exist, or which tab the agent controls, goes
+ * through here. Only the user changes the mode, and only from the side panel.
+ */
+export async function requireMultiMode(action) {
+  const state = await getState();
+  if (state.mode === 'multi') return;
+  throw new Error(
+    `action:"${action}" changes which tabs exist or which tab you control, and the mode is ` +
+      `"${state.mode}". Only the user may do that — ask them to either perform it themselves ` +
+      `from the G9 side panel, or switch the panel to "Multi-tab" mode. You may still use ` +
+      `action:"list".`,
+  );
+}
+
 async function requireTab(tabId) {
   let tab;
   try {
@@ -77,7 +102,15 @@ async function requireTab(tabId) {
   return tab;
 }
 
-export async function pinTab(tabId) {
+/**
+ * Attach and pin a tab.
+ *
+ * `clearHalt` is the difference between the user pressing "Attach & Pin" and an
+ * agent calling browser_tabs. Pinning used to always clear `halted`, which made
+ * the Stop button self-defeating: a halted agent could un-halt itself with one
+ * pin call. Only a real user gesture from the side panel may lift a stop.
+ */
+export async function pinTab(tabId, { clearHalt = false } = {}) {
   const tab = await api.tabs.get(tabId);
   if (!isAttachable(tab.url)) {
     throw new Error(`Cannot attach to ${tab.url} — browser-internal pages are off limits.`);
@@ -86,35 +119,98 @@ export async function pinTab(tabId) {
   if (state.pinnedTabId != null && state.pinnedTabId !== tabId) {
     await detach(state.pinnedTabId).catch(() => {});
     await clearRefs(state.pinnedTabId);
+    await clearBuffers(state.pinnedTabId);
   }
   await attach(tabId);
-  await setState({ pinnedTabId: tabId, halted: false });
+  await setState({ pinnedTabId: tabId, ...(clearHalt ? { halted: false } : {}) });
   return tab;
 }
 
+/**
+ * Stop debugging — every tab, not just the pinned one.
+ *
+ * `attachedTabs` accumulates: `send()` attaches whatever tab it is given, so
+ * follow mode picks up each tab the user visits and multi mode picks up each
+ * one the agent touches. Detaching only `pinnedTabId` left those attached, and
+ * the "browser is being debugged" banner is per attached tab — so pressing
+ * Detach could leave banners up on tabs the panel no longer mentioned.
+ *
+ * Returns what actually happened per tab, so the panel can say "still attached"
+ * rather than claiming a clean detach it did not verify.
+ */
 export async function unpinTab() {
   const state = await getState();
-  if (state.pinnedTabId != null) {
-    await detach(state.pinnedTabId).catch(() => {});
-    await clearRefs(state.pinnedTabId);
-  }
+  const held = [...new Set(state.attachedTabs)];
+  if (state.pinnedTabId != null && !held.includes(state.pinnedTabId)) held.push(state.pinnedTabId);
+
+  // Release first, then tidy. The user is watching the debugger banner; the
+  // buffer and ref cleanup behind it can happen at whatever speed it likes.
+  const results = await detachMany(held);
   await setState({ pinnedTabId: null });
+
+  await Promise.all(
+    held.flatMap((id) => [clearRefs(id).catch(() => {}), clearBuffers(id).catch(() => {})]),
+  );
+
+  return results;
 }
 
+/** Scheme + host only. The redacted form of a tab the agent may not drive. */
+export function originOf(url = '') {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return '(unknown)';
+  }
+}
+
+/**
+ * Which tab the agent will actually act on, by mode.
+ *
+ * Follow mode acts on the ACTIVE tab, not the pinned one — so anything that
+ * reports "the attached tab" has to ask the same question `resolveTarget()`
+ * asks, or it will orient the agent to a page it is not about to touch.
+ */
+export async function currentTargetId(state) {
+  if (state.mode !== 'follow') return state.pinnedTabId;
+  const active = await getActiveTab().catch(() => null);
+  return active && isAttachable(active.url) ? active.id : state.pinnedTabId;
+}
+
+/**
+ * The one disclosure rule for tab listings.
+ *
+ * It lives here, and every tool that lists tabs uses it, because it has been
+ * written separately three times and drifted every time: `browser_status`
+ * redacted (v1.0.7) while `browser_tabs list` handed over every title and URL,
+ * and `inspect cookies` had no boundary at all (v1.0.14). Titles and URLs carry
+ * subject lines, document names, order numbers, and search queries — the exact
+ * things pinned and follow mode exist to keep out of the agent's context.
+ *
+ * The tab the agent IS allowed to drive is never redacted; it can read that
+ * page in full anyway.
+ */
 export async function listTabs() {
   const tabs = await api.tabs.query({});
   const state = await getState();
-  return tabs.map((t) => ({
-    tabId: t.id,
-    title: t.title,
-    url: t.url,
-    active: t.active,
-    windowId: t.windowId,
-    pinned: t.id === state.pinnedTabId,
-    attached: state.attachedTabs.includes(t.id),
-    attachable: isAttachable(t.url),
-    status: t.status,
-  }));
+  const full = state.mode === 'multi';
+  const targetId = await currentTargetId(state);
+
+  return tabs.map((t) => {
+    const base = {
+      tabId: t.id,
+      active: t.active,
+      windowId: t.windowId,
+      pinned: t.id === state.pinnedTabId,
+      target: t.id === targetId,
+      attached: state.attachedTabs.includes(t.id),
+      attachable: isAttachable(t.url),
+      status: t.status,
+    };
+    return full || t.id === targetId
+      ? { ...base, title: t.title, url: t.url }
+      : { ...base, origin: originOf(t.url) };
+  });
 }
 
 export async function openTab(url, { active = false } = {}) {

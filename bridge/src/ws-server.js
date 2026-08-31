@@ -130,40 +130,50 @@ export class WsServer extends EventEmitter {
     socket.on('data', (chunk) => {
       buffer = Buffer.concat([buffer, chunk]);
 
-      for (;;) {
-        const frame = decodeFrame(buffer);
-        if (!frame) break;
-        buffer = buffer.subarray(frame.consumed);
+      try {
+        for (;;) {
+          const frame = decodeFrame(buffer);
+          if (!frame) break;
+          buffer = buffer.subarray(frame.consumed);
 
-        switch (frame.opcode) {
-          case OP.PING:
-            socket.write(encodeFrame(OP.PONG, frame.payload));
-            break;
+          switch (frame.opcode) {
+            case OP.PING:
+              socket.write(encodeFrame(OP.PONG, frame.payload));
+              break;
 
-          case OP.PONG:
-            break;
+            case OP.PONG:
+              break;
 
-          case OP.CLOSE:
-            this.#dropClient(1000, 'client closed');
-            return;
+            case OP.CLOSE:
+              this.#dropClient(1000, 'client closed');
+              return;
 
-          case OP.CONT:
-            fragments.push(frame.payload);
-            if (frame.fin) {
-              this.#deliver(fragmentOp, Buffer.concat(fragments));
-              fragments.length = 0;
-              fragmentOp = null;
-            }
-            break;
-
-          default:
-            if (frame.fin) {
-              this.#deliver(frame.opcode, frame.payload);
-            } else {
-              fragmentOp = frame.opcode;
+            case OP.CONT:
               fragments.push(frame.payload);
-            }
+              if (frame.fin) {
+                this.#deliver(fragmentOp, Buffer.concat(fragments));
+                fragments.length = 0;
+                fragmentOp = null;
+              }
+              break;
+
+            default:
+              if (frame.fin) {
+                this.#deliver(frame.opcode, frame.payload);
+              } else {
+                fragmentOp = frame.opcode;
+                fragments.push(frame.payload);
+              }
+          }
         }
+      } catch (err) {
+        // decodeFrame throws on an oversized or malformed frame, and it throws
+        // INSIDE a 'data' handler — where an uncaught exception takes the whole
+        // process with it. The bridge would then simply vanish, which from the
+        // agent's side is indistinguishable from a bridge that never started.
+        // A protocol violation costs the connection, never the server.
+        this.emit('protocolError', { reason: String(err?.message ?? err) });
+        this.#dropClient(1009, 'protocol error');
       }
     });
 

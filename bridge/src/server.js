@@ -37,7 +37,7 @@ const PORT = Number(process.env.G9_PORT ?? 8765);
 const TOKEN = process.env.G9_TOKEN ?? '';
 const CALL_TIMEOUT_MS = Number(process.env.G9_TIMEOUT_MS ?? 60_000);
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 
 // ---------------------------------------------------------------- transport
 
@@ -47,10 +47,22 @@ const ws = new WsServer({ host: HOST, port: PORT, token: TOKEN });
 const pending = new Map();
 let nextId = 1;
 
+/**
+ * Why the WebSocket listener is not up, in words the agent can relay.
+ *
+ * Null once we are listening. See the startup block at the bottom for why this
+ * exists rather than a `process.exit(1)`.
+ */
+let startupFailure = null;
+
 ws.on('connect', ({ origin }) => log(`[g9] extension connected (${origin})`));
 
 ws.on('rejected', ({ origin, reason }) =>
   log(`[g9] refused a connection from "${origin}" — ${reason}. Only browser extensions may connect.`),
+);
+
+ws.on('protocolError', ({ reason }) =>
+  log(`[g9] dropped the extension connection — ${reason}. The bridge itself stays up.`),
 );
 
 ws.on('disconnect', () => {
@@ -74,6 +86,28 @@ ws.on('message', (msg) => {
     return;
   }
 
+  // A JavaScript dialog freezes the renderer, so the call that opened it will
+  // not return until someone answers the dialog. Failing it now, with the
+  // recovery named, replaces a full 60s timeout with an immediate answer. This
+  // is transport correlation, not browser logic — the extension decided what
+  // happened; the bridge only knows which promise is waiting on it.
+  if (msg.type === 'event' && msg.event === 'dialog') {
+    const kind = msg.data?.type ?? 'dialog';
+    const text = String(msg.data?.message ?? '').slice(0, 200);
+    for (const [id, entry] of pending) {
+      if (entry.tool === 'browser_dialog') continue; // the call that will fix it
+      clearTimeout(entry.timer);
+      entry.reject(
+        new Error(
+          `The page opened a JavaScript ${kind} ("${text}") which blocks it until handled, so this ` +
+            `call cannot complete. Call browser_dialog to accept or dismiss it, then retry.`,
+        ),
+      );
+      pending.delete(id);
+    }
+    return;
+  }
+
   if (msg.type === 'hello') {
     log(`[g9] extension v${msg.version} ready`);
     // Hand the extension the real on-disk path so the side panel can show a
@@ -92,6 +126,8 @@ ws.on('message', (msg) => {
 /** Send a tool call to the extension and await its result. */
 function call(tool, args) {
   return new Promise((resolve, reject) => {
+    if (startupFailure) return reject(new Error(startupFailure));
+
     if (!ws.connected) {
       return reject(
         new Error(
@@ -113,7 +149,7 @@ function call(tool, args) {
       );
     }, CALL_TIMEOUT_MS);
 
-    pending.set(id, { resolve, reject, timer });
+    pending.set(id, { resolve, reject, timer, tool });
     ws.send({ type: 'call', id, tool, args });
   });
 }
@@ -151,6 +187,9 @@ mcp.resource(
     mimeType: 'application/json',
   },
   async () => {
+    if (startupFailure) {
+      return JSON.stringify({ connected: false, listening: false, problem: startupFailure }, null, 2);
+    }
     if (!ws.connected) {
       return JSON.stringify({ connected: false, hint: 'The browser extension is not connected.' }, null, 2);
     }
@@ -160,20 +199,79 @@ mcp.resource(
 
 // ------------------------------------------------------------------ startup
 
-try {
-  await ws.listen();
-  log(`[g9] bridge listening on ws://${HOST}:${PORT}`);
-  log(`[g9] waiting for the browser extension to connect…`);
-} catch (err) {
-  if (err.code === 'EADDRINUSE') {
-    log(
-      `[g9] FATAL: port ${PORT} is already in use. Another bridge is probably running. ` +
-        `Stop it, or set G9_PORT to a different port in both the MCP config and the extension side panel.`,
-    );
-  } else {
-    log(`[g9] FATAL: ${err.message}`);
+/**
+ * Turn a bind failure into something the user can act on.
+ *
+ * EADDRINUSE has two very different causes with two different fixes: another
+ * G9 bridge (a second editor window, or a process left behind), or an unrelated
+ * program sitting on the port. Probing /health tells them apart, and it is
+ * worth the 1.5s because the wrong guess sends the user looking in the wrong
+ * place.
+ */
+async function describeStartupFailure(err) {
+  if (err.code !== 'EADDRINUSE') {
+    return `The G9 bridge could not start: ${err.message}`;
   }
-  process.exit(1);
+
+  let itIsUs = false;
+  try {
+    const res = await fetch(`http://${HOST}:${PORT}/health`, { signal: AbortSignal.timeout(1500) });
+    itIsUs = res.ok && (await res.json())?.ok === true;
+  } catch {
+    /* not a G9 bridge, or not speaking HTTP at all */
+  }
+
+  const shared =
+    `so this bridge has NO connection to the browser extension and no tool will work. `;
+
+  return itIsUs
+    ? `Port ${PORT} is already held by another G9 bridge, ${shared}` +
+        `Two bridges cannot share one port. Usually this means a second editor window or MCP ` +
+        `client is running, or an earlier bridge was left behind — close it, or stop the stray ` +
+        `node process. To run both deliberately, set a different G9_PORT here and the same port ` +
+        `in the extension side panel. This bridge retries every 5s, so it recovers on its own ` +
+        `once the port is free.`
+    : `Port ${PORT} is in use by another program, ${shared}` +
+        `Free the port, or set G9_PORT to something else in both the MCP config and the extension ` +
+        `side panel. This bridge retries every 5s.`;
+}
+
+/**
+ * Bind, or stay up and explain why not.
+ *
+ * This deliberately does NOT `process.exit(1)` on a bind failure. An MCP client
+ * that launched us sees only that the process died and reports "Connection
+ * closed"; the real reason, written to stderr, lands in a log file nobody
+ * opens. That is the same one-layer-away failure as v1.0.2 and v1.0.4, and it
+ * cost a debugging session in v1.0.7.
+ *
+ * The stdio channel is completely independent of the WebSocket port, so we can
+ * still serve MCP, list tools, and answer every call with the actual reason.
+ * A visible, accurate error beats a silent exit.
+ */
+async function listenOrExplain() {
+  try {
+    await ws.listen();
+    if (startupFailure) log(`[g9] port ${PORT} is free again — bridge listening`);
+    startupFailure = null;
+    log(`[g9] bridge listening on ws://${HOST}:${PORT}`);
+    log(`[g9] waiting for the browser extension to connect…`);
+    return true;
+  } catch (err) {
+    startupFailure = await describeStartupFailure(err);
+    log(`[g9] NOT LISTENING: ${startupFailure}`);
+    return false;
+  }
+}
+
+if (!(await listenOrExplain())) {
+  // Retry, so closing the other window heals this session without an editor
+  // restart. The timer is deliberately NOT unref'd: with no listening socket it
+  // is the only thing holding the event loop open, and a bridge that quietly
+  // exits is the exact failure this whole block exists to remove.
+  const retry = setInterval(async () => {
+    if (await listenOrExplain()) clearInterval(retry);
+  }, 5_000);
 }
 
 // --standalone forces the bridge to stay up even if an MCP client attaches and
