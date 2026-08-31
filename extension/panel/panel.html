@@ -17,63 +17,182 @@
 
   <p class="panelerr" id="panelError" hidden></p>
 
-  <section class="card" id="bridgeCard">
-    <div class="row">
-      <span class="dot" id="bridgeDot"></span>
-      <strong id="bridgeLabel">Connecting…</strong>
-      <button class="link" id="bridgeToggle" type="button">settings</button>
-    </div>
-    <p class="muted" id="bridgeHint">Waiting for the local bridge.</p>
-    <div class="settings" id="bridgeSettings" hidden>
-      <label>Host <input id="host" value="127.0.0.1" spellcheck="false" /></label>
-      <label>Port <input id="port" value="8765" inputmode="numeric" /></label>
-      <label>Token <input id="token" placeholder="(optional)" spellcheck="false" /></label>
-      <button id="saveBridge" class="primary sm">Save &amp; reconnect</button>
-    </div>
-  </section>
+  <!-- Three jobs, three places. Recording a flow and filing a bug have nothing
+       to do with each other, and stacking them under the connection settings
+       buried both. -->
+  <nav class="tabs" id="tabs" role="tablist">
+    <button data-tab="session" role="tab" aria-selected="true">Session</button>
+    <button data-tab="automation" role="tab" aria-selected="false">Automation</button>
+    <button data-tab="issues" role="tab" aria-selected="false">Issues</button>
+  </nav>
 
-  <section class="card">
-    <div class="row spread">
-      <strong>Attached tab</strong>
-      <div class="modes" id="modes">
-        <button data-mode="pinned" title="Agent is locked to one tab">Pinned</button>
-        <button data-mode="follow" title="Agent follows whichever tab is active">Follow</button>
-        <button data-mode="multi" title="Agent may switch and open tabs">Multi</button>
+  <!-- ============================================================ SESSION -->
+  <div class="tabbody" data-body="session">
+    <section class="card" id="bridgeCard">
+      <div class="row">
+        <span class="dot" id="bridgeDot"></span>
+        <strong id="bridgeLabel">Connecting…</strong>
+        <button class="link" id="bridgeToggle" type="button">settings</button>
       </div>
+      <p class="muted" id="bridgeHint">Waiting for the local bridge.</p>
+      <div class="settings" id="bridgeSettings" hidden>
+        <label>Host <input id="host" value="127.0.0.1" spellcheck="false" /></label>
+        <label>Port <input id="port" value="8765" inputmode="numeric" /></label>
+        <label>Token <input id="token" placeholder="(optional)" spellcheck="false" /></label>
+        <button id="saveBridge" class="primary sm">Save &amp; reconnect</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="row spread">
+        <strong>Attached tab</strong>
+        <div class="modes" id="modes">
+          <button data-mode="pinned" title="Agent is locked to one tab">Pinned</button>
+          <button data-mode="follow" title="Agent follows whichever tab is active">Follow</button>
+          <button data-mode="multi" title="Agent may switch and open tabs">Multi</button>
+        </div>
+      </div>
+
+      <div id="attached" class="attached empty">
+        <p class="muted">No tab attached yet.</p>
+      </div>
+
+      <div class="btnrow">
+        <button id="attachActive" class="primary">Attach &amp; Pin current tab</button>
+        <button id="detach" class="ghost" hidden>Detach</button>
+      </div>
+      <p class="warn" id="modeWarn" hidden></p>
+    </section>
+
+    <section class="card">
+      <div class="row spread">
+        <strong>Connect your agent</strong>
+        <button class="link" id="copyGuide" type="button">copy guide</button>
+      </div>
+      <p class="muted">
+        Point any MCP client at the bridge. Most clients read
+        <code>setup/mcp.json</code> — copy it into your client config.
+      </p>
+      <pre class="snippet" id="snippet"></pre>
+    </section>
+
+    <section class="card grow">
+      <div class="row spread">
+        <strong>Activity</strong>
+        <button class="link" id="clearLog" type="button">clear</button>
+      </div>
+      <ul class="log" id="log">
+        <li class="muted pad">Nothing yet. Agent actions will appear here in real time.</li>
+      </ul>
+    </section>
+  </div>
+
+  <!-- ========================================================= AUTOMATION -->
+  <div class="tabbody" data-body="automation" hidden>
+    <section class="card">
+      <strong>Record a flow</strong>
+      <p class="muted">
+        Press record, then use the page exactly as you would when testing it.
+        Every click, entry, and selection is captured with several ways to find
+        the element again, so the flow still replays after a redeploy.
+      </p>
+      <div class="btnrow">
+        <button id="recToggle" class="primary">● Start recording</button>
+      </div>
+      <p class="reclive" id="recLive" hidden></p>
+    </section>
+
+    <section class="card grow">
+      <div class="row spread">
+        <strong>Saved flows</strong>
+        <span class="muted sm" id="recCount"></span>
+      </div>
+      <ul class="minilist" id="recList"></ul>
+      <p class="muted pad" id="recEmpty">No flows recorded yet.</p>
+      <div id="replayReport" hidden></div>
+    </section>
+  </div>
+
+  <!-- ============================================================= ISSUES -->
+  <div class="tabbody" data-body="issues" hidden>
+
+    <!-- list view -->
+    <div id="issueListView">
+      <section class="card">
+        <strong>Report what you found</strong>
+        <p class="muted">
+          The screenshot, URL, console tail, failed requests, and the surrounding
+          DOM are captured the moment you press this — while the bug is still on
+          screen. You add detail afterwards.
+        </p>
+        <div class="btnrow">
+          <button id="issueNew" class="primary">⚑ New issue</button>
+        </div>
+      </section>
+
+      <section class="card grow">
+        <div class="row spread">
+          <strong>Open issues</strong>
+          <span class="muted sm" id="issueUsage"></span>
+        </div>
+        <ul class="minilist" id="issueList"></ul>
+        <p class="muted pad" id="issueEmpty">Nothing reported yet.</p>
+      </section>
     </div>
 
-    <div id="attached" class="attached empty">
-      <p class="muted">No tab attached yet.</p>
-    </div>
+    <!-- detail view -->
+    <div id="issueDetailView" hidden>
+      <section class="card">
+        <div class="row spread">
+          <button class="link" id="issueBack" type="button">← all issues</button>
+          <span class="muted sm" id="issueSaved"></span>
+        </div>
+        <input id="dTitle" class="bigfield" placeholder="Short summary of the problem" spellcheck="false" />
+        <textarea id="dBody" rows="5" placeholder="What you did, what you expected, what happened instead."></textarea>
+        <div class="row">
+          <select id="dSeverity" title="Severity">
+            <option value="blocker">Blocker</option>
+            <option value="major">Major</option>
+            <option value="normal">Normal</option>
+            <option value="minor">Minor</option>
+          </select>
+          <select id="dStatus" title="Status">
+            <option value="open">Open</option>
+            <option value="filed">Filed</option>
+            <option value="closed">Closed</option>
+          </select>
+          <input id="dFiledAs" placeholder="PROJ-1234" spellcheck="false" title="Tracker key once filed" />
+        </div>
+      </section>
 
-    <div class="btnrow">
-      <button id="attachActive" class="primary">Attach &amp; Pin current tab</button>
-      <button id="detach" class="ghost" hidden>Detach</button>
-    </div>
-    <p class="warn" id="modeWarn" hidden></p>
-  </section>
+      <section class="card">
+        <div class="row spread">
+          <strong>Evidence</strong>
+          <span class="muted sm" id="dAttCount"></span>
+        </div>
+        <div class="btnrow wrap">
+          <button id="dShot" class="ghost sm">📷 Screenshot</button>
+          <button id="dShotFull" class="ghost sm">🖼 Full page</button>
+          <button id="dVideo" class="ghost sm">● Record tab</button>
+          <button id="dFile" class="ghost sm">📎 Attach file</button>
+          <button id="dRecapture" class="ghost sm">↻ Re-capture context</button>
+        </div>
+        <input type="file" id="dFileInput" hidden multiple />
+        <ul class="attgrid" id="dAttachments"></ul>
+      </section>
 
-  <section class="card">
-    <div class="row spread">
-      <strong>Connect your agent</strong>
-      <button class="link" id="copyGuide" type="button">copy guide</button>
-    </div>
-    <p class="muted">
-      Point any MCP client at the bridge. Most clients read
-      <code>setup/mcp.json</code> — copy it into your client config.
-    </p>
-    <pre class="snippet" id="snippet"></pre>
-  </section>
+      <section class="card">
+        <strong>Captured context</strong>
+        <pre class="snippet" id="dContext"></pre>
+      </section>
 
-  <section class="card grow">
-    <div class="row spread">
-      <strong>Activity</strong>
-      <button class="link" id="clearLog" type="button">clear</button>
+      <section class="card">
+        <div class="btnrow">
+          <button id="dDelete" class="ghost danger">Delete this issue</button>
+        </div>
+      </section>
     </div>
-    <ul class="log" id="log">
-      <li class="muted pad">Nothing yet. Agent actions will appear here in real time.</li>
-    </ul>
-  </section>
+  </div>
 
   <div id="toast" class="toast" hidden></div>
 

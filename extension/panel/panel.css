@@ -231,3 +231,84 @@ button.stop.armed { background: var(--err); color: #fff; }
 
 code { font-family: var(--mono); font-size: 11px; }
 [hidden] { display: none !important; }
+
+/* --- automation and issues ------------------------------------------------ */
+
+.sm { font-size: 11px; }
+
+.minilist { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.minilist:empty { display: none; }
+.minilist li {
+  display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: center;
+  padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); font-size: 11.5px;
+}
+.minilist .who { min-width: 0; }
+.minilist .nm { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.minilist .sub { color: var(--muted); font-size: 10.5px; }
+.minilist .acts { display: flex; gap: 4px; }
+.minilist button {
+  padding: 3px 7px; font-size: 10.5px; border-radius: 5px;
+  background: var(--card); border: 1px solid var(--line); color: var(--ink); cursor: pointer;
+}
+.minilist button:hover { border-color: var(--accent); }
+.minilist .danger:hover { border-color: var(--err); color: var(--err); }
+.minilist .pass { color: var(--ok); }
+.minilist .fail { color: var(--err); }
+
+.reclive {
+  margin: 8px 0 0; padding: 8px 10px; border-radius: 6px; font-size: 11.5px;
+  background: color-mix(in srgb, var(--err) 12%, transparent);
+  border: 1px solid var(--err); color: var(--err);
+}
+
+
+/* --- tabs ----------------------------------------------------------------- */
+
+.tabs { display: flex; gap: 3px; padding: 3px; background: var(--card);
+        border: 1px solid var(--line); border-radius: 9px; }
+.tabs button {
+  flex: 1; padding: 6px 8px; font-size: 12px; font-weight: 600;
+  border: 0; background: transparent; color: var(--muted); border-radius: 6px;
+}
+.tabs button[aria-selected="true"] {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+.tabbody { display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; }
+
+/* --- detail view ---------------------------------------------------------- */
+
+.bigfield { font: inherit; font-size: 14px; font-weight: 600; padding: 8px 9px;
+            border: 1px solid var(--line); border-radius: 7px;
+            background: var(--bg); color: var(--ink); width: 100%; }
+.tabbody textarea, .tabbody select, .tabbody input:not(.bigfield) {
+  font: inherit; font-size: 12px; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--ink); width: 100%; resize: vertical;
+}
+.btnrow.wrap { flex-wrap: wrap; }
+.btnrow.wrap button { flex: 0 0 auto; }
+button.danger { color: var(--err); border-color: color-mix(in srgb, var(--err) 35%, transparent); }
+button.danger:hover { border-color: var(--err); background: var(--err-bg); }
+
+.attgrid { list-style: none; margin: 8px 0 0; padding: 0;
+           display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 6px; }
+.attgrid:empty { display: none; }
+.attgrid li { position: relative; border: 1px solid var(--line); border-radius: 7px;
+              overflow: hidden; background: var(--bg); }
+.attgrid img { display: block; width: 100%; height: 58px; object-fit: cover; }
+.attgrid .glyph { display: flex; align-items: center; justify-content: center;
+                  height: 58px; font-size: 20px; color: var(--muted); }
+.attgrid .cap { padding: 3px 5px; font-size: 9.5px; color: var(--muted);
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attgrid .rm { position: absolute; top: 2px; right: 2px; padding: 1px 5px;
+               font-size: 10px; border-radius: 4px; background: var(--card);
+               border: 1px solid var(--line); cursor: pointer; }
+.attgrid .rm:hover { color: var(--err); border-color: var(--err); }
+
+.report { margin-top: 8px; font-size: 11.5px; border-radius: 7px; padding: 8px 10px;
+          border: 1px solid var(--line); background: var(--bg); }
+.report.bad { border-color: var(--err); background: var(--err-bg); color: var(--err); }
+.report.good { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
+.report .warn { margin-top: 6px; }

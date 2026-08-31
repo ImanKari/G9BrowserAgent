@@ -226,8 +226,8 @@ try {
 
   const list = await mcp.request('tools/list');
   const tools = list.result?.tools ?? [];
-  if (tools.length === 12) ok('tools/list', `${tools.length} tools`);
-  else bad('tools/list', `expected 12, got ${tools.length}`);
+  if (tools.length === 14) ok('tools/list', `${tools.length} tools`);
+  else bad("tools/list", `expected 14, got ${tools.length}`);
 
   const schemaProblems = tools.filter((t) => !t.description || t.inputSchema?.type !== 'object');
   if (!schemaProblems.length) ok('every tool has a description and object schema');

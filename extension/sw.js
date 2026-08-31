@@ -26,6 +26,10 @@ import * as nav from './tools/navigate.js';
 import { screenshot } from './tools/capture.js';
 import * as diagnose from './tools/diagnose.js';
 import * as emulate from './tools/emulate.js';
+import * as record from './tools/record.js';
+import * as replay from './tools/replay.js';
+import * as issues from './tools/issues.js';
+import * as store from './lib/store.js';
 
 const api = globalThis.browser ?? globalThis.chrome;
 
@@ -81,6 +85,18 @@ api.debugger.onEvent.addListener((source, method, params) => {
     console.error('[G9] event capture failed', method, err);
   });
 
+  // The recorder speaks to us through a Runtime binding rather than a content
+  // script: injected before the page's own code, surviving navigation, over the
+  // debugger session already open.
+  if (method === 'Runtime.bindingCalled' && params.name === record.BINDING) {
+    try {
+      record.ingestRaw(source.tabId, JSON.parse(params.payload)).catch(() => {});
+    } catch { /* a malformed payload is one lost event, not a broken recording */ }
+  }
+
+  if (method === 'Page.screencastFrame') {
+    issues.ingestFrame(source.tabId, params).catch(() => {});
+  }
   // A committed navigation invalidates every element ref for that tab, and
   // everything captured for the document we just left. Pruning here as well as
   // in navigate.js is what closes the gap: the outgoing page keeps emitting
@@ -88,6 +104,9 @@ api.debugger.onEvent.addListener((source, method, params) => {
   if (method === 'Page.frameNavigated' && !params.frame.parentId) {
     clearRefs(source.tabId).catch(() => {});
     observe.pruneToLoader(source.tabId, params.frame.loaderId).catch(() => {});
+    // A new document cannot report the navigation that created it — the script
+    // that would have emitted the event went away with the old page.
+    record.ingestRaw(source.tabId, { type: 'navigate', at: Date.now(), url: params.frame.url }).catch(() => {});
   }
 
   // Surface dialogs immediately — they block the page until handled.
@@ -250,6 +269,69 @@ const TOOLS = {
         : observe.network(tabId, args),
   },
 
+  // --- automation ----------------------------------------------------------
+  browser_recording: {
+    // list/get/delete/export/import touch no page, so they must keep working
+    // when nothing is attached — that is when someone reviews their library.
+    needsTab: false,
+    run: async ({ args }) => {
+      const action = args.action ?? 'list';
+      const needsPage = ['start', 'stop', 'replay'].includes(action);
+      const tab = needsPage ? await tabsTool.resolveTarget(args.tabId) : null;
+
+      switch (action) {
+        case 'list': return { recordings: await store.listRecordings() };
+        case 'get': {
+          const rec = await store.getRecording(requireId(args));
+          if (!rec) throw new Error(`No recording with id "${args.id}".`);
+          return { ...rec, outline: rec.steps.map(record.summarize) };
+        }
+        case 'status': return record.recordingStatus(tab ? tab.id : (await tabsTool.resolveTarget()).id);
+        case 'start': return record.startRecording(tab.id, { name: args.name });
+        case 'stop': return record.stopRecording(tab.id);
+        case 'replay': return replay.replay(tab.id, {
+          id: requireId(args), timing: args.timing, dryRun: args.dryRun, stopOnFailure: args.stopOnFailure !== false,
+        });
+        case 'delete': return store.deleteRecording(requireId(args));
+        case 'export': return store.exportBundle({ includeAttachments: args.includeAttachments !== false });
+        case 'import': {
+          if (!args.bundle) throw new Error('action:"import" needs a bundle.');
+          return store.importBundle(args.bundle, { mode: args.mode ?? 'merge' });
+        }
+        default: throw new Error(`Unknown recording action "${action}".`);
+      }
+    },
+  },
+
+  browser_issue: {
+    needsTab: false,
+    run: async ({ args }) => {
+      const action = args.action ?? 'list';
+      const needsPage = ['create', 'screenshot', 'video_start', 'video_stop'].includes(action);
+      const tab = needsPage ? await tabsTool.resolveTarget(args.tabId) : null;
+
+      switch (action) {
+        case 'list': return { issues: await store.listIssues(), usage: await store.usage() };
+        case 'get': {
+          const issue = await issues.getIssue(requireId(args));
+          if (!issue) throw new Error(`No issue with id "${args.id}".`);
+          return issue;
+        }
+        case 'create': return issues.createIssue(tab.id, args);
+        case 'update': return issues.updateIssue(requireId(args), args);
+        case 'delete': return store.deleteIssue(requireId(args));
+        case 'screenshot': return issues.attachScreenshot(tab.id, requireId(args), args);
+        case 'attach': return issues.attachFile(requireId(args), args);
+        case 'attachment': {
+          if (!args.attachmentId) throw new Error('action:"attachment" needs an attachmentId.');
+          return store.getAttachment(args.attachmentId, { includeBytes: args.includeBytes !== false });
+        }
+        case 'video_start': return issues.startVideo(tab.id, args);
+        case 'video_stop': return issues.stopVideo(tab.id, args.id);
+        default: throw new Error(`Unknown issue action "${action}".`);
+      }
+    },
+  },
   // --- diagnosis -----------------------------------------------------------
   browser_diagnose: {
     run: ({ tabId, args }) =>
@@ -258,6 +340,11 @@ const TOOLS = {
         : diagnose.health(tabId),
   },
 };
+
+function requireId(args) {
+  if (!args.id) throw new Error('This action needs an id. Use action:"list" to see what exists.');
+  return args.id;
+}
 
 function requireTabId(args) {
   if (args.tabId == null) throw new Error('This action needs a tabId. Call browser_tabs with action:"list" first.');
@@ -489,6 +576,80 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         await clearActivity();
         sendResponse({ ok: true });
         break;
+      // The panel drives recording and issues through the same tool
+      // implementations the agent uses. Two entry points, one behaviour —
+      // a QA and an agent must never get different results from one button.
+      case 'recStatus': {
+        const tab = await tabsTool.resolveTarget().catch(() => null);
+        sendResponse({ ok: true, status: tab ? await record.recordingStatus(tab.id) : { recording: false },
+                       recordings: await store.listRecordings() });
+        break;
+      }
+      case 'recStart': {
+        const tab = await tabsTool.resolveTarget();
+        sendResponse({ ok: true, ...(await record.startRecording(tab.id, { name: msg.name })) });
+        break;
+      }
+      case 'recStop': {
+        const tab = await tabsTool.resolveTarget();
+        sendResponse({ ok: true, ...(await record.stopRecording(tab.id)) });
+        break;
+      }
+      case 'recReplay': {
+        const tab = await tabsTool.resolveTarget();
+        sendResponse({ ok: true, ...(await replay.replay(tab.id, { id: msg.id, dryRun: msg.dryRun })) });
+        break;
+      }
+      case 'recDelete':
+        sendResponse({ ok: true, ...(await store.deleteRecording(msg.id)) });
+        break;
+      case 'issueList':
+        sendResponse({ ok: true, issues: await store.listIssues(), usage: await store.usage() });
+        break;
+      case 'issueCreate': {
+        const tab = await tabsTool.resolveTarget();
+        const issue = await issues.createIssue(tab.id, msg);
+        sendResponse({ ok: true, id: issue.id, title: issue.title });
+        break;
+      }
+      case 'issueGet':
+        sendResponse({ ok: true, issue: await issues.getIssue(msg.id) });
+        break;
+      case 'issueUpdate':
+        sendResponse({ ok: true, issue: await issues.updateIssue(msg.id, msg) });
+        break;
+      case 'issueShot': {
+        const tab = await tabsTool.resolveTarget();
+        sendResponse({ ok: true, attachment: await issues.attachScreenshot(tab.id, msg.id, { area: msg.area }) });
+        break;
+      }
+      case 'issueRecapture': {
+        const tab = await tabsTool.resolveTarget();
+        sendResponse({ ok: true, ...(await issues.recapture(tab.id, msg.id)) });
+        break;
+      }
+      case 'issueAttach':
+        sendResponse({ ok: true, attachment: await issues.attachFile(msg.id, msg) });
+        break;
+      case 'issueDetach':
+        sendResponse({ ok: true, ...(await store.deleteAttachment(msg.attachmentId)) });
+        break;
+      case 'issueAttachment':
+        sendResponse({ ok: true, attachment: await store.getAttachment(msg.attachmentId) });
+        break;
+      case 'issueDelete':
+        sendResponse({ ok: true, ...(await store.deleteIssue(msg.id)) });
+        break;
+      case 'videoStart': {
+        const tab = await tabsTool.resolveTarget();
+        sendResponse({ ok: true, ...(await issues.startVideo(tab.id)) });
+        break;
+      }
+      case 'videoStop': {
+        const tab = await tabsTool.resolveTarget();
+        sendResponse({ ok: true, ...(await issues.stopVideo(tab.id, msg.id)) });
+        break;
+      }
       case 'listTabs':
         sendResponse({ ok: true, tabs: await tabsTool.listTabs() });
         break;

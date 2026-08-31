@@ -1,7 +1,7 @@
 /**
  * Tool schemas and the agent-facing instructions.
  *
- * Design note: there are 12 tools rather than 50, each with an `action` or
+ * Design note: there are 14 tools rather than 50, each with an `action` or
  * `what` discriminator. Tool definitions are sent on every request, so a wide
  * flat surface costs thousands of tokens of context before the agent has done
  * anything. Grouping keeps the whole toolset around 3k tokens.
@@ -328,6 +328,67 @@ export const TOOLS = [
       properties: {
         accept: bool('Accept (OK) or dismiss (Cancel).', true),
         promptText: str('Text to enter for a prompt() dialog.'),
+        tabId: num('Only in multi-tab mode.'),
+      },
+    },
+  },
+
+  {
+    name: 'browser_recording',
+    description:
+      'Recorded user flows, replayable as tests. A QA presses Record in the side panel, works through a flow, and stops; the result is a list of steps that can be replayed later. Each element is stored with several independent locators (test id, role+accessible name, label, text, CSS, XPath) so a step still finds its element after a redeploy. Replay reports WHICH locator matched — a step matching only by "xpath" still passes but is one refactor from breaking, and comes back as a warning. When a step fails you get what it looked for, what it tried, and the closest thing on the page now.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: str('What to do. "list" and "get" work with no tab attached.', {
+          enum: ['list', 'get', 'status', 'start', 'stop', 'replay', 'delete', 'export', 'import'],
+          default: 'list',
+        }),
+        id: str('Recording id, for get / replay / delete.'),
+        name: str('For action:"start" — a name for the recording.'),
+        timing: str(
+          'For action:"replay". "adaptive" (default) waits only as long as each step needs. ' +
+            '"recorded" also honours the original pause, for pages whose behaviour depends on pacing. ' +
+            '"fast" skips the waits. Recorded gaps are always a budget, never a blind sleep.',
+          { enum: ['adaptive', 'recorded', 'fast'], default: 'adaptive' },
+        ),
+        dryRun: bool('For action:"replay" — resolve every element and change nothing. The cheapest way to find out whether a recording has rotted.', false),
+        stopOnFailure: bool('For action:"replay" — stop at the first failing step.', true),
+        includeAttachments: bool('For action:"export" — inline attachment bytes.', true),
+        mode: str('For action:"import".', { enum: ['merge', 'replace'], default: 'merge' }),
+        bundle: { type: 'object', description: 'For action:"import" — a bundle from action:"export".' },
+        tabId: num('Only in multi-tab mode.'),
+      },
+    },
+  },
+
+  {
+    name: 'browser_issue',
+    description:
+      'Defects captured in the browser, with the context a developer always has to ask for afterwards: the URL, the page before it, the console tail, the failed requests, the viewport — all recorded at the moment the bug was visible rather than reconstructed later. Attachments (screenshots, tab video, arbitrary files) belong to an issue and travel with it. Read these to file tickets: you have the full body and context, so write the ticket from them rather than asking the user to repeat what is already here.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: str('What to do. Everything except create/screenshot/video works with no tab attached.', {
+          enum: ['list', 'get', 'create', 'update', 'delete', 'screenshot', 'attach', 'attachment', 'video_start', 'video_stop'],
+          default: 'list',
+        }),
+        id: str('Issue id.'),
+        title: str('For create/update.'),
+        body: str('For create/update — what happened, and what was expected.'),
+        severity: str('For create/update.', { enum: ['blocker', 'major', 'normal', 'minor'], default: 'normal' }),
+        status: str('For update.', { enum: ['open', 'filed', 'closed'] }),
+        tags: { type: 'array', description: 'Free-form labels.', items: { type: 'string' } },
+        filedAs: str('For update — the tracker key once filed, e.g. "PROJ-1234". Record it so the issue is not filed twice.'),
+        withScreenshot: bool('For action:"create" — capture the viewport now.', true),
+        area: str('For action:"screenshot".', { enum: ['viewport', 'fullpage', 'element'], default: 'viewport' }),
+        ref: str('For action:"screenshot" with area:"element".'),
+        note: str('A caption for the attachment.'),
+        name: str('For action:"attach" — file name.'),
+        mime: str('For action:"attach" — content type.'),
+        dataBase64: str('For action:"attach" — the file bytes, base64.'),
+        attachmentId: str('For action:"attachment" — which attachment to read.'),
+        includeBytes: bool('For action:"attachment" — include the bytes, not just metadata.', true),
         tabId: num('Only in multi-tab mode.'),
       },
     },
