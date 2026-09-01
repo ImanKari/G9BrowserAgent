@@ -2,7 +2,7 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v1.5.3 — 14 context-efficient browser tools; bridge/MCP 26/26, extension regressions 25/25, isolated real-Edge **42/42** over three consecutive runs. **Interaction verifies that the page actually received the event, and a stuck CDP command reports itself instead of timing out the call** — see §4.3a and the v1.4.0/v1.5.1 entries.
+**Status:** v1.5.4 — 14 context-efficient browser tools; bridge/MCP 26/26, extension regressions 25/25, isolated real-Edge **42/42** over three consecutive runs. **Interaction verifies that the page actually received the event, and a stuck CDP command reports itself instead of timing out the call** — see §4.3a and the v1.4.0/v1.5.1 entries.
 **Created:** 2026-08-31
 
 ---
@@ -601,6 +601,43 @@ Two grouped tools, keeping §4.4's discipline (12 → 14, not 12 → 30):
 ## 9. Change log
 
 Newest first. **Every change to this repo gets an entry.**
+
+### 2026-09-01 — v1.5.4, a script that drives the extension without an agent
+
+`scripts/Save-TelegramImages.ps1` walks a Telegram Web channel backwards and
+archives every photo, named from the post's own `data-timestamp`. It speaks MCP
+over stdio to a bridge it spawns itself — the same interface the agent uses, no
+agent present.
+
+The pattern is worth naming, because it is what this toolset is FOR beyond
+answering questions: an agent drives a flow once and learns how the site really
+behaves, and that knowledge is then frozen into something schedulable. The
+script is small; the exploration that produced it is the expensive part, so it
+is written down in `scripts/README.md` as a table of assumption versus reality.
+
+Six things a reasonable guess gets wrong about Telegram, all found by driving
+it: the scroller is `.bubbles-scrollable` and `.bubbles` does not scroll;
+Telegram restores `scrollTop` after each load so it cannot mark progress; posts
+are UNMOUNTED as they leave the viewport (about 30 stay alive at any depth), so
+images must be taken as they pass; `scrollHeight` plateaus long before the
+history ends and the honest end signal is that no smaller `data-mid` arrives;
+sponsored posts carry a real photo and must be filtered by `is-sponsored` /
+`mid = -1` / `timestamp = 2`; and the images are `blob:` URLs, readable only
+inside the page.
+
+**A limitation worth stating plainly.** The extension attaches to ONE bridge, on
+the port in its side panel, so a script cannot run while an editor's MCP client
+holds that port — the extension is talking to that one. The script detects this
+and refuses with an explanation rather than hanging. Giving the bridge an HTTP
+endpoint for tool calls would remove the restriction and was deliberately NOT
+done: any web page can POST to localhost, and §5's Origin check is the primary
+defence precisely because pages must not be able to issue commands.
+
+Verified: PowerShell's MCP layer (spawn, initialize, notifications/initialized,
+tools/call, error surfacing, clean shutdown) drives a real bridge end to end;
+the port guard refuses correctly; and every page-side query in the script was
+run against the live channel through the agent before being written into it.
+The full run needs the MCP client closed, so it is the user's to make.
 
 ### 2026-09-01 — v1.5.3, the scroll that worked and said it had not
 
