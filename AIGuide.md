@@ -2,7 +2,7 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v1.3.0 — 14 context-efficient browser tools; bridge/MCP 26/26, extension regressions 15/15, isolated real-Edge live test 42/42, plus side-panel render and interaction.
+**Status:** v1.4.0 — 14 context-efficient browser tools; bridge/MCP 26/26, extension regressions 25/25. **Interaction now verifies that the page actually received the event** — see the v1.4.0 entry, and §4.3a.
 **Created:** 2026-08-31
 
 ---
@@ -152,6 +152,45 @@ Specific care taken:
 - `clear: true` selects through `this.select()` rather than Ctrl+A, then deletes with a real key event, then VERIFIES the field is empty and throws if it is not. A key chord is blockable by the page; a selection is not an edit, so making it directly costs nothing. See the v1.0.15 entry.
 - Chords (Ctrl+S) must use `rawKeyDown` with no `text`, or the page receives a literal character instead of the shortcut.
 - `drag()` interpolates 12 intermediate moves; HTML5 DnD and most drag libraries ignore a single source→target jump.
+- `pointFor()` returns TOP-LEVEL viewport coordinates. `DOM.getBoxModel` already does; `getBoundingClientRect()` inside `callOnNode` does NOT, because that runs in the frame that owns the node — so the fallback path adds `frameOffset()`, and `checkObscured` subtracts it again before hit-testing. Mixing the two put every click and every obstruction check at the wrong point inside an iframe (v1.4.0).
+
+### 4.3a A dispatched event is not a delivered event
+
+**Consequence:** the input witness in `tools/interact.js`.
+
+**A headed Chromium silently discards `Input.dispatch*Event` for a page that is
+not visible.** The command resolves normally, no error is raised, and the page
+receives nothing at all — not even a `keydown`. It is Chromium's behaviour, not
+ours, and it is invisible from the CDP side.
+
+Three things make this the most dangerous failure mode in the toolset:
+
+1. **It is the headline workflow.** Pinned mode exists so the user can browse
+   elsewhere while the agent works (§4.5), and browsing elsewhere is precisely
+   what makes the pinned tab hidden. The feature and the bug share a trigger.
+2. **It cannot be reproduced headless**, because a headless surface is always
+   paintable. Every automated live run in this repo's history has been headless,
+   so the suites were green while the product did nothing.
+3. **Nothing noticed.** Each action returned an echo of its own arguments —
+   `{ typed: text }` built from the input, never read back from the page — so
+   the agent proceeded on a login that never happened.
+
+Every dispatching action now goes through `witnessed()`: a capture-phase
+listener counts **trusted** events, the action runs, and the count is checked.
+On a miss, `explainNoInput()` asks the page for `visibilityState` and returns
+the sentence that names the fix.
+
+Two rules to preserve:
+
+- **Never arm a witness inside another witness.** Arming resets the counter, so
+  a nested one makes a working action report failure. `dispatchKey()` is the
+  unwitnessed primitive that `type()` and `select()` call for exactly this
+  reason; only the exported `key()` witnesses.
+- **Witness DELIVERY, never the resulting value.** Per-character typing of
+  `12ab34` into a digit-only field correctly lands `1234` — the page rejecting
+  keys is the page working (v1.0.15). Asserting the value would fail every
+  masked, filtered and formatted input in existence. The value is reported so
+  the agent can see it; only the arrival of input is enforced.
 
 ### 4.4 Tool definitions are re-sent on every request
 
@@ -353,7 +392,7 @@ The report is capped **per severity** (30/20/10), never by a flat slice of the r
 
 Covers: MCP handshake, instruction delivery, tool count and schema validity, resources, missing-extension error quality, **Origin rejection**, end-to-end routing, argument fidelity, keepalive, image content blocks, error propagation, disconnect handling, stdout hygiene, standalone survival, and **oversized-frame survival**.
 
-`node setup/extensiontest.mjs` — 15 assertions, also **no browser required**. It loads real extension modules under a deterministic `chrome` stub and exercises recorder normalisation/races/caps, replay guarding, concurrent network lifecycles and pending semantics, snapshot bounds, modern/fallback emulation, failure reporting, follow targeting, recursive data, visual comparison, schema annotations, and durable video/panel invariants. This catches missing exports and circular imports that `node --check` cannot see.
+`node setup/extensiontest.mjs` — 25 assertions, also **no browser required**. It loads real extension modules under a deterministic `chrome` stub and exercises recorder normalisation/races/caps, replay guarding, concurrent network lifecycles and pending semantics, snapshot bounds, modern/fallback emulation, failure reporting, follow targeting, recursive data, visual comparison, schema annotations, and durable video/panel invariants. This catches missing exports and circular imports that `node --check` cannot see.
 
 > The tool-count assertion (`=== 14`) will fail when you add a tool. That is intentional — it forces this file and the README to be updated too.
 
@@ -365,7 +404,17 @@ Covers: MCP handshake, instruction delivery, tool count and schema validity, res
 
 **Live-verified on 2026-09-01** (isolated real Edge): 42/42 checks plus panel render/interaction. Proven live: MCP handshake and discovery, extension transport, snapshot/refs, inspect, console/evaluate, network detail/HAR, health/vitals/memory, all seeded defects, trusted typing/click/select, obstruction refusal, recorder/assertion pass and deliberate failure, run history, Playwright export, stale-ref error, screenshot, IndexedDB video, exact responsive emulation/reset, and connection stability.
 
-**Still untested:** trusted-event dispatch against real frameworks (React/Vue controlled inputs, masked fields), service-worker survival over hours, Chrome parity — every live run so far has been Edge. See §8.
+**Still untested:** trusted-event dispatch against real frameworks (React/Vue
+controlled inputs, masked fields), service-worker survival over hours, Chrome
+parity — every live run so far has been Edge. See §8.
+
+> **Every automated live run in this repo is HEADLESS, and headless cannot see
+> the class of bug that cost v1.4.0.** A headless surface is always paintable, so
+> input dispatch always works there; in a headed browser with the tab in the
+> background it silently works on nothing (§4.3a). The suites were green through
+> the entire audit that found it. If you change perception or interaction, drive
+> a HEADED browser with the attached tab both in front and behind — that is the
+> axis the harness does not cover.
 
 > **Run the tool against the test page before shipping anything that touches perception or interaction.** Three of the bugs in v1.0.9 were invisible to a full source read and obvious within two minutes of driving a real page. `checkObscured` in particular *reads* correctly; the defect was in the browser API's contract.
 
@@ -388,6 +437,15 @@ Covers: MCP handshake, instruction delivery, tool count and schema validity, res
 
 **Known rough edges:**
 
+- **A hidden tab cannot be interacted with, and that is a browser limit, not a
+  bug we can fix.** Chromium discards CDP input for a page that is not visible
+  in a headed browser (§4.3a). `browser_interact` now detects it and says so
+  instead of claiming success, but detection is all we can offer: `Page.bringToFront`
+  does not restore delivery for an occluded window, and stealing focus would
+  break the promise pinned mode exists to make. Reading tools are unaffected —
+  snapshot, inspect, console, network and screenshot all work on a hidden tab —
+  so an agent can still observe a background tab in full; it just cannot act on
+  one. Anything that must click or type needs the tab in the foreground.
 - SPA route changes that alter the **path** invalidate all refs, even when the DOM is largely unchanged. Strict on purpose — the error is actionable. Hash-only routing (`#/orders/42`) keeps its refs, because `resolveRef` compares URLs with the hash stripped; both behaviours were verified live in v1.0.13.
 - The extension asks for seven permissions and uses all seven. `scripting` and `downloads` were dropped in v1.1.0 — re-add either as one manifest line if a feature needs it.
 - Edge's `sidePanel` render and Automation-tab interaction are covered by the isolated live test. Chrome parity remains unverified in this environment.
@@ -523,6 +581,125 @@ Two grouped tools, keeping §4.4's discipline (12 → 14, not 12 → 30):
 ## 9. Change log
 
 Newest first. **Every change to this repo gets an entry.**
+
+### 2026-09-01 — v1.4.0, the tools were reporting work they had not done
+
+A full audit — every source file read, all three suites run, and the tool driven
+against a real browser through MCP. The suites were green and the product was
+not, which is the finding that matters most here.
+
+**`browser_interact` succeeded at nothing, repeatedly.** Typing `admin` into a
+field returned `{"typed":"admin"}` and left the field empty. Clicks returned a
+target and dispatched nothing. An armed recorder captured one step across four
+interactions, because there were no events to record.
+
+The cause is Chromium's, not ours: **a headed browser silently discards
+`Input.dispatch*Event` for a page that is not visible.** No error, no event, the
+CDP command resolves normally. Reproduced with raw CDP and no extension
+involved, and it does NOT reproduce headless — a headless surface is always
+paintable — which is why `isolated-livetest.mjs` never caught it and never
+could.
+
+Two things made it ours. First, `pinned` mode exists so the user can browse
+elsewhere while the agent works, and browsing elsewhere is exactly what makes
+the pinned tab hidden: the headline workflow is the trigger. Second, every
+action returned an echo of its own arguments instead of checking anything —
+`{ typed: text }` was built from the input, never from the page.
+
+So `tools/interact.js` now **witnesses** every dispatch: a capture-phase
+listener counts trusted events, and click/hover/type/key/scroll/drag each prove
+the page received theirs. When it did not, the error names visibility as the
+cause and the foreground as the fix. What is deliberately NOT asserted is the
+resulting VALUE — a digit-only field keeping `1234` out of `12ab34` is the page
+working (v1.0.15) — so the value is reported and the delivery is verified. This
+is the rule the codebase already applied in `select` and `clear`, and `select`
+was the only action that refused to lie about this bug; the audit found it
+because `select` reported it.
+
+**`browser_issue` video could deadlock the whole extension, permanently.**
+`startVideo`, `ingestFrame` and `stopVideo` each called `cdp.send()` inside
+`serialize()`. `send()` is not serialized — until the tab is missing from
+`attachedTabs`, at which point `attach()` calls `setState()` and
+`logActivity()`, and the one shared chain waits on itself forever. Every later
+state write, activity entry, console line and network record in the extension
+hangs behind it. The trigger is one click: the "browser is being debugged"
+infobar's Cancel button fires `onDetach`. All three now reserve state under the
+lock and talk to CDP outside it. §4.1's rule is now enforced by a test.
+
+**Connection status was overwriting configuration.** `setState` mirrored the
+whole `bridge` object to `storage.local` whenever a patch mentioned `bridge` —
+including `{connected:false, lastError}`, which every failed reconnect sends. On
+a machine with no bridge that is a disk write per backoff tick, forever. It also
+made `isolated-livetest.mjs` impossible to pass: the harness seeds a private
+port, and the next status write put 8765 back, so the isolated browser connected
+to whatever was on the default port. In this audit that was the developer's own
+live session, which it displaced silently — running the test suite broke the
+work it exists to protect. Only genuine setting changes mirror now.
+
+**Version skew is now visible.** Both sides have always exchanged a version and
+neither compared them, while the documented workflow drifts them every time:
+reloading the extension is immediate, the bridge only changes when the MCP
+client restarts, and the client caches tool schemas from startup. During this
+audit the extension was v1.3.0 and the bridge v1.2.3, so `browser_diagnose` was
+missing `vitals` and `memory` with nothing anywhere saying why.
+`browser_status` now carries a `versionMismatch` explaining that both sides must
+be restarted.
+
+**Evidence that could not be delivered.** `browser_network format:"har"
+includeBody:true` had no aggregate cap — 400 requests × 512KB in one frame,
+against `ws-server.js`'s 64MB limit, which drops the CONNECTION rather than
+truncating. `browser_inspect what:"storage"` dumped Web Storage unbounded. Both
+are budgeted now, and both say what they left out.
+
+**Smaller, all live-confirmed or read from the code:**
+
+- `browser_snapshot` returned `title: ""` on every page since v1.0.0. It read
+  `docInfo.root.title`; CDP's `Node` type has no such field. The RootWebArea's
+  accessible name is the title, and it was already in hand.
+- The overflow finding said "Widest offenders" and listed the first five
+  elements in DOCUMENT ORDER. Once a page overflows, every centred ancestor is
+  dragged past the viewport too, so it named five victims and never the cause —
+  on the seeded page, `div, h1, p.lede, section, h2` while the 2400px block went
+  unmentioned. It now ranks by how far an element exceeds its own container.
+- `checkObscured` and `pointFor` mixed coordinate spaces for anything in an
+  iframe: `DOM.getBoxModel` answers in top-level viewport coordinates,
+  `getBoundingClientRect` inside `callOnNode` answers in the frame's. v1.3.0
+  taught the locators to walk same-origin iframes, which made it reachable.
+- Replay called a navigating click a failure. The proof lives on the node and
+  the navigation destroys the node, so "did not observe the expected trusted
+  event" was reported for exactly the steps whose job was to navigate —
+  non-deterministically, since a slow server left the old document alive.
+- `select`'s trust proof used `{once:true}` window listeners, which the first
+  unrelated `input`/`change` on the page consumed.
+- `uniqueText` could return text matching a DIFFERENT element, because the
+  element being described need not be in the candidate set.
+- `waitForIdle` left a MutationObserver on `documentElement` forever — and
+  `diagnose.memory` reports node/listener growth as a leak signal, so the tool
+  was contaminating the number it was asked to interpret.
+- `locators.js` recomputed the full root walk on every `queryAll`; it is now
+  cached for one microtask.
+- `store.js usage()` did `getAll()` over every attachment record on every panel
+  poll; it walks a cursor now. `deleteIssue` did `storage.session.get(null)`,
+  deserialising every capture buffer to read a handful of small records.
+- `resolveTarget` said "locks the agent to tab null" in follow mode.
+  `originOf('about:blank')` rendered as the literal `null`; `sameOrigin` now
+  refuses opaque origins explicitly rather than by accident.
+
+**Tests and harness.** `extensiontest.mjs` goes from 15 to **25** assertions; the
+ten new ones pin each defect above, including a brace-matching check that no CDP
+call re-enters `serialize()`. `isolated-livetest.mjs` starts its private
+bridge BEFORE pointing the extension at it, seeds session as well as local
+storage (session outranks local in `getState`), and wakes an idle MV3 worker by
+opening a page from its own origin instead of waiting for a target that will
+never appear. It also **refuses to run while a bridge holds 8765**: a fresh
+extension connects to the default port on its first line, before any seeding is
+possible, so the takeover window cannot be closed from the harness — only
+declined. `--force` overrides. Bridge/MCP **26/26**, extension **25/25**.
+
+**Note for whoever next reads a green suite.** Both non-browser suites passed
+throughout, before and after. They were not wrong; they were testing the layers
+where the bugs were not. The interaction bug needed a headed browser and a
+background tab, and nothing automated here has ever run in one.
 
 ### 2026-09-01 — v1.3.0, QA tests must prove outcomes
 

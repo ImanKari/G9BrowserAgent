@@ -39,9 +39,16 @@ export async function resolveTarget(explicitTabId) {
 
   if (explicitTabId != null) {
     if (state.mode !== 'multi' && explicitTabId !== state.pinnedTabId) {
+      // Follow mode has no pinned tab, so naming one read as "locks the agent
+      // to tab null" — an error message that describes a state that cannot
+      // exist tells the agent nothing it can act on.
       throw new Error(
-        `Mode is "${state.mode}", which locks the agent to tab ${state.pinnedTabId}. ` +
-          `To act on other tabs, ask the user to switch the side panel to "Multi-tab" mode.`,
+        state.mode === 'follow'
+          ? `Mode is "follow", which locks the agent to whichever tab is currently focused — a tabId ` +
+            `cannot be chosen. To act on a specific tab, ask the user to switch the side panel to ` +
+            `"Multi-tab" mode.`
+          : `Mode is "pinned", which locks the agent to tab ${state.pinnedTabId}. ` +
+            `To act on other tabs, ask the user to switch the side panel to "Multi-tab" mode.`,
       );
     }
     return requireTab(explicitTabId);
@@ -158,7 +165,11 @@ export async function unpinTab() {
 /** Scheme + host only. The redacted form of a tab the agent may not drive. */
 export function originOf(url = '') {
   try {
-    return new URL(url).origin;
+    const origin = new URL(url).origin;
+    // about:blank, data: and blob: URLs all have the opaque origin, which
+    // stringifies to the literal "null". Showing that in a tab list reads as a
+    // bug; say what the tab actually is.
+    return origin === 'null' ? `(${new URL(url).protocol.replace(':', '')})` : origin;
   } catch {
     return '(unknown)';
   }

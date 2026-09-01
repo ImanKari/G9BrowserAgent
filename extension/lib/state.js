@@ -42,8 +42,22 @@ const DEFAULTS = {
 
 const MAX_ACTIVITY = 200;
 
-/** Settings that should outlive the browser session live in local storage. */
-const PERSISTED_KEYS = ['mode', 'bridge'];
+/**
+ * The bridge fields that are actually SETTINGS, as opposed to live status.
+ *
+ * `connected` and `lastError` change constantly and belong only to this
+ * session. Treating any `bridge` patch as a settings change meant that every
+ * reconnect attempt rewrote host/port/token to disk — a `storage.local` write
+ * per backoff tick, forever, on any machine where the bridge is not running.
+ *
+ * It also silently reverted externally configured settings. `setup/isolated-livetest.mjs`
+ * seeds a private port into `storage.local` and reloads the extension; the
+ * failed-connection write that followed put 8765 straight back, so the isolated
+ * browser connected to whatever bridge happened to be on the default port —
+ * including the user's live session, which it then displaced. The test could
+ * never pass, and running it broke real work.
+ */
+const BRIDGE_SETTING_FIELDS = ['host', 'port', 'token', 'serverPath', 'repoRoot'];
 
 export async function getState() {
   const [session, local] = await Promise.all([
@@ -98,7 +112,16 @@ export function setState(patch) {
     // serverPath/repoRoot belong here too: the repo does not move between
     // sessions, and keeping them only in session storage meant the side panel
     // fell back to a placeholder path after every extension reload.
-    if (PERSISTED_KEYS.some((k) => k in patch)) {
+    //
+    // Only when a durable value actually CHANGED, though — see
+    // BRIDGE_SETTING_FIELDS. A patch that carries nothing but `connected` and
+    // `lastError` is live status, not a setting, and writing it to disk is both
+    // pointless traffic and a way to clobber configuration.
+    const modeChanged = 'mode' in patch && patch.mode !== current.mode;
+    const bridgeChanged =
+      !!patch.bridge && BRIDGE_SETTING_FIELDS.some((k) => k in patch.bridge && patch.bridge[k] !== current.bridge[k]);
+
+    if (modeChanged || bridgeChanged) {
       const { host, port, token, serverPath, repoRoot } = next.bridge;
       await api.storage.local.set({
         settings: { mode: next.mode, bridge: { host, port, token, serverPath, repoRoot } },

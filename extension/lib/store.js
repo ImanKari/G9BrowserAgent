@@ -446,16 +446,36 @@ function base64ToBytes(b64) {
   return out;
 }
 
-/** Rough usage, for the panel and for telling the user when to prune. */
+/**
+ * Rough usage, for the panel and for telling the user when to prune.
+ *
+ * A cursor rather than `getAll()`. This runs on every issue-list refresh — the
+ * side panel polls it every 2.5s while its Issues tab is open — and `getAll()`
+ * structured-clones every attachment record, Blob handles included, to add up a
+ * `size` field. Walking the cursor reads the same numbers and never
+ * materialises the rows.
+ */
 export async function usage() {
   const [recordings, issues] = await Promise.all([listRecordings(), listIssues()]);
-  const rows = await tx('readonly', (store) => req(store.getAll()));
-  const attachmentBytes = (rows || []).reduce((sum, r) => sum + (r.size || 0), 0);
+
+  const totals = await tx('readonly', (store) => {
+    const acc = { count: 0, bytes: 0 };
+    const request = store.openCursor();
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return;
+      acc.count += 1;
+      acc.bytes += cursor.value?.size || 0;
+      cursor.continue();
+    };
+    return acc;
+  });
+
   return {
     recordings: recordings.length,
     issues: issues.length,
-    attachments: (rows || []).length,
-    attachmentBytes,
-    attachmentMB: Math.round((attachmentBytes / 1048576) * 10) / 10,
+    attachments: totals.count,
+    attachmentBytes: totals.bytes,
+    attachmentMB: Math.round((totals.bytes / 1048576) * 10) / 10,
   };
 }

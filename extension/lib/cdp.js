@@ -85,15 +85,6 @@ export async function attach(tabId) {
 }
 
 /**
- * Detach from a tab, and check that it worked.
- *
- * The old version swallowed the failure, dropped the tab from `attachedTabs`
- * anyway, and logged `ok: true`. So when a detach did not take, the "browser is
- * being debugged" banner stayed on the user's tab while the extension reported
- * a clean detach and showed nothing attached — the user is left looking at
- * evidence the tool says does not exist. Verify against the browser instead.
- */
-/**
  * Detach from several tabs at once, and check that it worked.
  *
  * Batched deliberately. The first version verified per tab, which meant N

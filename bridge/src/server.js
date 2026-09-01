@@ -37,7 +37,7 @@ const PORT = Number(process.env.G9_PORT ?? 8765);
 const TOKEN = process.env.G9_TOKEN ?? '';
 const CALL_TIMEOUT_MS = Number(process.env.G9_TIMEOUT_MS ?? 60_000);
 
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 
 // ---------------------------------------------------------------- transport
 
@@ -110,6 +110,19 @@ ws.on('message', (msg) => {
 
   if (msg.type === 'hello') {
     log(`[g9] extension v${msg.version} ready`);
+
+    // Both sides have always exchanged a version and neither has ever compared
+    // them. They drift constantly, because the documented workflow drifts them:
+    // reloading the extension takes effect immediately, while the bridge only
+    // changes when the MCP client is restarted — and the client caches the tool
+    // schemas it got at startup. The result is an agent whose tool list does not
+    // match the extension behind it: actions the schema forbids, actions the
+    // extension no longer implements, and no error anywhere explaining it.
+    extensionVersion = msg.version ?? null;
+    if (extensionVersion && extensionVersion !== VERSION) {
+      log(`[g9] VERSION MISMATCH: bridge v${VERSION}, extension v${extensionVersion}`);
+    }
+
     // Hand the extension the real on-disk path so the side panel can show a
     // copy-pasteable MCP config instead of a placeholder.
     ws.send({
@@ -122,6 +135,29 @@ ws.on('message', (msg) => {
     });
   }
 });
+
+/** Version the extension reported on connect, for the skew check below. */
+let extensionVersion = null;
+
+/**
+ * The skew warning, in the one place the agent cannot miss it.
+ *
+ * It rides on `browser_status` rather than failing calls, because skew is a
+ * degraded state, not a broken one — most tools still work, and refusing them
+ * all would be worse than the drift. `browser_status` is the tool the
+ * instructions tell the agent to call first, so this is where it will be read.
+ */
+function versionSkew() {
+  if (!extensionVersion || extensionVersion === VERSION) return null;
+  return (
+    `The bridge is v${VERSION} but the browser extension is v${extensionVersion}. ` +
+    `Tool schemas come from the bridge and behaviour comes from the extension, so they now disagree: ` +
+    `arguments may be rejected that the extension supports, or accepted that it does not implement. ` +
+    `Ask the user to reload the extension (chrome://extensions or edge://extensions) AND restart this ` +
+    `MCP client — the client caches tool definitions from bridge startup, so restarting only one side ` +
+    `leaves the mismatch in place.`
+  );
+}
 
 /** Send a tool call to the extension and await its result. */
 function call(tool, args) {
@@ -164,7 +200,16 @@ const mcp = new McpServer({
 
 for (const definition of TOOLS) {
   const { name, ...rest } = definition;
-  mcp.tool(name, rest, (args) => call(name, args));
+  mcp.tool(name, rest, async (args) => {
+    const result = await call(name, args);
+    // Attach the skew warning to browser_status only. Adding it to every result
+    // would spend the agent's context repeating itself; browser_status is the
+    // orientation tool, and orientation is exactly what skew corrupts.
+    const skew = name === 'browser_status' ? versionSkew() : null;
+    return skew && result && typeof result === 'object' && !Array.isArray(result)
+      ? { ...result, versionMismatch: skew }
+      : result;
+  });
 }
 
 // A readable capability guide the agent can pull on demand, and that a human

@@ -124,10 +124,11 @@ async function waitForIdle(tabId, timeoutMs) {
   await evaluate(
     tabId,
     `(() => {
-       if (window.__g9Idle) return;
-       window.__g9Idle = { mutations: 0, last: Date.now() };
-       new MutationObserver(() => { window.__g9Idle.mutations++; window.__g9Idle.last = Date.now(); })
-         .observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+       if (window.__g9Idle) { window.__g9Idle.last = Date.now(); return; }
+       const state = { mutations: 0, last: Date.now() };
+       state.observer = new MutationObserver(() => { state.mutations++; state.last = Date.now(); });
+       state.observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+       window.__g9Idle = state;
      })()`,
   ).catch(() => {});
 
@@ -144,11 +145,37 @@ async function waitForIdle(tabId, timeoutMs) {
     ]);
 
     if (quietFor >= 500 && pending === 0) {
+      await stopIdleWatch(tabId);
       return { satisfied: true, idle: true, quietForMs: quietFor, pendingRequests: 0 };
     }
     await sleep(100);
   }
+  await stopIdleWatch(tabId);
   return { satisfied: false, idle: false, timedOut: true };
+}
+
+/**
+ * Take the idle observer back off the page.
+ *
+ * It used to be left running for the life of the document — a MutationObserver
+ * on documentElement with subtree, attributes and characterData, firing for
+ * every change the page makes forever after. On a page that renders constantly
+ * that is real overhead, and it lands on the two tools least able to afford it:
+ * `diagnose.performance` measures the page WITH our observer in it, and
+ * `diagnose.memory` reports node and listener growth as a leak signal, so the
+ * tool was contributing to the very number it was asked to interpret.
+ */
+function stopIdleWatch(tabId) {
+  return evaluate(
+    tabId,
+    `(() => {
+       const s = window.__g9Idle;
+       if (!s) return false;
+       s.observer && s.observer.disconnect();
+       delete window.__g9Idle;
+       return true;
+     })()`,
+  ).catch(() => false);
 }
 
 async function currentUrl(tabId) {

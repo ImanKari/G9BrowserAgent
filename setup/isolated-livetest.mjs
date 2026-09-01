@@ -25,7 +25,41 @@ const screenshotPath = process.env.G9_PANEL_SCREENSHOT ??
   path.join(tmpdir(), 'g9-panel-' + Date.now() + '.png');
 const children = [];
 
+/**
+ * Refuse to run while a real session is live on the default port.
+ *
+ * A freshly loaded extension has no stored settings, so `bootstrap()` connects
+ * to the DEFAULT 8765 before this harness can seed anything — and the bridge's
+ * single-client rule lets the newest connection win. The isolated browser
+ * therefore displaces whatever agent session is running, silently, for as long
+ * as it takes to reconfigure and reload. During the audit that produced v1.4.0
+ * that is exactly what happened: a tool call meant for the developer's own tab
+ * was answered by the throwaway test profile.
+ *
+ * The window cannot be closed from here — nothing can seed storage before the
+ * worker's first line runs. So refuse instead of stealing, the same way
+ * livetest.mjs refuses when its own port is taken.
+ */
+async function assertNoLiveSession() {
+  if (process.argv.includes('--force')) return;
+  try {
+    const probe = await fetch('http://127.0.0.1:8765/health', { signal: AbortSignal.timeout(1500) });
+    if (!probe.ok || (await probe.json())?.ok !== true) return;
+  } catch {
+    return; // nothing there, which is what we want
+  }
+
+  console.error('\n\x1b[31mA G9 bridge is already running on the default port 8765.\x1b[0m');
+  console.error('This test loads a fresh extension, and a fresh extension connects to 8765');
+  console.error('before it can be told about this run\'s private port — which would take over');
+  console.error('that session and answer your agent\'s tool calls from a throwaway profile.\n');
+  console.error('Close the MCP client (or stop the stray bridge) and run this again.');
+  console.error('\x1b[90mIf you are certain nothing is using it: --force\x1b[0m\n');
+  process.exit(2);
+}
+
 async function main() {
+await assertNoLiveSession();
 const browser = await findBrowser();
 console.log('\nG9 isolated live test');
 console.log('browser: ' + browser);
@@ -57,17 +91,19 @@ try {
   const version = await waitJson('http://127.0.0.1:' + debugPort + '/json/version', 10_000);
   browserControl = new Cdp(version.webSocketDebuggerUrl);
   await browserControl.ready;
-  const foundWorker = await waitExtensionWorker(browserControl, 25_000);
+  const foundWorker = await waitExtensionWorker(browserControl, 45_000, debugPort);
   const worker = foundWorker.target;
   const extensionId = new URL(worker.url).hostname;
   const workerCdp = foundWorker.session;
-  await workerCdp.evaluate(
-    'chrome.storage.local.set({ settings: ' + JSON.stringify({
-      mode: 'pinned',
-      bridge: { host: '127.0.0.1', port: bridgePort, token: '', serverPath: null, repoRoot: null },
-    }) + ' })',
-  );
 
+  // Start the private bridge BEFORE the extension is pointed at it.
+  //
+  // The old order started it after seeding, which left a window in which the
+  // fresh extension had already fallen back to the default 8765 and connected
+  // to whatever bridge was there — in practice, the developer's own live
+  // session, which it then displaced, silently, because the bridge's
+  // single-client rule lets the newest connection win. Running the test suite
+  // broke the work it was supposed to protect.
   const live = spawn(process.execPath, [path.join(HERE, 'livetest.mjs')], {
     cwd: ROOT,
     env: { ...process.env, G9_PORT: String(bridgePort) },
@@ -76,11 +112,28 @@ try {
   children.push(live);
   live.stdout.pipe(process.stdout);
   live.stderr.pipe(process.stderr);
+  await waitHttp('http://127.0.0.1:' + bridgePort + '/health', 15_000);
 
-  // Reload after the private bridge exists so bootstrap reads the persisted
-  // port and connects immediately. Then seed the same pinned state a user
-  // creates with the panel button.
-  await delay(600);
+  // Seed BOTH stores, not just local.
+  //
+  // getState() layers session over local, so a session record written by the
+  // extension's own first connection attempt outranks anything seeded here.
+  // Writing local alone left the seeded port permanently shadowed.
+  const seed = {
+    mode: 'pinned',
+    bridge: { host: '127.0.0.1', port: bridgePort, token: '', serverPath: null, repoRoot: null },
+  };
+  await workerCdp.evaluate(
+    `(async () => {
+       await chrome.storage.local.set({ settings: ${JSON.stringify(seed)} });
+       const current = (await chrome.storage.session.get('state')).state || {};
+       await chrome.storage.session.set({ state: { ...current, mode: 'pinned',
+         bridge: { ...(current.bridge || {}), host: '127.0.0.1', port: ${bridgePort}, token: '' } } });
+       return true;
+     })()`,
+  );
+
+  // Reload so bootstrap reads the seeded port and connects immediately.
   await workerCdp.evaluate('chrome.runtime.reload(); true').catch(() => {});
   const reloadedWorker = await waitBrowserTarget(browserControl, (target) =>
     target.type === 'service_worker' && target.targetId !== worker.targetId &&
@@ -221,29 +274,66 @@ async function waitBrowserTarget(cdp, predicate, timeoutMs) {
   throw new Error('Timed out waiting for the extension service worker target via Target.getTargets.');
 }
 
-async function waitExtensionWorker(cdp, timeoutMs) {
+/**
+ * Find the extension's service worker.
+ *
+ * Two things made this flaky, and both are MV3 facts rather than timing luck:
+ *
+ * 1. An idle worker is TORN DOWN and stops appearing in `Target.getTargets`
+ *    entirely. Waiting longer does not help; something has to wake it. Opening
+ *    any page from the extension's own origin does, which is why the extension
+ *    id is resolved from a target of any type rather than from the worker.
+ * 2. A candidate that failed the probe was added to `checked` and never tried
+ *    again — but the usual reason to fail is being probed mid-startup, which is
+ *    exactly the case that would have succeeded a moment later.
+ *
+ * `setDiscoverTargets` is requested first so targets that nobody is attached to
+ * are still reported.
+ */
+async function waitExtensionWorker(cdp, timeoutMs, debugPort) {
   const deadline = Date.now() + timeoutMs;
-  const checked = new Set();
+  await cdp.send('Target.setDiscoverTargets', { discover: true }).catch(() => {});
+  const notOurs = new Set();
+  let seen = [];
+  let woke = false;
+
   while (Date.now() < deadline) {
     const result = await cdp.send('Target.getTargets');
-    const candidates = (result.targetInfos ?? []).filter((target) =>
-      target.type === 'service_worker' &&
-      target.url.startsWith('chrome-extension://') &&
-      !checked.has(target.targetId)
-    );
-    for (const target of candidates) {
-      checked.add(target.targetId);
+    seen = result.targetInfos ?? [];
+
+    for (const target of seen) {
+      if (target.type !== 'service_worker') continue;
+      if (!target.url.startsWith('chrome-extension://')) continue;
+      if (notOurs.has(target.targetId)) continue;
       try {
         const attached = await cdp.send('Target.attachToTarget', { targetId: target.targetId, flatten: true });
         const session = cdp.session(attached.sessionId);
         await session.send('Runtime.enable');
         const name = await session.evaluate('chrome.runtime.getManifest().name');
         if (name === 'G9 Browser Agent') return { target, session };
-      } catch {}
+        notOurs.add(target.targetId);
+      } catch {
+        // Mid-startup or mid-teardown. Deliberately NOT blacklisted.
+      }
     }
-    await delay(150);
+
+    // No worker is running. Wake it by loading a page from its own origin.
+    if (!woke) {
+      const anyExtension = seen.find((t) => t.url.startsWith('chrome-extension://'));
+      if (anyExtension) {
+        woke = true;
+        const id = new URL(anyExtension.url).hostname;
+        await openTarget(debugPort, 'chrome-extension://' + id + '/panel/panel.html').catch(() => {});
+      }
+    }
+
+    await delay(200);
   }
-  throw new Error('Timed out waiting for the G9 Browser Agent service worker.');
+
+  throw new Error(
+    'Timed out waiting for the G9 Browser Agent service worker. Targets visible were:\n  ' +
+      (seen.map((t) => `${t.type} ${t.url}`).join('\n  ') || '(none)'),
+  );
 }
 
 async function openTarget(port, url) {

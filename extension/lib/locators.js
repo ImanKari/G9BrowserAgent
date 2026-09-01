@@ -106,7 +106,23 @@ export const LOCATOR_SOURCE = `
    * roots, and same-origin iframe documents. Closed shadow roots and
    * cross-origin frames remain browser boundaries and are reported as such.
    */
+  /*
+   * Discovering roots means walking every element of every root looking for
+   * shadow hosts and iframes. resolve() calls queryAll several times per
+   * locator, and the role branch of candidatesFor() then runs roleOf+nameOf
+   * across everything it returns — so recomputing the root list on every call
+   * turned one replay step on a large page into many full-document walks.
+   *
+   * The cache lives for one microtask turn only. Every entry point here is
+   * synchronous, so a cached list cannot span a DOM change the caller made,
+   * and a stale root set is exactly the kind of bug this file exists to avoid.
+   *
+   * (No backticks in comments inside this string: it is a template literal, and
+   * a stray one ends it. Same family of hazard as the doubled regex escapes.)
+   */
+  let rootCache = null;
   const roots = () => {
+    if (rootCache) return rootCache;
     const out = [];
     const seen = new Set();
     const visit = (root) => {
@@ -123,6 +139,8 @@ export const LOCATOR_SOURCE = `
       }
     };
     visit(document);
+    rootCache = out;
+    Promise.resolve().then(() => { rootCache = null; });
     return out;
   };
   const queryAll = (selector) => roots().flatMap((root) => {
@@ -339,7 +357,16 @@ export const LOCATOR_SOURCE = `
 
   // ------------------------------------------------------------------ describe
 
-  /** Shortest visible text that identifies exactly one element. */
+  /**
+   * Shortest visible text that identifies exactly one element.
+   *
+   * The candidate set is fixed (links, buttons, cells…), and the element being
+   * described is not necessarily in it. That mattered: a <div> whose text
+   * happened to equal a button's produced exactly one match — the BUTTON — and
+   * the recorder saved a text locator that resolves to a different element than
+   * the one the user touched. A locator that confidently finds the wrong node
+   * is worse than no locator, so the match must be this element itself.
+   */
   const uniqueText = (el) => {
     const text = clean(el.textContent);
     if (!text || text.length > 80) return '';
@@ -347,7 +374,7 @@ export const LOCATOR_SOURCE = `
       queryAll('a, button, [role=button], [role=link], label, summary, li, td, th'),
       (n) => clean(n.textContent) === text && visible(n),
     );
-    return matches.length === 1 ? text : '';
+    return matches.length === 1 && matches[0] === el ? text : '';
   };
 
   const describe = (el) => {

@@ -177,11 +177,55 @@ async function pageAudit(tabId) {
       const de = document.documentElement;
       const overflowing = de.scrollWidth > de.clientWidth + 1;
       if (overflowing) {
-        const culprits = [...document.querySelectorAll('body *')].filter(el => {
+        // Name the CAUSE, not the victims.
+        //
+        // The old version took the first five elements in DOCUMENT ORDER whose
+        // right edge passed the viewport and called them "widest offenders".
+        // Both halves were wrong. Once a page overflows, every centred or
+        // full-width ancestor is dragged past the viewport too, so the earliest
+        // elements in the document are almost always innocent: on the seeded
+        // test page this reported "div, h1, p.lede, section, h2" and never
+        // mentioned the 2400px block that actually caused it.
+        //
+        // An element earns the blame when it is wider than the room its parent
+        // gives it — that is the box that forced the scrollbar, rather than one
+        // that was stretched by it.
+        const name = (el) => el.tagName.toLowerCase() +
+          (el.id ? '#' + el.id : '') +
+          (el.className && typeof el.className === 'string' && el.className.trim()
+            ? '.' + el.className.trim().split(/\\s+/)[0] : '');
+
+        const boxes = [...document.querySelectorAll('body *')].map((el) => {
           const r = el.getBoundingClientRect();
-          return r.right > de.clientWidth + 1 && r.width > 0;
-        }).slice(0, 5).map(el => el.tagName.toLowerCase() + (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\\s+/)[0] : ''));
-        findings.push({ severity: 'warning', kind: 'layout', message: 'Page scrolls horizontally (' + de.scrollWidth + 'px content in ' + de.clientWidth + 'px viewport). Widest offenders: ' + culprits.join(', '), where: 'layout' });
+          const parent = el.parentElement;
+          const room = parent ? parent.getBoundingClientRect().width : de.clientWidth;
+          return { el, width: r.width, overhang: r.width - room, right: r.right };
+        });
+
+        const causes = boxes
+          .filter((b) => b.width > 0 && b.overhang > 1 && b.right > de.clientWidth + 1)
+          .sort((a, b) => b.overhang - a.overhang)
+          .slice(0, 5);
+
+        // Nothing breaks out of its own parent, so the overflow is cumulative.
+        const widest = boxes
+          .filter((b) => b.width > de.clientWidth + 1)
+          .sort((a, b) => b.width - a.width)
+          .slice(0, 5);
+
+        const picked = causes.length ? causes : widest;
+        const listed = picked.map((b) => name(b.el) + ' (' + Math.round(b.width) + 'px)').join(', ');
+        findings.push({
+          severity: 'warning',
+          kind: 'layout',
+          message: 'Page scrolls horizontally (' + de.scrollWidth + 'px content in ' + de.clientWidth + 'px viewport). ' +
+            (listed
+              ? (causes.length
+                ? 'Widest elements overflowing their own container: '
+                : 'No element exceeds its container; widest elements on the page: ') + listed
+              : 'No single element is wider than the viewport — the overflow is cumulative (check margins, absolute positioning, or transforms).'),
+          where: 'layout',
+        });
       }
 
       // Duplicate element IDs break querySelector and label association.

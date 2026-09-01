@@ -9,7 +9,7 @@
  * silently fails on any framework that checks isTrusted.
  */
 
-import { send, callOnNode } from '../lib/cdp.js';
+import { send, callOnNode, evaluate } from '../lib/cdp.js';
 import { resolveRef } from '../lib/refs.js';
 
 /** Modifier bitmask used by CDP: Alt=1, Ctrl=2, Meta=4, Shift=8 */
@@ -30,6 +30,110 @@ const SELECT_ALL_MODIFIER = /Mac/i.test(globalThis.navigator?.userAgent ?? '')
   : MODIFIERS.Control;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ------------------------------------------------------------ input witness
+
+/**
+ * Proof that an input event actually reached the page.
+ *
+ * Chromium SILENTLY DISCARDS `Input.dispatch*Event` for a page that is not
+ * visible in a headed browser. No error is raised, the CDP command resolves
+ * normally, and nothing happens. Every action here used to return an echo of
+ * its own arguments — `{ typed: "admin" }` for a field that stayed empty —
+ * which is the worst failure this toolset can produce: the agent proceeds,
+ * builds on a login that never happened, and reports success to the user.
+ *
+ * It is not reproducible headless (a headless surface is always paintable), so
+ * the automated live suite could never catch it. It IS the normal case for the
+ * product's own headline workflow: pinned mode exists so the user can browse
+ * elsewhere, and browsing elsewhere is exactly what makes the pinned tab
+ * hidden.
+ *
+ * So every dispatching action now witnesses its own event. The witness is a
+ * capture-phase listener installed once per document; it counts only trusted
+ * events, so it cannot be satisfied by the page's own synthetic ones.
+ *
+ * Note what is deliberately NOT verified: the resulting VALUE. Per-character
+ * typing of "12ab34" into a digit-only field correctly lands "1234" — a page
+ * rejecting keys is the page behaving, not a failure (see the v1.0.15 entry).
+ * The honest question is "did the input reach the page at all", and that is
+ * what this answers. The value that resulted is reported, never asserted.
+ */
+const WITNESS_EVENTS = ['mousedown', 'mousemove', 'wheel', 'keydown', 'input'];
+
+const WITNESS_SOURCE = `(() => {
+  if (!window.__g9witness) {
+    const w = { seen: {} };
+    for (const type of ${JSON.stringify(WITNESS_EVENTS)}) {
+      window.addEventListener(type, (e) => {
+        if (e.isTrusted) w.seen[type] = (w.seen[type] || 0) + 1;
+      }, { capture: true, passive: true });
+    }
+    window.__g9witness = w;
+  }
+  window.__g9witness.seen = {};
+  return true;
+})()`;
+
+/** Install (once) and reset the witness. Never fatal — a miss must not block. */
+async function armWitness(tabId) {
+  await evaluate(tabId, WITNESS_SOURCE).catch(() => {});
+}
+
+/**
+ * Did the page see a trusted event of this kind since the last arm?
+ * `null` means we could not tell, which is treated as "do not accuse".
+ */
+async function witnessSaw(tabId, types) {
+  const list = Array.isArray(types) ? types : [types];
+  return evaluate(
+    tabId,
+    `(() => {
+       const w = window.__g9witness;
+       if (!w) return null;
+       return ${JSON.stringify(list)}.some((t) => (w.seen[t] || 0) > 0);
+     })()`,
+  ).catch(() => null);
+}
+
+/**
+ * Turn "nothing happened" into the sentence that names the fix.
+ *
+ * Visibility is asked for only on the failure path, so the common case pays
+ * nothing for it.
+ */
+async function explainNoInput(tabId, action) {
+  const page = await evaluate(
+    tabId,
+    '({ hidden: document.hidden, state: document.visibilityState })',
+  ).catch(() => null);
+
+  if (page?.hidden) {
+    return (
+      `The ${action} was dispatched but the page never received it: the attached tab is HIDDEN ` +
+      `(document.visibilityState="${page.state}"). A headed Chromium silently discards CDP input ` +
+      `events for a page that is not visible — no error is raised, so nothing was done even though ` +
+      `the command succeeded. Ask the user to bring that tab to the foreground, and make sure its ` +
+      `window is neither minimised nor fully covered by another window. Reading tools ` +
+      `(browser_snapshot, browser_inspect, browser_console, browser_network) keep working while hidden.`
+    );
+  }
+  return (
+    `The ${action} was dispatched but the page never received a trusted event for it, although the ` +
+    `page reports it is visible. Something is intercepting input before the document — a native ` +
+    `dialog, a modal the browser owns, or a devtools overlay. Take a browser_screenshot to see the ` +
+    `current state.`
+  );
+}
+
+/** Dispatch through the witness: arm, act, then prove the page saw it. */
+async function witnessed(tabId, expect, action, run) {
+  await armWitness(tabId);
+  const result = await run();
+  const saw = await witnessSaw(tabId, expect);
+  if (saw === false) throw new Error(await explainNoInput(tabId, action));
+  return result;
+}
 
 /** Scroll into view, then return viewport-relative interaction coordinates. */
 async function pointFor(tabId, backendNodeId) {
@@ -53,6 +157,11 @@ async function pointFor(tabId, backendNodeId) {
       y: (q[1] + q[3] + q[5] + q[7]) / 4,
       width: box.width,
       height: box.height,
+      // DOM.getBoxModel answers in TOP-LEVEL viewport coordinates, already
+      // including any frame offset. That is the space Input.dispatch*Event
+      // wants, and it is NOT the space an in-page getBoundingClientRect()
+      // answers in when the element lives in an iframe. See frameOffset().
+      space: 'viewport',
     };
   }
 
@@ -68,7 +177,44 @@ async function pointFor(tabId, backendNodeId) {
   if (!rect || (rect.width === 0 && rect.height === 0)) {
     throw new Error('Element has zero size or is not rendered — it may be inside a collapsed or hidden parent.');
   }
-  return rect;
+  // This one came from inside the element's own frame, so it is frame-relative.
+  const offset = await frameOffset(tabId, backendNodeId);
+  return { ...rect, x: rect.x + offset.x, y: rect.y + offset.y, space: 'viewport' };
+}
+
+/**
+ * Where this element's frame sits in the top-level viewport.
+ *
+ * `Runtime.callFunctionOn` runs in the realm that owns the node, so for an
+ * element inside a same-origin iframe every in-page measurement is relative to
+ * THAT frame's viewport — while `Input.dispatch*Event` and
+ * `document.elementsFromPoint` on the top document both speak top-level
+ * coordinates. Mixing the two put clicks, and the obstruction check, at the
+ * wrong point for anything inside an iframe. v1.3.0 taught the locators to walk
+ * same-origin iframes, which is what made that reachable.
+ *
+ * Walking `frameElement` up to the top window keeps this correct for nested
+ * frames too, and returns {0,0} for the common case of a top-level element.
+ */
+function frameOffset(tabId, backendNodeId) {
+  return callOnNode(
+    tabId,
+    backendNodeId,
+    `function () {
+       let x = 0, y = 0;
+       let view = this.ownerDocument && this.ownerDocument.defaultView;
+       for (let depth = 0; view && view !== view.parent && depth < 10; depth++) {
+         let frame = null;
+         try { frame = view.frameElement; } catch (e) { break; } // cross-origin
+         if (!frame) break;
+         const r = frame.getBoundingClientRect();
+         x += r.left;
+         y += r.top;
+         view = view.parent;
+       }
+       return { x, y };
+     }`,
+  ).catch(() => ({ x: 0, y: 0 }));
 }
 
 /**
@@ -99,7 +245,22 @@ async function checkObscured(tabId, backendNodeId, x, y) {
     tabId,
     backendNodeId,
     `function (px, py) {
-       const stack = document.elementsFromPoint(px, py);
+       // px/py arrive in TOP-LEVEL viewport coordinates (see pointFor), but
+       // this function runs in the realm that owns the node, so a hit test has
+       // to be done in THIS frame's coordinates. Undo the frame offset.
+       const doc = this.ownerDocument;
+       let view = doc && doc.defaultView;
+       for (let depth = 0; view && view !== view.parent && depth < 10; depth++) {
+         let frame = null;
+         try { frame = view.frameElement; } catch (e) { break; }
+         if (!frame) break;
+         const fr = frame.getBoundingClientRect();
+         px -= fr.left;
+         py -= fr.top;
+         view = view.parent;
+       }
+
+       const stack = doc.elementsFromPoint(px, py);
        if (!stack.length) return { ok: false, reason: 'the point is outside the viewport' };
 
        const top = stack[0];
@@ -183,11 +344,13 @@ export async function click(tabId, opts = {}) {
     throw new Error('click needs either a ref (from browser_snapshot) or explicit x/y coordinates.');
   }
 
-  await mouse(tabId, 'mouseMoved', point.x, point.y, { button: 'none', modifiers });
-  for (let i = 1; i <= clickCount; i++) {
-    await mouse(tabId, 'mousePressed', point.x, point.y, { button, clickCount: i, modifiers });
-    await mouse(tabId, 'mouseReleased', point.x, point.y, { button, clickCount: i, modifiers });
-  }
+  await witnessed(tabId, 'mousedown', `${clickCount > 1 ? 'double ' : ''}click`, async () => {
+    await mouse(tabId, 'mouseMoved', point.x, point.y, { button: 'none', modifiers });
+    for (let i = 1; i <= clickCount; i++) {
+      await mouse(tabId, 'mousePressed', point.x, point.y, { button, clickCount: i, modifiers });
+      await mouse(tabId, 'mouseReleased', point.x, point.y, { button, clickCount: i, modifiers });
+    }
+  });
 
   return { clicked: target, at: { x: Math.round(point.x), y: Math.round(point.y) }, button, clickCount };
 }
@@ -202,7 +365,9 @@ export async function hover(tabId, { ref, x, y, url } = {}) {
   } else {
     throw new Error('hover needs a ref or x/y coordinates.');
   }
-  await mouse(tabId, 'mouseMoved', point.x, point.y, { button: 'none' });
+  await witnessed(tabId, 'mousemove', 'hover', () =>
+    mouse(tabId, 'mouseMoved', point.x, point.y, { button: 'none' }),
+  );
   return { hovered: { x: Math.round(point.x), y: Math.round(point.y) } };
 }
 
@@ -271,12 +436,16 @@ export async function type(tabId, opts = {}) {
     }
   }
 
+  // Only the typing itself is witnessed, and only when there is something to
+  // type: an empty string legitimately produces no events, and accusing the
+  // page of swallowing input it was never sent would be its own false report.
+  const emit = async () => {
   if (fast) {
     await send(tabId, 'Input.insertText', { text });
   } else {
     for (const ch of [...text]) {
       if (ch === '\n') {
-        await key(tabId, { key: 'Enter' });
+        await dispatchKey(tabId, { key: 'Enter' });
         continue;
       }
       // code and keyCode matter as much as text here: key-filtered numeric
@@ -294,13 +463,32 @@ export async function type(tabId, opts = {}) {
       if (delayMs) await sleep(delayMs);
     }
   }
+  };
+
+  if (text.length) {
+    // insertText raises `input` with no keydown; per-character mode raises
+    // both. Either one proves the page is receiving input.
+    await witnessed(tabId, ['keydown', 'input'], 'typing', emit);
+  } else {
+    await emit();
+  }
 
   if (pressEnter) await key(tabId, { key: 'Enter' });
+
+  // What actually landed. Reported, never asserted: a digit-only field that
+  // rejects the letters of "12ab34" and keeps "1234" is the page working
+  // correctly, and the agent needs to see the difference rather than have it
+  // called a failure. See the v1.0.15 change-log entry.
+  const value = node ? await readValue(tabId, node.backendNodeId) : null;
 
   return {
     typed: text.length > 60 ? `${text.slice(0, 57)}…` : text,
     cleared: clear,
     pressedEnter: pressEnter,
+    ...(node ? { value: truncateValue(value) } : {}),
+    ...(node && String(value ?? '') !== text && !pressEnter
+      ? { note: 'The field does not hold exactly what was typed — the page filtered or reformatted it.' }
+      : {}),
   };
 }
 
@@ -390,8 +578,19 @@ function physicalKey(def) {
   };
 }
 
-/** Named keys and chords: Enter, Tab, Escape, ArrowDown, Control+s … */
-export async function key(tabId, { key: name, modifiers = 0, repeat = 1 } = {}) {
+/**
+ * Named keys and chords: Enter, Tab, Escape, ArrowDown, Control+s …
+ *
+ * Witnessed at this level only. `dispatchKey` is the unwitnessed primitive,
+ * because `type()` and `select()` already run inside their own witness or their
+ * own verification — and arming a nested witness would RESET the counter the
+ * outer one is about to read, turning a working action into a false failure.
+ */
+export async function key(tabId, opts = {}) {
+  return witnessed(tabId, 'keydown', `key "${opts.key}"`, () => dispatchKey(tabId, opts));
+}
+
+async function dispatchKey(tabId, { key: name, modifiers = 0, repeat = 1 } = {}) {
   const def = keyDefinition(name);
 
   for (let i = 0; i < repeat; i++) {
@@ -425,14 +624,16 @@ export async function scroll(tabId, { ref, direction = 'down', amount = 400, x, 
   }
   const deltas = { down: [0, amount], up: [0, -amount], right: [amount, 0], left: [-amount, 0] };
   const [deltaX, deltaY] = deltas[direction] ?? deltas.down;
-  await send(tabId, 'Input.dispatchMouseEvent', {
-    type: 'mouseWheel',
-    x: px,
-    y: py,
-    deltaX,
-    deltaY,
-    pointerType: 'mouse',
-  });
+  await witnessed(tabId, 'wheel', 'scroll', () =>
+    send(tabId, 'Input.dispatchMouseEvent', {
+      type: 'mouseWheel',
+      x: px,
+      y: py,
+      deltaX,
+      deltaY,
+      pointerType: 'mouse',
+    }),
+  );
   return { scrolled: direction, amount };
 }
 
@@ -442,16 +643,18 @@ export async function drag(tabId, { from, to, url, steps = 12 } = {}) {
   const pa = await pointFor(tabId, a.backendNodeId);
   const pb = await pointFor(tabId, b.backendNodeId);
 
-  await mouse(tabId, 'mouseMoved', pa.x, pa.y, { button: 'none' });
-  await mouse(tabId, 'mousePressed', pa.x, pa.y, {});
-  // Intermediate moves matter: HTML5 drag-and-drop and most JS drag libraries
-  // ignore a single jump from source to target.
-  for (let i = 1; i <= steps; i++) {
-    const t = i / steps;
-    await mouse(tabId, 'mouseMoved', pa.x + (pb.x - pa.x) * t, pa.y + (pb.y - pa.y) * t, {});
-    await sleep(16);
-  }
-  await mouse(tabId, 'mouseReleased', pb.x, pb.y, {});
+  await witnessed(tabId, 'mousedown', 'drag', async () => {
+    await mouse(tabId, 'mouseMoved', pa.x, pa.y, { button: 'none' });
+    await mouse(tabId, 'mousePressed', pa.x, pa.y, {});
+    // Intermediate moves matter: HTML5 drag-and-drop and most JS drag libraries
+    // ignore a single jump from source to target.
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      await mouse(tabId, 'mouseMoved', pa.x + (pb.x - pa.x) * t, pa.y + (pb.y - pa.y) * t, {});
+      await sleep(16);
+    }
+    await mouse(tabId, 'mouseReleased', pb.x, pb.y, {});
+  });
   return { dragged: `${a.name || from} -> ${b.name || to}` };
 }
 
@@ -480,12 +683,22 @@ export async function select(tabId, { ref, values, url } = {}) {
        }
        const view = this.ownerDocument.defaultView;
        const proof = { target: this, trusted: false };
-       view.__g9SelectProof = proof;
+       // NOT { once: true }. A once-listener is consumed by the FIRST input or
+       // change event on the page, whoever fired it — an unrelated autosave, a
+       // sibling field, anything — and the real event for this select then
+       // arrives with nobody listening, which reported a working selection as
+       // an untrusted one. Filter by target instead, and detach explicitly.
        const observe = (event) => {
          if (event.target === proof.target && event.isTrusted) proof.trusted = true;
        };
-       view.addEventListener('input', observe, { capture: true, once: true });
-       view.addEventListener('change', observe, { capture: true, once: true });
+       proof.detach = () => {
+         view.removeEventListener('input', observe, true);
+         view.removeEventListener('change', observe, true);
+         if (view.__g9SelectProof === proof) delete view.__g9SelectProof;
+       };
+       view.addEventListener('input', observe, { capture: true });
+       view.addEventListener('change', observe, { capture: true });
+       view.__g9SelectProof = proof;
        return {
          ok: true,
          multiple: this.multiple,
@@ -512,12 +725,16 @@ export async function select(tabId, { ref, values, url } = {}) {
   );
   if (!focused) throw new Error('Could not focus the <select>; no selection keys were sent.');
 
+  // Armed once, around all of the key traffic below, so the verification step
+  // can tell "the page refused the selection" from "the keys never arrived".
+  await armWitness(tabId);
+
   if (!plan.multiple) {
     // These are browser input-pipeline key events. Unlike assigning
     // option.selected and dispatching Event(), the resulting input/change
     // events are trusted and controlled components see a real user gesture.
-    await key(tabId, { key: 'Home' });
-    if (plan.indices[0]) await key(tabId, { key: 'ArrowDown', repeat: plan.indices[0] });
+    await dispatchKey(tabId, { key: 'Home' });
+    if (plan.indices[0]) await dispatchKey(tabId, { key: 'ArrowDown', repeat: plan.indices[0] });
   } else {
     const navModifier = /Mac/i.test(globalThis.navigator?.userAgent ?? '') ? MODIFIERS.Meta : MODIFIERS.Control;
     const desired = new Set(plan.indices);
@@ -528,9 +745,9 @@ export async function select(tabId, { ref, values, url } = {}) {
       if (desired.has(index) !== selected.has(index)) toggles.push(index);
     }
     for (const index of toggles) {
-      await key(tabId, { key: 'Home', modifiers: navModifier });
-      if (index) await key(tabId, { key: 'ArrowDown', modifiers: navModifier, repeat: index });
-      await key(tabId, { key: 'Space', modifiers: navModifier });
+      await dispatchKey(tabId, { key: 'Home', modifiers: navModifier });
+      if (index) await dispatchKey(tabId, { key: 'ArrowDown', modifiers: navModifier, repeat: index });
+      await dispatchKey(tabId, { key: 'Space', modifiers: navModifier });
     }
   }
 
@@ -540,11 +757,13 @@ export async function select(tabId, { ref, values, url } = {}) {
     `function (wantedIndices) {
        const actual = [...this.options].map((o, index) => o.selected ? index : -1).filter(index => index >= 0);
        const proof = this.ownerDocument.defaultView.__g9SelectProof;
+       const trusted = !!proof?.trusted;
+       proof?.detach?.();
        return {
          actual,
          values: [...this.selectedOptions].map(o => o.value),
          labels: [...this.selectedOptions].map(o => o.textContent.trim()),
-         trusted: !!proof?.trusted,
+         trusted,
        };
      }`,
     [plan.indices],
@@ -552,6 +771,12 @@ export async function select(tabId, { ref, values, url } = {}) {
   const actual = [...(verified?.actual ?? [])].sort((a, b) => a - b);
   const expected = [...plan.indices].sort((a, b) => a - b);
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    // "The page intercepted it" was a guess, and for the most common cause it
+    // was the wrong one: a hidden tab receives no input at all, so the keys
+    // were never delivered and the page is blameless. Ask before accusing.
+    if ((await witnessSaw(tabId, 'keydown')) === false) {
+      throw new Error(await explainNoInput(tabId, 'selection'));
+    }
     throw new Error(
       `Selection keys were issued, but selected option indexes are ${JSON.stringify(actual)}; expected ${JSON.stringify(expected)}. ` +
         `The page or platform intercepted the native selection, so success is not being reported.` ,

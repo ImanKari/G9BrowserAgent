@@ -263,4 +263,153 @@ await test('replay, idle, video, and panel regressions retain their invariants',
   assert.doesNotMatch(interact, /dispatchEvent\(new Event/);
 });
 
+// ---------------------------------------------------------- v1.4.0 defects
+
+await test('every dispatching interaction witnesses that the page received it', async () => {
+  const interact = await readFile(new URL('../extension/tools/interact.js', import.meta.url), 'utf8');
+
+  // The bug: a headed Chromium silently discards Input.dispatch*Event for a
+  // page that is not visible, so every action returned a success object for
+  // something that never happened. Each dispatching action must now prove the
+  // page saw a TRUSTED event, and say why when it did not.
+  const bodyOf = (name) => {
+    const start = interact.indexOf('export async function ' + name + '(');
+    assert.ok(start > -1, name + '() is missing');
+    const next = interact.indexOf('\nexport ', start + 10);
+    return interact.slice(start, next === -1 ? undefined : next);
+  };
+  for (const action of ['click', 'hover', 'type', 'key', 'scroll', 'drag']) {
+    assert.match(bodyOf(action), /witnessed\(/, action + '() dispatches without witnessing the result');
+  }
+  assert.match(interact, /document\.visibilityState/);
+  assert.match(interact, /explainNoInput/);
+  assert.match(interact, /isTrusted/);
+
+  // The witness must never be armed inside another witness: arming resets the
+  // counter, so a nested one turns a working action into a false failure.
+  assert.match(interact, /async function dispatchKey\(/);
+  const emitBody = interact.slice(interact.indexOf('const emit = async ()'), interact.indexOf('if (text.length)'));
+  assert.doesNotMatch(emitBody, /await key\(tabId/, 'type() must call the unwitnessed dispatchKey');
+});
+
+await test('video capture never calls CDP inside the serialize chain', async () => {
+  const issues = await readFile(new URL('../extension/tools/issues.js', import.meta.url), 'utf8');
+
+  // cdp.send() -> attach() -> setState()/logActivity(), which are themselves
+  // serialized. Holding the chain across it deadlocks EVERY state write in the
+  // extension, permanently. Reserve under the lock, talk to CDP outside it.
+  /** Slice from an opening brace to its match, so nesting is handled. */
+  const blockAt = (text, openIndex) => {
+    let depth = 0;
+    for (let i = openIndex; i < text.length; i++) {
+      if (text[i] === '{') depth += 1;
+      else if (text[i] === '}' && --depth === 0) return text.slice(openIndex, i + 1);
+    }
+    return text.slice(openIndex);
+  };
+
+  for (const fn of ['startVideo', 'ingestFrame', 'stopVideo']) {
+    const start = issues.indexOf('export async function ' + fn);
+    assert.ok(start > -1, fn + ' is missing');
+    const next = issues.indexOf('\nexport ', start + 10);
+    const body = issues.slice(start, next === -1 ? undefined : next);
+
+    for (const block of [...body.matchAll(/serialize\(async \(\) => (\{)/g)]) {
+      const inside = blockAt(body, block.index + block[0].length - 1);
+      assert.doesNotMatch(inside, /\bsend\(tabId/, fn + '() calls CDP inside serialize() — that deadlocks the write chain');
+    }
+    // …and the CDP call still has to happen somewhere in the function.
+    assert.match(body, /\bsend\(tabId/, fn + '() no longer talks to CDP at all');
+  }
+  assert.match(issues, /Page\.screencastFrameAck/);
+});
+
+await test('connection status does not rewrite durable bridge settings', async () => {
+  const { setState, getState } = await import('../extension/lib/state.js');
+  localData.clear();
+  sessionData.clear();
+
+  // A configured port, as the side panel or the isolated harness would write it.
+  await setState({ bridge: { host: '127.0.0.1', port: 55099, token: '' } });
+  assert.equal(localData.get('settings').bridge.port, 55099);
+
+  // A failed connection is live status, not configuration. It used to mirror
+  // the whole bridge object back to disk, which reverted the seeded port to the
+  // default and made setup/isolated-livetest.mjs impossible to pass.
+  await setState({ bridge: { connected: false, lastError: 'bridge not reachable' } });
+  assert.equal(localData.get('settings').bridge.port, 55099, 'status write clobbered the configured port');
+
+  const state = await getState();
+  assert.equal(state.bridge.connected, false);
+  assert.equal(state.bridge.port, 55099);
+});
+
+await test('snapshot reports the real document title', async () => {
+  axNodes = [
+    { nodeId: '1', role: { value: 'RootWebArea' }, name: { value: 'G9 Agent Test Page' }, childIds: ['2'] },
+    { nodeId: '2', role: { value: 'button' }, name: { value: 'Sign in' }, backendDOMNodeId: 42, childIds: [] },
+  ];
+  const result = await snapshotModule.snapshot(7, {});
+  // It read docInfo.root.title for four versions. CDP's Node type has no such
+  // field, so this was "" on every page ever snapshotted.
+  assert.equal(result.title, 'G9 Agent Test Page');
+});
+
+await test('overflow findings name the cause, not the elements it stretched', async () => {
+  const diagnose = await readFile(new URL('../extension/tools/diagnose.js', import.meta.url), 'utf8');
+  // The old code sliced the first five in DOCUMENT ORDER and called them
+  // "widest offenders" — on the seeded page that named five stretched
+  // ancestors and never the 2400px block responsible.
+  assert.doesNotMatch(diagnose, /Widest offenders/);
+  assert.match(diagnose, /overhang/);
+  assert.match(diagnose, /sort\(\(a, b\) => b\.overhang - a\.overhang\)/);
+});
+
+await test('bounded evidence: HAR bodies and Web Storage cannot exceed the transport', async () => {
+  const [observeSrc, inspectSrc] = await Promise.all([
+    readFile(new URL('../extension/tools/observe.js', import.meta.url), 'utf8'),
+    readFile(new URL('../extension/tools/inspect.js', import.meta.url), 'utf8'),
+  ]);
+  // ws-server.js drops any frame over 64MB AND the connection with it, so an
+  // unbounded result does not truncate — it ends the session.
+  assert.match(observeSrc, /MAX_HAR_BODY_BYTES/);
+  assert.match(observeSrc, /bodiesOmitted/);
+  assert.match(inspectSrc, /MAX_TOTAL/);
+  assert.match(inspectSrc, /truncated/);
+});
+
+await test('a click that navigates is not reported as an unobserved event', async () => {
+  const replay = await readFile(new URL('../extension/tools/replay.js', import.meta.url), 'utf8');
+  // The proof lives on the node; a navigation destroys the node. Reading that
+  // as "the page never saw the click" failed every step meant to navigate.
+  assert.match(replay, /navigatedAway/);
+  assert.match(replay, /unreadable/);
+});
+
+await test('the idle watcher disconnects instead of observing forever', async () => {
+  const navigate = await readFile(new URL('../extension/tools/navigate.js', import.meta.url), 'utf8');
+  // diagnose.memory reads node/listener growth as a leak signal, so a permanent
+  // MutationObserver of our own contaminates the number it is asked to explain.
+  assert.match(navigate, /stopIdleWatch/);
+  assert.match(navigate, /observer\.disconnect\(\)/);
+});
+
+await test('locators refuse a text locator that resolves to a different element', async () => {
+  const { LOCATOR_SOURCE } = await import('../extension/lib/locators.js');
+  // The injected half is a template literal parsed twice; a stray backtick in a
+  // comment silently ends it. Prove it is still complete, valid JavaScript.
+  new Function(LOCATOR_SOURCE);
+  assert.match(LOCATOR_SOURCE, /matches\.length === 1 && matches\[0\] === el/);
+  assert.match(LOCATOR_SOURCE, /rootCache/);
+});
+
+await test('version skew between bridge and extension is reported to the agent', async () => {
+  const server = await readFile(new URL('../bridge/src/server.js', import.meta.url), 'utf8');
+  // Both sides always exchanged a version and neither compared them, while the
+  // documented workflow (reload extension, restart client) drifts them routinely.
+  assert.match(server, /versionSkew/);
+  assert.match(server, /extensionVersion/);
+  assert.match(server, /browser_status/);
+});
+
 console.log('\n' + passed + ' passed, 0 failed\n');

@@ -76,13 +76,30 @@ You do **not** need to start the bridge yourself — the MCP client launches it.
 
 | Mode | Behaviour | Use when |
 |---|---|---|
-| 📌 **Pinned** *(default)* | Locked to one tab. You can browse anywhere else freely and the agent will not follow. | Almost always. |
+| 📌 **Pinned** *(default)* | Locked to one tab. You can browse anywhere else freely and the agent will not follow. *(It can still read that tab while you are away, but not click or type in it — see below.)* | Almost always. |
 | 👁 **Follow** | Acts on whichever tab is focused. | Quick exploration across pages. |
 | 🌐 **Multi** | May open, close, and switch tabs itself. | Multi-tab flows, cross-page journeys. |
 
 Pinned is the default deliberately: without it, switching to your email mid-task would hand the agent your inbox.
 
 The side panel shows every action live, and **Stop** halts the agent instantly.
+
+### The tab has to be visible to be *acted on*
+
+A browser will not deliver clicks or keystrokes to a page it is not showing.
+This is Chromium's rule, not ours: a headed browser **silently discards** CDP
+input for a hidden page — no error, nothing happens. So if the agent needs to
+click or type, the attached tab has to be the one on screen, in a window that is
+neither minimised nor completely covered.
+
+**Reading is unaffected.** Snapshot, inspect, console, network, screenshot and
+diagnose all work perfectly on a background tab, so the agent can keep watching a
+page while you work elsewhere. It just cannot touch it.
+
+Before v1.4.0 this failed silently and the tools reported success anyway — the
+agent would "log in", get `{"typed": "admin"}` back, and carry on against an
+empty form. Now every action verifies that the page actually received the event
+and tells you to bring the tab forward if it did not.
 
 ---
 
@@ -175,7 +192,7 @@ node setup/selftest.mjs
 node setup/extensiontest.mjs
 ```
 
-The first command spawns the real bridge, speaks real MCP over stdio, connects a fake extension over a real WebSocket, and checks 26 behaviours including Origin rejection, keepalive, standalone survival, and surviving a malformed frame. The second loads real extension modules under a deterministic browser-API harness and checks 15 recorder, replay, network, snapshot, emulation, data, visual, video, and panel regressions. **No browser is needed for either.**
+The first command spawns the real bridge, speaks real MCP over stdio, connects a fake extension over a real WebSocket, and checks 26 behaviours including Origin rejection, keepalive, standalone survival, and surviving a malformed frame. The second loads real extension modules under a deterministic browser-API harness and checks 25 recorder, replay, network, snapshot, emulation, data, visual, video, panel, and input-verification regressions. **No browser is needed for either.**
 
 A test page with six deliberate defects is included:
 
@@ -204,8 +221,11 @@ MCP, drive the page, exercise the side panel, and clean up:
 node setup/isolated-livetest.mjs
 ```
 
-Current verified result: **26/26 bridge tests, 15/15 extension regressions, and
-42/42 live checks in isolated Edge**, plus side-panel render and interaction.
+Current verified result: **26/26 bridge tests and 25/25 extension regressions.**
+
+> ⚠️ Both automated suites are headless, and headless cannot reproduce the most
+> serious bug found so far — see **The tab has to be visible** below. Drive a
+> real, headed browser before shipping anything that touches interaction.
 
 ---
 
@@ -249,6 +269,8 @@ This tool has full control of your logged-in browser sessions. Treat it as you w
 | MCP client says **Connection closed / Failed**, but the side panel says **Bridge connected** | Another bridge already holds the port, and the extension connected to *that* one. Usually a second editor window, or a leftover `node` process. Find it with `netstat -ano \| findstr 8765`, stop it, then hit **Reconnect** in your MCP client. The blocked bridge also retries every 5s on its own, and its tool calls now say exactly this. |
 | `EADDRINUSE` | Another bridge is running. Stop it, or change `G9_PORT` in **both** the MCP config and the side panel. The bridge no longer exits on this — it stays up and reports the conflict through the agent. |
 | *"Another debugger is already attached"* | A DevTools window is open on that tab. Close DevTools, or attach a different tab. |
+| *"the page never received it: the attached tab is HIDDEN"* | Working as intended. Chromium does not deliver input to a page it is not showing. Bring that tab to the front, in a window that is not minimised or fully covered, and retry. Reading tools keep working regardless. |
+| Agent says it typed or clicked, but nothing changed | Only possible before v1.4.0 — that version made every action verify delivery. Check `browser_status` for a `versionMismatch`: if the extension and bridge are different versions, reload the extension **and** restart your MCP client. |
 | Agent clicks the wrong thing | Its snapshot is stale. Ask it to take a fresh `browser_snapshot`. |
 | A dialog blocked everything | Handled: the call that opened it now fails immediately naming `browser_dialog`, and later calls fail instantly too rather than each waiting 60s. |
 | Tools hang, then time out | A JavaScript dialog is blocking the page. `browser_dialog` clears it. |

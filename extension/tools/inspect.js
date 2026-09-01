@@ -19,7 +19,11 @@ const api = globalThis.browser ?? globalThis.chrome;
 
 function sameOrigin(a, b) {
   const oa = originOf(a);
-  return oa !== '(unknown)' && oa === originOf(b);
+  // originOf() reports unparseable and opaque origins in parentheses —
+  // "(unknown)", "(about)", "(data)". None of those is an origin, and two
+  // opaque origins are never the same one, so they can never satisfy this
+  // check. Getting that wrong would widen the cookie boundary, not narrow it.
+  return !oa.startsWith('(') && oa === originOf(b);
 }
 
 /** Outer HTML of an element (or the whole document when no ref is given). */
@@ -153,10 +157,41 @@ export async function storage(tabId, { kind = 'all' } = {}) {
   const out = {};
 
   if (kind === 'all' || kind === 'local' || kind === 'session') {
+    // Bounded, because Web Storage is not. Sites routinely park serialised
+    // application state, cached API responses, and whole i18n bundles in
+    // localStorage; an unbounded dump is megabytes into the agent's context in
+    // the best case, and over the transport's 64MB frame limit in the worst.
+    // Values are truncated individually so every KEY is still visible — knowing
+    // what is stored is most of the question, and one value can be read in full
+    // with browser_console action:"evaluate".
     const web = await evaluate(
       tabId,
       `(() => {
-         const dump = (s) => { const o = {}; for (let i = 0; i < s.length; i++) { const k = s.key(i); o[k] = s.getItem(k); } return o; };
+         const MAX_VALUE = 2000;
+         const MAX_TOTAL = 256 * 1024;
+         const dump = (s) => {
+           const out = {};
+           let total = 0;
+           let truncatedKeys = 0;
+           let omittedKeys = 0;
+           for (let i = 0; i < s.length; i++) {
+             const k = s.key(i);
+             const v = s.getItem(k) ?? '';
+             if (total >= MAX_TOTAL) { omittedKeys++; continue; }
+             if (v.length > MAX_VALUE) {
+               out[k] = v.slice(0, MAX_VALUE) + '… [truncated ' + (v.length - MAX_VALUE) + ' chars]';
+               truncatedKeys++;
+             } else {
+               out[k] = v;
+             }
+             total += Math.min(v.length, MAX_VALUE);
+           }
+           if (truncatedKeys || omittedKeys) {
+             out['__g9note'] = truncatedKeys + ' value(s) truncated, ' + omittedKeys +
+               ' key(s) omitted past the 256KB budget. Read one in full with browser_console action:"evaluate".';
+           }
+           return out;
+         };
          try { return { local: dump(localStorage), session: dump(sessionStorage) }; }
          catch (e) { return { error: String(e) }; }
        })()`,

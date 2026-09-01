@@ -104,7 +104,12 @@ export async function snapshot(tabId, { mode = 'a11y', maxNodes = 900, includeTe
 
   const result = {
     url,
-    title: docInfo?.root?.title ?? '',
+    // The document's title comes from the accessibility root, NOT from
+    // `DOM.getDocument`. CDP's Node type has no `title` field, so
+    // `docInfo.root.title` was always undefined and this key was always "" —
+    // on every page, since v1.0.0. The RootWebArea's accessible name IS the
+    // document title, and it is already in hand.
+    title: (root?.name?.value ?? '').trim() || null,
     generation,
     interactiveCount: entries.length,
     emittedNodes: emitted,

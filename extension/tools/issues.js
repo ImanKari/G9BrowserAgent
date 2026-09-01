@@ -218,11 +218,27 @@ export async function updateIssue(id, patch = {}) {
 
 export { getIssue, listIssues, listAttachments };
 
-/** Refuse to remove the owner of an active capture. */
+/**
+ * Refuse to remove the owner of an active capture.
+ *
+ * Finding the screencast keys used to mean `storage.session.get(null)`, which
+ * deserialises EVERYTHING in session storage — every console buffer, every
+ * network buffer, every ref table — to look at a handful of small records.
+ * `getKeys()` reads the names only; it landed in Chrome 130 and the manifest
+ * allows 116, so the old path stays as the fallback.
+ */
+async function screencastSessions() {
+  let keys;
+  if (typeof api.storage.session.getKeys === 'function') {
+    keys = (await api.storage.session.getKeys()).filter((k) => k.startsWith('g9:screencast:'));
+    if (!keys.length) return [];
+  }
+  const stored = await api.storage.session.get(keys ?? null);
+  return Object.entries(stored).filter(([key]) => key.startsWith('g9:screencast:'));
+}
+
 export async function deleteIssue(id) {
-  const all = await api.storage.session.get(null);
-  const active = Object.entries(all).find(([key, value]) =>
-    key.startsWith('g9:screencast:') && value?.issueId === id);
+  const active = (await screencastSessions()).find(([, value]) => value?.issueId === id);
   if (active) {
     throw new Error('Stop the active video capture before deleting this issue.');
   }
@@ -286,8 +302,26 @@ const VIDEO_KEY = (tabId) => `g9:screencast:${tabId}`;
 const MAX_FRAMES = 600;
 const MAX_VIDEO_BYTES = 40 * 1024 * 1024;
 
+/**
+ * Why no CDP call happens inside `serialize()` here.
+ *
+ * `state.js` states the rule: a function running inside `serialize()` must
+ * never call another serialized function, or it deadlocks. `cdp.send()` looks
+ * like it is not one — and it is not, until the tab is missing from
+ * `attachedTabs`, at which point `attach()` calls `setState()` and
+ * `logActivity()`, both serialized. The chain then waits on itself FOREVER, and
+ * because it is one shared chain the damage is not local: every later state
+ * write, activity entry, console line and network record in the whole extension
+ * hangs behind it until the service worker is restarted.
+ *
+ * It is one click away. The "browser is being debugged" infobar has a Cancel
+ * button; pressing it fires onDetach, which removes the tab from
+ * `attachedTabs`, and the next video_start deadlocks the extension.
+ *
+ * So the pattern throughout this section is: reserve state under the lock,
+ * talk to CDP outside it, then commit or roll back under the lock again.
+ */
 export async function startVideo(tabId, { id: issueId, quality = 60, everyNthFrame = 2 } = {}) {
-  return serialize(async () => {
   if (!Number.isInteger(quality) || quality < 0 || quality > 100) {
     throw new Error('Video quality must be an integer from 0 to 100.');
   }
@@ -297,91 +331,134 @@ export async function startVideo(tabId, { id: issueId, quality = 60, everyNthFra
   if (!issueId || !(await getIssue(issueId, { withAttachments: false }))) {
     throw new Error('Video recording needs an existing issue id so frames cannot be orphaned or attached to the wrong defect.');
   }
+
   const key = VIDEO_KEY(tabId);
-  const existing = (await api.storage.session.get(key))[key];
-  if (existing) {
-    throw new Error('This tab is already recording video for issue "' + existing.issueId + '". Stop that capture first.');
-  }
-  const sessionId = 'video_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-  const session = { sessionId, issueId, frames: 0, bytes: 0, startedAt: Date.now(), truncated: false };
-  await api.storage.session.set({ [key]: session });
+
+  // Claim the slot atomically, so two concurrent starts cannot both proceed.
+  const session = await serialize(async () => {
+    const existing = (await api.storage.session.get(key))[key];
+    if (existing) {
+      throw new Error('This tab is already recording video for issue "' + existing.issueId + '". Stop that capture first.');
+    }
+    const claimed = {
+      sessionId: 'video_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+      issueId,
+      frames: 0,
+      bytes: 0,
+      startedAt: Date.now(),
+      truncated: false,
+      // Frames arriving before the screencast is confirmed have nothing to be
+      // attributed to yet; ingestFrame skips them rather than guessing.
+      starting: true,
+    };
+    await api.storage.session.set({ [key]: claimed });
+    return claimed;
+  });
+
   try {
     await send(tabId, 'Page.startScreencast', {
       format: 'jpeg', quality, maxWidth: 1280, maxHeight: 800, everyNthFrame,
     });
   } catch (err) {
-    await api.storage.session.remove(key);
+    await serialize(async () => api.storage.session.remove(key));
     throw err;
   }
-    return { recording: true, tabId, issueId, startedAt: session.startedAt };
+
+  await serialize(async () => {
+    const current = (await api.storage.session.get(key))[key];
+    // Only promote the session we actually claimed: a stop that raced us must
+    // not be resurrected here.
+    if (current?.sessionId !== session.sessionId) return;
+    delete current.starting;
+    await api.storage.session.set({ [key]: current });
   });
+
+  return { recording: true, tabId, issueId, startedAt: session.startedAt };
 }
 
 /** Called from sw.js for every Page.screencastFrame event. */
 export async function ingestFrame(tabId, params) {
-  return serialize(async () => {
-    const key = VIDEO_KEY(tabId);
-    try {
+  const key = VIDEO_KEY(tabId);
+  try {
+    // Reserve this frame's slot under the lock, write the bytes outside it, then
+    // commit the counters under the lock. The reservation is what keeps two
+    // frames from claiming the same seq without holding the chain across an
+    // IndexedDB write — and the ack (below) is a CDP call, which must never
+    // happen inside serialize(). See the note on startVideo.
+    const reserved = await serialize(async () => {
       const session = (await api.storage.session.get(key))[key];
-      if (!session) return;
+      if (!session || session.starting) return null;
       const approximateBytes = Math.ceil(params.data.length * 0.75);
       if (session.frames >= MAX_FRAMES || session.bytes + approximateBytes > MAX_VIDEO_BYTES) {
         session.truncated = true;
         await api.storage.session.set({ [key]: session });
-        return;
+        return null;
       }
+      const seq = session.frames;
+      session.frames += 1;
+      await api.storage.session.set({ [key]: session });
+      return { sessionId: session.sessionId, seq, startedAt: session.startedAt };
+    });
+
+    if (reserved) {
       const size = await putVideoFrame({
-        sessionId: session.sessionId,
-        seq: session.frames,
-        at: Date.now() - session.startedAt,
+        sessionId: reserved.sessionId,
+        seq: reserved.seq,
+        at: Date.now() - reserved.startedAt,
         dataBase64: params.data,
       });
-      session.frames += 1;
-      session.bytes += size;
-      await api.storage.session.set({ [key]: session });
-    } finally {
-      // Ack only after the frame is durable. Chromium naturally back-pressures
-      // the stream, and no asynchronous read/modify/write can drop a frame.
-      await send(tabId, 'Page.screencastFrameAck', { sessionId: params.sessionId }).catch(() => {});
+      await serialize(async () => {
+        const session = (await api.storage.session.get(key))[key];
+        if (session?.sessionId !== reserved.sessionId) return;
+        session.bytes += size;
+        await api.storage.session.set({ [key]: session });
+      });
     }
-  });
+  } finally {
+    // Ack only after the frame is durable. Chromium naturally back-pressures
+    // the stream, and no asynchronous read/modify/write can drop a frame.
+    await send(tabId, 'Page.screencastFrameAck', { sessionId: params.sessionId }).catch(() => {});
+  }
 }
 
 export async function stopVideo(tabId, issueId) {
-  return serialize(async () => {
-    const key = VIDEO_KEY(tabId);
-    const session = (await api.storage.session.get(key))[key];
-    if (!session) {
-      await send(tabId, 'Page.stopScreencast').catch(() => {});
-      return { frames: 0, attached: false };
-    }
-    if (issueId && issueId !== session.issueId) {
-      throw new Error('This video belongs to issue "' + session.issueId + '", not "' + issueId + '". Nothing was re-attributed.');
-    }
+  const key = VIDEO_KEY(tabId);
+
+  // Read and claim under the lock; everything after it — the CDP stop, the
+  // IndexedDB reads, the attachment write — happens outside, per startVideo.
+  const session = await serialize(async () => {
+    const current = (await api.storage.session.get(key))[key];
+    if (!current) return null;
     // Ownership is checked before stopping. A typo in the issue id must not
     // silently stop a valid capture and leave an unfinishable session behind.
-    await send(tabId, 'Page.stopScreencast').catch(() => {});
-    const frames = await listVideoFrames(session.sessionId);
-    if (!frames.length) {
-      await api.storage.session.remove(key);
-      await deleteVideoFrames(session.sessionId);
-      return { frames: 0, attached: false, issueId: session.issueId };
+    if (issueId && issueId !== current.issueId) {
+      throw new Error('This video belongs to issue "' + current.issueId + '", not "' + issueId + '". Nothing was re-attributed.');
     }
-    const durationMs = frames[frames.length - 1].at;
-    const payload = JSON.stringify({
-      format: 'g9-frames/1', durationMs,
-      frames: frames.map(({ data, at }) => ({ data, at })),
-    });
-    const attachment = await putAttachment({
-      owner: session.issueId,
-      name: 'capture-' + Date.now() + '.g9frames.json',
-      mime: 'application/json', kind: 'video', bytes: new TextEncoder().encode(payload),
-      meta: { frames: frames.length, durationMs, truncated: session.truncated },
-    });
     await api.storage.session.remove(key);
-    await deleteVideoFrames(session.sessionId);
-    return { frames: frames.length, attached: true, issueId: session.issueId, truncated: session.truncated, attachment };
+    return current;
   });
+
+  await send(tabId, 'Page.stopScreencast').catch(() => {});
+  if (!session) return { frames: 0, attached: false };
+
+  const frames = await listVideoFrames(session.sessionId);
+  if (!frames.length) {
+    await deleteVideoFrames(session.sessionId);
+    return { frames: 0, attached: false, issueId: session.issueId };
+  }
+  const durationMs = frames[frames.length - 1].at;
+  const payload = JSON.stringify({
+    format: 'g9-frames/1', durationMs,
+    frames: frames.map(({ data, at }) => ({ data, at })),
+  });
+  const attachment = await putAttachment({
+    owner: session.issueId,
+    name: 'capture-' + Date.now() + '.g9frames.json',
+    mime: 'application/json', kind: 'video', bytes: new TextEncoder().encode(payload),
+    meta: { frames: frames.length, durationMs, truncated: session.truncated },
+  });
+  await deleteVideoFrames(session.sessionId);
+  return { frames: frames.length, attached: true, issueId: session.issueId, truncated: session.truncated, attachment };
 }
 
 export async function videoStatus(tabId) {

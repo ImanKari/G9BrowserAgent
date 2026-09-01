@@ -364,6 +364,17 @@ export async function networkDetail(tabId, { requestId, includeBody = true }) {
   return detail;
 }
 
+/**
+ * Total response-body budget for one HAR export.
+ *
+ * Per-request the cap is MAX_BODY_BYTES, and 400 buffered requests at 512KB
+ * each is 200MB in a single result. The transport gives up long before that:
+ * `ws-server.js` drops any frame over 64MB, and it drops the CONNECTION with
+ * it, so one over-eager HAR export took the whole browser session down. A HAR
+ * is evidence, and evidence that cannot be delivered is worth nothing.
+ */
+const MAX_HAR_BODY_BYTES = 8 * 1024 * 1024;
+
 /** Standards-shaped HAR 1.2 export from the captured request buffer. */
 export async function har(tabId, { filter, includeBody = false } = {}) {
   const key = NETWORK_KEY(tabId);
@@ -375,10 +386,17 @@ export async function har(tabId, { filter, includeBody = false } = {}) {
   }
   records.sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0));
   const entries = [];
+  let bodyBudget = MAX_HAR_BODY_BYTES;
+  let bodiesOmitted = 0;
   for (const record of records) {
     let detail = record;
     if (includeBody && !record.failed) {
-      detail = await networkDetail(tabId, { requestId: record.requestId, includeBody: true });
+      if (bodyBudget > 0) {
+        detail = await networkDetail(tabId, { requestId: record.requestId, includeBody: true });
+        bodyBudget -= String(detail.body ?? '').length + String(detail.postData ?? '').length;
+      } else {
+        bodiesOmitted += 1;
+      }
     }
     const duration = record.finishedAt && record.startedAt
       ? Math.max(0, Math.round((record.finishedAt - record.startedAt) * 1000))
@@ -428,6 +446,15 @@ export async function har(tabId, { filter, includeBody = false } = {}) {
     },
     entryCount: entries.length,
     includesBodies: includeBody,
+    ...(bodiesOmitted
+      ? {
+          bodiesOmitted,
+          note:
+            `Response bodies were included until the ${MAX_HAR_BODY_BYTES / 1048576}MB budget ran out; ` +
+            `${bodiesOmitted} later entries carry headers and timing only. Narrow it with \`filter\`, or ` +
+            `fetch a specific body with browser_network requestId:"…".`,
+        }
+      : {}),
   };
 }
 

@@ -460,10 +460,29 @@ async function verifyEventProof(tabId, backendNodeId, eventName) {
     tabId,
     backendNodeId,
     `function () { const p = this.__g9ReplayProof; return p && ({ seen: p.seen, trusted: p.trusted }); }`,
-  ).catch(() => null);
-  if (!proof?.seen || !proof?.trusted) {
-    throw new Error(`The ${eventName} command was issued, but the recorded target did not observe the expected trusted event.`);
+  ).catch((err) => ({ unreadable: String(err?.message ?? err) }));
+
+  if (proof?.seen && proof?.trusted) return;
+
+  // The node being gone is the SUCCESS case for a link or a submit button.
+  //
+  // The handler runs synchronously on the click; the navigation it starts then
+  // tears the document down, and by the time we ask, the node we were holding
+  // no longer exists. Reading that as "the page never saw the click" failed
+  // every recorded step whose whole purpose was to navigate — and did it
+  // non-deterministically, because a slow server left the old document alive
+  // long enough to answer.
+  if (proof?.unreadable) {
+    const navigated = await evaluate(tabId, 'document.readyState').catch(() => null);
+    if (navigated !== null) {
+      return { navigatedAway: true, note: `The ${eventName} started a navigation, which replaced the page.` };
+    }
+    throw new Error(
+      `The ${eventName} command was issued, but the result could not be read back: ${proof.unreadable}.`,
+    );
   }
+
+  throw new Error(`The ${eventName} command was issued, but the recorded target did not observe the expected trusted event.`);
 }
 
 /** backendNodeId of whatever `locate` stored in window.__g9target. */
