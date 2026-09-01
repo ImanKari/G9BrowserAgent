@@ -2,7 +2,7 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v1.5.1 — 14 context-efficient browser tools; bridge/MCP 26/26, extension regressions 25/25, isolated real-Edge 41/41 (+1 skipped) over three consecutive runs. **Interaction verifies that the page actually received the event, and a stuck CDP command reports itself instead of timing out the call** — see §4.3a and the v1.4.0/v1.5.1 entries.
+**Status:** v1.5.2 — 14 context-efficient browser tools; bridge/MCP 26/26, extension regressions 25/25, isolated real-Edge **42/42** over three consecutive runs. **Interaction verifies that the page actually received the event, and a stuck CDP command reports itself instead of timing out the call** — see §4.3a and the v1.4.0/v1.5.1 entries.
 **Created:** 2026-08-31
 
 ---
@@ -601,6 +601,41 @@ Two grouped tools, keeping §4.4's discipline (12 → 14, not 12 → 30):
 ## 9. Change log
 
 Newest first. **Every change to this repo gets an entry.**
+
+### 2026-09-01 — v1.5.2, the witness accused a working action
+
+Found by using the tool for something real: posting a birthday carousel to
+Instagram. The caption typed perfectly and `browser_interact` reported a
+failure — the exact inverse of the v1.4.0 bug, and just as damaging, because an
+agent that believes a working action failed will RETRY it, and retrying a click
+is how you post something twice.
+
+The witness kept its state in the page across two separate `evaluate` calls:
+one installed a counting listener, a later one read the counter. That quietly
+assumes both calls land in the same JavaScript execution context. On a
+single-page application they do not — Instagram swaps context as its router
+moves, so `window.__g9witness` was simply GONE by the time the count was read,
+and a zero count was read as "the page received nothing".
+
+It is now armed and read as ONE promise: `Runtime.evaluate` with
+`awaitPromise:false` returns the moment the listener is installed (everything
+before the first await is synchronous, so the page is definitely listening
+before the caller dispatches), and `Runtime.awaitPromise` collects the answer
+afterwards. If the context disappears in between, that rejects and resolves to
+`null` — "cannot tell" — and null never accuses anyone. Typing additionally
+passes a `verify` callback that compares the field's value before and after: an
+observable outcome outranks any opinion about events.
+
+**The harness was hiding its own test tab.** Waking an idle MV3 worker opens a
+page from the extension's own origin, which pushed the test page into the
+background — the one state where a browser stops delivering input. Every
+interaction check then failed with a perfectly correct explanation about a
+hidden tab, and the harness was testing its own side effect. It now brings the
+test page back to the front, which is also what a real user's tab looks like.
+
+**With that fixed, the live suite is fully green for the first time: 42 passed,
+0 failed, over three consecutive runs — including the tab-video frame spool,
+which needed a tab that is actually being painted and so had been skipped.**
 
 ### 2026-09-01 — v1.5.1, the live test runs, and three browser stalls it found
 

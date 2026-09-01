@@ -293,6 +293,18 @@ await test('every dispatching interaction witnesses that the page received it', 
   assert.match(interact, /explainNoInput/);
   assert.match(interact, /isTrusted/);
 
+  // Arm and read in ONE evaluate. Two calls assume both land in the same
+  // execution context, and a single-page app swaps context as its router
+  // moves — the listener is gone by the time the counter is read, and a
+  // caption that typed perfectly gets reported as a failure. That inverse
+  // failure is as damaging as the original: retrying a click posts twice.
+  assert.match(interact, /function watchForInput/);
+  assert.doesNotMatch(interact, /armWitness|witnessSaw|__g9witness/,
+    'the witness must not keep state between separate evaluate calls');
+  // An observable outcome outranks any opinion about events.
+  assert.match(interact, /verify && \(await verify\(\)/);
+  assert.match(interact, /readValue\(tabId, node\.backendNodeId\)\) !== before/);
+
   // The witness must never be armed inside another witness: arming resets the
   // counter, so a nested one turns a working action into a false failure.
   assert.match(interact, /async function dispatchKey\(/);

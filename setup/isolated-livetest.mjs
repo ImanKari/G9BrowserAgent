@@ -244,6 +244,27 @@ try {
   );
   if (!pinned?.tabId) throw new Error('Could not pin the isolated test tab.');
 
+  // Put the test page back in front before driving it.
+  //
+  // Waking the service worker opens a page from the extension's own origin,
+  // which pushes the test tab into the background — and a background tab is
+  // exactly the state where a browser stops delivering input (§4.3a). The
+  // harness would then be testing its own side effect: every interaction check
+  // failing with a correct explanation about a hidden tab. A real user has the
+  // tab they are working on in front of them, so the harness should too.
+  await browserControl.send('Target.activateTarget', { targetId: (await browserControl.send('Target.getTargets'))
+    .targetInfos.find((t) => t.type === 'page' && t.url.startsWith(TEST_URL))?.targetId }).catch(() => {});
+  await delay(400);
+  const visibility = await activeWorker.evaluate(
+    `(async () => {
+       const [tab] = await chrome.tabs.query({ url: 'http://127.0.0.1:5199/*' });
+       if (tab) await chrome.tabs.update(tab.id, { active: true });
+       return tab ? tab.id : null;
+     })()`,
+  ).catch(() => null);
+  if (visibility == null) console.warn('Could not re-activate the test tab; interaction checks may fail as hidden.');
+  await delay(500);
+
   const exitCode = await new Promise((resolve) => live.once('exit', (code) => resolve(code ?? 1)));
 
   const panelTarget = await openTarget(

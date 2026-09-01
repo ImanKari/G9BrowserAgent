@@ -61,41 +61,82 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  */
 // 'wheel' is deliberately absent: Chromium may handle it entirely on the
 // compositor, so its absence proves nothing. scroll() checks its outcome.
-const WITNESS_EVENTS = ['mousedown', 'mousemove', 'keydown', 'input'];
-
-const WITNESS_SOURCE = `(() => {
-  if (!window.__g9witness) {
-    const w = { seen: {} };
-    for (const type of ${JSON.stringify(WITNESS_EVENTS)}) {
-      window.addEventListener(type, (e) => {
-        if (e.isTrusted) w.seen[type] = (w.seen[type] || 0) + 1;
-      }, { capture: true, passive: true });
-    }
-    window.__g9witness = w;
-  }
-  window.__g9witness.seen = {};
-  return true;
-})()`;
-
-/** Install (once) and reset the witness. Never fatal — a miss must not block. */
-async function armWitness(tabId) {
-  await evaluate(tabId, WITNESS_SOURCE).catch(() => {});
-}
-
 /**
- * Did the page see a trusted event of this kind since the last arm?
- * `null` means we could not tell, which is treated as "do not accuse".
+ * Watch, from inside the page, for a trusted event of the given kinds.
+ *
+ * Armed and read in a SINGLE evaluate, deliberately. The first version
+ * installed a counting listener in one call and read the counter in a later
+ * one, which quietly assumes both land in the same JavaScript execution
+ * context. On a single-page application they do not: Instagram swaps context
+ * as its router moves, so the listener that was watching is simply GONE by the
+ * time the counter is read, the count is zero, and a caption that typed
+ * perfectly is reported as a failure.
+ *
+ * That is the exact inverse of the bug this mechanism exists to prevent, and it
+ * is just as damaging — an agent that believes a working action failed will
+ * retry it, and retrying a click is how you post something twice.
+ *
+ * A promise that lives entirely inside one evaluate cannot be split that way.
+ * If the context does disappear the evaluate rejects, which resolves to `null`
+ * — "cannot tell" — and `null` never accuses anyone.
+ *
+ * Do NOT await the returned promise before dispatching. Arm, act, then await.
  */
-async function witnessSaw(tabId, types) {
-  const list = Array.isArray(types) ? types : [types];
-  return evaluate(
-    tabId,
-    `(() => {
-       const w = window.__g9witness;
-       if (!w) return null;
-       return ${JSON.stringify(list)}.some((t) => (w.seen[t] || 0) > 0);
-     })()`,
-  ).catch(() => null);
+async function watchForInput(tabId, types, timeoutMs) {
+  // Two CDP calls, and the split is the whole point.
+  //
+  // `Runtime.evaluate` with awaitPromise:false returns as soon as the
+  // expression has RUN — which is after addEventListener, because everything
+  // up to the first await is synchronous. So by the time this function
+  // returns, the page is definitely listening, and the caller can dispatch
+  // knowing nothing can slip past.
+  //
+  // Awaiting the promise itself here instead would be a race the other way:
+  // the listener would go in, but the caller could not act until the event it
+  // is waiting for had already happened.
+  let handle;
+  try {
+    handle = await send(tabId, 'Runtime.evaluate', {
+      expression: `new Promise((resolve) => {
+         const kinds = ${JSON.stringify(types)};
+         let settled = false;
+         const finish = (value) => {
+           if (settled) return;
+           settled = true;
+           for (const kind of kinds) removeEventListener(kind, onEvent, true);
+           resolve(value);
+         };
+         // Only trusted events count: a page firing its own synthetic input
+         // must not be able to vouch for us.
+         const onEvent = (event) => { if (event.isTrusted) finish(true); };
+         for (const kind of kinds) addEventListener(kind, onEvent, { capture: true, passive: true });
+         setTimeout(() => finish(false), ${timeoutMs});
+       })`,
+      awaitPromise: false,
+      returnByValue: false,
+    });
+  } catch {
+    return () => Promise.resolve(null); // cannot watch: never accuse
+  }
+
+  const promiseObjectId = handle?.result?.objectId;
+  if (!promiseObjectId) return () => Promise.resolve(null);
+
+  return async () => {
+    try {
+      const settled = await send(tabId, 'Runtime.awaitPromise', {
+        promiseObjectId,
+        returnByValue: true,
+      });
+      return settled?.result?.value ?? null;
+    } catch {
+      // The context went away — a navigation, a router move. We genuinely
+      // cannot tell what the page saw, and `null` never accuses anyone.
+      return null;
+    } finally {
+      send(tabId, 'Runtime.releaseObject', { objectId: promiseObjectId }).catch(() => {});
+    }
+  };
 }
 
 /**
@@ -129,35 +170,35 @@ async function explainNoInput(tabId, action) {
 }
 
 /**
- * Dispatch through the witness: arm, act, then prove the page saw it.
+ * How long the page waits for the event before giving up.
  *
- * The check polls briefly rather than looking once, to absorb the small delay
- * between a dispatch resolving and the event reaching a listener under load.
- * Clicks and keys are delivered to the renderer before their CDP command
- * resolves, so in practice they satisfy this on the first look and pay nothing
- * for the loop; the wait only runs out when the input genuinely never arrived,
- * which is the case this exists to catch.
- *
- * Keep the budget small. An earlier version used this for scroll as well, and
- * during an active screencast the extra round trips competed with frame
- * ingestion until the whole tool call timed out — a verification that breaks
- * the thing it verifies is worse than none. Scroll now checks its own outcome.
+ * Generous, because the wait runs INSIDE the page and in parallel with the
+ * action — a successful dispatch resolves it immediately and pays nothing, so
+ * the only thing a larger budget costs is a slower answer in the failing case.
+ * A long `Input.insertText` on a heavy editor needs more than a few hundred
+ * milliseconds to come back through the event loop.
  */
-const WITNESS_TIMEOUT_MS = 400;
+const WITNESS_TIMEOUT_MS = 1500;
 
-async function witnessed(tabId, expect, action, run) {
-  await armWitness(tabId);
+/**
+ * Dispatch, then require proof the page saw it.
+ *
+ * `verify` is an optional last word: some actions can observe their own OUTCOME
+ * directly, and an outcome outranks any opinion about events. Typing uses it,
+ * because a field that now holds the text is not open to argument.
+ */
+async function witnessed(tabId, expect, action, run, verify = null) {
+  const kinds = Array.isArray(expect) ? expect : [expect];
+  // Awaited: this only installs the listener, it does not wait for the event.
+  const settled = await watchForInput(tabId, kinds, WITNESS_TIMEOUT_MS);
   const result = await run();
+  const saw = await settled();
 
-  const deadline = Date.now() + WITNESS_TIMEOUT_MS;
-  for (;;) {
-    const saw = await witnessSaw(tabId, expect);
-    if (saw !== false) return result; // true, or null meaning "cannot tell"
-    if (Date.now() >= deadline) break;
-    await sleep(40);
+  if (saw === false) {
+    if (verify && (await verify().catch(() => false))) return result;
+    throw new Error(await explainNoInput(tabId, action));
   }
-
-  throw new Error(await explainNoInput(tabId, action));
+  return result; // true, or null meaning "cannot tell" — never accuse on null
 }
 
 /** Scroll into view, then return viewport-relative interaction coordinates. */
@@ -493,7 +534,19 @@ export async function type(tabId, opts = {}) {
   if (text.length) {
     // insertText raises `input` with no keydown; per-character mode raises
     // both. Either one proves the page is receiving input.
-    await witnessed(tabId, ['keydown', 'input'], 'typing', emit);
+    //
+    // The `verify` arm is what makes this safe on a single-page app: if the
+    // field's contents changed, the typing plainly landed, whatever the event
+    // watcher managed to observe. Reading the value is cheap and it is the
+    // outcome the caller actually cares about.
+    const before = node ? await readValue(tabId, node.backendNodeId) : null;
+    await witnessed(
+      tabId,
+      ['keydown', 'input'],
+      'typing',
+      emit,
+      node ? async () => (await readValue(tabId, node.backendNodeId)) !== before : null,
+    );
   } else {
     await emit();
   }
@@ -801,9 +854,9 @@ export async function select(tabId, { ref, values, url } = {}) {
   );
   if (!focused) throw new Error('Could not focus the <select>; no selection keys were sent.');
 
-  // Armed once, around all of the key traffic below, so the verification step
-  // can tell "the page refused the selection" from "the keys never arrived".
-  await armWitness(tabId);
+  // Watch the whole run of selection keys, so the verification below can tell
+  // "the page refused the selection" from "the keys never arrived at all".
+  const sawKeys = await watchForInput(tabId, ['keydown'], WITNESS_TIMEOUT_MS);
 
   if (!plan.multiple) {
     // These are browser input-pipeline key events. Unlike assigning
@@ -850,7 +903,7 @@ export async function select(tabId, { ref, values, url } = {}) {
     // "The page intercepted it" was a guess, and for the most common cause it
     // was the wrong one: a hidden tab receives no input at all, so the keys
     // were never delivered and the page is blameless. Ask before accusing.
-    if ((await witnessSaw(tabId, 'keydown')) === false) {
+    if ((await sawKeys()) === false) {
       throw new Error(await explainNoInput(tabId, 'selection'));
     }
     throw new Error(

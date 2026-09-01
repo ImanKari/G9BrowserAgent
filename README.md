@@ -226,12 +226,11 @@ node setup/isolated-livetest.mjs
 ```
 
 Current verified result: **26/26 bridge tests, 25/25 extension regressions, and
-41 passed / 0 failed / 1 skipped in isolated Edge** over three consecutive runs.
+42/42 in isolated Edge** over three consecutive runs.
 
 > ⚠️ All three suites are headless, and headless cannot reproduce the most
 > serious bug found so far — see **The tab has to be visible** below. Drive a
-> real, headed browser before shipping anything that touches interaction. The
-> one skipped check is tab video, which needs a browser that actually paints.
+> real, headed browser before shipping anything that touches interaction.
 
 ---
 
