@@ -288,6 +288,10 @@ await test('every dispatching interaction witnesses that the page received it', 
   assert.doesNotMatch(scrollBody, /witnessed\(/, 'scroll must not witness a wheel event');
   assert.match(scrollBody, /scrollX, y: scrollY/);
   assert.match(scrollBody, /moved/);
+  // Wheel scrolling settles on the compositor AFTER the command resolves, so
+  // reading the position once reported a working scroll as `moved: false`.
+  assert.match(scrollBody, /settleBy/);
+  assert.match(scrollBody, /if \(moved \|\| Date\.now\(\) >= settleBy\) break;/);
   assert.doesNotMatch(interact, /WITNESS_EVENTS = \[[^\]]*'wheel'/);
   assert.match(interact, /document\.visibilityState/);
   assert.match(interact, /explainNoInput/);

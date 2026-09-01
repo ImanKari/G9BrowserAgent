@@ -2,7 +2,7 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v1.5.2 — 14 context-efficient browser tools; bridge/MCP 26/26, extension regressions 25/25, isolated real-Edge **42/42** over three consecutive runs. **Interaction verifies that the page actually received the event, and a stuck CDP command reports itself instead of timing out the call** — see §4.3a and the v1.4.0/v1.5.1 entries.
+**Status:** v1.5.3 — 14 context-efficient browser tools; bridge/MCP 26/26, extension regressions 25/25, isolated real-Edge **42/42** over three consecutive runs. **Interaction verifies that the page actually received the event, and a stuck CDP command reports itself instead of timing out the call** — see §4.3a and the v1.4.0/v1.5.1 entries.
 **Created:** 2026-08-31
 
 ---
@@ -601,6 +601,28 @@ Two grouped tools, keeping §4.4's discipline (12 → 14, not 12 → 30):
 ## 9. Change log
 
 Newest first. **Every change to this repo gets an entry.**
+
+### 2026-09-01 — v1.5.3, the scroll that worked and said it had not
+
+Asked "so is it done, are there no bugs left?" — and the honest way to answer
+that is to go and look. A scroll on a real Instagram profile came back
+`moved: false` with a note guessing about inner containers. The page had in
+fact scrolled: `scrollY` was already 300 by the time anyone checked.
+
+Wheel scrolling is handled on the COMPOSITOR thread. The CDP command resolves
+once the event is queued, and the scroll position updates afterwards, so
+reading it once immediately catches the old value. `scroll()` now polls for
+movement with a 600ms budget and returns as soon as it sees any.
+
+This is the same family of lie the whole 1.4/1.5 line exists to remove, pointing
+the other way: not "it says it worked when it did not", but "it says it failed
+when it did". Both send the agent somewhere untrue.
+
+Worth recording WHY no suite caught it: `livetest.mjs` only exercises the plain
+scroll path when it is NOT on the seeded test page, so in the isolated run that
+branch never executes, and the one scroll that does run (during the video
+capture) never asserts that the page moved. A check that never runs is not
+coverage.
 
 ### 2026-09-01 — v1.5.2, the witness accused a working action
 

@@ -733,12 +733,26 @@ export async function scroll(tabId, { ref, direction = 'down', amount = 400, x, 
     via = 'programmatic';
   }
 
-  const after = await evaluate(
-    tabId,
-    '({ x: scrollX, y: scrollY, hidden: document.hidden })',
-  ).catch(() => null);
-
-  const moved = !!before && !!after && (after.x !== before.x || after.y !== before.y);
+  // Poll for the movement instead of reading it once.
+  //
+  // Wheel scrolling is handled on the COMPOSITOR thread: the CDP command
+  // resolves as soon as the event is queued, and the scroll position updates
+  // afterwards. Reading immediately therefore caught the old position and
+  // reported `moved: false` for a scroll that worked perfectly — on Instagram,
+  // scrollY was already 300 by the time anyone looked. Same family of lie as
+  // the one this whole release exists to remove, just pointing the other way.
+  let after = null;
+  let moved = false;
+  const settleBy = Date.now() + 600;
+  for (;;) {
+    after = await evaluate(
+      tabId,
+      '({ x: scrollX, y: scrollY, hidden: document.hidden })',
+    ).catch(() => null);
+    moved = !!before && !!after && (after.x !== before.x || after.y !== before.y);
+    if (moved || Date.now() >= settleBy) break;
+    await sleep(60);
+  }
 
   // Only accuse the browser when the page also could not have received it.
   // A page already at its edge legitimately does not move.
