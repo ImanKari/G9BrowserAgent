@@ -175,7 +175,7 @@ export const TOOLS = [
         text: str('For action:"wait" — wait until this text appears in the page.'),
         selector: str('For action:"wait" — wait until this CSS selector matches.'),
         gone: bool('For action:"wait" — invert: wait until it DISAPPEARS. Useful for spinners.', false),
-        idle: bool('For action:"wait" — wait until the DOM stops mutating for 500ms.', false),
+        idle: bool('For action:"wait" — wait until both the DOM is mutation-free for 500ms and no captured network request remains in flight.', false),
         waitUntil: str('Load condition for goto/reload.', {
           enum: ['load', 'domcontentloaded', 'idle'],
           default: 'load',
@@ -255,6 +255,7 @@ export const TOOLS = [
           anyOf: [{ type: 'string' }, { type: 'number' }],
         },
         includeBody: bool('When fetching one request, include the response body.', true),
+        format: str('Return a HAR 1.2 document instead of the compact request list.', { enum: ['list', 'har'], default: 'list' }),
         limit: num('Max requests to list.', { default: 50 }),
         clear: bool('Empty the buffer instead of reading.', false),
         tabId: num('Only in multi-tab mode.'),
@@ -266,17 +267,18 @@ export const TOOLS = [
   {
     name: 'browser_diagnose',
     description:
-      'FASTEST PATH TO "what is wrong with this page". what:"health" correlates console errors, failed requests, broken images, unlabelled form controls, horizontal overflow, and duplicate IDs into one ranked list with page metrics. what:"performance" records a trace and returns a timing breakdown.',
+      'FASTEST PATH TO "what is wrong with this page". health correlates actionable defects; performance records a trace and may reload; vitals measures Core Web Vitals and long tasks; memory samples heap, DOM nodes, documents and listeners for leak signals.',
     inputSchema: {
       type: 'object',
       properties: {
-        what: str('Which analysis.', { enum: ['health', 'performance'], default: 'health' }),
+        what: str('Which analysis.', { enum: ['health', 'performance', 'vitals', 'memory'], default: 'health' }),
         durationMs: num('For what:"performance" — how long to record.', { default: 4000 }),
         reload: bool('For what:"performance" — reload the page so the trace covers page load.', false),
+        samples: num('For what:"memory" — 2..10 metric samples.', { default: 3 }),
+        intervalMs: num('For what:"memory" — delay between samples.', { default: 500 }),
         tabId: num('Only in multi-tab mode.'),
       },
     },
-    annotations: { readOnlyHint: true },
   },
 
   {
@@ -314,6 +316,7 @@ export const TOOLS = [
         colorScheme: str('Emulate prefers-color-scheme.', { enum: ['light', 'dark'] }),
         locale: str('BCP-47 locale, e.g. "fa-IR".'),
         timezone: str('IANA timezone, e.g. "Asia/Tehran".'),
+        reloadIfNeeded: bool('For mobile devices — reload once only if Chromium keeps the old desktop layout viewport.', true),
         reset: bool('Clear all emulation overrides.', false),
         tabId: num('Only in multi-tab mode.'),
       },
@@ -342,10 +345,10 @@ export const TOOLS = [
       type: 'object',
       properties: {
         action: str('What to do. "list" and "get" work with no tab attached.', {
-          enum: ['list', 'get', 'status', 'start', 'stop', 'replay', 'delete', 'export', 'import'],
+          enum: ['list', 'get', 'status', 'start', 'stop', 'replay', 'assert', 'update', 'delete', 'export', 'import', 'export_test'],
           default: 'list',
         }),
-        id: str('Recording id, for get / replay / delete.'),
+        id: str('Recording id, for get/replay/assert/update/delete/export_test.'),
         name: str('For action:"start" — a name for the recording.'),
         timing: str(
           'For action:"replay". "recorded" (DEFAULT) reproduces the pace the person worked at — a ten-second session replayed in 200ms never lets a debounce fire or an animation finish, so it is not the same test. "adaptive" waits only as long as each step needs. "fast" barely waits. Every mode gates each step on the page being loaded and the element being visible, enabled, and no longer moving — the recorded gap is a budget for that wait, never a blind sleep.',
@@ -353,6 +356,27 @@ export const TOOLS = [
         ),
         dryRun: bool('For action:"replay" — resolve every element and change nothing. The cheapest way to find out whether a recording has rotted.', false),
         stopOnFailure: bool('For action:"replay" — stop at the first failing step.', true),
+        variables: { type: 'object', description: 'For replay — data values substituted into {{name}} placeholders.' },
+        assertion: str('For action:"assert".', { enum: ['url', 'text', 'visible', 'value', 'state', 'network', 'console', 'a11y', 'screenshot'] }),
+        expected: { description: 'Expected string, number, boolean, or value for an assertion.' },
+        operator: str('Text comparison.', { enum: ['exact', 'contains', 'absent', 'matches'] }),
+        contains: str('Substring used by text, network, and console assertions.'),
+        absent: bool('Assert that matching text or console entries are absent.', false),
+        state: str('Element state.', { enum: ['checked', 'selected', 'disabled', 'enabled', 'expanded', 'pressed', 'focused', 'readonly'] }),
+        status: { description: 'Network assertion status filter.', anyOf: [{ type: 'string' }, { type: 'number' }] },
+        method: str('Network assertion HTTP method.'),
+        minCount: num('Minimum matching network/console entries.'),
+        maxCount: num('Maximum matching network/console entries.'),
+        maxViolations: num('Maximum actionable accessibility findings.', { default: 0 }),
+        threshold: num('Screenshot baseline difference threshold 0..1.', { default: 0.08 }),
+        level: { description: 'Console assertion level(s).', anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
+        ref: str('Element ref for visible/value/state assertions.'),
+        selector: str('CSS alternative to ref for element assertions.'),
+        suite: str('Suite name for action:"update".'),
+        folder: str('Folder path for action:"update".'),
+        tags: { type: 'array', items: { type: 'string' }, description: 'Recording tags for action:"update".' },
+        environment: { type: 'object', description: 'Named environment profile with an optional variables object.' },
+        parameters: { type: 'object', description: 'Data parameter defaults or descriptors.' },
         includeAttachments: bool('For action:"export" — inline attachment bytes.', true),
         mode: str('For action:"import".', { enum: ['merge', 'replace'], default: 'merge' }),
         bundle: { type: 'object', description: 'For action:"import" — a bundle from action:"export".' },
@@ -368,8 +392,8 @@ export const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        action: str('What to do. Everything except create/screenshot/video works with no tab attached.', {
-          enum: ['list', 'get', 'create', 'update', 'delete', 'screenshot', 'attach', 'attachment', 'video_start', 'video_stop'],
+        action: str('What to do. list/get/update/delete/attach/attachment work with no tab attached; page evidence and video actions need one.', {
+          enum: ['list', 'get', 'create', 'update', 'delete', 'screenshot', 'attach', 'attachment', 'video_start', 'video_stop', 'video_status'],
           default: 'list',
         }),
         id: str('Issue id.'),
@@ -388,6 +412,8 @@ export const TOOLS = [
         dataBase64: str('For action:"attach" — the file bytes, base64.'),
         attachmentId: str('For action:"attachment" — which attachment to read.'),
         includeBytes: bool('For action:"attachment" — include the bytes, not just metadata.', true),
+        quality: num('For video_start — JPEG frame quality 0..100.', { default: 60, minimum: 0, maximum: 100 }),
+        everyNthFrame: num('For video_start — capture every Nth screencast frame.', { default: 2, minimum: 1 }),
         tabId: num('Only in multi-tab mode.'),
       },
     },
@@ -400,11 +426,14 @@ export const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        action: str('What to do.', { enum: ['list', 'open', 'close', 'focus', 'pin', 'unpin'], default: 'list' }),
-        url: str('For action:"open".'),
+        action: str('What to do.', { enum: ['list', 'open', 'close', 'focus', 'pin', 'unpin', 'wait'], default: 'list' }),
+        url: str('For action:"open", or a URL substring for action:"wait".'),
         tabId: num('For close/focus/pin.'),
         focus: bool('For action:"open" — bring the new tab to the front.', false),
         pin: bool('For action:"open" — attach and pin the new tab immediately.', false),
+        title: str('For action:"wait" — title substring for a popup/new tab.'),
+        openerTabId: num('For action:"wait" — require this opener tab id.'),
+        timeoutMs: num('For action:"wait" — deadline.', { default: 15000 }),
       },
     },
   },

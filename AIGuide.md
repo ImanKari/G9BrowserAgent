@@ -2,7 +2,7 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v1.2.3 — self-tested (26/26) and live-tested against real Edge. Twelve browser tools verified live, plus recorder, replay and issue capture. The v1.2 features are freshly built and only partly exercised — see the change log for what is proven and what is not.
+**Status:** v1.3.0 — 14 context-efficient browser tools; bridge/MCP 26/26, extension regressions 15/15, isolated real-Edge live test 42/42, plus side-panel render and interaction.
 **Created:** 2026-08-31
 
 ---
@@ -60,7 +60,8 @@ g9-browser-agent/
 │   │   ├── cdp.js                chrome.debugger wrapper — single choke point
 │   │   ├── refs.js               element ref registry (eN -> backendNodeId)
 │   │   ├── locators.js           MULTI-LOCATOR element identity (recorder core)
-│   │   ├── store.js              recordings + issues; local for records, IDB for blobs
+│   │   ├── visual.js             compact screenshot fingerprint + comparison
+│   │   ├── store.js              recordings + issues; local for records, IDB for blobs/frames
 │   │   └── transport.js          WebSocket client, keepalive, backoff
 │   ├── tools/
 │   │   ├── tabs.js               tab list + TARGET RESOLUTION (safety boundary)
@@ -74,6 +75,7 @@ g9-browser-agent/
 │   │   ├── emulate.js            device/network emulation, JS dialogs
 │   │   ├── record.js             session recording over a CDP binding
 │   │   ├── replay.js             replay engine + failure diagnosis
+│   │   ├── qa.js                 assertions, metadata, data, Playwright export
 │   │   └── issues.js             defect capture, context, attachments
 │   └── panel/                    side panel — the trust surface
 │       ├── panel.html/.css/.js
@@ -87,9 +89,11 @@ g9-browser-agent/
 │       ├── ws-server.js          minimal RFC 6455 server
 │       └── tools.js              tool SCHEMAS + agent INSTRUCTIONS
 ├── setup/
-│   ├── install.ps1               Node check, self-test, mcp.json generation
+│   ├── install.ps1               Node check, both non-browser tests, config generation
 │   ├── selftest.mjs              26 assertions, no browser needed
+│   ├── extensiontest.mjs         15 browser-module regression tests
 │   ├── livetest.mjs              live CDP test, needs a real attached tab
+│   ├── isolated-livetest.mjs     temporary profile + extension/MCP/panel live run
 │   ├── serve.mjs                 static server for the test page
 │   ├── testpage.html             6 deliberate defects
 │   ├── postcard.html             1080² card, rendered and posted by the agent
@@ -151,7 +155,7 @@ Specific care taken:
 
 ### 4.4 Tool definitions are re-sent on every request
 
-**Consequence:** 12 grouped tools, not ~50 flat ones.
+**Consequence:** 14 grouped tools, not ~50 flat ones.
 
 Each takes an `action` or `what` discriminator. The full toolset is roughly 3k tokens. For comparison, `chrome-devtools-mcp` spends around 18k tokens on definitions alone. Adding a flat tool per capability would be the easy choice and the wrong one.
 
@@ -174,6 +178,17 @@ The general shape: a permission check that lives at one layer only is a permissi
 ## 5. Security model
 
 Read this before changing `ws-server.js`.
+
+**Project threat-model decision (2026-09-01): this is trusted-local QA tooling.**
+The localhost bridge, browser profile, installed extensions, and local users are
+inside the current deployment trust boundary. Work whose primary purpose is to
+defend against a malicious local extension/user/process, bridge impersonation,
+local secret theft, or hostile local software is intentionally out of scope.
+Do not repeatedly propose redaction, encrypted evidence, mandatory pairing,
+exact extension-ID allowlists, takeover authorization, or another local
+permission system unless the deployment model changes. Existing safeguards
+below stay because they work and support user control; this decision does not
+claim they make localhost a hostile-environment security boundary.
 
 | Layer | Mechanism |
 |---|---|
@@ -254,6 +269,7 @@ Ring buffers in `chrome.storage.session`, keyed per tab, written through the sha
 - Console text is truncated at **write** time, not only on read. Untruncated text still has to fit in storage first.
 - On a quota rejection the buffer drops to its newest quarter and **records that it did**, inside the data the agent reads. Silently shrinking would be worse than the overflow.
 - `clearBuffers(tabId)` is called when a tab closes, when it is unpinned, and — via `navigate.js → resetPageState()` — before every `goto`, `reload`, and history move. Nothing else reclaims these keys. Buffers that survive a navigation do not just leak; they make `browser_diagnose` report the previous page's defects as the current page's (v1.0.9).
+- A request remains `pending` after response headers arrive and until `loadingFinished`/`loadingFailed`. `browser_network format:"har"` converts the same bounded evidence into HAR 1.2 rather than maintaining a second truth.
 
 ### `extension/tools/snapshot.js` — perception
 
@@ -262,7 +278,7 @@ Accessibility tree, pruned hard. An unpruned tree from a real app is tens of tho
 - `INTERACTIVE` roles → always kept, always get a ref
 - `STRUCTURAL` roles → kept only when they carry a name (an unnamed `role=group` tells the agent nothing)
 - `NOISE` roles (`generic`, `none`, `StaticText`, …) → dropped, children still walked
-- Default cap 900 nodes; `truncated: true` when hit
+- Default cap 900 **emitted lines**, including structural nodes without refs; `truncated: true` when hit
 
 `mode:"a11y+text"` additionally extracts visible text through injected page code. **Every regex escape in injected code must be doubled** (`\s`, not `s`): the string is a template literal, so it is parsed twice, and a single escape is silently swallowed rather than rejected. Self-test #13 enforces it.
 
@@ -272,7 +288,9 @@ The recorder core. Generates several independent locators per element and
 resolves them back, from ONE injected source so the two halves can never
 disagree about what a locator means. Ranking, escaping rules and the reasoning
 are in §8b. Verified against a real DOM before anything was built on it — the
-names it produces match `browser_snapshot` exactly.
+names it produces match `browser_snapshot` exactly. Discovery walks open Shadow
+roots and same-origin iframe documents; closed Shadow DOM and cross-origin
+frames are browser boundaries and remain deliberately unavailable.
 
 ### `extension/tools/record.js` — capture, and normalisation
 
@@ -281,7 +299,9 @@ collapsing five `input` events into one `type` step, dropping the click pair a
 browser fires before `dblclick`, discarding scrolls the browser performed to
 reveal a focused field. That split is deliberate — normalisation is where the
 interesting mistakes live, and out here it is ordinary code that can be tested
-without a browser.
+without a browser. Raw writes are serialized and capped at 5,000 events, with a
+warning in the saved flow if the cap was reached. Native select mechanics are
+collapsed to the final selected values rather than replaying incidental keys.
 
 ### `extension/tools/replay.js` — and the failure message
 
@@ -290,21 +310,40 @@ and the element to be visible, enabled, and no longer moving; each of those
 fails with its own sentence. When no locator matches, the fingerprint answers
 in human terms and names the nearest element. Recorded gaps are a budget for
 waiting, never a blind sleep — but the default mode also honours the pace the
-person worked at, because a flow that only works slowly is a finding.
+person worked at, because a flow that only works slowly is a finding. Replay
+sets a durable per-tab replay guard, acts on recorded key/drag targets, and
+verifies click trust/target, typed value, selected options, and checkbox state
+before calling a step successful. Assertion steps are executed through
+`tools/qa.js`; each run is retained (last 20) and recent mixed outcomes produce
+a flaky signal rather than being hidden.
+
+### `extension/tools/qa.js` — observable tests
+
+Creates and executes URL, text, visibility, value/state, network, console,
+accessibility, and screenshot-baseline assertions. Variables substitute
+recursively from parameter defaults, environment variables, and replay inputs.
+Recording metadata supplies suite/folder/tags without creating more MCP tools.
+Visual baselines use a compact 32×32 luminance fingerprint: useful for a stable
+regression signal without persisting full duplicate screenshots. The same
+record can be exported as readable Playwright JavaScript.
 
 ### `extension/tools/issues.js` — evidence, captured at the moment
 
 The title and body are the part a QA could write anywhere. The value is what
 they would otherwise have to remember to collect and a developer always has to
 ask for afterwards — and it is only true while the bug is on screen. Written
-out as real attachments, because an agent filing a ticket uploads files.
+out as real attachments, because an agent filing a ticket uploads files. Video
+frames are written individually to IndexedDB before acknowledgement; session
+storage carries only bounded metadata. Closing/detaching the tab cancels and
+reclaims the spool, and an issue owning an active capture cannot be deleted.
+
 ### `extension/tools/diagnose.js` — the opinionated one
 
 `health` deliberately does the correlation the agent would otherwise do across six tools: console errors, failed requests, broken images, unlabelled form controls, nameless interactive elements, horizontal overflow (with the widest offenders named), duplicate IDs, plus load metrics — merged and ranked by severity.
 
 The report is capped **per severity** (30/20/10), never by a flat slice of the ranked list. A flat cut looks equivalent and is not: a page with 60+ console errors pushes every warning past it, and the warnings are where the a11y, layout, and duplicate-ID findings live — the only ones this tool produces that no other tool does. `omittedFindings` reports what was cut. Finding messages are capped at 300 chars; a finding is a pointer, and the full text is in `browser_console`.
 
-`performance` records a trace and returns **aggregates only**. A raw Chrome trace is megabytes and useless in a context window.
+`performance` records a trace and returns **aggregates only**. A raw Chrome trace is megabytes and useless in a context window. `vitals` collects buffered LCP, CLS, INP, paint/navigation timing, and long tasks. `memory` samples CDP Performance metrics and reports directional heap/DOM/listener/document growth as a leak signal — not proof of a leak. Health also checks document language, image alternatives, iframe titles, and heading-level jumps.
 
 ---
 
@@ -314,15 +353,17 @@ The report is capped **per severity** (30/20/10), never by a flat slice of the r
 
 Covers: MCP handshake, instruction delivery, tool count and schema validity, resources, missing-extension error quality, **Origin rejection**, end-to-end routing, argument fidelity, keepalive, image content blocks, error propagation, disconnect handling, stdout hygiene, standalone survival, and **oversized-frame survival**.
 
-**What the self-test structurally cannot cover:** everything on the extension side. It fakes the extension, so the mode boundary, the halt guard, and the capture buffers are invisible to it. Those were verified by loading the real extension modules under a stubbed `chrome` API — a useful technique worth repeating, because it also catches missing exports and circular imports that `node --check` cannot see.
+`node setup/extensiontest.mjs` — 15 assertions, also **no browser required**. It loads real extension modules under a deterministic `chrome` stub and exercises recorder normalisation/races/caps, replay guarding, concurrent network lifecycles and pending semantics, snapshot bounds, modern/fallback emulation, failure reporting, follow targeting, recursive data, visual comparison, schema annotations, and durable video/panel invariants. This catches missing exports and circular imports that `node --check` cannot see.
 
-> The tool-count assertion (`=== 12`) will fail when you add a tool. That is intentional — it forces this file and the README to be updated too.
+> The tool-count assertion (`=== 14`) will fail when you add a tool. That is intentional — it forces this file and the README to be updated too.
 
 `setup/testpage.html` + `serve.mjs` provide six deliberate defects: 2 load-time console errors + 1 uncaught `ReferenceError`, a 404 request, a broken image, an unlabelled password input, 2400px horizontal overflow, a duplicate `id`, plus a transparent overlay covering a button (obstruction detection) and a working login form (`admin` / `g9secret`).
 
 `serve.mjs` also exposes **`/hang`** (accepts the connection, never answers) and **`/slow?ms=`**. `/hang` is the only reliable way to observe `browser_network status:"pending"`: an agent round trip outlasts any latency `browser_emulate` can apply, so throttled requests are always finished by the time the query arrives.
 
-**Live-verified as of v1.0.9** (Edge, `setup/testpage.html`): all six seeded defects found by `browser_diagnose health`; obstruction detection refuses the covered button and passes four normal controls; the pinned-mode boundary refuses `browser_tabs action:"pin"`; `browser_status` discloses other tabs by origin only.
+`node setup/isolated-livetest.mjs` launches a temporary clean Edge/Chrome profile, loads the unpacked extension, starts private bridge/debug ports, drives the seeded page through real MCP/CDP, opens the side panel at 420×900, interacts with its Automation tab, captures it, and closes/cleans the profile. It is the preferred reproducible live workflow; `livetest.mjs` remains useful against a manually attached browser.
+
+**Live-verified on 2026-09-01** (isolated real Edge): 42/42 checks plus panel render/interaction. Proven live: MCP handshake and discovery, extension transport, snapshot/refs, inspect, console/evaluate, network detail/HAR, health/vitals/memory, all seeded defects, trusted typing/click/select, obstruction refusal, recorder/assertion pass and deliberate failure, run history, Playwright export, stale-ref error, screenshot, IndexedDB video, exact responsive emulation/reset, and connection stability.
 
 **Still untested:** trusted-event dispatch against real frameworks (React/Vue controlled inputs, masked fields), service-worker survival over hours, Chrome parity — every live run so far has been Edge. See §8.
 
@@ -332,28 +373,27 @@ Covers: MCP handshake, instruction delivery, tool count and schema validity, res
 
 ## 8. Known gaps and deliberate omissions
 
-**Not yet verified against a live browser.** The self-test proves the plumbing, not the CDP calls. First live run should exercise: attach, snapshot, click, type, console read, network body, diagnose.
-
 **Deliberately absent:**
 
 | Not built | Why |
 |---|---|
-| `Fetch` domain request interception | Powerful (mock responses, inject headers, bypass basic auth) but a large surface. Add when a real need appears. |
-| Heap snapshots / memory profiling | `HeapProfiler` availability to extensions is unconfirmed. Verify before promising it. |
+| `Fetch` request interception/fault injection | Powerful, but reliable lifecycle ownership, teardown, auth, redirects, and streaming are a larger subsystem. HAR/assertions landed first; do not add a superficial mock switch. |
+| Heap snapshots | Lightweight repeated CDP Performance metrics now provide leak signals. Full snapshots are large and `HeapProfiler` extension behavior remains unverified. |
 | Lighthouse audits | Not a CDP domain; would need to be bundled separately. |
 | Multi-browser (Firefox/Safari) | Would mean WebDriver BiDi and a different architecture. Out of scope. |
-| Scenario record/replay | Natural next feature — the activity log already contains the data. |
 | Content scripts | Not needed so far; `Runtime.evaluate` covers it. This is why `scripting` is unused. |
-| Cross-tab coordination in multi mode | Mode exists and works, but has no orchestration helpers. |
+| Download-file verification | Would require restoring `downloads` permission and a bounded result model. Navigation downloads can still be initiated, but their filesystem result is not asserted. |
+| Direct Jira/Azure/Linear integrations | The AI agent consumes structured issues/evidence and files them. Vendor-specific clients would duplicate that ability. |
+| Additional local-adversary hardening | Explicitly outside the trusted-local deployment model in §5 unless that model changes. |
 
 **Known rough edges:**
 
 - SPA route changes that alter the **path** invalidate all refs, even when the DOM is largely unchanged. Strict on purpose — the error is actionable. Hash-only routing (`#/orders/42`) keeps its refs, because `resolveRef` compares URLs with the hash stripped; both behaviours were verified live in v1.0.13.
 - The extension asks for seven permissions and uses all seven. `scripting` and `downloads` were dropped in v1.1.0 — re-add either as one manifest line if a feature needs it.
-- Edge's `sidePanel` support is assumed (Edge 114+) but unverified. `bootstrap()` catches the failure, so the extension still loads if absent.
+- Edge's `sidePanel` render and Automation-tab interaction are covered by the isolated live test. Chrome parity remains unverified in this environment.
 - The `diagnose.performance` trace listener attaches a raw `chrome.debugger.onEvent` handler each call. Correct, but would need care if traces ever run concurrently.
 - Capture buffers are pruned by `loaderId` on every committed navigation (v1.0.12), so agent navigation, click-driven navigation, and the internal reload in `diagnose.performance` all behave identically. Same-document `pushState` raises a different event and deliberately keeps its buffers. *(This replaces the limitation recorded in v1.0.9, which is now fixed.)*
-- Under mobile emulation on a horizontally overflowing page, `innerWidth` reports the zoomed-out layout width while `clientWidth` / `screen.width` / `visualViewport.width` / `outerWidth` are all correct. Chromium behaviour, not ours — but an agent that checks only `innerWidth` will misread the viewport.
+- Some Chromium/headless combinations expose a 4x layout viewport in full mobile mode even after a reload. `browser_emulate` verifies `innerWidth/innerHeight`; if Chromium does this, it returns an explicit compatibility warning and uses an exact responsive viewport while retaining mobile UA, DPR and touch. Text autosizing/overlay-scrollbar emulation are absent in that fallback.
 - `browser_network` with a `requestId` can return up to 512KB of response body plus full headers. That is a lot of context for one tool result. No limit is imposed beyond the cap because truncating a body the agent asked for by id is worse than a large answer — but it is worth watching.
 - `type()` chooses Ctrl+A or Cmd+A from the service worker's `navigator.userAgent`. Correct on both, but untested on macOS since nothing here runs there.
 - `install.ps1 -WriteProjectConfig` writes `.mcp.json` at the repo root, which is where Claude Code looks. Opt-in rather than default because it puts a file in the user's project; without it, step B is still a manual copy.
@@ -362,7 +402,7 @@ Covers: MCP handshake, instruction delivery, tool count and schema validity, res
 
 ## 8b. Recorder, replay, and issue capture
 
-Designed 2026-08-31, built and shipped in v1.2.0-v1.2.3. Written down before the
+Designed 2026-08-31, built in v1.2 and expanded in the current QA phase. Written down before the
 code existed because the decisions are the expensive part; the implementation
 followed from them, and the record of *why* is worth more than the diff.
 
@@ -418,6 +458,17 @@ recorded tests flaky. The gap is treated as a budget while the step waits on a
 real condition (element present, stable, actionable). Modes: `recorded`,
 `fast`, `adaptive`.
 
+### Assertions, data, and results
+
+An action step is not a test unless its result is observable. Assertions are
+ordinary recording steps, so backup/import, replay ordering, stop-on-failure,
+history, and Playwright export all share one model. Element assertions persist
+the same multi-locator target as actions. Screenshot baselines store a compact
+fingerprint and normalized threshold, not an opaque pass bit. Parameter defaults
+merge with environment variables and per-run values; unresolved placeholders
+fail with the missing name. The last 20 summaries are retained, and mixed recent
+pass/fail results are exposed as a flaky signal.
+
 ### Recording transport
 
 `Page.addScriptToEvaluateOnNewDocument` + `Runtime.addBinding`, over the
@@ -437,6 +488,12 @@ thing in this extension that deliberately touches disk, which §4.1 otherwise
 forbids, and the exception is the point: a test or a bug report that dies with
 the browser session is not one.
 
+Screencast frames themselves also live in IndexedDB, one record per frame and
+session. Acknowledgement happens only after that record is durable, which gives
+Chromium back-pressure and removes asynchronous read/modify/write loss. Session
+storage contains only frame count/bytes/owner metadata; a 40MB recording can no
+longer exceed its practical quota before it is turned into an attachment.
+
 Backup and restore is a single self-contained JSON bundle with attachments
 inlined — a manifest plus a folder is the kind of backup that arrives
 incomplete. Import defaults to `merge`; `replace` has to be asked for by name.
@@ -449,27 +506,89 @@ permission, and has no source-picker in the way of a QA who is trying to report
 a bug. Audio and full-desktop capture would cost an offscreen document, a
 microphone prompt, and a picker dialog on every recording.
 
-### Filing to Jira / Azure DevOps happens in the bridge
+### External task systems stay agent-owned
 
-Tokens (`G9_JIRA_TOKEN`, `G9_AZDO_TOKEN`) live beside `G9_TOKEN` as bridge
-environment variables and **never enter the browser**. The extension holds
-`<all_urls>` and a full CDP channel; if it is ever compromised, issue-tracker
-credentials should not be part of the blast radius.
-
-This does not violate §6's "the bridge is deliberately dumb". That rule is about
-*browser* logic — the bridge must not decide anything about a page, because only
-the extension can see one. Posting JSON to a REST API is not browser logic, and
-the bridge is the only side with a network stack and a secret store.
+The browser tool produces portable structured issues, attachments, HAR, and
+reproducible test steps. The connected AI agent normally already has the right
+GitHub/Jira/Azure/Linear connector and should file from that evidence. No
+vendor-specific tracker client or token handling is implemented here; keeping
+it out preserves the zero-dependency bridge and avoids duplicating the agent.
 
 ### MCP surface
 
 Two grouped tools, keeping §4.4's discipline (12 → 14, not 12 → 30):
-`browser_recording` (list/get/start/stop/replay/delete/export/import) and
-`browser_issue` (list/get/create/update/delete/attach/file/export).
+`browser_recording` (list/get/start/stop/replay/assert/update/delete/export/import/export_test) and
+`browser_issue` (list/get/create/update/delete/screenshot/attach/attachment/video start/stop/status).
 
 ## 9. Change log
 
 Newest first. **Every change to this repo gets an entry.**
+
+### 2026-09-01 — v1.3.0, QA tests must prove outcomes
+
+One deliberately combined phase: repair every non-security correctness finding
+from the review, add the QA capabilities that fit the grouped-tool architecture,
+and prove the result through the real browser boundary. No new MCP tools were
+needed; the surface remains 14.
+
+**Replay now earns a pass.** Drag executes the recorded source-to-target drag;
+keys focus their recorded target; checkbox/select/type outcomes are read back;
+click-like actions validate a trusted event on the intended element. Stability
+includes element identity, so a replacement node at the same rectangle is not
+called stable. The existing replay marker is now set in both session state and
+the page for the entire run, including navigation, so an armed recorder cannot
+record its own replay. Recursive `{{data}}` substitution fails by name when a
+value is missing. Every run persists a summary and the recent window exposes a
+mixed-result flaky signal.
+
+**Recorder and select correctness.** Raw event ingestion is serialized, capped
+at 5,000, and records truncation. `composedPath()` captures open-shadow targets.
+Native select interactions now use CDP keyboard input, verify final selection,
+and require trusted input/change when state changed; normalisation discards the
+incidental click/key/change machinery and keeps the final values. Intermediate
+checkbox/radio/file input events are likewise not mistaken for text entry.
+
+**Evidence is bounded and durable.** Snapshot `maxNodes` now caps every emitted
+line, not only ref-bearing nodes. Network pending status lasts until finish/fail,
+idle waits require both zero filtered pending requests and 500ms DOM quiet, and
+HAR 1.2 exports the captured lifecycle. Impossible history moves no longer erase
+refs/evidence. Video frames spool one-by-one to an IndexedDB v2 store before
+acknowledgement; session storage holds only metadata. Capture ownership prevents
+mis-attribution/deletion and detach/tab-close cleanup reclaims incomplete spools.
+Panel recording/issue refresh failures are visible, issue Back flushes edits,
+and delete no longer races a pending save.
+
+**Targeting and emulation.** Follow mode returns no target for an unattachable
+active page instead of silently controlling the pinned tab. Locators traverse
+open Shadow DOM and same-origin iframe documents. Multi mode can wait for a
+popup/tab by URL, title, or opener. Network emulation uses
+`Network.emulateNetworkConditionsByRule` + `Network.overrideNetworkState`, with
+the deprecated command only as a capability fallback. Device/locale/timezone
+failures are no longer swallowed; reset reports partial failure. Viewport
+application is verified and, for Chromium's headless 4x mobile-layout anomaly,
+returns an explicit compatibility warning while preserving exact responsive
+dimensions plus mobile UA/DPR/touch.
+
+**QA features.** Recording assertions now cover URL, text, visibility,
+value/state, network, console presence/absence, accessibility findings, and a
+32×32 normalized visual baseline. Recordings carry suite/folder/tags,
+environment variables, data defaults, last-20 run history, and a flaky signal;
+they export readable Playwright JavaScript. Diagnose gained actionable language,
+image-alt, iframe-title and heading-order checks, buffered Web Vitals/long tasks,
+and repeated memory/DOM/listener/document metrics for leak signals.
+
+**Tests and operations.** `extensiontest.mjs` adds 15 extension-side regressions,
+including concurrency and deliberate failure cases. `isolated-livetest.mjs`
+launches an unpacked extension in a disposable real Edge profile and proves the
+actual MCP/WS/CDP/panel chain. `install.ps1` and package scripts run both
+non-browser suites. Final pre-release results: bridge/MCP **26/26**, extension
+**15/15**, isolated Edge **42/42**, plus panel render and Automation interaction.
+
+**Scope recorded, not rediscovered.** §5 now makes the trusted-local deployment
+decision explicit. Request interception/fault injection and download verification
+were not added superficially; their reliable lifecycle/permission work remains
+documented in §8. Direct tracker integrations remain agent-owned and generic
+evidence/export is the integration surface.
 
 ### 2026-09-01 — v1.2.3, upload only worked on pages nobody had styled
 

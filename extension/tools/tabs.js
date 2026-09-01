@@ -174,7 +174,10 @@ export function originOf(url = '') {
 export async function currentTargetId(state) {
   if (state.mode !== 'follow') return state.pinnedTabId;
   const active = await getActiveTab().catch(() => null);
-  return active && isAttachable(active.url) ? active.id : state.pinnedTabId;
+  // Follow mode never falls back to the old pin. resolveTarget() refuses an
+  // internal active page, so status/listing must report the same absence rather
+  // than orienting the agent to a tab its next call will not control.
+  return active && isAttachable(active.url) ? active.id : null;
 }
 
 /**
@@ -206,6 +209,7 @@ export async function listTabs() {
       attached: state.attachedTabs.includes(t.id),
       attachable: isAttachable(t.url),
       status: t.status,
+      openerTabId: t.openerTabId ?? null,
     };
     return full || t.id === targetId
       ? { ...base, title: t.title, url: t.url }
@@ -229,4 +233,23 @@ export async function focusTab(tabId) {
   const tab = await api.tabs.get(tabId);
   await api.windows.update(tab.windowId, { focused: true });
   return tab;
+}
+
+/** Wait for a popup/window/tab matching observable browser metadata. */
+export async function waitForTab({ url, title, openerTabId, timeoutMs = 15_000 } = {}) {
+  const deadline = Date.now() + Math.max(100, Number(timeoutMs) || 15_000);
+  while (Date.now() < deadline) {
+    const tabs = await api.tabs.query({});
+    const match = tabs.find((tab) =>
+      (url == null || String(tab.url ?? '').includes(url)) &&
+      (title == null || String(tab.title ?? '').includes(title)) &&
+      (openerTabId == null || tab.openerTabId === openerTabId)
+    );
+    if (match) return { tabId: match.id, url: match.url, title: match.title, openerTabId: match.openerTabId ?? null };
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error('Timed out waiting for a tab' +
+    (url ? ' with URL containing "' + url + '"' : '') +
+    (title ? ' titled "' + title + '"' : '') +
+    (openerTabId != null ? ' opened by tab ' + openerTabId : '') + '.');
 }

@@ -32,8 +32,9 @@ import { serialize } from './state.js';
 const api = globalThis.browser ?? globalThis.chrome;
 
 const DB_NAME = 'g9-attachments';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const BLOB_STORE = 'blobs';
+const FRAME_STORE = 'video-frames';
 
 /** Index keys in storage.local. The records themselves are one key each. */
 const RECORDING_INDEX = 'g9:recordings';
@@ -64,6 +65,10 @@ function openDb() {
         // Deleting an issue must be able to find its attachments without
         // scanning every blob in the database.
         store.createIndex('owner', 'owner', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(FRAME_STORE)) {
+        const frames = db.createObjectStore(FRAME_STORE, { keyPath: 'id' });
+        frames.createIndex('session', 'sessionId', { unique: false });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -99,6 +104,20 @@ function tx(mode, fn) {
 
 /** Wrap an IDBRequest so tx() resolves with its result once the tx commits. */
 const req = (r) => ({ __req: r });
+
+function frameTx(mode, fn) {
+  return openDb().then(
+    (db) => new Promise((resolve, reject) => {
+      const transaction = db.transaction(FRAME_STORE, mode);
+      const store = transaction.objectStore(FRAME_STORE);
+      let result;
+      try { result = fn(store); } catch (err) { reject(err); return; }
+      transaction.oncomplete = () => resolve(result && result.__req ? result.__req.result : result);
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    }),
+  );
+}
 
 // ---------------------------------------------------------------- attachments
 
@@ -174,6 +193,41 @@ function blobToBase64(blob) {
   });
 }
 
+// ---------------------------------------------------------- video frame spool
+
+/** One screencast frame in IndexedDB; session storage holds metadata only. */
+export async function putVideoFrame({ sessionId, seq, at, dataBase64 }) {
+  const bytes = base64ToBytes(dataBase64);
+  const blob = new Blob([bytes], { type: 'image/jpeg' });
+  await frameTx('readwrite', (store) => req(store.put({
+    id: `${sessionId}:${String(seq).padStart(6, '0')}`,
+    sessionId,
+    seq,
+    at,
+    size: blob.size,
+    blob,
+  })));
+  return blob.size;
+}
+
+export async function listVideoFrames(sessionId) {
+  const rows = await frameTx('readonly', (store) => req(store.index('session').getAll(sessionId)));
+  const sorted = (rows ?? []).sort((a, b) => a.seq - b.seq);
+  const out = [];
+  for (const row of sorted) out.push({ at: row.at, data: await blobToBase64(row.blob), size: row.size });
+  return out;
+}
+
+export async function deleteVideoFrames(sessionId) {
+  const keys = await frameTx('readonly', (store) => req(store.index('session').getAllKeys(sessionId)));
+  if (!keys?.length) return 0;
+  await frameTx('readwrite', (store) => {
+    for (const key of keys) store.delete(key);
+    return keys.length;
+  });
+  return keys.length;
+}
+
 // ------------------------------------------------------------------- indices
 
 async function readIndex(key) {
@@ -224,6 +278,11 @@ export async function saveRecording(recording) {
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     lastRun: record.lastRun ?? null,
+    suite: record.suite ?? null,
+    folder: record.folder ?? null,
+    tags: record.tags ?? [],
+    environment: record.environment?.name ?? record.environment ?? null,
+    flaky: record.flaky ?? null,
   });
   return record;
 }

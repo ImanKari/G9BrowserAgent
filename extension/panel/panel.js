@@ -29,7 +29,7 @@ const el = new Proxy({}, { get: (_, id) => $(String(id)) });
 
 let current = null;
 let recording = false;
-let videoing = false;
+let videoState = { recording: false };
 let openIssueId = null;
 let saveTimer = null;
 let activeTab = 'session';
@@ -248,8 +248,11 @@ async function refreshAutomation() {
   let res;
   try {
     res = await cmd({ cmd: 'recStatus' });
-  } catch { return; }
-  if (!res?.ok) return;
+  } catch (err) {
+    el.recCount.textContent = 'refresh failed';
+    return showPanelError('Automation refresh failed: ' + (err?.message ?? err));
+  }
+  if (!res?.ok) return showPanelError(res?.error ?? 'Automation refresh failed.');
 
   recording = !!res.status?.recording;
   el.recToggle.textContent = recording ? '■ Stop and save' : '● Start recording';
@@ -270,8 +273,10 @@ async function refreshAutomation() {
     const last = r.lastRun
       ? ` · last run ${r.lastRun.failed ? `${r.lastRun.failed} failed` : 'all passed'}`
       : '';
+    const suite = r.suite ? `${r.suite} · ` : '';
+    const flaky = r.flaky?.detected ? ' · possibly flaky' : '';
     el.recList.append(
-      row(r.name, `${r.stepCount} steps · ${ago(r.createdAt)}${last}`, [
+      row(r.name, `${suite}${r.stepCount} steps · ${ago(r.createdAt)}${last}${flaky}`, [
         ['Replay', '', () => runReplay(r.id, false)],
         ['Check', '', () => runReplay(r.id, true)],
         ['✕', 'danger', async () => {
@@ -340,8 +345,11 @@ async function refreshIssues() {
   let res;
   try {
     res = await cmd({ cmd: 'issueList' });
-  } catch { return; }
-  if (!res?.ok) return;
+  } catch (err) {
+    el.issueUsage.textContent = 'refresh failed';
+    return showPanelError('Issue refresh failed: ' + (err?.message ?? err));
+  }
+  if (!res?.ok) return showPanelError(res?.error ?? 'Issue refresh failed.');
 
   const list = res.issues ?? [];
   el.issueUsage.textContent = res.usage?.attachments
@@ -403,8 +411,22 @@ async function openIssue(id, { focusTitle = false } = {}) {
   el.dContext.textContent = summariseContext(i.context);
   renderAttachments(i.attachments ?? []);
   el.issueSaved.textContent = `saved ${ago(i.updatedAt)}`;
+  const video = await cmd({ cmd: 'videoStatus' }).catch(() => null);
+  setVideoState(video?.ok ? video.status : { recording: false });
 
   if (focusTitle) { el.dTitle.focus(); el.dTitle.select(); }
+}
+
+function setVideoState(status) {
+  videoState = status ?? { recording: false };
+  const forThisIssue = videoState.recording && videoState.issueId === openIssueId;
+  el.dVideo.textContent = forThisIssue ? '■ Stop recording' : '● Record tab';
+  el.dVideo.classList.toggle('stop', forThisIssue);
+  el.dVideo.disabled = videoState.recording && !forThisIssue;
+  el.dDelete.disabled = forThisIssue;
+  el.dVideo.title = el.dVideo.disabled
+    ? 'This tab is recording video for another issue. Open that issue to stop it.'
+    : '';
 }
 
 function summariseContext(c) {
@@ -453,22 +475,32 @@ function renderAttachments(list) {
 }
 
 /** Debounced, so typing a body does not write on every keystroke. */
+async function saveIssueNow() {
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  if (!openIssueId) return true;
+  el.issueSaved.textContent = 'saving…';
+  const res = await cmd({
+    cmd: 'issueUpdate',
+    id: openIssueId,
+    title: el.dTitle.value.trim() || '(untitled)',
+    body: el.dBody.value,
+    severity: el.dSeverity.value,
+    status: el.dStatus.value,
+    filedAs: el.dFiledAs.value.trim(),
+  });
+  el.issueSaved.textContent = res?.ok ? 'saved just now' : 'not saved';
+  if (!res?.ok) {
+    showPanelError(res?.error ?? 'Could not save the issue.');
+    return false;
+  }
+  return true;
+}
+
 function queueSave() {
   clearTimeout(saveTimer);
   el.issueSaved.textContent = 'saving…';
-  saveTimer = setTimeout(async () => {
-    const res = await cmd({
-      cmd: 'issueUpdate',
-      id: openIssueId,
-      title: el.dTitle.value.trim() || '(untitled)',
-      body: el.dBody.value,
-      severity: el.dSeverity.value,
-      status: el.dStatus.value,
-      filedAs: el.dFiledAs.value.trim(),
-    });
-    el.issueSaved.textContent = res?.ok ? 'saved just now' : 'not saved';
-    if (!res?.ok) showPanelError(res?.error ?? 'Could not save the issue.');
-  }, 500);
+  saveTimer = setTimeout(() => { saveIssueNow().catch((err) => showPanelError(err?.message ?? err)); }, 500);
 }
 
 for (const id of ['dTitle', 'dBody', 'dSeverity', 'dStatus', 'dFiledAs']) {
@@ -476,8 +508,8 @@ for (const id of ['dTitle', 'dBody', 'dSeverity', 'dStatus', 'dFiledAs']) {
   el[id].addEventListener('change', queueSave);
 }
 
-el.issueBack.addEventListener('click', () => {
-  clearTimeout(saveTimer);
+el.issueBack.addEventListener('click', async () => {
+  if (saveTimer && !(await saveIssueNow())) return;
   openIssueId = null;
   el.issueDetailView.hidden = true;
   el.issueListView.hidden = false;
@@ -486,7 +518,11 @@ el.issueBack.addEventListener('click', () => {
 
 el.dDelete.addEventListener('click', async () => {
   const id = openIssueId;
-  el.issueBack.click();
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  openIssueId = null;
+  el.issueDetailView.hidden = true;
+  el.issueListView.hidden = false;
   await cmd({ cmd: 'issueDelete', id });
   toast('Deleted');
   refreshIssues();
@@ -509,19 +545,16 @@ el.dRecapture.addEventListener('click', async () => {
 });
 
 el.dVideo.addEventListener('click', async () => {
-  if (videoing) {
+  if (videoState.recording && videoState.issueId === openIssueId) {
     const res = await cmd({ cmd: 'videoStop', id: openIssueId });
-    videoing = false;
-    el.dVideo.textContent = '● Record tab';
-    el.dVideo.classList.remove('stop');
-    toast(res?.frames ? `${res.frames} frames attached` : 'Stopped — nothing captured');
+    if (!res?.ok) return showPanelError(res?.error ?? 'Could not stop recording.');
+    setVideoState({ recording: false });
+    toast(res?.frames ? (res.frames + ' frames attached') : 'Stopped — nothing captured');
     openIssue(openIssueId);
   } else {
-    const res = await cmd({ cmd: 'videoStart' });
+    const res = await cmd({ cmd: 'videoStart', id: openIssueId });
     if (!res?.ok) return showPanelError(res?.error ?? 'Could not start recording.');
-    videoing = true;
-    el.dVideo.textContent = '■ Stop recording';
-    el.dVideo.classList.add('stop');
+    setVideoState({ recording: true, issueId: openIssueId, startedAt: res.startedAt });
     toast('Recording this tab — reproduce the bug, then stop');
   }
 });

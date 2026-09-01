@@ -56,6 +56,7 @@ export async function health(tabId) {
       failedRequests: net.failedCount,
       brokenImages: page.brokenImages,
       formIssues: page.formIssues,
+      accessibilityIssues: page.accessibilityIssues,
       overflowing: page.overflowing,
     },
     metrics: page.metrics,
@@ -152,6 +153,26 @@ async function pageAudit(tabId) {
         findings.push({ severity: 'warning', kind: 'a11y', message: 'Interactive element has no accessible name: <' + el.tagName.toLowerCase() + '>', where: 'a11y' });
       }
 
+      const missingAlt = [...document.querySelectorAll('img:not([alt])')];
+      for (const el of missingAlt.slice(0, 10)) {
+        findings.push({ severity: 'warning', kind: 'a11y', message: 'Image has no alt attribute: ' + (el.currentSrc || el.src || '<img>'), where: 'image' });
+      }
+      const untitledFrames = [...document.querySelectorAll('iframe:not([title])')];
+      for (const el of untitledFrames.slice(0, 10)) {
+        findings.push({ severity: 'warning', kind: 'a11y', message: 'Iframe has no title: ' + (el.src || '<iframe>'), where: 'frame' });
+      }
+      if (!document.documentElement.lang) {
+        findings.push({ severity: 'warning', kind: 'a11y', message: 'Document has no language on <html lang>. Screen readers cannot choose the correct pronunciation rules.', where: 'document' });
+      }
+      const headings = [...document.querySelectorAll('h1,h2,h3,h4,h5,h6')];
+      for (let index = 1; index < headings.length; index++) {
+        const previous = Number(headings[index - 1].tagName.slice(1));
+        const current = Number(headings[index].tagName.slice(1));
+        if (current > previous + 1) {
+          findings.push({ severity: 'warning', kind: 'a11y', message: 'Heading level jumps from h' + previous + ' to h' + current + ': ' + headings[index].textContent.trim().slice(0, 80), where: 'heading' });
+        }
+      }
+
       // Horizontal overflow — the classic responsive bug.
       const de = document.documentElement;
       const overflowing = de.scrollWidth > de.clientWidth + 1;
@@ -180,6 +201,9 @@ async function pageAudit(tabId) {
         findings,
         brokenImages: broken.length,
         formIssues: unlabeled.length + nameless.length,
+        accessibilityIssues: unlabeled.length + nameless.length + missingAlt.length + untitledFrames.length +
+          (document.documentElement.lang ? 0 : 1) +
+          findings.filter((finding) => finding.kind === 'a11y' && finding.where === 'heading').length,
         overflowing,
         metrics: {
           domNodes: document.querySelectorAll('*').length,
@@ -225,6 +249,107 @@ export async function performance(tabId, { durationMs = 4000, reload = false } =
 
   const events = await readTraceStream(tabId, streamHandle);
   return summarizeTrace(events);
+}
+
+/**
+ * Buffered Web Vitals plus long tasks. Observers collect what Chromium still
+ * retains and then watch a short window for late layout/input activity.
+ */
+export async function vitals(tabId, { durationMs = 1000 } = {}) {
+  const wait = Math.max(100, Math.min(Number(durationMs) || 1000, 5000));
+  return evaluate(
+    tabId,
+    `new Promise((resolve) => {
+      const data = { lcp: [], shifts: [], events: [], longTasks: [] };
+      const observers = [];
+      const watch = (type, key) => {
+        try {
+          const observer = new PerformanceObserver((list) => data[key].push(...list.getEntries()));
+          observer.observe({ type, buffered: true, durationThreshold: type === 'event' ? 40 : undefined });
+          observers.push(observer);
+        } catch {}
+      };
+      watch('largest-contentful-paint', 'lcp');
+      watch('layout-shift', 'shifts');
+      watch('event', 'events');
+      watch('longtask', 'longTasks');
+      setTimeout(() => {
+        observers.forEach((observer) => observer.disconnect());
+        const nav = performance.getEntriesByType('navigation')[0];
+        const paints = performance.getEntriesByType('paint');
+        const lcp = data.lcp[data.lcp.length - 1];
+        const cls = data.shifts.filter((entry) => !entry.hadRecentInput).reduce((sum, entry) => sum + entry.value, 0);
+        const interactions = data.events.filter((entry) => entry.interactionId);
+        const inp = interactions.length ? Math.max(...interactions.map((entry) => entry.duration)) : null;
+        resolve({
+          coreWebVitals: {
+            lcpMs: lcp ? Math.round(lcp.startTime) : null,
+            cls: Math.round(cls * 10000) / 10000,
+            inpMs: inp == null ? null : Math.round(inp),
+          },
+          paint: {
+            firstPaintMs: Math.round(paints.find((entry) => entry.name === 'first-paint')?.startTime ?? 0) || null,
+            firstContentfulPaintMs: Math.round(paints.find((entry) => entry.name === 'first-contentful-paint')?.startTime ?? 0) || null,
+          },
+          navigation: nav ? {
+            ttfbMs: Math.round(nav.responseStart),
+            domContentLoadedMs: Math.round(nav.domContentLoadedEventEnd),
+            loadMs: Math.round(nav.loadEventEnd),
+            transferBytes: nav.transferSize,
+          } : null,
+          longTasks: {
+            count: data.longTasks.length,
+            totalMs: Math.round(data.longTasks.reduce((sum, entry) => sum + entry.duration, 0)),
+            longestMs: Math.round(Math.max(0, ...data.longTasks.map((entry) => entry.duration))),
+          },
+          note: inp == null ? 'INP needs a real user interaction during the observation window.' : undefined,
+        });
+      }, ` + wait + `);
+    })`,
+  );
+}
+
+/** Repeated CDP metrics expose meaningful heap/node/listener growth signals. */
+export async function memory(tabId, { samples = 3, intervalMs = 500 } = {}) {
+  const count = Math.max(2, Math.min(Number(samples) || 3, 10));
+  const gap = Math.max(50, Math.min(Number(intervalMs) || 500, 5000));
+  await send(tabId, 'Performance.enable');
+  const rows = [];
+  for (let index = 0; index < count; index++) {
+    const result = await send(tabId, 'Performance.getMetrics');
+    const metrics = Object.fromEntries((result.metrics ?? []).map((metric) => [metric.name, metric.value]));
+    rows.push({
+      atMs: index * gap,
+      jsHeapUsedBytes: metrics.JSHeapUsedSize ?? null,
+      jsHeapTotalBytes: metrics.JSHeapTotalSize ?? null,
+      nodes: metrics.Nodes ?? null,
+      listeners: metrics.JSEventListeners ?? null,
+      documents: metrics.Documents ?? null,
+      frames: metrics.Frames ?? null,
+      layoutCount: metrics.LayoutCount ?? null,
+      recalcStyleCount: metrics.RecalcStyleCount ?? null,
+    });
+    if (index + 1 < count) await new Promise((resolve) => setTimeout(resolve, gap));
+  }
+  const first = rows[0];
+  const last = rows[rows.length - 1];
+  const growth = {
+    jsHeapUsedBytes: delta(first.jsHeapUsedBytes, last.jsHeapUsedBytes),
+    nodes: delta(first.nodes, last.nodes),
+    listeners: delta(first.listeners, last.listeners),
+    documents: delta(first.documents, last.documents),
+  };
+  return {
+    samples: rows,
+    growth,
+    suspectedLeak: (growth.jsHeapUsedBytes ?? 0) > 5 * 1024 * 1024 ||
+      (growth.nodes ?? 0) > 500 || (growth.listeners ?? 0) > 100,
+    note: 'Growth is a signal, not proof. Re-run around a repeatable open/close flow to identify retained objects.',
+  };
+}
+
+function delta(a, b) {
+  return a == null || b == null ? null : Math.round(b - a);
 }
 
 async function readTraceStream(tabId, handle) {

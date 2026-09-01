@@ -49,14 +49,15 @@ export async function snapshot(tabId, { mode = 'a11y', maxNodes = 900, includeTe
 
   const entries = [];
   const lines = [];
+  let emitted = 0;
   let refCounter = 0;
   let truncated = false;
 
   const root = nodes.find((n) => !n.parentId) ?? nodes[0];
 
   const walk = (node, depth) => {
-    if (!node || entries.length >= maxNodes) {
-      if (entries.length >= maxNodes) truncated = true;
+    if (!node || emitted >= maxNodes) {
+      if (emitted >= maxNodes) truncated = true;
       return;
     }
 
@@ -74,6 +75,10 @@ export async function snapshot(tabId, { mode = 'a11y', maxNodes = 900, includeTe
       const keep = isInteractive || (isStructural && (name || role === 'heading')) || (includeText && name && depth < 4);
 
       if (keep) {
+        if (emitted >= maxNodes) {
+          truncated = true;
+          return;
+        }
         const props = describeProps(node);
         const backendNodeId = node.backendDOMNodeId;
         let ref = '';
@@ -85,6 +90,7 @@ export async function snapshot(tabId, { mode = 'a11y', maxNodes = 900, includeTe
         const label = name ? ` "${truncate(name, 120)}"` : '';
         const refTag = ref ? ` [ref=${ref}]` : '';
         lines.push(`${indent}- ${role}${label}${refTag}${props}`);
+        emitted += 1;
         emittedDepth = depth + 1;
       }
     }
@@ -101,6 +107,7 @@ export async function snapshot(tabId, { mode = 'a11y', maxNodes = 900, includeTe
     title: docInfo?.root?.title ?? '',
     generation,
     interactiveCount: entries.length,
+    emittedNodes: emitted,
     truncated,
     tree: lines.join('\n'),
   };

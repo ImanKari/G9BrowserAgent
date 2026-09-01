@@ -8,6 +8,8 @@
 
 import { send, evaluate } from '../lib/cdp.js';
 import { setState } from '../lib/state.js';
+import { clearRefs } from '../lib/refs.js';
+import { clearBuffers } from './observe.js';
 
 const api = globalThis.browser ?? globalThis.chrome;
 
@@ -46,8 +48,38 @@ const NETWORKS = {
   none: null,
 };
 
+/** Modern CDP first; the legacy command remains the compatibility path. */
+async function applyNetwork(tabId, preset) {
+  const conditions = {
+    offline: preset?.offline ?? false,
+    downloadThroughput: preset ? preset.downloadThroughput : -1,
+    uploadThroughput: preset ? preset.uploadThroughput : -1,
+    latency: preset?.latency ?? 0,
+  };
+  try {
+    await send(tabId, 'Network.emulateNetworkConditionsByRule', {
+      matchedNetworkConditions: preset ? [{ urlPattern: '', ...conditions }] : [],
+    });
+    await send(tabId, 'Network.overrideNetworkState', conditions);
+    return 'modern-rule+state';
+  } catch (modernError) {
+    try {
+      await send(tabId, 'Network.emulateNetworkConditions', conditions);
+      return 'legacy-fallback';
+    } catch (legacyError) {
+      throw new Error(
+        `Network emulation failed with both the modern and compatibility CDP paths. ` +
+          `Modern: ${modernError?.message ?? modernError}. Legacy: ${legacyError?.message ?? legacyError}.`,
+      );
+    }
+  }
+}
+
 export async function emulate(tabId, opts = {}) {
-  const { device, width, height, network, cpuThrottle, colorScheme, locale, timezone, reset = false } = opts;
+  const {
+    device, width, height, network, cpuThrottle, colorScheme, locale, timezone,
+    reset = false, reloadIfNeeded = true,
+  } = opts;
   const applied = {};
 
   if (reset) {
@@ -56,19 +88,23 @@ export async function emulate(tabId, opts = {}) {
     // user agent and Asia/Tehran afterwards — and reported `reset: true` while
     // doing it, which is the part that makes it a real bug rather than a gap.
     const cleared = [];
+    const failed = [];
     const step = async (label, method, params = {}) => {
       try {
         await send(tabId, method, params);
         cleared.push(label);
-      } catch {
-        /* domain unavailable on this target; not fatal */
+      } catch (err) {
+        failed.push({ override: label, error: String(err?.message ?? err) });
       }
     };
 
     await step('viewport', 'Emulation.clearDeviceMetricsOverride');
-    await step('network', 'Network.emulateNetworkConditions', {
-      offline: false, downloadThroughput: -1, uploadThroughput: -1, latency: 0,
-    });
+    try {
+      const engine = await applyNetwork(tabId, null);
+      cleared.push(`network (${engine})`);
+    } catch (err) {
+      failed.push({ override: 'network', error: String(err?.message ?? err) });
+    }
     await step('cpu', 'Emulation.setCPUThrottlingRate', { rate: 1 });
     await step('media', 'Emulation.setEmulatedMedia', { features: [] });
     await step('touch', 'Emulation.setTouchEmulationEnabled', { enabled: false });
@@ -79,11 +115,14 @@ export async function emulate(tabId, opts = {}) {
     const key = UA_KEY(tabId);
     const stored = await api.storage.session.get(key);
     if (stored[key]) {
+      const failuresBeforeUa = failed.length;
       await step('userAgent', 'Emulation.setUserAgentOverride', { userAgent: stored[key] });
-      await api.storage.session.remove(key);
+      // Retain the real UA when reset failed so a later retry can still
+      // restore it. Removing it here made a partial failure irreversible.
+      if (failed.length === failuresBeforeUa) await api.storage.session.remove(key);
     }
 
-    return { reset: true, cleared };
+    return { reset: failed.length === 0, cleared, failed };
   }
 
   if (device || width || height) {
@@ -97,16 +136,78 @@ export async function emulate(tabId, opts = {}) {
       deviceScaleFactor: preset?.deviceScaleFactor ?? 1,
       mobile: preset?.mobile ?? false,
     };
-    await send(tabId, 'Emulation.setDeviceMetricsOverride', metrics);
+    await send(tabId, 'Emulation.setDeviceMetricsOverride', {
+      ...metrics,
+      screenWidth: metrics.width,
+      screenHeight: metrics.height,
+      positionX: 0,
+      positionY: 0,
+      dontSetVisibleSize: false,
+    });
+    if (metrics.mobile) {
+      // A tab that was loaded in desktop mode can retain Chromium's automatic
+      // mobile fit-to-width scale (often 0.25), yielding a 4x layout viewport
+      // even though the device metrics command succeeded. Force the page scale
+      // to one so CSS media queries see the requested CSS-pixel viewport.
+      await send(tabId, 'Emulation.setPageScaleFactor', { pageScaleFactor: 1 });
+    }
     if (preset?.userAgent) {
       // Capture the real one first — reset has no other way to get it back.
       await rememberUserAgent(tabId);
-      await send(tabId, 'Emulation.setUserAgentOverride', { userAgent: preset.userAgent }).catch(() => {});
+      await send(tabId, 'Emulation.setUserAgentOverride', { userAgent: preset.userAgent });
+      applied.userAgent = true;
     }
     if (preset?.mobile) {
-      await send(tabId, 'Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 }).catch(() => {});
+      await send(tabId, 'Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+      applied.touch = true;
+    }
+    let viewport = await evaluate(tabId, '({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio })');
+    if (metrics.mobile && reloadIfNeeded &&
+        (viewport?.width !== metrics.width || viewport?.height !== metrics.height)) {
+      // Chromium applies the device screen immediately, but a document first
+      // parsed in desktop mode can keep its old fit-to-width layout viewport
+      // until navigation. Reload only when verification proves it is needed,
+      // and clear document-scoped evidence before doing so.
+      await Promise.all([clearRefs(tabId), clearBuffers(tabId)]);
+      await send(tabId, 'Page.reload');
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        const state = await evaluate(tabId, 'document.readyState').catch(() => 'loading');
+        if (state === 'complete') break;
+      }
+      viewport = await evaluate(tabId, '({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio })');
+      applied.reloadedForViewport = true;
+    }
+    if (metrics.mobile &&
+        (viewport?.width !== metrics.width || viewport?.height !== metrics.height)) {
+      // Some Chromium/headless combinations ignore the document's viewport
+      // meta state when mobile mode is enabled through chrome.debugger and
+      // expose a 4x layout viewport. Keep the requested CSS viewport exact and
+      // retain the mobile UA/touch overrides. Surface the compatibility mode
+      // so callers know text autosizing/overlay-scrollbar emulation is absent.
+      await send(tabId, 'Emulation.setDeviceMetricsOverride', {
+        ...metrics,
+        mobile: false,
+        screenWidth: metrics.width,
+        screenHeight: metrics.height,
+        positionX: 0,
+        positionY: 0,
+        dontSetVisibleSize: false,
+      });
+      viewport = await evaluate(tabId, '({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio })');
+      applied.mobileCompatibilityMode = 'exact-responsive-viewport-with-mobile-UA-and-touch';
+      applied.warning = 'Chromium rejected an exact layout viewport in full mobile mode; responsive dimensions, mobile user agent, DPR, and touch remain emulated.';
+    }
+    if (viewport?.width !== metrics.width || viewport?.height !== metrics.height) {
+      throw new Error(
+        'Device metrics command completed, but the page viewport is ' + viewport?.width + 'x' + viewport?.height +
+          '; expected ' + metrics.width + 'x' + metrics.height + '. The override was not reported as applied.' +
+          (!reloadIfNeeded ? ' Retry with reloadIfNeeded:true.' : ''),
+      );
     }
     applied.device = device ?? `${metrics.width}x${metrics.height}`;
+    applied.viewport = viewport;
   }
 
   if (network) {
@@ -114,13 +215,7 @@ export async function emulate(tabId, opts = {}) {
     if (preset === undefined) {
       throw new Error(`Unknown network preset "${network}". Available: ${Object.keys(NETWORKS).join(', ')}.`);
     }
-    await send(tabId, 'Network.emulateNetworkConditions', {
-      offline: preset?.offline ?? false,
-      downloadThroughput: preset ? preset.downloadThroughput : -1,
-      uploadThroughput: preset ? preset.uploadThroughput : -1,
-      latency: preset?.latency ?? 0,
-    });
-    applied.network = network;
+    applied.network = { preset: network, engine: await applyNetwork(tabId, preset) };
   }
 
   if (cpuThrottle) {
@@ -136,12 +231,12 @@ export async function emulate(tabId, opts = {}) {
   }
 
   if (locale) {
-    await send(tabId, 'Emulation.setLocaleOverride', { locale }).catch(() => {});
+    await send(tabId, 'Emulation.setLocaleOverride', { locale });
     applied.locale = locale;
   }
 
   if (timezone) {
-    await send(tabId, 'Emulation.setTimezoneOverride', { timezoneId: timezone }).catch(() => {});
+    await send(tabId, 'Emulation.setTimezoneOverride', { timezoneId: timezone });
     applied.timezone = timezone;
   }
 

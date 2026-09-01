@@ -32,6 +32,7 @@
 import { send, ensureDomain } from '../lib/cdp.js';
 import { LOCATOR_SOURCE } from '../lib/locators.js';
 import { saveRecording } from '../lib/store.js';
+import { serialize } from '../lib/state.js';
 
 const api = globalThis.browser ?? globalThis.chrome;
 
@@ -39,6 +40,8 @@ const api = globalThis.browser ?? globalThis.chrome;
 export const BINDING = '__g9emit';
 
 const SESSION_KEY = (tabId) => `g9:recording-session:${tabId}`;
+const REPLAY_KEY = (tabId) => `g9:replaying:${tabId}`;
+const MAX_RAW_EVENTS = 5000;
 
 /**
  * The in-page half. Emits raw events; decides nothing.
@@ -63,7 +66,7 @@ const RECORDER_SOURCE = `
 
   const at = () => Date.now();
 
-  /** Interactive ancestor, so a click on a <span> inside a button records the button. */
+  /** Interactive ancestor, including the real node inside an open shadow root. */
   const actionable = (el) => {
     if (!el || el.nodeType !== 1) return null;
     return el.closest('a, button, input, select, textarea, label, summary, [role], [onclick], [tabindex]') || el;
@@ -77,7 +80,7 @@ const RECORDER_SOURCE = `
 
   addEventListener('click', (e) => {
     if (!e.isTrusted) return;
-    send('click', e.target, { button: 'left', detail: e.detail, modifiers: mods(e) });
+    send('click', e.composedPath ? e.composedPath()[0] : e.target, { button: 'left', detail: e.detail, modifiers: mods(e) });
   }, true);
 
   addEventListener('dblclick', (e) => {
@@ -95,6 +98,7 @@ const RECORDER_SOURCE = `
     if (!e.isTrusted) return;
     const el = e.target;
     if (!el || !('value' in el)) return;
+    if (el.tagName === 'SELECT' || el.type === 'checkbox' || el.type === 'radio' || el.type === 'file') return;
     send('change', el, { value: String(el.value), inputType: e.inputType || null, live: true });
   }, true);
 
@@ -114,6 +118,8 @@ const RECORDER_SOURCE = `
       send('select', el, {
         value: String(el.value),
         text: el.selectedOptions && el.selectedOptions[0] ? el.selectedOptions[0].textContent.trim() : '',
+        values: Array.prototype.map.call(el.selectedOptions || [], (option) => String(option.value)),
+        texts: Array.prototype.map.call(el.selectedOptions || [], (option) => option.textContent.trim()),
       });
       return;
     }
@@ -227,12 +233,32 @@ export async function recordingStatus(tabId) {
  * document exists, the script that would have emitted the event is gone.
  */
 export async function ingestRaw(tabId, event) {
-  const key = SESSION_KEY(tabId);
-  const stored = await api.storage.session.get(key);
-  const session = stored[key];
-  if (!session) return;
-  session.raw.push(event);
-  await api.storage.session.set({ [key]: session });
+  return serialize(async () => {
+    const key = SESSION_KEY(tabId);
+    const replayKey = REPLAY_KEY(tabId);
+    const stored = await api.storage.session.get([key, replayKey]);
+    const session = stored[key];
+    if (!session || stored[replayKey]) return;
+    session.raw.push(event);
+    if (session.raw.length > MAX_RAW_EVENTS) {
+      const first = session.raw[0]?.type === 'navigate' ? session.raw[0] : null;
+      const keep = session.raw.slice(-(MAX_RAW_EVENTS - (first ? 1 : 0)));
+      session.raw = first ? [first, ...keep] : keep;
+      session.droppedRawEvents = (session.droppedRawEvents ?? 0) + 1;
+    }
+    await api.storage.session.set({ [key]: session });
+  });
+}
+
+/** Keep an armed recorder from recording its own trusted replay events. */
+export async function setReplaying(tabId, replaying) {
+  const key = REPLAY_KEY(tabId);
+  if (replaying) await api.storage.session.set({ [key]: true });
+  else await api.storage.session.remove(key);
+  await send(tabId, 'Runtime.evaluate', {
+    expression: `window.__g9replaying = ${replaying ? 'true' : 'false'}`,
+    returnByValue: true,
+  }).catch(() => {});
 }
 
 export async function stopRecording(tabId) {
@@ -254,6 +280,9 @@ export async function stopRecording(tabId) {
     createdAt: session.startedAt,
     durationMs: Date.now() - session.startedAt,
     steps,
+    recorderWarnings: session.droppedRawEvents
+      ? [`${session.droppedRawEvents} oldest raw events were discarded after the ${MAX_RAW_EVENTS}-event safety cap.`]
+      : [],
   });
 
   return {
@@ -297,6 +326,20 @@ export function normalize(raw) {
 
   for (let i = 0; i < raw.length; i++) {
     const e = raw[i];
+
+    if (e.type === 'select' || e.type === 'check') {
+      // Native select/checkbox use may emit key/click events plus multiple
+      // intermediate change events. The observable final state is the test
+      // step; replaying the mechanics as well applies the action repeatedly.
+      while (steps.length) {
+        const last = steps[steps.length - 1];
+        if (!sameTarget(last.target, e.target) || e.at - last.at > 1000) break;
+        if (!['click', 'key', 'select', 'check'].includes(last.type)) break;
+        steps.pop();
+      }
+      steps.push({ ...e });
+      continue;
+    }
 
     if (e.type === 'change' && e.live) {
       // Keep only the final value for a run of live input on the same element.
@@ -423,6 +466,7 @@ export function summarize(step) {
     case 'key': return `press ${[...(step.modifiers || []), step.key].join('+')}`;
     case 'drag': return `drag ${name} onto ${step.to?.fingerprint?.name ?? 'target'}`;
     case 'scroll': return `scroll to ${step.x},${step.y}`;
+    case 'assert': return 'assert ' + step.assertion + (name ? ' on ' + name : '');
     default: return step.type;
   }
 }

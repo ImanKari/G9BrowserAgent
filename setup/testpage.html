@@ -49,6 +49,7 @@
   </style>
 </head>
 <body>
+  <button id="hidden-assertion-target" hidden>Hidden assertion fixture</button>
 <main>
   <div>
     <h1>G9 Agent Test Page</h1>
@@ -159,8 +160,11 @@
     }
   });
 
-  $('env').addEventListener('change', (e) =>
-    console.log('[TestPage] environment switched to', e.target.value));
+  window.__g9SelectTrusted = null;
+  $('env').addEventListener('change', (e) => {
+    window.__g9SelectTrusted = e.isTrusted;
+    console.log('[TestPage] environment switched to', e.target.value, 'trusted=' + e.isTrusted);
+  });
 
   $('fetchOk').addEventListener('click', async () => {
     const r = await fetch('data:application/json,' + encodeURIComponent(JSON.stringify({ ok: true, items: 3 })));

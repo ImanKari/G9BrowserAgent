@@ -30,6 +30,7 @@ import * as record from './tools/record.js';
 import * as replay from './tools/replay.js';
 import * as issues from './tools/issues.js';
 import * as store from './lib/store.js';
+import * as qa from './tools/qa.js';
 
 const api = globalThis.browser ?? globalThis.chrome;
 
@@ -123,6 +124,7 @@ api.debugger.onEvent.addListener((source, method, params) => {
 
 api.debugger.onDetach.addListener(async (source, reason) => {
   if (source.tabId == null) return;
+  await issues.cancelVideo(source.tabId).catch(() => {});
   const state = await getState();
   await setState({ attachedTabs: state.attachedTabs.filter((id) => id !== source.tabId) });
   await logActivity({ kind: 'detach', tabId: source.tabId, ok: false, detail: reason });
@@ -132,6 +134,7 @@ api.debugger.onDetach.addListener(async (source, reason) => {
 });
 
 api.tabs.onRemoved.addListener(async (tabId) => {
+  await issues.cancelVideo(tabId).catch(() => {});
   const state = await getState();
   if (state.pinnedTabId === tabId) {
     await setState({ pinnedTabId: null });
@@ -186,6 +189,8 @@ const TOOLS = {
         case 'unpin':
           await tabsTool.unpinTab();
           return { unpinned: true };
+        case 'wait':
+          return tabsTool.waitForTab(args);
         default:
           throw new Error(`Unknown tabs action "${action}".`);
       }
@@ -263,10 +268,10 @@ const TOOLS = {
   },
 
   browser_network: {
-    run: ({ tabId, args }) =>
-      args.requestId
-        ? observe.networkDetail(tabId, args)
-        : observe.network(tabId, args),
+    run: ({ tabId, args }) => {
+      if (args.format === 'har') return observe.har(tabId, args);
+      return args.requestId ? observe.networkDetail(tabId, args) : observe.network(tabId, args);
+    },
   },
 
   // --- automation ----------------------------------------------------------
@@ -276,7 +281,7 @@ const TOOLS = {
     needsTab: false,
     run: async ({ args }) => {
       const action = args.action ?? 'list';
-      const needsPage = ['start', 'stop', 'replay'].includes(action);
+      const needsPage = ['start', 'stop', 'replay', 'assert'].includes(action);
       const tab = needsPage ? await tabsTool.resolveTarget(args.tabId) : null;
 
       switch (action) {
@@ -290,8 +295,12 @@ const TOOLS = {
         case 'start': return record.startRecording(tab.id, { name: args.name });
         case 'stop': return record.stopRecording(tab.id);
         case 'replay': return replay.replay(tab.id, {
-          id: requireId(args), timing: args.timing, dryRun: args.dryRun, stopOnFailure: args.stopOnFailure !== false,
+          id: requireId(args), timing: args.timing, dryRun: args.dryRun,
+          stopOnFailure: args.stopOnFailure !== false, variables: args.variables,
         });
+        case 'assert': return qa.addAssertion(tab.id, { ...args, id: requireId(args) });
+        case 'update': return qa.updateRecording(requireId(args), args);
+        case 'export_test': return qa.exportPlaywright(requireId(args));
         case 'delete': return store.deleteRecording(requireId(args));
         case 'export': return store.exportBundle({ includeAttachments: args.includeAttachments !== false });
         case 'import': {
@@ -307,7 +316,7 @@ const TOOLS = {
     needsTab: false,
     run: async ({ args }) => {
       const action = args.action ?? 'list';
-      const needsPage = ['create', 'screenshot', 'video_start', 'video_stop'].includes(action);
+      const needsPage = ['create', 'screenshot', 'video_start', 'video_stop', 'video_status'].includes(action);
       const tab = needsPage ? await tabsTool.resolveTarget(args.tabId) : null;
 
       switch (action) {
@@ -319,7 +328,7 @@ const TOOLS = {
         }
         case 'create': return issues.createIssue(tab.id, args);
         case 'update': return issues.updateIssue(requireId(args), args);
-        case 'delete': return store.deleteIssue(requireId(args));
+        case 'delete': return issues.deleteIssue(requireId(args));
         case 'screenshot': return issues.attachScreenshot(tab.id, requireId(args), args);
         case 'attach': return issues.attachFile(requireId(args), args);
         case 'attachment': {
@@ -328,16 +337,20 @@ const TOOLS = {
         }
         case 'video_start': return issues.startVideo(tab.id, args);
         case 'video_stop': return issues.stopVideo(tab.id, args.id);
+        case 'video_status': return issues.videoStatus(tab.id);
         default: throw new Error(`Unknown issue action "${action}".`);
       }
     },
   },
   // --- diagnosis -----------------------------------------------------------
   browser_diagnose: {
-    run: ({ tabId, args }) =>
-      (args.what ?? 'health') === 'performance'
-        ? diagnose.performance(tabId, args)
-        : diagnose.health(tabId),
+    run: ({ tabId, args }) => {
+      const what = args.what ?? 'health';
+      if (what === 'performance') return diagnose.performance(tabId, args);
+      if (what === 'vitals') return diagnose.vitals(tabId, args);
+      if (what === 'memory') return diagnose.memory(tabId, args);
+      return diagnose.health(tabId);
+    },
   },
 };
 
@@ -638,16 +651,21 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sendResponse({ ok: true, attachment: await store.getAttachment(msg.attachmentId) });
         break;
       case 'issueDelete':
-        sendResponse({ ok: true, ...(await store.deleteIssue(msg.id)) });
+        sendResponse({ ok: true, ...(await issues.deleteIssue(msg.id)) });
         break;
       case 'videoStart': {
         const tab = await tabsTool.resolveTarget();
-        sendResponse({ ok: true, ...(await issues.startVideo(tab.id)) });
+        sendResponse({ ok: true, ...(await issues.startVideo(tab.id, { id: msg.id })) });
         break;
       }
       case 'videoStop': {
         const tab = await tabsTool.resolveTarget();
         sendResponse({ ok: true, ...(await issues.stopVideo(tab.id, msg.id)) });
+        break;
+      }
+      case 'videoStatus': {
+        const tab = await tabsTool.resolveTarget();
+        sendResponse({ ok: true, status: await issues.videoStatus(tab.id) });
         break;
       }
       case 'listTabs':

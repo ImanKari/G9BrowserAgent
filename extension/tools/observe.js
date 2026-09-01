@@ -83,6 +83,7 @@ export async function ingest(tabId, method, params) {
           method: params.request.method,
           resourceType: params.type,
           startedAt: params.timestamp,
+          wallTime: params.wallTime,
           requestHeaders: params.request.headers,
           hasPostData: !!params.request.hasPostData,
           status: null,
@@ -305,7 +306,7 @@ export async function network(tabId, { filter, status, method, limit = 50, clear
   }
   if (method) list = list.filter((r) => r.method?.toUpperCase() === method.toUpperCase());
   if (status === 'failed') list = list.filter((r) => r.failed || (r.status && r.status >= 400));
-  else if (status === 'pending') list = list.filter((r) => r.status == null && !r.failed);
+  else if (status === 'pending') list = list.filter((r) => r.finishedAt == null && !r.failed);
   else if (typeof status === 'number') list = list.filter((r) => r.status === status);
 
   list.sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
@@ -361,6 +362,85 @@ export async function networkDetail(tabId, { requestId, includeBody = true }) {
   }
 
   return detail;
+}
+
+/** Standards-shaped HAR 1.2 export from the captured request buffer. */
+export async function har(tabId, { filter, includeBody = false } = {}) {
+  const key = NETWORK_KEY(tabId);
+  const stored = await api.storage.session.get(key);
+  let records = Object.values(stored[key] ?? {});
+  if (filter) {
+    const needle = filter.toLowerCase();
+    records = records.filter((record) => record.url?.toLowerCase().includes(needle));
+  }
+  records.sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0));
+  const entries = [];
+  for (const record of records) {
+    let detail = record;
+    if (includeBody && !record.failed) {
+      detail = await networkDetail(tabId, { requestId: record.requestId, includeBody: true });
+    }
+    const duration = record.finishedAt && record.startedAt
+      ? Math.max(0, Math.round((record.finishedAt - record.startedAt) * 1000))
+      : 0;
+    entries.push({
+      startedDateTime: new Date((record.wallTime ?? Date.now() / 1000) * 1000).toISOString(),
+      time: duration,
+      request: {
+        method: record.method ?? 'GET',
+        url: record.url ?? '',
+        httpVersion: record.protocol ?? '',
+        headers: headerArray(record.requestHeaders),
+        queryString: queryArray(record.url),
+        cookies: [],
+        headersSize: -1,
+        bodySize: record.hasPostData ? -1 : 0,
+        ...(detail.postData ? { postData: { mimeType: 'text/plain', text: detail.postData } } : {}),
+      },
+      response: {
+        status: Number(record.status) || 0,
+        statusText: record.statusText ?? record.errorText ?? '',
+        httpVersion: record.protocol ?? '',
+        headers: headerArray(record.responseHeaders),
+        cookies: [],
+        content: {
+          size: Number(record.encodedDataLength) || 0,
+          mimeType: record.mimeType ?? '',
+          ...(includeBody && detail.body && !String(detail.body).startsWith('<')
+            ? { text: detail.body }
+            : {}),
+        },
+        redirectURL: '',
+        headersSize: -1,
+        bodySize: Number(record.encodedDataLength) || -1,
+      },
+      cache: {},
+      timings: { blocked: -1, dns: -1, connect: -1, send: 0, wait: duration, receive: 0, ssl: -1 },
+      _g9: { requestId: record.requestId, resourceType: record.resourceType, failed: !!record.failed },
+    });
+  }
+  return {
+    log: {
+      version: '1.2',
+      creator: { name: 'G9 Browser Agent', version: 'runtime' },
+      pages: [],
+      entries,
+    },
+    entryCount: entries.length,
+    includesBodies: includeBody,
+  };
+}
+
+function headerArray(headers) {
+  return Object.entries(headers ?? {}).map(([name, value]) => ({ name, value: String(value) }));
+}
+
+function queryArray(url) {
+  try {
+    return [...new URL(url).searchParams].map(([name, value]) => ({ name, value }));
+  } catch {
+    return [];
+  }
 }
 
 // ------------------------------------------------------------------- helpers

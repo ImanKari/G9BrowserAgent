@@ -15,7 +15,11 @@
 import { send, evaluate } from '../lib/cdp.js';
 import { screenshot } from './capture.js';
 import * as observe from './observe.js';
-import { saveIssue, getIssue, listIssues, deleteIssue, putAttachment, listAttachments } from '../lib/store.js';
+import {
+  saveIssue, getIssue, listIssues, deleteIssue as deleteStoredIssue, putAttachment, listAttachments,
+  putVideoFrame, listVideoFrames, deleteVideoFrames,
+} from '../lib/store.js';
+import { serialize } from '../lib/state.js';
 
 const api = globalThis.browser ?? globalThis.chrome;
 
@@ -212,7 +216,18 @@ export async function updateIssue(id, patch = {}) {
   return getIssue(id);
 }
 
-export { getIssue, listIssues, deleteIssue, listAttachments };
+export { getIssue, listIssues, listAttachments };
+
+/** Refuse to remove the owner of an active capture. */
+export async function deleteIssue(id) {
+  const all = await api.storage.session.get(null);
+  const active = Object.entries(all).find(([key, value]) =>
+    key.startsWith('g9:screencast:') && value?.issueId === id);
+  if (active) {
+    throw new Error('Stop the active video capture before deleting this issue.');
+  }
+  return deleteStoredIssue(id);
+}
 
 /**
  * Attach a fresh screenshot to an existing issue.
@@ -271,59 +286,119 @@ const VIDEO_KEY = (tabId) => `g9:screencast:${tabId}`;
 const MAX_FRAMES = 600;
 const MAX_VIDEO_BYTES = 40 * 1024 * 1024;
 
-export async function startVideo(tabId, { quality = 60, everyNthFrame = 2 } = {}) {
-  await api.storage.session.set({ [VIDEO_KEY(tabId)]: { frames: [], bytes: 0, startedAt: Date.now() } });
-  await send(tabId, 'Page.startScreencast', {
-    format: 'jpeg',
-    quality,
-    maxWidth: 1280,
-    maxHeight: 800,
-    everyNthFrame,
+export async function startVideo(tabId, { id: issueId, quality = 60, everyNthFrame = 2 } = {}) {
+  return serialize(async () => {
+  if (!Number.isInteger(quality) || quality < 0 || quality > 100) {
+    throw new Error('Video quality must be an integer from 0 to 100.');
+  }
+  if (!Number.isInteger(everyNthFrame) || everyNthFrame < 1) {
+    throw new Error('everyNthFrame must be a positive integer.');
+  }
+  if (!issueId || !(await getIssue(issueId, { withAttachments: false }))) {
+    throw new Error('Video recording needs an existing issue id so frames cannot be orphaned or attached to the wrong defect.');
+  }
+  const key = VIDEO_KEY(tabId);
+  const existing = (await api.storage.session.get(key))[key];
+  if (existing) {
+    throw new Error('This tab is already recording video for issue "' + existing.issueId + '". Stop that capture first.');
+  }
+  const sessionId = 'video_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  const session = { sessionId, issueId, frames: 0, bytes: 0, startedAt: Date.now(), truncated: false };
+  await api.storage.session.set({ [key]: session });
+  try {
+    await send(tabId, 'Page.startScreencast', {
+      format: 'jpeg', quality, maxWidth: 1280, maxHeight: 800, everyNthFrame,
+    });
+  } catch (err) {
+    await api.storage.session.remove(key);
+    throw err;
+  }
+    return { recording: true, tabId, issueId, startedAt: session.startedAt };
   });
-  return { recording: true, tabId };
 }
 
 /** Called from sw.js for every Page.screencastFrame event. */
 export async function ingestFrame(tabId, params) {
-  const key = VIDEO_KEY(tabId);
-  const stored = await api.storage.session.get(key);
-  const session = stored[key];
-  // Acknowledge regardless, or Chromium stops sending frames.
-  await send(tabId, 'Page.screencastFrameAck', { sessionId: params.sessionId }).catch(() => {});
-  if (!session) return;
-
-  if (session.frames.length >= MAX_FRAMES || session.bytes >= MAX_VIDEO_BYTES) return;
-  session.frames.push({ data: params.data, at: Date.now() - session.startedAt });
-  session.bytes += params.data.length;
-  await api.storage.session.set({ [key]: session });
+  return serialize(async () => {
+    const key = VIDEO_KEY(tabId);
+    try {
+      const session = (await api.storage.session.get(key))[key];
+      if (!session) return;
+      const approximateBytes = Math.ceil(params.data.length * 0.75);
+      if (session.frames >= MAX_FRAMES || session.bytes + approximateBytes > MAX_VIDEO_BYTES) {
+        session.truncated = true;
+        await api.storage.session.set({ [key]: session });
+        return;
+      }
+      const size = await putVideoFrame({
+        sessionId: session.sessionId,
+        seq: session.frames,
+        at: Date.now() - session.startedAt,
+        dataBase64: params.data,
+      });
+      session.frames += 1;
+      session.bytes += size;
+      await api.storage.session.set({ [key]: session });
+    } finally {
+      // Ack only after the frame is durable. Chromium naturally back-pressures
+      // the stream, and no asynchronous read/modify/write can drop a frame.
+      await send(tabId, 'Page.screencastFrameAck', { sessionId: params.sessionId }).catch(() => {});
+    }
+  });
 }
 
 export async function stopVideo(tabId, issueId) {
-  await send(tabId, 'Page.stopScreencast').catch(() => {});
+  return serialize(async () => {
+    const key = VIDEO_KEY(tabId);
+    const session = (await api.storage.session.get(key))[key];
+    if (!session) {
+      await send(tabId, 'Page.stopScreencast').catch(() => {});
+      return { frames: 0, attached: false };
+    }
+    if (issueId && issueId !== session.issueId) {
+      throw new Error('This video belongs to issue "' + session.issueId + '", not "' + issueId + '". Nothing was re-attributed.');
+    }
+    // Ownership is checked before stopping. A typo in the issue id must not
+    // silently stop a valid capture and leave an unfinishable session behind.
+    await send(tabId, 'Page.stopScreencast').catch(() => {});
+    const frames = await listVideoFrames(session.sessionId);
+    if (!frames.length) {
+      await api.storage.session.remove(key);
+      await deleteVideoFrames(session.sessionId);
+      return { frames: 0, attached: false, issueId: session.issueId };
+    }
+    const durationMs = frames[frames.length - 1].at;
+    const payload = JSON.stringify({
+      format: 'g9-frames/1', durationMs,
+      frames: frames.map(({ data, at }) => ({ data, at })),
+    });
+    const attachment = await putAttachment({
+      owner: session.issueId,
+      name: 'capture-' + Date.now() + '.g9frames.json',
+      mime: 'application/json', kind: 'video', bytes: new TextEncoder().encode(payload),
+      meta: { frames: frames.length, durationMs, truncated: session.truncated },
+    });
+    await api.storage.session.remove(key);
+    await deleteVideoFrames(session.sessionId);
+    return { frames: frames.length, attached: true, issueId: session.issueId, truncated: session.truncated, attachment };
+  });
+}
+
+export async function videoStatus(tabId) {
+  const session = (await api.storage.session.get(VIDEO_KEY(tabId)))[VIDEO_KEY(tabId)];
+  return session ? { recording: true, ...session } : { recording: false };
+}
+
+/** Reclaim a capture whose tab or debugger session disappeared. */
+export async function cancelVideo(tabId) {
   const key = VIDEO_KEY(tabId);
-  const stored = await api.storage.session.get(key);
-  const session = stored[key];
+  const session = (await api.storage.session.get(key))[key];
+  if (!session) return { cancelled: false };
+  // Called after debugger detach/tab close. CDP already stopped the stream;
+  // calling the normal send() wrapper here would attach the tab again.
   await api.storage.session.remove(key);
-
-  if (!session || !session.frames.length) return { frames: 0, attached: false };
-  if (!issueId) return { frames: session.frames.length, attached: false };
-
-  const payload = JSON.stringify({
-    format: 'g9-frames/1',
-    durationMs: session.frames[session.frames.length - 1].at,
-    frames: session.frames,
-  });
-
-  const attachment = await putAttachment({
-    owner: issueId,
-    name: `capture-${Date.now()}.g9frames.json`,
-    mime: 'application/json',
-    kind: 'video',
-    bytes: new TextEncoder().encode(payload),
-    meta: { frames: session.frames.length, durationMs: session.frames[session.frames.length - 1].at },
-  });
-
-  return { frames: session.frames.length, attached: true, attachment };
+  await deleteVideoFrames(session.sessionId);
+  return { cancelled: true, issueId: session.issueId, frames: session.frames };
 }
 
 function base64ToBytes(b64) {

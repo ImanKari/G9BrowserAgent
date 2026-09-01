@@ -30,9 +30,11 @@
 import { send, evaluate, callOnNode } from '../lib/cdp.js';
 import { LOCATOR_SOURCE } from '../lib/locators.js';
 import { getRecording, saveRecording } from '../lib/store.js';
-import { saveRefs, getRefs } from '../lib/refs.js';
+import { saveRefs, getRefs, clearRefs } from '../lib/refs.js';
 import * as interact from './interact.js';
 import * as nav from './navigate.js';
+import { setReplaying } from './record.js';
+import { executeAssertion, substitute, summarizeAssertion } from './qa.js';
 
 /** Two consecutive identical boxes is the cheapest proof an element has settled. */
 const POLL_MS = 120;
@@ -62,7 +64,7 @@ const TIMING = {
   recorded: { budget: 1.5, honourPause: true },
 };
 
-export async function replay(tabId, { id, timing = 'recorded', stopOnFailure = true, dryRun = false } = {}) {
+export async function replay(tabId, { id, timing = 'recorded', stopOnFailure = true, dryRun = false, variables = {} } = {}) {
   const recording = await getRecording(id);
   if (!recording) throw new Error(`No recording with id "${id}". Call browser_recording action:"list" to see them.`);
 
@@ -70,11 +72,18 @@ export async function replay(tabId, { id, timing = 'recorded', stopOnFailure = t
   const started = Date.now();
   const results = [];
   const warnings = [];
+  const data = {
+    ...parameterDefaults(recording.parameters),
+    ...(recording.environment?.variables ?? {}),
+    ...variables,
+  };
 
   await ensureLocators(tabId);
+  await setReplaying(tabId, true);
 
-  for (let i = 0; i < recording.steps.length; i++) {
-    const step = recording.steps[i];
+  try {
+    for (let i = 0; i < recording.steps.length; i++) {
+    const step = substitute(recording.steps[i], data);
     const label = `step ${i + 1}/${recording.steps.length}`;
     const stepStarted = Date.now();
 
@@ -98,6 +107,9 @@ export async function replay(tabId, { id, timing = 'recorded', stopOnFailure = t
       });
       if (stopOnFailure) break;
     }
+    }
+  } finally {
+    await setReplaying(tabId, false);
   }
 
   const failed = results.filter((r) => !r.ok);
@@ -112,14 +124,28 @@ export async function replay(tabId, { id, timing = 'recorded', stopOnFailure = t
     failed: failed.length,
     durationMs: Date.now() - started,
     warnings,
+    dataParameters: Object.keys(data),
     steps: results,
   };
 
   if (!dryRun) {
+    const run = { at: Date.now(), passed: summary.passed, failed: summary.failed, durationMs: summary.durationMs };
+    const runHistory = [...(recording.runHistory ?? []), run].slice(-20);
+    const recent = runHistory.slice(-10);
+    const passRuns = recent.filter((item) => item.failed === 0).length;
+    const failRuns = recent.length - passRuns;
     await saveRecording({
       ...recording,
-      lastRun: { at: Date.now(), passed: summary.passed, failed: summary.failed, durationMs: summary.durationMs },
+      lastRun: run,
+      runHistory,
+      flaky: {
+        detected: passRuns > 0 && failRuns > 0,
+        sampleSize: recent.length,
+        passRuns,
+        failRuns,
+      },
     });
+    summary.flaky = passRuns > 0 && failRuns > 0;
   }
 
   return summary;
@@ -168,8 +194,9 @@ async function locate(tabId, step, { budgetMs }) {
          // Stability: an element mid-animation or mid-reflow is still moving,
          // and clicking where it WAS is how a replay hits the wrong thing.
          const key = [box.x, box.y, box.width, box.height].map(Math.round).join(',');
-         const settled = window.__g9lastBox === key;
-         window.__g9lastBox = key;
+         const previous = window.__g9lastBox;
+         const settled = previous && previous.el === r.el && previous.key === key;
+         window.__g9lastBox = { el: r.el, key };
 
          return {
            ok: true,
@@ -235,7 +262,8 @@ async function locate(tabId, step, { budgetMs }) {
 
 /** What a dry run does: resolve everything, change nothing. */
 async function probe(tabId, step) {
-  if (step.type === 'navigate' || step.type === 'scroll' || step.type === 'key') {
+  if (step.type === 'assert') return executeAssertion(tabId, step);
+  if (step.type === 'navigate' || step.type === 'scroll' || (step.type === 'key' && !step.target)) {
     return { skipped: 'not element-bound' };
   }
   const found = await locate(tabId, step, { budgetMs: 0 });
@@ -248,6 +276,8 @@ async function runStep(tabId, step, mode) {
   const stepStart = Date.now();
   const budgetMs = Math.round((step.waitMs ?? 0) * mode.budget);
 
+  if (step.type === 'assert') return executeAssertion(tabId, step);
+
   if (step.type === 'navigate') {
     await nav.navigate(tabId, { url: step.url, waitUntil: 'load' });
     await ensureLocators(tabId);
@@ -259,7 +289,7 @@ async function runStep(tabId, step, mode) {
     return { to: { x: step.x, y: step.y } };
   }
 
-  if (step.type === 'key') {
+  if (step.type === 'key' && !step.target) {
     await interact.key(tabId, {
       key: step.key,
       modifiers: interact.modifierMask(step.modifiers || []),
@@ -284,6 +314,8 @@ async function runStep(tabId, step, mode) {
     case 'click':
     case 'double_click':
     case 'rightclick': {
+      const eventName = step.type === 'rightclick' ? 'contextmenu' : step.type === 'double_click' ? 'dblclick' : 'click';
+      await armEventProof(tabId, backendNodeId, eventName);
       await withRefBypass(tabId, backendNodeId, (opts) =>
         interact.click(tabId, {
           ...opts,
@@ -292,6 +324,7 @@ async function runStep(tabId, step, mode) {
           modifiers: interact.modifierMask(step.modifiers || []),
         }),
       );
+      await verifyEventProof(tabId, backendNodeId, eventName);
       return common;
     }
 
@@ -299,14 +332,22 @@ async function runStep(tabId, step, mode) {
       await withRefBypass(tabId, backendNodeId, (opts) =>
         interact.type(tabId, { ...opts, text: String(step.value ?? ''), clear: true }),
       );
+      const actual = await callOnNode(
+        tabId,
+        backendNodeId,
+        `function () { return this.value != null ? String(this.value) : String(this.textContent || ''); }`,
+      );
+      if (actual !== String(step.value ?? '')) {
+        throw new Error(`Typing was issued, but the field contains ${JSON.stringify(actual)} instead of ${JSON.stringify(String(step.value ?? ''))}.`);
+      }
       return { ...common, value: step.value };
     }
 
     case 'select': {
       await withRefBypass(tabId, backendNodeId, (opts) =>
-        interact.select(tabId, { ...opts, values: step.text || step.value }),
+        interact.select(tabId, { ...opts, values: step.values || step.texts || step.text || step.value }),
       );
-      return { ...common, selected: step.text || step.value };
+      return { ...common, selected: step.values || step.texts || step.text || step.value };
     }
 
     case 'check': {
@@ -314,7 +355,22 @@ async function runStep(tabId, step, mode) {
       if (now !== step.checked) {
         await withRefBypass(tabId, backendNodeId, (opts) => interact.click(tabId, opts));
       }
+      const after = await callOnNode(tabId, backendNodeId, `function () { return !!this.checked; }`);
+      if (after !== step.checked) {
+        throw new Error(`Checkbox action was issued, but checked is ${after}; expected ${step.checked}.`);
+      }
       return { ...common, checked: step.checked };
+    }
+
+    case 'key': {
+      await send(tabId, 'DOM.focus', { backendNodeId });
+      const focused = await callOnNode(tabId, backendNodeId, `function () { return document.activeElement === this; }`);
+      if (!focused) throw new Error('Could not focus the recorded key target; the key was not sent to another element by guesswork.');
+      await interact.key(tabId, {
+        key: step.key,
+        modifiers: interact.modifierMask(step.modifiers || []),
+      });
+      return { ...common, pressed: step.key, targetFocused: true };
     }
 
     case 'upload':
@@ -326,7 +382,12 @@ async function runStep(tabId, step, mode) {
 
     case 'drag': {
       const to = await locate(tabId, { target: step.to }, { budgetMs: 0 });
-      return { ...common, dragTo: to.describe, note: 'drag replay uses recorded endpoints' };
+      const toBackendNodeId = await resolvedNodeId(tabId);
+      await withRefsBypass(tabId, {
+        __replay_from: { backendNodeId, role: 'element', name: 'replay drag source' },
+        __replay_to: { backendNodeId: toBackendNodeId, role: 'element', name: 'replay drag target' },
+      }, (url) => interact.drag(tabId, { from: '__replay_from', to: '__replay_to', url }));
+      return { ...common, dragTo: to.describe, executed: true };
     }
 
     default:
@@ -356,7 +417,52 @@ async function withRefBypass(tabId, backendNodeId, run) {
         url: previous.url,
         entries: Object.entries(previous.map),
       });
-    }
+    } else await clearRefs(tabId);
+  }
+}
+
+async function withRefsBypass(tabId, refs, run) {
+  const previous = await getRefs(tabId);
+  const url = await evaluate(tabId, 'location.href').catch(() => null);
+  await saveRefs(tabId, { url, entries: Object.entries(refs) });
+  try {
+    return await run(url);
+  } finally {
+    if (previous) {
+      await saveRefs(tabId, { url: previous.url, entries: Object.entries(previous.map) });
+    } else await clearRefs(tabId);
+  }
+}
+
+async function armEventProof(tabId, backendNodeId, eventName) {
+  await callOnNode(
+    tabId,
+    backendNodeId,
+    `function (eventName) {
+       const proof = { target: this, eventName, seen: false, trusted: false };
+       this.__g9ReplayProof = proof;
+       window.addEventListener(eventName, function verify(e) {
+         const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+         if (e.target === proof.target || proof.target.contains(e.target) || path.includes(proof.target)) {
+           proof.seen = true;
+           proof.trusted = e.isTrusted === true;
+         }
+       }, { capture: true, once: true });
+     }`,
+    [eventName],
+  );
+}
+
+async function verifyEventProof(tabId, backendNodeId, eventName) {
+  // Read the proof from the target node, not the top window. A same-origin
+  // iframe has its own Window realm even though its element is controllable.
+  const proof = await callOnNode(
+    tabId,
+    backendNodeId,
+    `function () { const p = this.__g9ReplayProof; return p && ({ seen: p.seen, trusted: p.trusted }); }`,
+  ).catch(() => null);
+  if (!proof?.seen || !proof?.trusted) {
+    throw new Error(`The ${eventName} command was issued, but the recorded target did not observe the expected trusted event.`);
   }
 }
 
@@ -370,8 +476,17 @@ async function resolvedNodeId(tabId) {
 }
 
 function describeStep(step) {
+  if (step.type === 'assert') return summarizeAssertion(step);
   const fp = step.target?.fingerprint;
   return fp ? `${step.type} ${fp.role || fp.tag}${fp.name ? ` "${fp.name}"` : ''}` : step.type;
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function parameterDefaults(parameters) {
+  if (!parameters || typeof parameters !== 'object') return {};
+  return Object.fromEntries(Object.entries(parameters).map(([key, value]) => [
+    key,
+    value && typeof value === 'object' && 'default' in value ? value.default : value,
+  ]));
+}

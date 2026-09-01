@@ -9,6 +9,7 @@
 import { send, evaluate } from '../lib/cdp.js';
 import { clearRefs } from '../lib/refs.js';
 import { clearBuffers } from './observe.js';
+import { network } from './observe.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -47,12 +48,13 @@ export async function reload(tabId, { hard = false, waitUntil = 'load', timeoutM
 }
 
 export async function history(tabId, { delta = -1 } = {}) {
-  await resetPageState(tabId);
   const { currentIndex, entries } = await send(tabId, 'Page.getNavigationHistory');
   const target = currentIndex + delta;
   if (target < 0 || target >= entries.length) {
     throw new Error(`Cannot go ${delta > 0 ? 'forward' : 'back'} — no such history entry.`);
   }
+  // Only discard refs and evidence once a destination is known to exist.
+  await resetPageState(tabId);
   await send(tabId, 'Page.navigateToHistoryEntry', { entryId: entries[target].id });
   await waitForLoad(tabId, { waitUntil: 'load', timeoutMs: 15_000 });
   return { url: await currentUrl(tabId), movedTo: entries[target].url };
@@ -130,13 +132,19 @@ async function waitForIdle(tabId, timeoutMs) {
   ).catch(() => {});
 
   while (Date.now() < deadline) {
-    const quietFor = await evaluate(
-      tabId,
-      `(() => { const s = window.__g9Idle; return s ? Date.now() - s.last : 9999; })()`,
-    ).catch(() => 0);
+    const [quietFor, pending] = await Promise.all([
+      evaluate(
+        tabId,
+        `(() => { const s = window.__g9Idle; return s ? Date.now() - s.last : 9999; })()`,
+      ).catch(() => 0),
+      // `total` is the size of the complete capture buffer. `returned` is the
+      // number left after the pending filter. Using total here meant that one
+      // old, completed request could make every later idle wait time out.
+      network(tabId, { status: 'pending', limit: 0 }).then((r) => r.returned).catch(() => 0),
+    ]);
 
-    if (quietFor >= 500) {
-      return { satisfied: true, idle: true, quietForMs: quietFor };
+    if (quietFor >= 500 && pending === 0) {
+      return { satisfied: true, idle: true, quietForMs: quietFor, pendingRequests: 0 };
     }
     await sleep(100);
   }

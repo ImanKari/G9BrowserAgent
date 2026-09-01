@@ -122,6 +122,7 @@ const child = spawn(process.execPath, [SERVER], {
 });
 
 const events = [];
+let stabilityStartAt = 0;
 child.stderr.setEncoding('utf8');
 child.stderr.on('data', (d) => {
   for (const l of d.trim().split('\n')) {
@@ -166,6 +167,10 @@ try {
 
   const status = await mcp.call('browser_status');
   ok('status returned', `mode=${status.mode}`);
+  // Isolated setup may deliberately reload the extension while selecting its
+  // private bridge port. Only transport loss after the first real tool call is
+  // a session-stability failure.
+  stabilityStartAt = Date.now();
 
   if (!status.attached) {
     console.log('\n  \x1b[33mNo tab is pinned.\x1b[0m Open a page, click the G9 icon,');
@@ -180,6 +185,17 @@ try {
   ok('tab attached', `${status.attached.title} — ${status.attached.url}`);
   const onTestPage = /127\.0\.0\.1:5199|testpage\.html/.test(status.attached.url ?? '');
   console.log(`  \x1b[90mhealth: ${JSON.stringify(status.health)}\x1b[0m`);
+
+  // Capture starts at attach. Reload before taking refs or diagnosing so every
+  // seeded load-time console/network defect belongs to this run.
+  if (onTestPage) {
+    const reloaded = await mcp.call('browser_navigate', {
+      action: 'reload', waitUntil: 'idle', timeoutMs: 15_000,
+    });
+    reloaded.readyState === 'complete'
+      ? ok('test page reloaded after attach', 'load-time evidence is now captured')
+      : bad('test page reload did not settle', JSON.stringify(reloaded));
+  }
 
   // -- perception ----------------------------------------------------------
   head('3. browser_snapshot (accessibility tree + refs)');
@@ -236,6 +252,11 @@ try {
     else bad('request detail empty');
   } else skip('request detail', 'no requests captured yet — reload the page');
 
+  const har = await mcp.call('browser_network', { format: 'har' });
+  har.log?.version === '1.2' && har.entryCount === har.log.entries.length
+    ? ok('HAR 1.2 export', har.entryCount + ' entries')
+    : bad('HAR export invalid', JSON.stringify(har).slice(0, 120));
+
   // -- diagnosis -----------------------------------------------------------
   head('7. browser_diagnose (the correlated health report)');
 
@@ -245,6 +266,15 @@ try {
   for (const f of (health.findings ?? []).slice(0, 8)) {
     console.log(`    \x1b[90m[${f.severity}] ${f.kind}: ${String(f.message).slice(0, 90)}\x1b[0m`);
   }
+
+  const vitals = await mcp.call('browser_diagnose', { what: 'vitals', durationMs: 250 });
+  vitals.coreWebVitals && vitals.longTasks
+    ? ok('Core Web Vitals + long tasks', JSON.stringify(vitals.coreWebVitals))
+    : bad('vitals diagnostics missing');
+  const memory = await mcp.call('browser_diagnose', { what: 'memory', samples: 2, intervalMs: 50 });
+  memory.samples?.length === 2
+    ? ok('memory/leak sampling', JSON.stringify(memory.growth))
+    : bad('memory diagnostics missing');
 
   if (onTestPage) {
     head('7b. Deliberate defects on the test page');
@@ -295,6 +325,18 @@ try {
         bad('login did not complete', `status reads: ${after.value}`);
       }
 
+      const envRef = refOf(/combobox.*Environment/i);
+      if (envRef) {
+        await mcp.call('browser_interact', { action: 'select', ref: envRef, values: 'Staging' });
+        const selected = await mcp.call('browser_console', {
+          action: 'evaluate',
+          expression: '({ value: document.getElementById("env").value, trusted: window.__g9SelectTrusted })',
+        });
+        selected.value?.value === 'stg' && selected.value?.trusted === true
+          ? ok('trusted select applied and verified', 'Staging · isTrusted=true')
+          : bad('select was not a trusted verified interaction', JSON.stringify(selected.value));
+      } else skip('trusted select', 'combobox ref not found');
+
       // Obstruction detection: this click must be refused.
       const coveredRef = refOf(/You cannot click me/i);
       if (coveredRef) {
@@ -320,8 +362,69 @@ try {
     skip('login flow', 'not on the test page');
   }
 
+  // -- recorder + assertions -----------------------------------------------
+  if (onTestPage) {
+    head('9. Recorder, assertions, run history, and export');
+    await mcp.call('browser_recording', { action: 'start', name: 'G9 live assertion flow' });
+    const liveSnap = await mcp.call('browser_snapshot');
+    const envLine = liveSnap.tree.split('\n').find((line) => /combobox.*Environment/i.test(line) && /\[ref=/.test(line));
+    const envRef = envLine?.match(/\[ref=(e\d+)\]/)?.[1];
+    if (envRef) {
+      await mcp.call('browser_interact', { action: 'select', ref: envRef, values: 'Production' });
+    }
+    const recorded = await mcp.call('browser_recording', { action: 'stop' });
+    if (recorded.id && recorded.steps >= 2) ok('recording captured trusted select', recorded.steps + ' steps');
+    else bad('recording did not capture select', JSON.stringify(recorded));
+
+    await mcp.call('browser_recording', {
+      action: 'update', id: recorded.id, suite: 'Live smoke', folder: 'setup',
+      tags: ['live', 'regression'], environment: { name: 'local', variables: { expectedEnv: 'prd' } },
+      parameters: { expectedTitle: 'G9 Agent Test Page' },
+    });
+    await mcp.call('browser_recording', { action: 'assert', id: recorded.id, assertion: 'url', contains: '127.0.0.1:5199', operator: 'contains' });
+    await mcp.call('browser_recording', { action: 'assert', id: recorded.id, assertion: 'text', contains: '{{expectedTitle}}' });
+    await mcp.call('browser_recording', {
+      action: 'assert', id: recorded.id, assertion: 'visible', selector: '#hidden-assertion-target', expected: false,
+    });
+    if (envRef) {
+      await mcp.call('browser_recording', { action: 'assert', id: recorded.id, assertion: 'value', ref: envRef, expected: '{{expectedEnv}}' });
+    }
+    await mcp.call('browser_recording', { action: 'assert', id: recorded.id, assertion: 'network', contains: '/api/missing', minCount: 1 });
+    await mcp.call('browser_recording', { action: 'assert', id: recorded.id, assertion: 'console', contains: 'THIS_MESSAGE_MUST_NOT_EXIST', absent: true });
+    await mcp.call('browser_recording', { action: 'assert', id: recorded.id, assertion: 'a11y', maxViolations: 1 });
+    await mcp.call('browser_recording', { action: 'assert', id: recorded.id, assertion: 'screenshot', threshold: 0.12 });
+
+    const run = await mcp.call('browser_recording', { action: 'replay', id: recorded.id, timing: 'fast' });
+    run.failed === 0 && run.passed === run.total
+      ? ok('assertion replay passed with observable checks', run.passed + '/' + run.total)
+      : bad('assertion replay failed', JSON.stringify(run.steps?.find((step) => !step.ok)));
+    const saved = await mcp.call('browser_recording', { action: 'get', id: recorded.id });
+    saved.runHistory?.length === 1 && saved.suite === 'Live smoke'
+      ? ok('run history + suite metadata persisted')
+      : bad('run history or metadata missing');
+    const exported = await mcp.call('browser_recording', { action: 'export_test', id: recorded.id });
+    /@playwright\/test/.test(exported.code ?? '') && /toHaveScreenshot/.test(exported.code ?? '')
+      ? ok('Playwright test export', exported.code.split('\n').length + ' lines')
+      : bad('Playwright export missing expected code');
+    await mcp.call('browser_recording', { action: 'delete', id: recorded.id });
+
+    await mcp.call('browser_recording', { action: 'start', name: 'G9 deliberate failing assertion' });
+    const failing = await mcp.call('browser_recording', { action: 'stop' });
+    await mcp.call('browser_recording', {
+      action: 'assert', id: failing.id, assertion: 'text', contains: 'TEXT_THAT_DOES_NOT_EXIST_9F8E',
+    });
+    const failedRun = await mcp.call('browser_recording', { action: 'replay', id: failing.id, timing: 'fast' });
+    failedRun.failed === 1 && /assertion failed/i.test(failedRun.steps?.find((step) => !step.ok)?.error ?? '')
+      ? ok('assertion failure path is explicit')
+      : bad('failing assertion reported optimistic success', JSON.stringify(failedRun));
+    await mcp.call('browser_recording', { action: 'delete', id: failing.id });
+  }
+
   // -- stale refs ----------------------------------------------------------
-  head('9. Error quality');
+  head('10. Error quality');
+  // Replays navigate and deliberately invalidate prior refs. Establish a fresh
+  // generation so this check exercises the unknown-ref branch specifically.
+  await mcp.call('browser_snapshot');
   try {
     await mcp.call('browser_interact', { action: 'click', ref: 'e9999' });
     bad('bogus ref was accepted');
@@ -332,14 +435,29 @@ try {
   }
 
   // -- screenshot ----------------------------------------------------------
-  head('10. browser_screenshot');
+  head('11. browser_screenshot');
   const shot = await mcp.call('browser_screenshot', { area: 'viewport' });
   if (shot.__image?.data?.length > 500) {
     ok('screenshot captured', `${Math.round(shot.__image.data.length / 1365)} KB, ${shot.__image.mimeType}`);
   } else bad('screenshot empty', JSON.stringify(shot).slice(0, 100));
 
+  if (onTestPage) {
+    const issue = await mcp.call('browser_issue', {
+      action: 'create', title: 'G9 live video spool check', withScreenshot: false,
+    });
+    await mcp.call('browser_issue', { action: 'video_start', id: issue.id });
+    await mcp.call('browser_interact', { action: 'scroll', direction: 'down', amount: 120 });
+    await sleep(600);
+    const video = await mcp.call('browser_issue', { action: 'video_stop', id: issue.id });
+    const issueAfter = await mcp.call('browser_issue', { action: 'get', id: issue.id });
+    video.attached && issueAfter.attachments?.some((attachment) => attachment.kind === 'video')
+      ? ok('video frames spooled through IndexedDB', video.frames + ' frames')
+      : bad('video attachment missing', JSON.stringify(video));
+    await mcp.call('browser_issue', { action: 'delete', id: issue.id });
+  }
+
   // -- emulation -----------------------------------------------------------
-  head('11. browser_emulate');
+  head('12. browser_emulate');
   await mcp.call('browser_emulate', { device: 'iphone-15' });
   await sleep(300);
   const mobile = await mcp.call('browser_console', {
@@ -352,9 +470,9 @@ try {
   ok('emulation reset');
 
   // -- connection stability ------------------------------------------------
-  head('12. Connection stability');
-  const drops = events.filter((e) => e.line.includes('extension disconnected'));
-  const joins = events.filter((e) => e.line.includes('extension connected'));
+  head('13. Connection stability');
+  const drops = events.filter((e) => e.at >= stabilityStartAt && e.line.includes('extension disconnected'));
+  const joins = events.filter((e) => e.at >= stabilityStartAt && e.line.includes('extension connected'));
   if (drops.length === 0) {
     ok('no disconnects during the run', `${Math.round((Date.now() - events[0].at) / 1000)}s`);
   } else {

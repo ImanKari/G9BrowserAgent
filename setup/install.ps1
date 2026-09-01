@@ -3,7 +3,7 @@
   Sets up G9 Browser Agent on this machine.
 
 .DESCRIPTION
-  Verifies Node, runs the self-test, writes an mcp.json with the correct
+  Verifies Node, runs the bridge and extension regression tests, writes an mcp.json with the correct
   absolute path, and prints the two manual steps that cannot be automated
   (loading an unpacked extension is deliberately user-driven in Chrome/Edge).
 
@@ -50,10 +50,15 @@ Write-Ok "No npm install needed — the bridge has zero dependencies."
 
 # --- 2. Self-test -----------------------------------------------------------
 if (-not $SkipSelfTest) {
-  Write-Step 2 "Running the self-test (bridge + MCP + WebSocket)"
+  Write-Step 2 "Running tests (bridge/MCP/WebSocket + extension regressions)"
   & node (Join-Path $PSScriptRoot 'selftest.mjs')
   if ($LASTEXITCODE -ne 0) {
     Write-Host "`n    Self-test failed. Fix this before loading the extension." -ForegroundColor Red
+    exit 1
+  }
+  & node (Join-Path $PSScriptRoot 'extensiontest.mjs')
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "`n    Extension regression test failed. Fix this before loading the extension." -ForegroundColor Red
     exit 1
   }
 } else {

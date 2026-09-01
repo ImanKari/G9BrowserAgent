@@ -2,7 +2,7 @@
 
 Give an AI agent full, DevTools-level control of the browser you are **already using** — your real profile, your real logins, your real tabs.
 
-The agent can read everything you can read in DevTools (Elements, Computed styles, Console, Network with response bodies, Application storage and cookies, Performance) and do everything you can do with a mouse and keyboard — using **trusted input events**, so frameworks that reject synthetic clicks behave exactly as they do for a human.
+The agent can read everything you can read in DevTools (Elements, Computed styles, Console, Network/HAR with response bodies, Application storage and cookies, Performance) and do everything you can do with a mouse and keyboard — using **trusted input events**, so frameworks that reject synthetic clicks behave exactly as they do for a human. QA flows can carry observable assertions, visual baselines, data parameters, run history, and maintainable Playwright exports.
 
 ```
   AI Agent  ──MCP (stdio)──▶  Bridge  ──WebSocket──▶  Extension  ──CDP──▶  Your tab
@@ -37,7 +37,7 @@ cd g9-browser-agent
 .\setup\install.ps1
 ```
 
-The script checks Node, runs the self-test, and writes `setup/mcp.json` with the correct absolute path. Then two manual steps.
+The script checks Node, runs the bridge/MCP and extension regression suites, and writes `setup/mcp.json` with the correct absolute path. Then two manual steps.
 
 Add **`-WriteProjectConfig`** and it also writes `.mcp.json` at the repo root — the location Claude Code reads — which turns step 2 below into "restart your client". It never overwrites an existing `.mcp.json`.
 
@@ -96,14 +96,14 @@ The side panel shows every action live, and **Stop** halts the agent instantly.
 | `browser_navigate` | goto / reload / back / forward / **wait for a condition** |
 | `browser_inspect` | dom · styles · box · storage · cookies · frames |
 | `browser_console` | Read buffered console output, or evaluate JavaScript |
-| `browser_network` | List requests; fetch one with headers and response body |
-| `browser_diagnose` | **health** — correlated defect report; **performance** — trace summary |
+| `browser_network` | List requests; fetch one with headers/body; export HAR 1.2 |
+| `browser_diagnose` | **health** · **performance** trace · Core Web **vitals**/long tasks · **memory** leak signals |
 | `browser_screenshot` | viewport / fullpage / element |
 | `browser_emulate` | Device, viewport, network throttle, CPU, colour scheme, locale, timezone |
 | `browser_dialog` | Accept or dismiss `alert` / `confirm` / `prompt` |
-| `browser_tabs` | List tabs; open, close, focus, pin — the last four only in multi-tab mode |
-| `browser_recording` | Record a flow in the side panel, replay it as a test — list · replay · export |
-| `browser_issue` | Defects with screenshot, console, failed requests and page context attached |
+| `browser_tabs` | List/open/close/focus/pin tabs; wait for popups by URL, title, or opener in multi mode |
+| `browser_recording` | Record/replay flows; assertions, suites/tags/data, history/flaky signal, backup, Playwright export |
+| `browser_issue` | Defects with screenshot, durable tab video, console, failed requests and page context attached |
 
 Fourteen tools rather than fifty: definitions are re-sent on every request, so a wide surface would burn thousands of context tokens before the agent did anything.
 
@@ -151,6 +151,8 @@ this usually means it was renamed.
 
 Timing is reproduced by default. A ten-second session replayed in 200ms is not the same test — it never lets a debounce fire or an animation finish. Recorded gaps are a **budget for waiting**, never a blind sleep: every step waits for the page to be loaded and the element to be visible, enabled, and no longer moving. `timing: "fast"` when you trust the flow.
 
+Recordings are real tests, not only macros. `browser_recording action:"assert"` adds URL, text, visibility, element value/state, network, console-absence, accessibility, or screenshot-baseline checks. `action:"update"` adds suite/folder/tags, an environment profile, and `{{parameter}}` data defaults. Replay verifies the observable result of each action, saves the last 20 runs, and flags mixed pass/fail outcomes as potentially flaky. Open Shadow DOM and same-origin iframe elements participate in locator discovery. `action:"export_test"` produces a readable Playwright JavaScript test.
+
 ## Report a defect while it is still on screen
 
 Side panel → **Issues** → *New issue*. It captures first and asks questions second, because the evidence is only true at that instant:
@@ -170,9 +172,10 @@ Then enrich it: more screenshots, a tab video, the file you were testing an uplo
 
 ```powershell
 node setup/selftest.mjs
+node setup/extensiontest.mjs
 ```
 
-Spawns the real bridge, speaks real MCP over stdio, connects a fake extension over a real WebSocket, and checks 26 behaviours including Origin rejection, keepalive, standalone survival, and surviving a malformed frame. **No browser needed** — if this passes, the plumbing is sound and any remaining problem is in browser-side code.
+The first command spawns the real bridge, speaks real MCP over stdio, connects a fake extension over a real WebSocket, and checks 26 behaviours including Origin rejection, keepalive, standalone survival, and surviving a malformed frame. The second loads real extension modules under a deterministic browser-API harness and checks 15 recorder, replay, network, snapshot, emulation, data, visual, video, and panel regressions. **No browser is needed for either.**
 
 A test page with six deliberate defects is included:
 
@@ -189,14 +192,28 @@ node setup/livetest.mjs
 ```
 
 It exercises snapshot, computed styles, storage, cookies, console, network,
-diagnose, trusted-event login, obstruction detection, screenshots, and device
-emulation, then checks that all six seeded defects were actually found. As of v1.0.9 all six **are** found — verified against Edge.
+diagnose, trusted-event login/select, obstruction detection, assertions and their
+failure paths, run history, Playwright export, screenshots, IndexedDB video, and
+device emulation. It then checks that all seeded defects were actually found.
+
+For a completely reproducible run, let the harness launch a temporary clean
+Edge/Chrome profile, load the unpacked extension, connect the real bridge over
+MCP, drive the page, exercise the side panel, and clean up:
+
+```powershell
+node setup/isolated-livetest.mjs
+```
+
+Current verified result: **26/26 bridge tests, 15/15 extension regressions, and
+42/42 live checks in isolated Edge**, plus side-panel render and interaction.
 
 ---
 
 ## Security
 
 This tool has full control of your logged-in browser sessions. Treat it as you would an SSH key.
+
+**Deployment decision:** G9 Browser Agent currently targets a trusted, controlled local development/QA environment. The localhost bridge, browser profile, local users, and installed extensions are inside the trust boundary. Additional hardening against a malicious local user/extension, bridge impersonation, local secret theft, or hostile local software is intentionally out of scope unless that deployment model changes. Existing safeguards below remain in place; this is a scope decision, not a claim that localhost is a hostile-environment security boundary.
 
 **What protects you:**
 
@@ -214,6 +231,8 @@ This tool has full control of your logged-in browser sessions. Treat it as you w
 **Optional:** set `G9_TOKEN` in the MCP config and enter the same value in the side panel for a shared secret on top of Origin checking.
 
 **Known and unavoidable:** the "browser is being debugged" banner cannot be hidden. Browser-internal pages (`chrome://`, `edge://`, extension stores) can never be controlled. Native OS dialogs (print, basic auth) are outside the browser's reach — but file uploads work via `browser_interact action:"upload"`, which bypasses the picker entirely.
+
+**Intentional capability limits:** request interception/mocking and download-file verification are not implemented yet; cross-origin iframes and closed Shadow DOM remain browser boundaries; full Lighthouse audits and heap snapshots are not bundled. The automated live suite currently proves Edge; Chrome parity, long-running service-worker endurance, and controlled-input behavior across large React/Vue applications still need dedicated live runs.
 
 ---
 
@@ -251,7 +270,7 @@ g9-browser-agent/
 │   └── panel/              side panel UI (the trust surface)
 ├── bridge/                 zero-dependency Node bridge
 │   └── src/                server · mcp · ws-server · tools (schemas)
-├── setup/                  install.ps1 · selftest.mjs · livetest.mjs · serve.mjs · testpage.html
+├── setup/                  install · bridge/extension tests · live/isolated live harness · seeded page
 ├── README.md               this file
 └── AIGuide.md              build log + architecture reference
 ```
@@ -271,7 +290,7 @@ This tool is **completely independent of any project it inspects**. It sees only
 > 2. Add an entry to the **Change log** in `AIGuide.md` — date, what changed, why.
 > 3. Update the affected architecture or tool section in the same file.
 > 4. If you added a tool: update the schema in `bridge/src/tools.js`, the router in `extension/sw.js`, the table above, **and** the tool reference in `AIGuide.md`.
-> 5. Run `node setup/selftest.mjs` — it asserts the tool count, so it will fail until you have updated everything.
+> 5. Run `node setup/selftest.mjs`, `node setup/extensiontest.mjs`, and the isolated live test when browser behavior changed.
 >
 > A change that is not in `AIGuide.md` did not happen. This is how we keep an accurate picture of what we have and what we do not.
 

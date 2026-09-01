@@ -458,39 +458,110 @@ export async function drag(tabId, { from, to, url, steps = 12 } = {}) {
 /** Select <option>s by value, label, or visible text. */
 export async function select(tabId, { ref, values, url } = {}) {
   const node = await resolveRef(tabId, ref, url);
-  const wanted = Array.isArray(values) ? values : [values];
-  const result = await callOnNode(
+  const wanted = (Array.isArray(values) ? values : [values]).map(String);
+  const plan = await callOnNode(
     tabId,
     node.backendNodeId,
     `function (wanted) {
        if (this.tagName !== 'SELECT') return { ok: false, reason: 'the element is not a <select>' };
-       const chosen = [];
-       for (const opt of this.options) {
-         const hit = wanted.includes(opt.value) || wanted.includes(opt.label) || wanted.includes(opt.textContent.trim());
-         opt.selected = hit;
-         if (hit) chosen.push(opt.textContent.trim() || opt.value);
-       }
-       if (!chosen.length) {
+       const options = [...this.options];
+       const indices = options.map((opt, index) =>
+         wanted.includes(opt.value) || wanted.includes(opt.label) || wanted.includes(opt.textContent.trim()) ? index : -1
+       ).filter(index => index >= 0);
+       if (!indices.length) {
          return {
            ok: false,
            reason: 'no option matched',
-           available: [...this.options].map((o) => o.textContent.trim()).slice(0, 25),
+           available: options.map((o) => o.textContent.trim()).slice(0, 25),
          };
        }
-       this.dispatchEvent(new Event('input', { bubbles: true }));
-       this.dispatchEvent(new Event('change', { bubbles: true }));
-       return { ok: true, chosen };
+       if (!this.multiple && indices.length !== 1) {
+         return { ok: false, reason: 'multiple requested values matched a single-select control' };
+       }
+       const view = this.ownerDocument.defaultView;
+       const proof = { target: this, trusted: false };
+       view.__g9SelectProof = proof;
+       const observe = (event) => {
+         if (event.target === proof.target && event.isTrusted) proof.trusted = true;
+       };
+       view.addEventListener('input', observe, { capture: true, once: true });
+       view.addEventListener('change', observe, { capture: true, once: true });
+       return {
+         ok: true,
+         multiple: this.multiple,
+         indices,
+         selected: options.map((o, index) => o.selected ? index : -1).filter(index => index >= 0),
+         chosen: indices.map(index => options[index].textContent.trim() || options[index].value),
+       };
      }`,
     [wanted],
   );
 
-  if (!result?.ok) {
+  if (!plan?.ok) {
     throw new Error(
-      `Could not select ${JSON.stringify(wanted)}: ${result?.reason}.` +
-        (result?.available ? ` Available options: ${result.available.join(' | ')}` : ''),
+      `Could not select ${JSON.stringify(wanted)}: ${plan?.reason}.` +
+        (plan?.available ? ` Available options: ${plan.available.join(' | ')}` : ''),
     );
   }
-  return { selected: result.chosen };
+
+  await send(tabId, 'DOM.focus', { backendNodeId: node.backendNodeId });
+  const focused = await callOnNode(
+    tabId,
+    node.backendNodeId,
+    `function () { return this.ownerDocument.activeElement === this; }`,
+  );
+  if (!focused) throw new Error('Could not focus the <select>; no selection keys were sent.');
+
+  if (!plan.multiple) {
+    // These are browser input-pipeline key events. Unlike assigning
+    // option.selected and dispatching Event(), the resulting input/change
+    // events are trusted and controlled components see a real user gesture.
+    await key(tabId, { key: 'Home' });
+    if (plan.indices[0]) await key(tabId, { key: 'ArrowDown', repeat: plan.indices[0] });
+  } else {
+    const navModifier = /Mac/i.test(globalThis.navigator?.userAgent ?? '') ? MODIFIERS.Meta : MODIFIERS.Control;
+    const desired = new Set(plan.indices);
+    const selected = new Set(plan.selected);
+    const toggles = [];
+    const max = Math.max(...plan.indices, ...plan.selected, 0);
+    for (let index = 0; index <= max; index++) {
+      if (desired.has(index) !== selected.has(index)) toggles.push(index);
+    }
+    for (const index of toggles) {
+      await key(tabId, { key: 'Home', modifiers: navModifier });
+      if (index) await key(tabId, { key: 'ArrowDown', modifiers: navModifier, repeat: index });
+      await key(tabId, { key: 'Space', modifiers: navModifier });
+    }
+  }
+
+  const verified = await callOnNode(
+    tabId,
+    node.backendNodeId,
+    `function (wantedIndices) {
+       const actual = [...this.options].map((o, index) => o.selected ? index : -1).filter(index => index >= 0);
+       const proof = this.ownerDocument.defaultView.__g9SelectProof;
+       return {
+         actual,
+         values: [...this.selectedOptions].map(o => o.value),
+         labels: [...this.selectedOptions].map(o => o.textContent.trim()),
+         trusted: !!proof?.trusted,
+       };
+     }`,
+    [plan.indices],
+  );
+  const actual = [...(verified?.actual ?? [])].sort((a, b) => a - b);
+  const expected = [...plan.indices].sort((a, b) => a - b);
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new Error(
+      `Selection keys were issued, but selected option indexes are ${JSON.stringify(actual)}; expected ${JSON.stringify(expected)}. ` +
+        `The page or platform intercepted the native selection, so success is not being reported.` ,
+    );
+  }
+  const changed = JSON.stringify([...plan.selected].sort((a, b) => a - b)) !== JSON.stringify(expected);
+  if (changed && !verified.trusted) {
+    throw new Error('The selection changed, but the page did not observe a trusted input/change event. Success is not being reported.');
+  }
+  return { selected: verified.labels, values: verified.values, trustedEvent: changed ? true : 'not-needed' };
 }
 
 /**

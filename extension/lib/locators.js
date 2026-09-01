@@ -97,8 +97,43 @@ export const LOCATOR_SOURCE = `
     if (!el || !el.isConnected) return false;
     const r = el.getBoundingClientRect();
     if (r.width <= 0 && r.height <= 0) return false;
-    const s = getComputedStyle(el);
+    const s = (el.ownerDocument.defaultView || window).getComputedStyle(el);
     return s.visibility !== 'hidden' && s.display !== 'none';
+  };
+
+  /**
+   * Every searchable DOM root we can legally reach: the document, open shadow
+   * roots, and same-origin iframe documents. Closed shadow roots and
+   * cross-origin frames remain browser boundaries and are reported as such.
+   */
+  const roots = () => {
+    const out = [];
+    const seen = new Set();
+    const visit = (root) => {
+      if (!root || seen.has(root)) return;
+      seen.add(root);
+      out.push(root);
+      let elements = [];
+      try { elements = root.querySelectorAll('*'); } catch (e) { return; }
+      for (const el of elements) {
+        if (el.shadowRoot) visit(el.shadowRoot);
+        if (el.tagName === 'IFRAME') {
+          try { if (el.contentDocument) visit(el.contentDocument); } catch (e) { /* cross-origin */ }
+        }
+      }
+    };
+    visit(document);
+    return out;
+  };
+  const queryAll = (selector) => roots().flatMap((root) => {
+    try { return Array.prototype.slice.call(root.querySelectorAll(selector)); } catch (e) { return []; }
+  });
+  const getById = (id) => {
+    for (const root of roots()) {
+      const found = root.getElementById ? root.getElementById(id) : root.querySelector('#' + CSS.escape(id));
+      if (found) return found;
+    }
+    return null;
   };
 
   // ------------------------------------------------------- accessible identity
@@ -168,7 +203,7 @@ export const LOCATOR_SOURCE = `
     const ref = clean(el.getAttribute('aria-labelledby'));
     if (ref) {
       const parts = ref.split(' ')
-        .map((id) => document.getElementById(id))
+        .map((id) => getById(id))
         .filter(Boolean)
         .map((n) => clean(n.textContent));
       if (parts.length) return parts.join(' ');
@@ -244,7 +279,7 @@ export const LOCATOR_SOURCE = `
       parts.unshift(seg);
       const candidate = parts.join(' > ');
       try {
-        if (document.querySelectorAll(candidate).length === 1) return candidate;
+        if (queryAll(candidate).length === 1) return candidate;
       } catch (e) { /* a segment we cannot query is no use */ }
 
       node = parent;
@@ -287,7 +322,7 @@ export const LOCATOR_SOURCE = `
   const fingerprint = (el) => {
     const role = roleOf(el);
     const peers = role
-      ? Array.prototype.filter.call(document.querySelectorAll('*'), (n) => roleOf(n) === role && visible(n))
+      ? queryAll('*').filter((n) => roleOf(n) === role && visible(n))
       : [];
     return {
       tag: el.tagName.toLowerCase(),
@@ -309,7 +344,7 @@ export const LOCATOR_SOURCE = `
     const text = clean(el.textContent);
     if (!text || text.length > 80) return '';
     const matches = Array.prototype.filter.call(
-      document.querySelectorAll('a, button, [role=button], [role=link], label, summary, li, td, th'),
+      queryAll('a, button, [role=button], [role=link], label, summary, li, td, th'),
       (n) => clean(n.textContent) === text && visible(n),
     );
     return matches.length === 1 ? text : '';
@@ -356,33 +391,39 @@ export const LOCATOR_SOURCE = `
   const candidatesFor = (loc) => {
     try {
       if (loc.kind === 'testid') {
-        return Array.prototype.slice.call(document.querySelectorAll('[' + loc.attr + '=' + JSON.stringify(loc.value) + ']'));
+        return queryAll('[' + loc.attr + '=' + JSON.stringify(loc.value) + ']');
       }
       if (loc.kind === 'role') {
         return Array.prototype.filter.call(
-          document.querySelectorAll('*'),
+          queryAll('*'),
           (n) => roleOf(n) === loc.role && nameOf(n) === loc.name,
         );
       }
       if (loc.kind === 'label') {
         return Array.prototype.filter.call(
-          document.querySelectorAll('input, textarea, select'),
+          queryAll('input, textarea, select'),
           (n) => labelFor(n) === loc.label,
         );
       }
       if (loc.kind === 'text') {
         return Array.prototype.filter.call(
-          document.querySelectorAll('a, button, [role=button], [role=link], label, summary, li, td, th'),
+          queryAll('a, button, [role=button], [role=link], label, summary, li, td, th'),
           (n) => clean(n.textContent) === loc.text,
         );
       }
       if (loc.kind === 'css') {
-        return Array.prototype.slice.call(document.querySelectorAll(loc.css));
+        return queryAll(loc.css);
       }
       if (loc.kind === 'xpath') {
         const out = [];
-        const it = document.evaluate(loc.xpath, document, null, XPathResult.ORDERED_NODE_ITERATOR_TYPE, null);
-        for (let n = it.iterateNext(); n; n = it.iterateNext()) out.push(n);
+        for (const root of roots()) {
+          const doc = root.nodeType === 9 ? root : root.ownerDocument;
+          // Do not use an instanceof-ShadowRoot check: roots inside a same-origin
+          // iframe belong to a different JS realm and fail that check.
+          if (!doc || root.nodeType === 11) continue;
+          const it = doc.evaluate(loc.xpath, doc, null, XPathResult.ORDERED_NODE_ITERATOR_TYPE, null);
+          for (let n = it.iterateNext(); n; n = it.iterateNext()) out.push(n);
+        }
         return out;
       }
     } catch (e) { /* a malformed locator is a miss, not a crash */ }
@@ -397,10 +438,12 @@ export const LOCATOR_SOURCE = `
    * identity has changed and the step is one refactor from breaking. Replay
    * surfaces that as a warning rather than waiting for the failure.
    */
-  const resolve = (target) => {
+  const resolve = (target, options) => {
     const tried = [];
     for (const loc of target.locators || []) {
-      const found = candidatesFor(loc).filter(visible);
+      const found = (options && options.includeHidden)
+        ? candidatesFor(loc).filter((node) => node && node.nodeType === 1)
+        : candidatesFor(loc).filter(visible);
       if (found.length === 1) return { ok: true, el: found[0], matchedBy: loc.kind, tried };
       tried.push({ kind: loc.kind, matches: found.length });
     }
@@ -420,7 +463,7 @@ export const LOCATOR_SOURCE = `
 
     let best = null;
     let bestScore = 0;
-    const all = document.querySelectorAll(fp.tag || '*');
+    const all = queryAll(fp.tag || '*');
     for (const el of all) {
       if (!visible(el)) continue;
       let score = 0;
