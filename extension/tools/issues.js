@@ -12,7 +12,7 @@
  * navigation trail in the same instant the bug is visible.
  */
 
-import { send, evaluate } from '../lib/cdp.js';
+import { send, evaluate, sendOnLiveSession } from '../lib/cdp.js';
 import { screenshot } from './capture.js';
 import * as observe from './observe.js';
 import {
@@ -373,51 +373,80 @@ export async function startVideo(tabId, { id: issueId, quality = 60, everyNthFra
     await api.storage.session.set({ [key]: current });
   });
 
-  return { recording: true, tabId, issueId, startedAt: session.startedAt };
+  // Say so NOW if this recording cannot produce anything.
+  //
+  // `Page.startScreencast` captures composited frames, so a tab that is not
+  // being painted yields none — a hidden tab, or a headless surface. The
+  // command succeeds either way, frames simply never arrive, and the only
+  // symptom is an empty video at the end, long after the bug being recorded has
+  // gone. Same shape as the input problem in tools/interact.js: the browser
+  // accepts the request and quietly does nothing.
+  const visible = await evaluate(tabId, 'document.visibilityState').catch(() => null);
+  const warning = visible && visible !== 'visible'
+    ? `The tab is "${visible}", and a tab that is not being painted produces no video frames. ` +
+      `Nothing will be captured until it is brought to the foreground — the recording is running, ` +
+      `but it is currently recording nothing.`
+    : null;
+
+  return {
+    recording: true,
+    tabId,
+    issueId,
+    startedAt: session.startedAt,
+    ...(warning ? { warning } : {}),
+  };
 }
 
 /** Called from sw.js for every Page.screencastFrame event. */
 export async function ingestFrame(tabId, params) {
   const key = VIDEO_KEY(tabId);
   try {
-    // Reserve this frame's slot under the lock, write the bytes outside it, then
-    // commit the counters under the lock. The reservation is what keeps two
-    // frames from claiming the same seq without holding the chain across an
-    // IndexedDB write — and the ack (below) is a CDP call, which must never
-    // happen inside serialize(). See the note on startVideo.
-    const reserved = await serialize(async () => {
-      const session = (await api.storage.session.get(key))[key];
-      if (!session || session.starting) return null;
-      const approximateBytes = Math.ceil(params.data.length * 0.75);
-      if (session.frames >= MAX_FRAMES || session.bytes + approximateBytes > MAX_VIDEO_BYTES) {
-        session.truncated = true;
-        await api.storage.session.set({ [key]: session });
-        return null;
-      }
-      const seq = session.frames;
-      session.frames += 1;
-      await api.storage.session.set({ [key]: session });
-      return { sessionId: session.sessionId, seq, startedAt: session.startedAt };
+    // Chromium sends the next frame only after the previous one is acked, so
+    // frames arrive strictly one at a time and this read needs no lock. The
+    // earlier reserve-then-commit pair was guarding against a concurrency that
+    // the protocol already prevents, and it cost two trips through the shared
+    // write chain per frame — which, during a scroll, is a lot of frames.
+    const session = (await api.storage.session.get(key))[key];
+    if (!session || session.starting) return;
+
+    const approximateBytes = Math.ceil(params.data.length * 0.75);
+    if (session.frames >= MAX_FRAMES || session.bytes + approximateBytes > MAX_VIDEO_BYTES) {
+      await serialize(async () => {
+        const current = (await api.storage.session.get(key))[key];
+        if (current?.sessionId !== session.sessionId) return;
+        current.truncated = true;
+        await api.storage.session.set({ [key]: current });
+      });
+      return;
+    }
+
+    const size = await putVideoFrame({
+      sessionId: session.sessionId,
+      seq: session.frames,
+      at: Date.now() - session.startedAt,
+      dataBase64: params.data,
     });
 
-    if (reserved) {
-      const size = await putVideoFrame({
-        sessionId: reserved.sessionId,
-        seq: reserved.seq,
-        at: Date.now() - reserved.startedAt,
-        dataBase64: params.data,
-      });
-      await serialize(async () => {
-        const session = (await api.storage.session.get(key))[key];
-        if (session?.sessionId !== reserved.sessionId) return;
-        session.bytes += size;
-        await api.storage.session.set({ [key]: session });
-      });
-    }
+    // One serialized write per frame, after the bytes are durable. Never hold
+    // the chain across the IndexedDB write, and never call CDP inside it — see
+    // the note on startVideo.
+    await serialize(async () => {
+      const current = (await api.storage.session.get(key))[key];
+      if (current?.sessionId !== session.sessionId) return;
+      current.frames += 1;
+      current.bytes += size;
+      await api.storage.session.set({ [key]: current });
+    });
   } finally {
-    // Ack only after the frame is durable. Chromium naturally back-pressures
-    // the stream, and no asynchronous read/modify/write can drop a frame.
-    await send(tabId, 'Page.screencastFrameAck', { sessionId: params.sessionId }).catch(() => {});
+    // Ack only after the frame is durable, so Chromium's back-pressure is real.
+    //
+    // Deliberately NOT through send(): that would run a halt check, an attach
+    // check and a getTargets() round trip for every frame, on the same
+    // single-threaded worker the agent's own calls run on. It starved them
+    // badly enough that a scroll during a recording timed out after 60s. The
+    // event we are answering is itself proof the session is live.
+    await sendOnLiveSession(tabId, 'Page.screencastFrameAck', { sessionId: params.sessionId })
+      .catch(() => {});
   }
 }
 
@@ -444,7 +473,19 @@ export async function stopVideo(tabId, issueId) {
   const frames = await listVideoFrames(session.sessionId);
   if (!frames.length) {
     await deleteVideoFrames(session.sessionId);
-    return { frames: 0, attached: false, issueId: session.issueId };
+    // An empty capture is a result that needs explaining, not a bare zero.
+    const visible = await evaluate(tabId, 'document.visibilityState').catch(() => null);
+    return {
+      frames: 0,
+      attached: false,
+      issueId: session.issueId,
+      reason: visible && visible !== 'visible'
+        ? `No frames were captured: the tab was "${visible}" for the whole recording, and a tab ` +
+          `that is not being painted produces none. Bring it to the foreground and record again.`
+        : 'No frames were captured. The tab reports it is visible, so either nothing on the page ' +
+          'changed during the recording, or this browser is not compositing it (a headless ' +
+          'browser produces no screencast frames at all).',
+    };
   }
   const durationMs = frames[frames.length - 1].at;
   const payload = JSON.stringify({

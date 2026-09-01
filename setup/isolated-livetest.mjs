@@ -8,7 +8,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm, writeFile, access } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, access, cp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
@@ -19,14 +19,45 @@ const ROOT = path.resolve(HERE, '..');
 const EXTENSION = path.join(ROOT, 'extension');
 const TEST_URL = 'http://127.0.0.1:5199/';
 const profile = await mkdtemp(path.join(tmpdir(), 'g9-isolated-'));
+const extensionCopy = await mkdtemp(path.join(tmpdir(), 'g9-ext-'));
 const bridgePort = await freePort();
 const debugPort = await freePort();
 const screenshotPath = process.env.G9_PANEL_SCREENSHOT ??
   path.join(tmpdir(), 'g9-panel-' + Date.now() + '.png');
 const children = [];
+const workerLog = [];
 
 /**
- * Refuse to run while a real session is live on the default port.
+ * Buffer the extension service worker's own console output and exceptions.
+ *
+ * The harness drives the browser from outside, so when something goes wrong in
+ * the extension all it sees is a tool call that never came back. The worker
+ * usually knows exactly what happened; nothing was listening.
+ */
+function watchWorkerConsole(session, sink) {
+  session.on('Runtime.consoleAPICalled', (params) => {
+    const text = (params.args ?? [])
+      .map((a) => a.value ?? a.description ?? a.unserializableValue ?? a.type)
+      .join(' ');
+    sink.push('[' + params.type + '] ' + text);
+  });
+  session.on('Runtime.exceptionThrown', (params) => {
+    const d = params.exceptionDetails ?? {};
+    sink.push('[exception] ' + (d.exception?.description ?? d.text ?? 'unknown'));
+  });
+}
+
+function dumpWorkerLog() {
+  if (!workerLog.length) {
+    console.log('\n\x1b[90m(the extension service worker logged nothing)\x1b[0m');
+    return;
+  }
+  console.log('\n\x1b[1mExtension service worker said:\x1b[0m');
+  for (const line of workerLog.slice(-60)) console.log('  \x1b[90m' + line + '\x1b[0m');
+}
+
+/**
+ * Keep this run away from a real session on the default port.
  *
  * A freshly loaded extension has no stored settings, so `bootstrap()` connects
  * to the DEFAULT 8765 before this harness can seed anything — and the bridge's
@@ -36,30 +67,61 @@ const children = [];
  * that is exactly what happened: a tool call meant for the developer's own tab
  * was answered by the throwaway test profile.
  *
- * The window cannot be closed from here — nothing can seed storage before the
- * worker's first line runs. So refuse instead of stealing, the same way
- * livetest.mjs refuses when its own port is taken.
+ * That window cannot be closed from the harness — nothing can seed storage
+ * before the worker's first line runs. So the address is baked into a COPY of
+ * the extension instead (`dev-bridge.json`, read by `sw.js` before connect),
+ * and this run never uses the default port at all.
+ *
+ * The note below stays because the override is the only thing standing between
+ * a test run and someone's live session; `assertPrivateBridge()` verifies it
+ * actually took effect rather than assuming.
  */
-async function assertNoLiveSession() {
-  if (process.argv.includes('--force')) return;
+async function warnAboutLiveSession() {
   try {
     const probe = await fetch('http://127.0.0.1:8765/health', { signal: AbortSignal.timeout(1500) });
     if (!probe.ok || (await probe.json())?.ok !== true) return;
   } catch {
-    return; // nothing there, which is what we want
+    return; // nothing there
   }
+  console.warn('\n\x1b[33mNote: a G9 bridge is already running on the default port 8765.\x1b[0m');
+  console.warn('This run bakes its own port into a copy of the extension, so it will not touch');
+  console.warn('that session. If the override fails, the run aborts rather than taking it over.\n');
+}
 
-  console.error('\n\x1b[31mA G9 bridge is already running on the default port 8765.\x1b[0m');
-  console.error('This test loads a fresh extension, and a fresh extension connects to 8765');
-  console.error('before it can be told about this run\'s private port — which would take over');
-  console.error('that session and answer your agent\'s tool calls from a throwaway profile.\n');
-  console.error('Close the MCP client (or stop the stray bridge) and run this again.');
-  console.error('\x1b[90mIf you are certain nothing is using it: --force\x1b[0m\n');
-  process.exit(2);
+/**
+ * Prove the isolated extension is on THIS run's port before doing anything.
+ *
+ * Without this the failure is silent and expensive: the harness drives a
+ * browser that is talking to a different bridge, every check behaves oddly, and
+ * the real session is being answered by a throwaway profile the whole time.
+ */
+async function assertPrivateBridge(workerCdp, expectedPort) {
+  // bootstrap() applies the override asynchronously, and the worker target can
+  // appear before that write lands. Poll rather than race it.
+  const deadline = Date.now() + 8000;
+  let actual = null;
+  while (Date.now() < deadline) {
+    actual = await workerCdp.evaluate(
+      `(async () => {
+         const session = (await chrome.storage.session.get('state')).state || {};
+         const local = (await chrome.storage.local.get('settings')).settings || {};
+         return (session.bridge && session.bridge.port) || (local.bridge && local.bridge.port) || null;
+       })()`,
+    ).catch(() => null);
+    if (actual === expectedPort) return;
+    await delay(200);
+  }
+  if (actual !== expectedPort) {
+    throw new Error(
+      'The isolated extension is configured for bridge port ' + actual + ', not this run\'s ' +
+        expectedPort + '. dev-bridge.json was not applied, so the run would drive the wrong ' +
+        'browser and could take over a live session. Aborting.',
+    );
+  }
 }
 
 async function main() {
-await assertNoLiveSession();
+await warnAboutLiveSession();
 const browser = await findBrowser();
 console.log('\nG9 isolated live test');
 console.log('browser: ' + browser);
@@ -74,11 +136,22 @@ try {
   children.push(server);
   await waitHttp(TEST_URL, 10_000);
 
+  // Load a COPY of the extension with this run's bridge address baked in.
+  //
+  // The address has to be present before the service worker's first line: it
+  // connects on startup, and a default-port connection would take over whatever
+  // real session is on 8765. Configuring afterwards is always too late.
+  await cp(EXTENSION, extensionCopy, { recursive: true });
+  await writeFile(
+    path.join(extensionCopy, 'dev-bridge.json'),
+    JSON.stringify({ host: '127.0.0.1', port: bridgePort, token: '' }),
+  );
+
   const chrome = spawn(browser, [
     '--user-data-dir=' + profile,
     '--remote-debugging-port=' + debugPort,
-    '--load-extension=' + EXTENSION,
-    '--disable-extensions-except=' + EXTENSION,
+    '--load-extension=' + extensionCopy,
+    '--disable-extensions-except=' + extensionCopy,
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-component-update',
@@ -95,6 +168,15 @@ try {
   const worker = foundWorker.target;
   const extensionId = new URL(worker.url).hostname;
   const workerCdp = foundWorker.session;
+  await assertPrivateBridge(workerCdp, bridgePort);
+
+  // Watch what the extension itself says.
+  //
+  // Without this a failure shows only what the MCP client saw — usually a bare
+  // 60s timeout — while the reason sits in a service-worker console nobody is
+  // reading. Three debugging runs were spent guessing at a hang that the worker
+  // was explaining the whole time.
+  watchWorkerConsole(workerCdp, workerLog);
 
   // Start the private bridge BEFORE the extension is pointed at it.
   //
@@ -141,6 +223,9 @@ try {
   const reattached = await browserControl.send('Target.attachToTarget', { targetId: reloadedWorker.targetId, flatten: true });
   const activeWorker = browserControl.session(reattached.sessionId);
   await activeWorker.send('Runtime.enable');
+  // The reload above replaced the worker, and with it the session id — a watch
+  // on the old one hears nothing. This is the session that runs the whole test.
+  watchWorkerConsole(activeWorker, workerLog);
   const pinned = await activeWorker.evaluate(
     `(async () => {
       const tabs = await chrome.tabs.query({});
@@ -193,6 +278,7 @@ try {
   workerCdp.close();
   activeWorker.close();
   panelCdp.close();
+  if (exitCode !== 0) dumpWorkerLog();
   process.exitCode = exitCode;
 } finally {
   if (browserControl) {
@@ -207,6 +293,7 @@ try {
     await delay(500 + attempt * 500);
     try {
       await rm(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+      await rm(extensionCopy, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
       cleaned = true;
     } catch (err) {
       if (attempt === 4) {
@@ -354,8 +441,18 @@ class Cdp {
       this.socket.addEventListener('open', resolve, { once: true });
       this.socket.addEventListener('error', reject, { once: true });
     });
+    this.listeners = [];
     this.socket.addEventListener('message', (event) => {
       const message = JSON.parse(event.data);
+      if (message.id == null) {
+        // An event, not a reply. Deliver it to anyone watching this session.
+        for (const l of this.listeners) {
+          if (l.sessionId === (message.sessionId ?? null) && l.method === message.method) {
+            try { l.handler(message.params ?? {}); } catch { /* a bad listener is not fatal */ }
+          }
+        }
+        return;
+      }
       const pending = this.pending.get(message.id);
       if (!pending) return;
       this.pending.delete(message.id);
@@ -385,6 +482,7 @@ class Cdp {
     return {
       ready: this.ready,
       send: (method, params = {}) => this.send(method, params, sessionId),
+      on: (method, handler) => { this.listeners.push({ sessionId, method, handler }); },
       evaluate: async (expression) => {
         const result = await this.send('Runtime.evaluate', {
           expression, awaitPromise: true, returnByValue: true, userGesture: true,

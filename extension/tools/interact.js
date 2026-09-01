@@ -59,7 +59,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * The honest question is "did the input reach the page at all", and that is
  * what this answers. The value that resulted is reported, never asserted.
  */
-const WITNESS_EVENTS = ['mousedown', 'mousemove', 'wheel', 'keydown', 'input'];
+// 'wheel' is deliberately absent: Chromium may handle it entirely on the
+// compositor, so its absence proves nothing. scroll() checks its outcome.
+const WITNESS_EVENTS = ['mousedown', 'mousemove', 'keydown', 'input'];
 
 const WITNESS_SOURCE = `(() => {
   if (!window.__g9witness) {
@@ -126,13 +128,36 @@ async function explainNoInput(tabId, action) {
   );
 }
 
-/** Dispatch through the witness: arm, act, then prove the page saw it. */
+/**
+ * Dispatch through the witness: arm, act, then prove the page saw it.
+ *
+ * The check polls briefly rather than looking once, to absorb the small delay
+ * between a dispatch resolving and the event reaching a listener under load.
+ * Clicks and keys are delivered to the renderer before their CDP command
+ * resolves, so in practice they satisfy this on the first look and pay nothing
+ * for the loop; the wait only runs out when the input genuinely never arrived,
+ * which is the case this exists to catch.
+ *
+ * Keep the budget small. An earlier version used this for scroll as well, and
+ * during an active screencast the extra round trips competed with frame
+ * ingestion until the whole tool call timed out — a verification that breaks
+ * the thing it verifies is worse than none. Scroll now checks its own outcome.
+ */
+const WITNESS_TIMEOUT_MS = 400;
+
 async function witnessed(tabId, expect, action, run) {
   await armWitness(tabId);
   const result = await run();
-  const saw = await witnessSaw(tabId, expect);
-  if (saw === false) throw new Error(await explainNoInput(tabId, action));
-  return result;
+
+  const deadline = Date.now() + WITNESS_TIMEOUT_MS;
+  for (;;) {
+    const saw = await witnessSaw(tabId, expect);
+    if (saw !== false) return result; // true, or null meaning "cannot tell"
+    if (Date.now() >= deadline) break;
+    await sleep(40);
+  }
+
+  throw new Error(await explainNoInput(tabId, action));
 }
 
 /** Scroll into view, then return viewport-relative interaction coordinates. */
@@ -624,17 +649,68 @@ export async function scroll(tabId, { ref, direction = 'down', amount = 400, x, 
   }
   const deltas = { down: [0, amount], up: [0, -amount], right: [amount, 0], left: [-amount, 0] };
   const [deltaX, deltaY] = deltas[direction] ?? deltas.down;
-  await witnessed(tabId, 'wheel', 'scroll', () =>
-    send(tabId, 'Input.dispatchMouseEvent', {
-      type: 'mouseWheel',
-      x: px,
-      y: py,
-      deltaX,
-      deltaY,
-      pointerType: 'mouse',
-    }),
-  );
-  return { scrolled: direction, amount };
+
+  // Scroll checks its OUTCOME, not a `wheel` event.
+  //
+  // Wheel is the one input Chromium may handle entirely on the compositor
+  // thread, so a scroll that works perfectly can produce no DOM `wheel` event
+  // for a listener to see. Witnessing it reported working scrolls as failures,
+  // and the retry loop that hid that made it worse: during an active screencast
+  // the extra round trips competed with frame ingestion until the call timed
+  // out. The scroll position is the honest signal and costs two evaluates.
+  const before = await evaluate(tabId, '({ x: scrollX, y: scrollY })').catch(() => null);
+
+  // A wheel dispatch can wedge, and does so reproducibly while a screencast is
+  // running: `Page.startScreencast` is active, `Input.dispatchMouseEvent` with
+  // `mouseWheel` is accepted, and the promise never settles. Recording a bug
+  // while scrolling through it is not an exotic thing to do — it is the
+  // ordinary way someone reports a scrolling bug — so this falls back rather
+  // than failing, and says which one it used.
+  let via = 'wheel';
+  try {
+    await send(
+      tabId,
+      'Input.dispatchMouseEvent',
+      { type: 'mouseWheel', x: px, y: py, deltaX, deltaY, pointerType: 'mouse' },
+      { timeoutMs: 4000 },
+    );
+  } catch (err) {
+    if (!/did not return after/.test(String(err?.message ?? err))) throw err;
+    await evaluate(tabId, `scrollBy(${Number(deltaX) || 0}, ${Number(deltaY) || 0})`);
+    via = 'programmatic';
+  }
+
+  const after = await evaluate(
+    tabId,
+    '({ x: scrollX, y: scrollY, hidden: document.hidden })',
+  ).catch(() => null);
+
+  const moved = !!before && !!after && (after.x !== before.x || after.y !== before.y);
+
+  // Only accuse the browser when the page also could not have received it.
+  // A page already at its edge legitimately does not move.
+  if (!moved && after?.hidden) throw new Error(await explainNoInput(tabId, 'scroll'));
+
+  return {
+    scrolled: direction,
+    amount,
+    moved,
+    via,
+    ...(after ? { position: { x: after.x, y: after.y } } : {}),
+    ...(via === 'programmatic'
+      ? {
+          note: 'The browser stopped answering wheel events — this happens while a tab video ' +
+            'recording is running — so the page was scrolled programmatically instead. The page ' +
+            'moved, but no wheel event was fired, so anything driven by wheel (custom zoom, ' +
+            'carousels, infinite-scroll hooks) will not have reacted.',
+        }
+      : moved
+        ? {}
+        : {
+            note: 'The page did not move. It may already be at that edge, or the thing that scrolls ' +
+              'is an inner container rather than the document — pass a ref inside it.',
+          }),
+  };
 }
 
 export async function drag(tabId, { from, to, url, steps = 12 } = {}) {

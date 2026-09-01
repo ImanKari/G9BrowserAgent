@@ -26,6 +26,38 @@ function fit(width, height) {
   return Math.min(1, MAX_DIMENSION / width, MAX_CAPTURE_HEIGHT / height);
 }
 
+/**
+ * Capture, retrying once if the command STALLS rather than fails.
+ *
+ * `Page.captureScreenshot` intermittently never returns: the browser accepts
+ * the command and no answer ever comes. It is a compositor stall, most visible
+ * headless but not exclusive to it, and it is not deterministic — the same page
+ * captures fine on the next attempt. Before `cdp.send()` had a timeout this
+ * consumed the whole 60s tool budget and then blamed a JavaScript dialog.
+ *
+ * One retry, only for a stall, and the result SAYS when it happened. Retrying
+ * quietly would turn a browser problem into a mystery about why screenshots are
+ * sometimes slow; retrying at all is worth it because the alternative is losing
+ * evidence the user asked for to a transient fault.
+ */
+async function captureWithRetry(tabId, params) {
+  try {
+    return { ...(await send(tabId, 'Page.captureScreenshot', params)), stalled: false };
+  } catch (err) {
+    if (!/did not return after/.test(String(err?.message ?? err))) throw err;
+    const result = await send(tabId, 'Page.captureScreenshot', params);
+    return { ...result, stalled: true };
+  }
+}
+
+const stallNote = (stalled) =>
+  stalled
+    ? {
+        note: 'The first capture attempt stalled and was retried. This is a browser-side ' +
+          'compositor stall, not a page problem; the image below is from the successful retry.',
+      }
+    : {};
+
 export async function screenshot(tabId, opts = {}) {
   const { area = 'viewport', ref, format = 'jpeg', quality = 70, url } = opts;
 
@@ -55,7 +87,7 @@ export async function screenshot(tabId, opts = {}) {
     }
 
     const scale = fit(rect.width, rect.height);
-    const { data } = await send(tabId, 'Page.captureScreenshot', {
+    const { data, stalled } = await captureWithRetry(tabId, {
       format,
       quality,
       captureBeyondViewport: true,
@@ -73,6 +105,7 @@ export async function screenshot(tabId, opts = {}) {
       element: node.name,
       size: { width: Math.round(rect.width), height: Math.round(rect.height) },
       scale,
+      ...stallNote(stalled),
       dataBase64: data,
     };
   }
@@ -84,15 +117,15 @@ export async function screenshot(tabId, opts = {}) {
       throw new Error('Could not measure the page for a full-page capture — try area:"viewport".');
     }
     const scale = fit(content.width, content.height);
-    const { data } = await send(tabId, 'Page.captureScreenshot', {
+    const { data, stalled } = await captureWithRetry(tabId, {
       format,
       quality,
       captureBeyondViewport: true,
       clip: { x: 0, y: 0, width: content.width, height: content.height, scale },
     });
-    return { format, area, size: content, scale, dataBase64: data };
+    return { format, area, size: content, scale, ...stallNote(stalled), dataBase64: data };
   }
 
-  const { data } = await send(tabId, 'Page.captureScreenshot', { format, quality });
-  return { format, area: 'viewport', dataBase64: data };
+  const { data, stalled } = await captureWithRetry(tabId, { format, quality });
+  return { format, area: 'viewport', ...stallNote(stalled), dataBase64: data };
 }

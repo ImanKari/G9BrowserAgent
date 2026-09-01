@@ -50,12 +50,44 @@ api.runtime.onInstalled.addListener(async (details) => {
 // A worker revival (message, alarm, event) also lands here on module eval.
 bootstrap();
 
+/**
+ * A bridge address baked into the bundle, for disposable test profiles.
+ *
+ * A freshly installed extension has no stored settings, so `bootstrap()`
+ * connects to the default 8765 on its very first line — before any harness can
+ * possibly configure it. The bridge accepts one client and lets the newest win,
+ * so spinning up a throwaway profile SILENTLY TOOK OVER whatever real agent
+ * session was running on that port. `setup/isolated-livetest.mjs` did exactly
+ * that to the developer's own session during the v1.4.0 audit, and it is why
+ * that harness could never pass: it was talking to the wrong browser.
+ *
+ * Nothing the harness does after launch can close that window, so the address
+ * has to be present BEFORE the first line runs. `dev-bridge.json` is written
+ * into a COPY of this directory by the harness; it is absent from the real
+ * extension, where this is one failed fetch at startup and nothing else.
+ */
+async function applyDevBridgeOverride() {
+  try {
+    const response = await fetch(api.runtime.getURL('dev-bridge.json'));
+    if (!response.ok) return null;
+    const config = await response.json();
+    if (!Number.isInteger(config.port)) return null;
+    await setState({ bridge: { host: config.host ?? '127.0.0.1', port: config.port, token: config.token ?? '' } });
+    console.log('[G9] dev bridge override active:', config.host ?? '127.0.0.1', config.port);
+    return config;
+  } catch {
+    return null; // the normal case: this is not a test build
+  }
+}
+
 async function bootstrap() {
   try {
     await api.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
   } catch {
     /* Edge versions before 114 have no sidePanel; the action click still works */
   }
+  // Before connect(), never after — see applyDevBridgeOverride.
+  await applyDevBridgeOverride();
   transport.onMessage(handleBridgeMessage);
   transport.connect();
   // A heartbeat alarm resurrects the worker if it was torn down while the

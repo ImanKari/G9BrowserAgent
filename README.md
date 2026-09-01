@@ -96,6 +96,10 @@ neither minimised nor completely covered.
 diagnose all work perfectly on a background tab, so the agent can keep watching a
 page while you work elsewhere. It just cannot touch it.
 
+The same rule applies to **tab video**: a browser only produces video frames for
+a tab it is painting, so recording a hidden tab captures nothing. The tool now
+tells you that when you start the recording rather than at the end.
+
 Before v1.4.0 this failed silently and the tools reported success anyway — the
 agent would "log in", get `{"typed": "admin"}` back, and carry on against an
 empty form. Now every action verifies that the page actually received the event
@@ -221,11 +225,13 @@ MCP, drive the page, exercise the side panel, and clean up:
 node setup/isolated-livetest.mjs
 ```
 
-Current verified result: **26/26 bridge tests and 25/25 extension regressions.**
+Current verified result: **26/26 bridge tests, 25/25 extension regressions, and
+41 passed / 0 failed / 1 skipped in isolated Edge** over three consecutive runs.
 
-> ⚠️ Both automated suites are headless, and headless cannot reproduce the most
+> ⚠️ All three suites are headless, and headless cannot reproduce the most
 > serious bug found so far — see **The tab has to be visible** below. Drive a
-> real, headed browser before shipping anything that touches interaction.
+> real, headed browser before shipping anything that touches interaction. The
+> one skipped check is tab video, which needs a browser that actually paints.
 
 ---
 

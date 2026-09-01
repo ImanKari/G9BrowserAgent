@@ -37,7 +37,7 @@ const PORT = Number(process.env.G9_PORT ?? 8765);
 const TOKEN = process.env.G9_TOKEN ?? '';
 const CALL_TIMEOUT_MS = Number(process.env.G9_TIMEOUT_MS ?? 60_000);
 
-const VERSION = '1.4.1';
+const VERSION = '1.5.1';
 
 // ---------------------------------------------------------------- transport
 

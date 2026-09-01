@@ -278,9 +278,17 @@ await test('every dispatching interaction witnesses that the page received it', 
     const next = interact.indexOf('\nexport ', start + 10);
     return interact.slice(start, next === -1 ? undefined : next);
   };
-  for (const action of ['click', 'hover', 'type', 'key', 'scroll', 'drag']) {
+  for (const action of ['click', 'hover', 'type', 'key', 'drag']) {
     assert.match(bodyOf(action), /witnessed\(/, action + '() dispatches without witnessing the result');
   }
+  // scroll is the exception, and for a reason worth pinning: Chromium may
+  // handle wheel entirely on the compositor, so no DOM event arrives even when
+  // the scroll worked. It verifies the scroll POSITION instead.
+  const scrollBody = bodyOf('scroll');
+  assert.doesNotMatch(scrollBody, /witnessed\(/, 'scroll must not witness a wheel event');
+  assert.match(scrollBody, /scrollX, y: scrollY/);
+  assert.match(scrollBody, /moved/);
+  assert.doesNotMatch(interact, /WITNESS_EVENTS = \[[^\]]*'wheel'/);
   assert.match(interact, /document\.visibilityState/);
   assert.match(interact, /explainNoInput/);
   assert.match(interact, /isTrusted/);
@@ -316,12 +324,25 @@ await test('video capture never calls CDP inside the serialize chain', async () 
 
     for (const block of [...body.matchAll(/serialize\(async \(\) => (\{)/g)]) {
       const inside = blockAt(body, block.index + block[0].length - 1);
-      assert.doesNotMatch(inside, /\bsend\(tabId/, fn + '() calls CDP inside serialize() — that deadlocks the write chain');
+      assert.doesNotMatch(inside, /\bsend(OnLiveSession)?\(tabId/, fn + '() calls CDP inside serialize() — that deadlocks the write chain');
     }
     // …and the CDP call still has to happen somewhere in the function.
-    assert.match(body, /\bsend\(tabId/, fn + '() no longer talks to CDP at all');
+    assert.match(body, /\bsend(OnLiveSession)?\(tabId/, fn + '() no longer talks to CDP at all');
   }
   assert.match(issues, /Page\.screencastFrameAck/);
+
+  // The ack must NOT go through send(): its halt check, attach check and
+  // getTargets() round trip, paid per frame on the single worker thread,
+  // starved the agent's own calls until an ordinary scroll during a recording
+  // timed out after 60s. The frame event is itself proof the session is live.
+  const ingest = issues.slice(issues.indexOf('export async function ingestFrame'));
+  assert.match(ingest, /sendOnLiveSession\(tabId, 'Page\.screencastFrameAck'/);
+  const cdp = await readFile(new URL('../extension/lib/cdp.js', import.meta.url), 'utf8');
+  assert.match(cdp, /export function sendOnLiveSession/);
+  // At most one serialized write per frame path, never across the blob write.
+  const ingestBody = ingest.slice(0, ingest.indexOf('\nexport '));
+  assert.ok((ingestBody.match(/serialize\(/g) || []).length <= 2,
+    'ingestFrame holds the shared write chain more than necessary per frame');
 });
 
 await test('connection status does not rewrite durable bridge settings', async () => {

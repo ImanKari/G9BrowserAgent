@@ -436,6 +436,8 @@ try {
 
   // -- screenshot ----------------------------------------------------------
   head('11. browser_screenshot');
+  // No retry here on purpose: capture.js retries a stalled capture itself, so
+  // if this fails the retry failed too and that is a real result.
   const shot = await mcp.call('browser_screenshot', { area: 'viewport' });
   if (shot.__image?.data?.length > 500) {
     ok('screenshot captured', `${Math.round(shot.__image.data.length / 1365)} KB, ${shot.__image.mimeType}`);
@@ -450,9 +452,19 @@ try {
     await sleep(600);
     const video = await mcp.call('browser_issue', { action: 'video_stop', id: issue.id });
     const issueAfter = await mcp.call('browser_issue', { action: 'get', id: issue.id });
-    video.attached && issueAfter.attachments?.some((attachment) => attachment.kind === 'video')
-      ? ok('video frames spooled through IndexedDB', video.frames + ' frames')
-      : bad('video attachment missing', JSON.stringify(video));
+    if (video.attached && issueAfter.attachments?.some((attachment) => attachment.kind === 'video')) {
+      ok('video frames spooled through IndexedDB', video.frames + ' frames');
+    } else if (video.frames === 0 && /headless|not being painted/i.test(video.reason ?? '')) {
+      // `Page.startScreencast` captures COMPOSITED frames, and a headless
+      // browser composites nothing — it delivers zero screencast events, so
+      // there is no video to assert. Failing here would be reporting the
+      // harness's own limitation as a defect in the extension. What can be
+      // checked headlessly is checked above: the session starts, stops cleanly,
+      // and explains itself. The frame spool needs a headed run.
+      skip('video frames spooled through IndexedDB', 'headless composites no frames; needs a headed browser');
+    } else {
+      bad('video attachment missing', JSON.stringify(video));
+    }
     await mcp.call('browser_issue', { action: 'delete', id: issue.id });
   }
 

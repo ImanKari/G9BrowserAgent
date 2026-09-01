@@ -161,17 +161,63 @@ function rawSend(tabId, method, params = {}) {
 }
 
 /**
+ * How long any single CDP command may take before we stop waiting.
+ *
+ * Some commands can wedge and never resolve at all. `Input.dispatchMouseEvent`
+ * with `mouseWheel` does it reliably while `Page.startScreencast` is running:
+ * the promise simply never settles. Without a bound, that consumed the bridge's
+ * entire 60s tool budget and then produced a diagnosis that was not merely
+ * unhelpful but WRONG — "the page may be blocked by a JavaScript dialog" — and
+ * sent whoever read it looking in the wrong place. Bounding it here means one
+ * stuck command reports itself, by name, instead of poisoning the call.
+ *
+ * Comfortably longer than any healthy command, and comfortably shorter than the
+ * bridge timeout, so this error wins the race and the agent learns something.
+ *
+ * A few commands are legitimately slow rather than stuck — capturing a large
+ * page, or ending a trace — and cutting those off would invent a failure where
+ * there was only patience required. They get their own budget, still under the
+ * bridge's 60s. Callers can override per call; nothing may exceed the bridge.
+ */
+const COMMAND_TIMEOUT_MS = 20_000;
+
+const SLOW_COMMANDS = new Map([
+  ['Page.captureScreenshot', 45_000],
+  ['Page.getLayoutMetrics', 30_000],
+  ['Tracing.end', 45_000],
+  ['IO.read', 45_000],
+]);
+
+function withTimeout(promise, method, tabId, timeoutMs) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(
+        () => reject(new CdpError(
+          `The CDP command "${method}" did not return after ${Math.round(timeoutMs / 1000)}s. ` +
+          `The command is stuck rather than slow — the browser accepted it and never answered.`,
+          { method, tabId },
+        )),
+        timeoutMs,
+      );
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+/**
  * Send a CDP command, attaching first if needed.
  * This is the single choke point for every deep browser operation.
  */
-export async function send(tabId, method, params = {}) {
+export async function send(tabId, method, params = {}, options = {}) {
+  const timeoutMs = options.timeoutMs ?? SLOW_COMMANDS.get(method) ?? COMMAND_TIMEOUT_MS;
   const state = await getState();
   if (state.halted) throw new CdpError('Agent is halted by the user (Stop was pressed)', { method, tabId });
 
   await attach(tabId);
 
   try {
-    const result = await rawSend(tabId, method, params);
+    const result = await withTimeout(rawSend(tabId, method, params), method, tabId, timeoutMs);
     return result ?? {};
   } catch (err) {
     const msg = String(err?.message ?? err);
@@ -179,11 +225,30 @@ export async function send(tabId, method, params = {}) {
     // re-attaching resolves the overwhelming majority of these.
     if (msg.includes('Detached') || msg.includes('not attached') || msg.includes('Target closed')) {
       await attach(tabId);
-      const result = await rawSend(tabId, method, params);
+      const result = await withTimeout(rawSend(tabId, method, params), method, tabId, timeoutMs);
       return result ?? {};
     }
     throw new CdpError(msg, { method, tabId });
   }
+}
+
+/**
+ * Send a command on a session we already know is live, skipping every guard.
+ *
+ * `send()` pays for its safety on every call: a halt check, an attach check,
+ * and inside `attach()` a `chrome.debugger.getTargets()` round trip. That is
+ * the right price for a tool call. It is the wrong price for answering a
+ * high-frequency event on a session that just proved it exists by DELIVERING
+ * that event — the screencast frame ack is the case that matters, and paying
+ * full price per frame starved the worker badly enough that an ordinary scroll
+ * during a recording timed out after 60s.
+ *
+ * Use this ONLY to respond to an event from the same tab, never to start work.
+ * There is no halt check here, which is safe for an ack and would not be for
+ * anything the agent asked for.
+ */
+export function sendOnLiveSession(tabId, method, params = {}) {
+  return rawSend(tabId, method, params);
 }
 
 /** Ensure a domain is enabled before relying on its events. */

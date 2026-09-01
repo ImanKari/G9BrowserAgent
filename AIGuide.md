@@ -2,7 +2,7 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v1.4.1 — 14 context-efficient browser tools; bridge/MCP 26/26, extension regressions 25/25. **Interaction now verifies that the page actually received the event** — see the v1.4.0 entry, and §4.3a.
+**Status:** v1.5.1 — 14 context-efficient browser tools; bridge/MCP 26/26, extension regressions 25/25, isolated real-Edge 41/41 (+1 skipped) over three consecutive runs. **Interaction verifies that the page actually received the event, and a stuck CDP command reports itself instead of timing out the call** — see §4.3a and the v1.4.0/v1.5.1 entries.
 **Created:** 2026-08-31
 
 ---
@@ -408,6 +408,12 @@ Covers: MCP handshake, instruction delivery, tool count and schema validity, res
 controlled inputs, masked fields), service-worker survival over hours, Chrome
 parity — every live run so far has been Edge. See §8.
 
+`node setup/isolated-livetest.mjs` **works as of v1.5.1** — 41 passed, 0 failed,
+1 skipped, verified over three consecutive runs. It copies the extension to a
+temp directory with `dev-bridge.json` baked in so it can never collide with a
+live session on 8765, wakes an idle MV3 worker instead of waiting for a target
+that will not appear, and prints the service worker's own console when it fails.
+
 > **Every automated live run in this repo is HEADLESS, and headless cannot see
 > the class of bug that cost v1.4.0.** A headless surface is always paintable, so
 > input dispatch always works there; in a headed browser with the tab in the
@@ -437,6 +443,20 @@ parity — every live run so far has been Edge. See §8.
 
 **Known rough edges:**
 
+- **Tab video needs a tab that is being painted.** `Page.startScreencast`
+  captures composited frames, so a hidden tab and a headless browser both
+  produce ZERO — the command succeeds and frames simply never arrive.
+  `video_start` warns when the tab is not visible and `video_stop` explains an
+  empty capture, but neither can conjure frames. The frame spool is the one
+  check `isolated-livetest.mjs` skips, and it needs a headed run.
+- **Some CDP commands stall forever rather than failing.**
+  `Input.dispatchMouseEvent{mouseWheel}` does it reliably while a screencast is
+  running; `Page.captureScreenshot` does it intermittently on identical code.
+  `cdp.send()` bounds every command and names the stuck method, `scroll()` falls
+  back to a programmatic scroll and says so, and `capture.js` retries a stalled
+  capture once. Do not remove those bounds: without them a stall consumes the
+  bridge's whole 60s budget and then reports a JavaScript dialog that is not
+  there.
 - **A hidden tab cannot be interacted with, and that is a browser limit, not a
   bug we can fix.** Chromium discards CDP input for a page that is not visible
   in a headed browser (§4.3a). `browser_interact` now detects it and says so
@@ -581,6 +601,60 @@ Two grouped tools, keeping §4.4's discipline (12 → 14, not 12 → 30):
 ## 9. Change log
 
 Newest first. **Every change to this repo gets an entry.**
+
+### 2026-09-01 — v1.5.1, the live test runs, and three browser stalls it found
+
+`setup/isolated-livetest.mjs` had never once passed. Making it work took fixing
+why it could not connect, and then the real browser told us three things no
+amount of source reading would have.
+
+**It was driving the wrong browser.** A freshly loaded extension has no stored
+settings, so `bootstrap()` connects to the default 8765 on its first line —
+before any harness can configure it — and the bridge lets the newest client win.
+The throwaway profile therefore took over whatever real session was on that port
+and answered its tool calls. Nothing the harness does after launch can close
+that window, so the address is now baked in ahead of it: the harness copies
+`extension/` to a temp directory, writes `dev-bridge.json` beside the manifest,
+and `sw.js` reads it before `transport.connect()`. Absent from the real
+extension, where it is one failed fetch at startup. `assertPrivateBridge()`
+verifies it took effect rather than trusting it.
+
+**`Input.dispatchMouseEvent{mouseWheel}` never returns while a screencast is
+running.** Not slow — stuck. The promise does not settle, which consumed the
+bridge's whole 60s budget and then reported "the page may be blocked by a
+JavaScript dialog": a diagnosis that was not merely unhelpful but WRONG, and
+sent three debugging runs in the wrong direction. So `cdp.send()` now bounds
+every command (20s; 45s for genuinely slow ones like capture and tracing), and
+names the stuck method. `scroll()` falls back to a programmatic scroll when the
+wheel wedges and SAYS it did, because scrolling while recording a bug is the
+ordinary way someone reports a scrolling bug — but a programmatic scroll fires
+no wheel event, so anything driven by wheel will not have reacted.
+
+**`Page.captureScreenshot` intermittently never returns either**, on identical
+code that passed the run before. `capture.js` retries a stall once and reports
+that it did; a second failure is still a failure.
+
+**Tab video needs a tab that is actually being painted.** `Page.startScreencast`
+captures composited frames, so a hidden tab and a headless browser both deliver
+ZERO — the command succeeds, frames never arrive, and the only symptom was an
+empty video discovered long after the bug had gone. `video_start` now warns
+immediately when the tab is not visible, and `video_stop` explains an empty
+capture instead of returning a bare zero. This is the same shape as the input
+problem in §4.3a: the browser accepts the request and quietly does nothing.
+
+**The harness can hear the extension now.** A failing run prints the service
+worker's own console and exceptions. Three runs were spent guessing at a hang
+the worker could have explained, except nothing was listening.
+
+Also in this range: the overflow finding scores evidence that an element's width
+came from the element rather than the layout (v1.4.1); the scroll witness was
+removed because `wheel` may never reach the renderer, and every version bump
+since v1.4.0 is its own entry in this range because a hand-reloaded unpacked
+extension has no other way to confirm the reload took.
+
+**Result: bridge/MCP 26/26, extension 25/25, isolated real-Edge 41 passed /
+0 failed / 1 skipped, three consecutive runs.** The skip is the video frame
+spool, which headless cannot produce; it needs a headed run.
 
 ### 2026-09-01 — v1.4.1, the overflow finding, finished
 
