@@ -195,35 +195,57 @@ async function pageAudit(tabId) {
           (el.className && typeof el.className === 'string' && el.className.trim()
             ? '.' + el.className.trim().split(/\\s+/)[0] : '');
 
-        const boxes = [...document.querySelectorAll('body *')].map((el) => {
+        // Width alone cannot separate cause from victim, which is the trap the
+        // first two versions of this fell into. Once a document overflows, its
+        // containing block grows, and every auto-width block inside stretches
+        // to match — so on the seeded page the 2400px culprit and thirty-one
+        // innocent ancestors and siblings all measure 2400-2434px. Ranking by
+        // width, or by how far something exceeds its parent, ranks noise.
+        //
+        // What actually marks a cause is evidence that the element's width came
+        // from the element rather than from the layout around it. Each signal
+        // below is weak alone and decisive together: on the test page this
+        // scores the real culprit 4 and everything else 1.
+        const INTRINSIC = ['IMG', 'TABLE', 'PRE', 'IFRAME', 'VIDEO', 'CANVAS', 'OBJECT', 'EMBED'];
+        const suspects = [...document.querySelectorAll('body *')].map((el) => {
           const r = el.getBoundingClientRect();
-          const parent = el.parentElement;
-          const room = parent ? parent.getBoundingClientRect().width : de.clientWidth;
-          return { el, width: r.width, overhang: r.width - room, right: r.right };
-        });
+          if (r.width <= de.clientWidth + 1) return null;
+          const why = [];
+          let score = 0;
+          if (!el.children.length && !(el.textContent || '').trim()) {
+            score += 3; why.push('an empty box this wide was given an explicit width');
+          }
+          if (el.scrollWidth > el.clientWidth + 1) {
+            score += 2; why.push('its own content does not fit inside it');
+          }
+          if (INTRINSIC.indexOf(el.tagName) >= 0) {
+            score += 2; why.push('intrinsically sized element');
+          }
+          const widestChild = el.children.length
+            ? Math.max.apply(null, [].map.call(el.children, (c) => c.getBoundingClientRect().width))
+            : 0;
+          if (widestChild < r.width - 1) {
+            score += 1; why.push('no child accounts for its width');
+          }
+          return { el, width: r.width, score, why };
+        }).filter(Boolean).sort((a, b) => b.score - a.score || b.width - a.width);
 
-        const causes = boxes
-          .filter((b) => b.width > 0 && b.overhang > 1 && b.right > de.clientWidth + 1)
-          .sort((a, b) => b.overhang - a.overhang)
-          .slice(0, 5);
+        const best = suspects[0];
+        const listed = suspects.slice(0, 5)
+          .map((s) => name(s.el) + ' (' + Math.round(s.width) + 'px)').join(', ');
 
-        // Nothing breaks out of its own parent, so the overflow is cumulative.
-        const widest = boxes
-          .filter((b) => b.width > de.clientWidth + 1)
-          .sort((a, b) => b.width - a.width)
-          .slice(0, 5);
-
-        const picked = causes.length ? causes : widest;
-        const listed = picked.map((b) => name(b.el) + ' (' + Math.round(b.width) + 'px)').join(', ');
         findings.push({
           severity: 'warning',
           kind: 'layout',
-          message: 'Page scrolls horizontally (' + de.scrollWidth + 'px content in ' + de.clientWidth + 'px viewport). ' +
-            (listed
-              ? (causes.length
-                ? 'Widest elements overflowing their own container: '
-                : 'No element exceeds its container; widest elements on the page: ') + listed
-              : 'No single element is wider than the viewport — the overflow is cumulative (check margins, absolute positioning, or transforms).'),
+          message: 'Page scrolls horizontally (' + de.scrollWidth + 'px content in ' + de.clientWidth +
+            'px viewport). ' +
+            (!best
+              ? 'No single element is wider than the viewport, so the overflow is cumulative — check margins, absolute positioning, or transforms.'
+              : best.score >= 3
+                ? 'Most likely cause: ' + name(best.el) + ' at ' + Math.round(best.width) + 'px — ' +
+                  best.why[0] + '. Also over the viewport: ' + listed + '.'
+                : 'No element stands out as the cause; everything over the viewport looks stretched by the ' +
+                  'overflow rather than causing it. Widest: ' + listed + '.'),
           where: 'layout',
         });
       }

@@ -361,8 +361,12 @@ await test('overflow findings name the cause, not the elements it stretched', as
   // "widest offenders" — on the seeded page that named five stretched
   // ancestors and never the 2400px block responsible.
   assert.doesNotMatch(diagnose, /Widest offenders/);
-  assert.match(diagnose, /overhang/);
-  assert.match(diagnose, /sort\(\(a, b\) => b\.overhang - a\.overhang\)/);
+  // Width alone cannot separate cause from victim: an overflowing document
+  // stretches every auto-width block inside it, so the culprit and thirty
+  // innocent ancestors all measure the same. Scored evidence is the fix.
+  assert.match(diagnose, /Most likely cause/);
+  assert.match(diagnose, /an empty box this wide was given an explicit width/);
+  assert.match(diagnose, /sort\(\(a, b\) => b\.score - a\.score \|\| b\.width - a\.width\)/);
 });
 
 await test('bounded evidence: HAR bodies and Web Storage cannot exceed the transport', async () => {
