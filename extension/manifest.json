@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "G9 Browser Agent",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Gives an AI agent full DevTools-level control over your real browser tabs — inspect, debug, and interact with trusted input events.",
   "minimum_chrome_version": "116",
   "permissions": [

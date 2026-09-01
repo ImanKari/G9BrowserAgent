@@ -2,7 +2,7 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v1.4.0 — 14 context-efficient browser tools; bridge/MCP 26/26, extension regressions 25/25. **Interaction now verifies that the page actually received the event** — see the v1.4.0 entry, and §4.3a.
+**Status:** v1.4.1 — 14 context-efficient browser tools; bridge/MCP 26/26, extension regressions 25/25. **Interaction now verifies that the page actually received the event** — see the v1.4.0 entry, and §4.3a.
 **Created:** 2026-08-31
 
 ---
@@ -581,6 +581,33 @@ Two grouped tools, keeping §4.4's discipline (12 → 14, not 12 → 30):
 ## 9. Change log
 
 Newest first. **Every change to this repo gets an entry.**
+
+### 2026-09-01 — v1.4.1, the overflow finding, finished
+
+Live verification of v1.4.0 caught its own overflow fix only half working, so
+this is the second half plus the version discipline that should have carried it.
+
+Ranking suspects by how far each exceeded its own container found NOTHING on the
+seeded page. The reason is the same trap in a new costume: once a document
+overflows, its containing block grows and every auto-width block inside stretches
+to match, so the 2400px culprit and thirty-one innocent ancestors and siblings
+all measured 2400–2434px and none of them exceeded its parent. The message fell
+back to listing victims by width, honestly labelled and still useless.
+
+Width cannot separate cause from effect here, so `pageAudit` now scores evidence
+that an element's width came from the element rather than from the layout around
+it: an empty box that is nonetheless wider than the viewport (+3), content that
+does not fit inside its own element (+2), an intrinsically sized tag (+2), no
+child accounting for the width (+1). Measured against the live page that scores
+`div.too-wide` **4** and everything else **1**, and the finding now reads
+"Most likely cause: div.too-wide at 2400px — an empty box this wide was given an
+explicit width."
+
+**Every change to this repo bumps the version, including this one.** The
+extension is loaded unpacked and reloaded by hand, and the version in
+`edge://extensions` is the only confirmation the reload took. v1.4.0 shipped the
+first overflow fix without a bump, and the user reloaded with no way to tell
+whether the new code was in. Small changes take the patch segment.
 
 ### 2026-09-01 — v1.4.0, the tools were reporting work they had not done
 
