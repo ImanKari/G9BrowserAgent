@@ -35,6 +35,13 @@ import * as interact from './interact.js';
 import * as nav from './navigate.js';
 import { setReplaying } from './record.js';
 import { executeAssertion, substitute, summarizeAssertion } from './qa.js';
+import { snapshot } from './snapshot.js';
+import * as observe from './observe.js';
+import {
+  buildSignature, detectSurprises, classifySurprises, mergeKnownWorld,
+  calibrateVolatile, emptyKnownWorld, describeSurprise,
+} from '../lib/signature.js';
+import { DEFAULT_SENSITIVITY } from '../lib/flowspec.js';
 
 /** Two consecutive identical boxes is the cheapest proof an element has settled. */
 const POLL_MS = 120;
@@ -64,11 +71,32 @@ const TIMING = {
   recorded: { budget: 1.5, honourPause: true },
 };
 
-export async function replay(tabId, { id, timing = 'recorded', stopOnFailure = true, dryRun = false, variables = {} } = {}) {
+/**
+ * How much of the run's own behaviour is recorded for the surprise detector.
+ *
+ * `lite` is the default because an accessibility tree is the single most
+ * expensive thing this file can ask for, and taking one after every step of a
+ * forty-step flow doubles the run for evidence nobody reads. Assertion steps
+ * and the final step are where the flow claims something is true, so those are
+ * where the UI shape is worth keeping.
+ */
+const SIGNATURE_MODES = {
+  off: { network: false, console: false, ui: 'none' },
+  lite: { network: true, console: true, ui: 'checkpoints' },
+  full: { network: true, console: true, ui: 'every-step' },
+};
+
+export async function replay(tabId, {
+  id, timing = 'recorded', stopOnFailure = true, dryRun = false, variables = {},
+  signature: signatureMode = 'lite', compare = true, seedKnownWorld = false,
+  includeSignature = false,
+} = {}) {
   const recording = await getRecording(id);
   if (!recording) throw new Error(`No recording with id "${id}". Call browser_recording action:"list" to see them.`);
 
   const mode = TIMING[timing] ?? TIMING.adaptive;
+  const evidence = SIGNATURE_MODES[signatureMode] ?? SIGNATURE_MODES.lite;
+  const sensitivity = { ...DEFAULT_SENSITIVITY, ...(recording.sensitivity ?? {}) };
   const started = Date.now();
   const results = [];
   const warnings = [];
@@ -81,15 +109,25 @@ export async function replay(tabId, { id, timing = 'recorded', stopOnFailure = t
   await ensureLocators(tabId);
   await setReplaying(tabId, true);
 
+  // Everything already in the buffers belongs to whatever happened before this
+  // run started. Recording the watermark rather than clearing the buffers keeps
+  // the agent's own view of the page intact — a replay must not destroy the
+  // console history somebody is reading.
+  const watermark = await captureWatermark(tabId, evidence);
+
   try {
     for (let i = 0; i < recording.steps.length; i++) {
-    const step = substitute(recording.steps[i], data);
+    const raw = recording.steps[i];
+    // Assertions that write evidence need to know which recording owns it.
+    const step = substitute({ ...raw, recordingId: recording.id }, data);
+    const stepId = raw.id ?? `s${i + 1}`;
     const label = `step ${i + 1}/${recording.steps.length}`;
     const stepStarted = Date.now();
 
     try {
       const outcome = dryRun ? await probe(tabId, step) : await runStep(tabId, step, mode);
-      results.push({ step: i + 1, type: step.type, ok: true, ms: Date.now() - stepStarted, ...outcome });
+      const record = { step: i + 1, id: stepId, type: step.type, ok: true, ms: Date.now() - stepStarted, ...outcome };
+      results.push(record);
 
       if (outcome.matchedBy && !HEALTHY_MATCH.has(outcome.matchedBy)) {
         warnings.push(
@@ -97,14 +135,25 @@ export async function replay(tabId, { id, timing = 'recorded', stopOnFailure = t
             `Its stable identifiers no longer work, so this step is one refactor from breaking.`,
         );
       }
+
+      await attachEvidence(tabId, record, {
+        evidence, watermark,
+        wantUi: evidence.ui === 'every-step'
+          || (evidence.ui === 'checkpoints' && (step.type === 'assert' || i === recording.steps.length - 1)),
+      });
     } catch (err) {
-      results.push({
+      const record = {
         step: i + 1,
+        id: stepId,
         type: step.type,
         ok: false,
         ms: Date.now() - stepStarted,
         error: String(err?.message ?? err),
-      });
+      };
+      results.push(record);
+      // A failing step is exactly the one whose surroundings matter, so its
+      // evidence is collected even though the run is about to stop.
+      await attachEvidence(tabId, record, { evidence, watermark, wantUi: evidence.ui !== 'none' });
       if (stopOnFailure) break;
     }
     }
@@ -125,19 +174,77 @@ export async function replay(tabId, { id, timing = 'recorded', stopOnFailure = t
     durationMs: Date.now() - started,
     warnings,
     dataParameters: Object.keys(data),
-    steps: results,
+    steps: results.map(publicStep),
   };
 
+  // ---- settle the evidence ------------------------------------------------
+  // Evidence is collected immediately after each step, so a request that had not finished yet was
+  // recorded with no status. Excluding those is right (an unfinished request is not an outcome),
+  // but leaving it there makes the SAME request look brand-new on the next run, when it happens to
+  // complete in time. Re-reading the buffer once at the end gives every request its final status,
+  // which is the only status worth comparing. Found live on 2026-09-04.
+  if (evidence.network && !dryRun) {
+    await settleNetworkEvidence(tabId, results);
+  }
+
+  // ---- signature, known world, surprises ---------------------------------
+  let runSignature = null;
+  let classified = [];
+  if (signatureMode !== 'off') {
+    runSignature = buildSignature({
+      flowId: recording.flowId ?? recording.id,
+      environment: recording.environment?.name ?? recording.environment ?? null,
+      platform: 'web',
+      build: recording.build ?? null,
+      normalizers: recording.urlNormalizers ?? [],
+      steps: results,
+    });
+
+    if (compare) {
+      const detection = detectSurprises(recording.knownWorld, runSignature, { sensitivity });
+      classified = classifySurprises(detection.surprises, recording.surpriseHistory ?? []);
+      summary.surprises = classified;
+      summary.surpriseLines = classified.map(describeSurprise);
+      summary.knownWorld = detection.seeded
+        ? { seeded: false, runs: 0, note: detection.note }
+        : { runs: detection.knownWorldRuns, volatileKeys: (recording.knownWorld?.volatile ?? []).length };
+    }
+    // Never sent to an agent: a full signature is kilobytes of normalised
+    // evidence. Internal callers (calibration, A/B) ask for it by name.
+    if (includeSignature) summary.signature = runSignature;
+  }
+
+  summary.verdict = verdictFor({ failed, warnings, surprises: classified, dryRun });
+
   if (!dryRun) {
-    const run = { at: Date.now(), passed: summary.passed, failed: summary.failed, durationMs: summary.durationMs };
+    const run = {
+      at: Date.now(),
+      passed: summary.passed,
+      failed: summary.failed,
+      durationMs: summary.durationMs,
+      verdict: summary.verdict,
+      surprises: classified.filter((s) => s.effectiveSeverity !== 'info').length,
+    };
     const runHistory = [...(recording.runHistory ?? []), run].slice(-20);
     const recent = runHistory.slice(-10);
     const passRuns = recent.filter((item) => item.failed === 0).length;
     const failRuns = recent.length - passRuns;
+
+    // The known world is only ever grown by a human approving a run, EXCEPT for
+    // the very first one: a flow with no known world can never produce a useful
+    // comparison, and asking somebody to approve an empty baseline they have
+    // not seen is theatre. `seedKnownWorld` makes that first merge explicit.
+    const shouldSeed = seedKnownWorld && runSignature && !(recording.knownWorld?.runs);
+
     await saveRecording({
       ...recording,
       lastRun: run,
       runHistory,
+      lastSignature: runSignature ?? recording.lastSignature ?? null,
+      knownWorld: shouldSeed
+        ? { ...mergeKnownWorld(emptyKnownWorld(runSignature), runSignature), approvedAt: Date.now(), approvedBy: 'seed' }
+        : recording.knownWorld ?? null,
+      surpriseHistory: [...(recording.surpriseHistory ?? []), classified.map((s) => ({ key: s.key, kind: s.kind }))].slice(-5),
       flaky: {
         detected: passRuns > 0 && failRuns > 0,
         sampleSize: recent.length,
@@ -146,9 +253,193 @@ export async function replay(tabId, { id, timing = 'recorded', stopOnFailure = t
       },
     });
     summary.flaky = passRuns > 0 && failRuns > 0;
+    if (shouldSeed) summary.knownWorld = { runs: 1, seeded: true, note: 'Known world seeded from this run.' };
   }
 
   return summary;
+}
+
+/**
+ * Run the same flow twice on the same build and mark what differed as noise.
+ *
+ * Anything that changes when nothing changed is volatile by definition. This is
+ * the cheapest correct mask there is, and — unlike hand-written masks — it does
+ * not slowly blind the suite, because it only ever excludes things that were
+ * proven unstable rather than things somebody found annoying.
+ */
+export async function calibrate(tabId, { id, timing = 'recorded', variables = {} } = {}) {
+  const options = { id, timing, variables, signature: 'full', compare: false, stopOnFailure: true, includeSignature: true };
+
+  const first = await replay(tabId, options);
+  if (first.failed) {
+    throw new Error(
+      `Calibration needs a flow that passes: run 1 failed at step ${first.steps.find((s) => !s.ok)?.step}. ` +
+        `Fix the flow first — calibrating a broken run would mark the breakage itself as noise.`,
+    );
+  }
+  const second = await replay(tabId, options);
+  if (second.failed) {
+    throw new Error('Calibration needs two clean runs; the second run failed. The flow is not stable enough to calibrate.');
+  }
+
+  const volatile = calibrateVolatile(first.signature, second.signature);
+  const recording = await getRecording(id);
+  const knownWorld = { ...(recording.knownWorld ?? emptyKnownWorld(second.signature)), volatile };
+  await saveRecording({ ...recording, knownWorld });
+
+  return {
+    id,
+    runs: 2,
+    volatileKeys: volatile.length,
+    volatile: volatile.slice(0, 60),
+    note: volatile.length
+      ? 'These differed between two identical runs and will no longer be reported as surprises.'
+      : 'Nothing differed between two identical runs — this flow is fully deterministic.',
+  };
+}
+
+/**
+ * Fold the last run into the known world.
+ *
+ * Deliberately a separate, explicit action. Everything else in this file is
+ * allowed to observe; only a person is allowed to say "that is normal now".
+ */
+export async function approveKnownWorld(id, { by = 'operator', note = null } = {}) {
+  const recording = await getRecording(id);
+  if (!recording) throw new Error(`No recording with id "${id}".`);
+  if (!recording.lastSignature) {
+    throw new Error('There is no recorded signature to approve. Replay the flow once, then approve that run.');
+  }
+  const merged = mergeKnownWorld(recording.knownWorld, recording.lastSignature);
+  const knownWorld = { ...merged, approvedAt: Date.now(), approvedBy: by, approvalNote: note };
+  await saveRecording({ ...recording, knownWorld, surpriseHistory: [] });
+  return {
+    id,
+    runs: knownWorld.runs,
+    networkOperations: Object.keys(knownWorld.network).length,
+    consoleSignatures: Object.keys(knownWorld.console).length,
+    steps: Object.keys(knownWorld.steps).length,
+    volatileKeys: knownWorld.volatile.length,
+  };
+}
+
+/**
+ * The result classification.
+ *
+ * `FAIL_AUTOMATION` is separated from `FAIL_PRODUCT` on the wording of the
+ * error, because those two outcomes have different owners: one is a bug and
+ * one is a broken test, and filing the second as the first is how a QA system
+ * loses its audience.
+ */
+function verdictFor({ failed, warnings, surprises, dryRun }) {
+  if (dryRun) return failed.length ? 'FAIL_AUTOMATION' : 'PASS';
+  if (failed.length) {
+    const automation = failed.every((step) => AUTOMATION_FAILURE.test(step.error ?? ''));
+    return automation ? 'FAIL_AUTOMATION' : 'FAIL_PRODUCT';
+  }
+  if (surprises.some((s) => s.effectiveSeverity === 'fail')) return 'SURPRISE';
+  if (warnings.length || surprises.some((s) => s.effectiveSeverity === 'warn')) return 'PASS_WITH_WARNING';
+  return 'PASS';
+}
+
+const AUTOMATION_FAILURE = /^(Could not find |Lost the resolved |Assertion target could not be resolved|Step is a file upload|Unknown step type|No recording )/;
+
+/** The buffer positions this run starts from, so its own slice can be isolated. */
+async function captureWatermark(tabId, evidence) {
+  const mark = { consoleSeq: 0, requestIds: new Set() };
+  if (evidence.console) {
+    const log = await observe.consoleLog(tabId, { limit: 0 }).catch(() => null);
+    mark.consoleSeq = log?.lastSeq ?? 0;
+  }
+  if (evidence.network) {
+    const net = await observe.network(tabId, { limit: 500 }).catch(() => null);
+    for (const request of net?.requests ?? []) mark.requestIds.add(request.requestId);
+  }
+  return mark;
+}
+
+/**
+ * Attach this step's slice of the world to its result record.
+ *
+ * Attribution is by identity, never by wall-clock: console entries carry a
+ * monotonic `seq` and requests carry an id, so "what happened during this step"
+ * is a set difference rather than a guess about timing. The alternative —
+ * filtering by timestamp — quietly mis-assigns everything on a slow page.
+ */
+async function attachEvidence(tabId, record, { evidence, watermark, wantUi }) {
+  if (evidence.console) {
+    const log = await observe.consoleLog(tabId, { since: watermark.consoleSeq, limit: 50 }).catch(() => null);
+    if (log?.entries?.length) {
+      record.console = log.entries.map((e) => ({ level: e.level, text: e.text }));
+      watermark.consoleSeq = log.lastSeq ?? watermark.consoleSeq;
+    }
+  }
+  if (evidence.network) {
+    const net = await observe.network(tabId, { limit: 500 }).catch(() => null);
+    const fresh = [];
+    for (const request of net?.requests ?? []) {
+      if (watermark.requestIds.has(request.requestId)) continue;
+      watermark.requestIds.add(request.requestId);
+      fresh.push({
+        requestId: request.requestId,
+        method: request.method,
+        url: request.url,
+        status: normalizeStatus(request.status),
+      });
+    }
+    if (fresh.length) record.network = fresh;
+  }
+  if (wantUi) {
+    const tree = await snapshot(tabId, { mode: 'a11y', maxNodes: 300 }).catch(() => null);
+    if (tree) {
+      record.aria = tree.tree;
+      record.url = tree.url;
+    }
+  }
+}
+
+/**
+ * Give every request its FINAL status.
+ *
+ * One extra buffer read, after the run, patching by requestId. Requests that are still unfinished
+ * even now keep a null status and are dropped from the signature — a request that never completed
+ * has no outcome to compare, and inventing one is how a detector starts lying.
+ */
+async function settleNetworkEvidence(tabId, results) {
+  const latest = await observe.network(tabId, { limit: 500 }).catch(() => null);
+  if (!latest?.requests?.length) return;
+
+  const byId = new Map(latest.requests.map((request) => [request.requestId, request]));
+  for (const record of results) {
+    for (const entry of record.network ?? []) {
+      const current = byId.get(entry.requestId);
+      if (!current) continue;
+      entry.status = normalizeStatus(current.status);
+    }
+  }
+}
+
+/** A failed request is an outcome (0), a pending one is not (null). */
+function normalizeStatus(status) {
+  if (typeof status === 'number') return status;
+  return String(status ?? '').startsWith('FAILED') ? 0 : null;
+}
+
+/**
+ * What leaves the extension.
+ *
+ * The raw step record carries the whole aria tree and every request, which is
+ * the signature's input and is far too much for a tool result. The counts stay
+ * so a reader can see the evidence existed.
+ */
+function publicStep(record) {
+  const { aria, network, console: consoleEntries, ...rest } = record;
+  return {
+    ...rest,
+    ...(consoleEntries?.length ? { consoleCount: consoleEntries.length } : {}),
+    ...(network?.length ? { requestCount: network.length } : {}),
+    ...(aria ? { uiCaptured: true } : {}),
+  };
 }
 
 /** Make sure the locator engine is present — it may have been lost to a navigation. */

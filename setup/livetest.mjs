@@ -420,6 +420,150 @@ try {
     await mcp.call('browser_recording', { action: 'delete', id: failing.id });
   }
 
+  // -- v1.6.0: regression memory ------------------------------------------
+  head('9b. Regression memory: aria baselines, known world, surprises, pinning');
+  {
+    // A flow with a semantic baseline rather than a pixel one, and a navigate step so that each
+    // replay actually produces traffic and console output to compare. A flow that does nothing
+    // gives the detector nothing to observe, which would make this section prove nothing.
+    await mcp.call('browser_recording', { action: 'start', name: 'G9 live regression memory' });
+    await mcp.call('browser_navigate', { action: 'reload' });
+    const flow = await mcp.call('browser_recording', { action: 'stop' });
+    await mcp.call('browser_recording', { action: 'assert', id: flow.id, assertion: 'aria' });
+
+    const seeded = await mcp.call('browser_recording', {
+      action: 'replay', id: flow.id, timing: 'fast', signature: 'full', seedKnownWorld: true,
+    });
+    seeded.failed === 0 && seeded.knownWorld?.runs === 1
+      ? ok('aria baseline replays and seeds a known world', `verdict=${seeded.verdict}`)
+      : bad('known world was not seeded', JSON.stringify({ failed: seeded.failed, kw: seeded.knownWorld }));
+
+    // A second identical run must be quiet. If a signature is not normalised properly, THIS is
+    // where it shows: the same page compared against itself starts inventing findings. It caught
+    // a real one on 2026-09-04 — a request captured mid-flight on one run and completed on the
+    // next produced a spurious pair, one "new" and one "missing".
+    const quiet = await mcp.call('browser_recording', {
+      action: 'replay', id: flow.id, timing: 'fast', signature: 'full',
+    });
+    const noisy = (quiet.surprises ?? []).filter((item) => item.effectiveSeverity !== 'info');
+    quiet.failed === 0 && noisy.length === 0
+      ? ok('an unchanged page produces no surprises', `verdict=${quiet.verdict}`)
+      : bad('signature is noisy against itself', JSON.stringify(noisy.slice(0, 3)));
+
+    // Now break the world underneath the flow, WITHOUT changing a single assertion. Offline is a
+    // regression the flow has no check for; the detector has to notice on its own, which is the
+    // entire point of the feature.
+    await mcp.call('browser_emulate', { network: 'offline' });
+    const broken = await mcp.call('browser_recording', {
+      action: 'replay', id: flow.id, timing: 'fast', signature: 'full', stopOnFailure: false,
+    });
+    await mcp.call('browser_emulate', { reset: true });
+    await mcp.call('browser_navigate', { action: 'reload' });
+
+    const surprises = broken.surprises ?? [];
+    const missingTraffic = surprises.find((item) => item.layer === 'network' && item.kind === 'missing');
+    missingTraffic
+      ? ok('traffic that always happened and now does not is caught', missingTraffic.key.slice(0, 60))
+      : bad('the missing-direction detector saw nothing', JSON.stringify(surprises.slice(0, 3)));
+
+    surprises.length > 0 && broken.verdict !== 'PASS'
+      ? ok('a run nobody wrote an assertion for is not reported as clean', `verdict=${broken.verdict}, ${surprises.length} surprise(s)`)
+      : bad('a broken run was reported as PASS', JSON.stringify({ verdict: broken.verdict, surprises }));
+
+    const known = await mcp.call('browser_recording', { action: 'known_world', id: flow.id });
+    known.runs === 1
+      ? ok('known world stays at its approved size', `${known.runs} approved run(s)`)
+      : bad('known world grew without approval', JSON.stringify(known));
+
+    await mcp.call('browser_recording', { action: 'delete', id: flow.id });
+  }
+
+  {
+    // Network pinning: record the page's traffic, serve it back, and prove the
+    // page still loads from the recording rather than the server.
+    const captured = await mcp.call('browser_network', { action: 'record_har' });
+    if (!captured.har?.log?.entries?.length) {
+      bad('record_har produced no entries', JSON.stringify(captured).slice(0, 120));
+    } else {
+      ok('HAR captured for pinning', `${captured.recorded} entries`);
+      const pinned = await mcp.call('browser_network', { action: 'pin', har: captured.har });
+      pinned.pinned
+        ? ok('network pinned', `${pinned.operations} operations`)
+        : bad('pin did not engage', JSON.stringify(pinned));
+
+      await mcp.call('browser_navigate', { action: 'reload' });
+      const after = await mcp.call('browser_network', { action: 'pin_status' });
+      after.served > 0
+        ? ok('pinned responses were served to a real reload', `${after.served} served, ${after.passedThrough} passed through`)
+        : bad('pin served nothing on reload', JSON.stringify(after));
+
+      const released = await mcp.call('browser_network', { action: 'unpin' });
+      released.unpinned ? ok('network unpinned') : bad('unpin failed', JSON.stringify(released));
+    }
+  }
+
+  {
+    // The assertion wizard, against the real page. It must propose from what was OBSERVED, and it
+    // must add nothing — a wizard that quietly wrote assertions would be the exact blind spot the
+    // whole design refuses.
+    //
+    // Reload the seeded page FIRST, and make this block self-contained. The pinning section above
+    // leaves the tab holding a page served from a HAR and a console buffer pruned by that
+    // navigation, so a wizard run straight after it correctly sees a small tree and a clean
+    // console — and the assertions here would be testing the previous section's leftovers rather
+    // than the wizard. Test ordering is a fixture, not an accident.
+    await mcp.call('browser_navigate', { action: 'goto', url: 'http://127.0.0.1:5199/', waitUntil: 'load' });
+
+    await mcp.call('browser_recording', { action: 'start', name: 'G9 live wizard' });
+    const wizardFlow = await mcp.call('browser_recording', { action: 'stop' });
+    const before = await mcp.call('browser_recording', { action: 'get', id: wizardFlow.id });
+    const advice = await mcp.call('browser_recording', { action: 'suggest', id: wizardFlow.id });
+    const after = await mcp.call('browser_recording', { action: 'get', id: wizardFlow.id });
+
+    const kinds = (advice.suggestions ?? []).map((item) => item.assertion);
+    kinds.includes('url') && kinds.includes('aria') && kinds.includes('console')
+      ? ok('wizard proposes observable assertions', kinds.join(', '))
+      : bad('wizard proposed too little', JSON.stringify(kinds));
+
+    (advice.suggestions ?? []).every((item) => item.why && item.strength)
+      ? ok('every suggestion carries a strength and a reason')
+      : bad('a suggestion arrived with no rationale', JSON.stringify(advice.suggestions?.slice(0, 2)));
+
+    // The seeded page has deliberate console errors, so the console-absence suggestion must be
+    // marked BLOCKED rather than offered as safe. Offering it would hand the QA an assertion that
+    // fails on the first run.
+    const consoleAdvice = (advice.suggestions ?? []).find((item) => item.assertion === 'console');
+    consoleAdvice?.strength === 'blocked'
+      ? ok('a suggestion that would fail immediately is marked blocked', consoleAdvice.why.slice(0, 60))
+      : bad('the wizard offered a console assertion the page cannot pass', JSON.stringify(consoleAdvice));
+
+    (after.steps?.length ?? 0) === (before.steps?.length ?? 0)
+      ? ok('the wizard added nothing — a human still chooses')
+      : bad('the wizard mutated the recording', `${before.steps?.length} -> ${after.steps?.length}`);
+
+    await mcp.call('browser_recording', { action: 'delete', id: wizardFlow.id });
+  }
+
+  {
+    // The FlowSpec round trip, against a real recording rather than a fixture.
+    await mcp.call('browser_recording', { action: 'start', name: 'G9 live flowspec' });
+    const spec_flow = await mcp.call('browser_recording', { action: 'stop' });
+    await mcp.call('browser_recording', { action: 'assert', id: spec_flow.id, assertion: 'url', operator: 'contains', expected: '127.0.0.1' });
+    const exported = await mcp.call('browser_recording', { action: 'export_spec', id: spec_flow.id });
+    const canonical = exported.json ?? '';
+    canonical.includes('"format": "g9/flowspec"') && canonical.includes('"schemaVersion"')
+      ? ok('FlowSpec exported in canonical form', `${canonical.split('\n').length} lines`)
+      : bad('FlowSpec export is not canonical', canonical.slice(0, 120));
+
+    const reimported = await mcp.call('browser_recording', { action: 'import_spec', spec: exported.spec });
+    reimported.steps === (exported.spec.steps?.length ?? -1)
+      ? ok('FlowSpec re-imports with every step', `${reimported.steps} steps`)
+      : bad('FlowSpec round trip lost steps', JSON.stringify(reimported));
+
+    await mcp.call('browser_recording', { action: 'delete', id: reimported.id });
+    await mcp.call('browser_recording', { action: 'delete', id: spec_flow.id });
+  }
+
   // -- stale refs ----------------------------------------------------------
   head('10. Error quality');
   // Replays navigate and deliberately invalidate prior refs. Establish a fresh

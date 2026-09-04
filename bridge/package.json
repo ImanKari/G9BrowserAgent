@@ -1,6 +1,6 @@
 {
   "name": "g9-browser-agent-bridge",
-  "version": "1.5.4",
+  "version": "1.6.0",
   "private": true,
   "description": "MCP bridge between an AI agent and the G9 Browser Agent extension. Zero dependencies.",
   "type": "module",

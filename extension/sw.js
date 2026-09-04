@@ -31,6 +31,8 @@ import * as replay from './tools/replay.js';
 import * as issues from './tools/issues.js';
 import * as store from './lib/store.js';
 import * as qa from './tools/qa.js';
+import * as netpin from './tools/netpin.js';
+import { toFlowSpec, fromFlowSpec, canonicalJson, validateFlowSpec } from './lib/flowspec.js';
 
 const api = globalThis.browser ?? globalThis.chrome;
 
@@ -129,6 +131,16 @@ api.debugger.onEvent.addListener((source, method, params) => {
 
   if (method === 'Page.screencastFrame') {
     issues.ingestFrame(source.tabId, params).catch(() => {});
+  }
+
+  // A paused request is a request the page is WAITING on. Every branch inside
+  // onRequestPaused answers it; if this handler ever throws before one of them
+  // runs, the tab hangs — so the failure path continues the request rather than
+  // only logging.
+  if (method === 'Fetch.requestPaused') {
+    netpin.onRequestPaused(source.tabId, params).catch((err) => {
+      console.error('[G9] pinned-network interception failed', err);
+    });
   }
   // A committed navigation invalidates every element ref for that tab, and
   // everything captured for the document we just left. Pruning here as well as
@@ -301,6 +313,16 @@ const TOOLS = {
 
   browser_network: {
     run: ({ tabId, args }) => {
+      // Pinning lives here rather than in a fifteenth tool: it is the network
+      // tool doing a network thing, and §4.4's budget is spent on definitions,
+      // not on actions.
+      switch (args.action) {
+        case 'record_har': return netpin.record(tabId, args);
+        case 'pin': return netpin.pin(tabId, args);
+        case 'unpin': return netpin.unpin(tabId);
+        case 'pin_status': return netpin.status(tabId);
+        default: break;
+      }
       if (args.format === 'har') return observe.har(tabId, args);
       return args.requestId ? observe.networkDetail(tabId, args) : observe.network(tabId, args);
     },
@@ -313,7 +335,7 @@ const TOOLS = {
     needsTab: false,
     run: async ({ args }) => {
       const action = args.action ?? 'list';
-      const needsPage = ['start', 'stop', 'replay', 'assert'].includes(action);
+      const needsPage = ['start', 'stop', 'replay', 'assert', 'suggest', 'calibrate'].includes(action);
       const tab = needsPage ? await tabsTool.resolveTarget(args.tabId) : null;
 
       switch (action) {
@@ -329,10 +351,52 @@ const TOOLS = {
         case 'replay': return replay.replay(tab.id, {
           id: requireId(args), timing: args.timing, dryRun: args.dryRun,
           stopOnFailure: args.stopOnFailure !== false, variables: args.variables,
+          signature: args.signature, compare: args.compare !== false,
+          seedKnownWorld: args.seedKnownWorld === true,
         });
+        case 'calibrate': return replay.calibrate(tab.id, {
+          id: requireId(args), timing: args.timing, variables: args.variables,
+        });
+        case 'approve': return replay.approveKnownWorld(requireId(args), { by: args.by, note: args.note });
+        case 'signature': {
+          // The full signature of the LAST run. Not returned by replay itself — it is kilobytes of
+          // normalised evidence and would flood an agent's context — but a runner doing an A/B
+          // comparison needs both sides in full, and it is the only consumer that does.
+          const rec = await store.getRecording(requireId(args));
+          if (!rec) throw new Error(`No recording with id "${args.id}".`);
+          if (!rec.lastSignature) throw new Error('This flow has not been replayed yet, so it has no signature.');
+          return rec.lastSignature;
+        }
+        case 'known_world': {
+          const rec = await store.getRecording(requireId(args));
+          if (!rec) throw new Error(`No recording with id "${args.id}".`);
+          const kw = rec.knownWorld;
+          if (!kw?.runs) return { runs: 0, note: 'No approved known world yet. Replay once, then action:"approve".' };
+          return {
+            runs: kw.runs, approvedAt: kw.approvedAt, approvedBy: kw.approvedBy,
+            networkOperations: Object.keys(kw.network), consoleSignatures: Object.keys(kw.console),
+            dialogs: Object.keys(kw.dialogs), steps: Object.keys(kw.steps).length,
+            volatile: kw.volatile,
+          };
+        }
         case 'assert': return qa.addAssertion(tab.id, { ...args, id: requireId(args) });
+        case 'suggest': return qa.suggestAssertions(tab.id, requireId(args));
         case 'update': return qa.updateRecording(requireId(args), args);
         case 'export_test': return qa.exportPlaywright(requireId(args));
+        case 'export_spec': {
+          const rec = await store.getRecording(requireId(args));
+          if (!rec) throw new Error(`No recording with id "${args.id}".`);
+          const spec = toFlowSpec(rec);
+          return { id: rec.id, spec, json: canonicalJson(spec) };
+        }
+        case 'import_spec': {
+          if (!args.spec) throw new Error('action:"import_spec" needs a spec.');
+          const problems = validateFlowSpec(args.spec);
+          if (problems.length) throw new Error(`FlowSpec is not valid:\n- ${problems.join('\n- ')}`);
+          const recording = fromFlowSpec(args.spec);
+          const saved = await store.saveRecording({ ...recording, id: args.id ?? undefined });
+          return { id: saved.id, name: saved.name, steps: saved.steps.length };
+        }
         case 'delete': return store.deleteRecording(requireId(args));
         case 'export': return store.exportBundle({ includeAttachments: args.includeAttachments !== false });
         case 'import': {

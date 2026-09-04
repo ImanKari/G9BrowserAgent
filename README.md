@@ -117,13 +117,13 @@ and tells you to bring the tab forward if it did not.
 | `browser_navigate` | goto / reload / back / forward / **wait for a condition** |
 | `browser_inspect` | dom · styles · box · storage · cookies · frames |
 | `browser_console` | Read buffered console output, or evaluate JavaScript |
-| `browser_network` | List requests; fetch one with headers/body; export HAR 1.2 |
+| `browser_network` | List requests; fetch one with headers/body; export HAR 1.2; **pin the backend to a recorded HAR** |
 | `browser_diagnose` | **health** · **performance** trace · Core Web **vitals**/long tasks · **memory** leak signals |
 | `browser_screenshot` | viewport / fullpage / element |
 | `browser_emulate` | Device, viewport, network throttle, CPU, colour scheme, locale, timezone |
 | `browser_dialog` | Accept or dismiss `alert` / `confirm` / `prompt` |
 | `browser_tabs` | List/open/close/focus/pin tabs; wait for popups by URL, title, or opener in multi mode |
-| `browser_recording` | Record/replay flows; assertions, suites/tags/data, history/flaky signal, backup, Playwright export |
+| `browser_recording` | Record/replay flows; assertions, suites/tags/data, history/flaky signal, backup, Playwright export, **the assertion wizard, FlowSpec export/import, calibration, and the known world** |
 | `browser_issue` | Defects with screenshot, durable tab video, console, failed requests and page context attached |
 
 Fourteen tools rather than fifty: definitions are re-sent on every request, so a wide surface would burn thousands of context tokens before the agent did anything.
@@ -174,6 +174,108 @@ Timing is reproduced by default. A ten-second session replayed in 200ms is not t
 
 Recordings are real tests, not only macros. `browser_recording action:"assert"` adds URL, text, visibility, element value/state, network, console-absence, accessibility, or screenshot-baseline checks. `action:"update"` adds suite/folder/tags, an environment profile, and `{{parameter}}` data defaults. Replay verifies the observable result of each action, saves the last 20 runs, and flags mixed pass/fail outcomes as potentially flaky. Open Shadow DOM and same-origin iframe elements participate in locator discovery. `action:"export_test"` produces a readable Playwright JavaScript test.
 
+## The part assertions cannot do: remembering what normal looks like
+
+An assertion only ever finds what somebody thought to look for. The regressions
+that reach users are the ones nobody predicted — a console error that appeared
+this sprint, a request that quietly started failing, a control that vanished
+from a screen nobody wrote an assertion about.
+
+So every replay also builds a **signature** of what the flow actually did
+(requests made, console output, the semantic shape of the screen, how long each
+step took) and compares it against that flow's approved **known world**.
+Anything outside it is a *surprise*, in both directions:
+
+```
++ [fail] console: error: Cannot read properties of undefined
+− [fail] network: POST /api/task 2xx
+         This request happened on all 7 previous runs and did not happen now.
++ [warn] ui: s4 :: 2|button "Archive"
+```
+
+The second one is the direction people forget. A request that *always* happened
+and now does not is a button that no longer does anything — and no assertion
+was ever written for it.
+
+**Three rules keep it from becoming noise:**
+
+- **Calibrate once.** `browser_recording action:"calibrate"` runs the flow twice
+  on the same build and marks everything that differed as volatile. Whatever
+  changes when nothing changed is noise by definition. This replaces hand-written
+  masks, which is the mechanism that quietly blinds most visual suites — teams
+  mask until the tool only watches the parts nobody masked.
+- **Confirmation before escalation.** A surprise seen once is reported as a
+  note; the same surprise in a majority of recent runs becomes a finding.
+- **Only a human approves.** `action:"approve"` folds the last run into the
+  known world. Nothing else can, ever — an automatic merge would write a real
+  regression into the baseline as normal, which is the silent-self-healing
+  failure in another costume.
+
+Every replay returns a verdict: `PASS`, `PASS_WITH_WARNING`, `SURPRISE`,
+`FAIL_PRODUCT`, or `FAIL_AUTOMATION`. The last two are separated deliberately:
+a rotted locator is a broken test, not a broken product, and a pipeline that
+conflates them teaches people to ignore it.
+
+### Freeze the backend and the remaining difference is yours
+
+```
+browser_network action:"record_har"     → capture once against the real server
+browser_network action:"pin"  har:…     → serve every matching request from it
+```
+
+Pinned, a retry sees byte-identical responses, so "it failed twice" means
+something. A pinned run red while the live run is green is a client regression;
+the other way round is the server or the data.
+
+### The wizard proposes the oracles you cannot see
+
+A recorded flow with no assertion is a macro: it proves the steps could be performed, never that
+they did anything. `action:"suggest"` looks at what the tool actually observed — which request
+fired, whether the console is clean, how big the semantic tree is — and proposes assertions, each
+with a strength and a reason:
+
+```
+url      strong   The flow ends here. If a later build routes elsewhere, everything else still passes.
+network  strong   The flow performed POST /api/task. Asserts the business effect, so it survives a redesign.
+console  blocked  The page ALREADY has 3 console errors, so this would fail immediately.
+aria     strong   180 semantic nodes — small enough to be a stable structural baseline.
+text     weak     Offered last: easiest to write, first to break on a copy edit.
+```
+
+**It adds nothing.** You pick. A weak assertion somebody consciously accepted is a decision; one a
+tool added quietly is a blind spot.
+
+### Compare two builds directly
+
+```powershell
+node runner/g9.mjs ab rec_abc123 --a https://released.example --b https://candidate.example
+```
+
+Both sides run minutes apart on the same machine with the same data, so almost everything that
+would be noise cancels and what is left is attributable to the build. It reports *differences*, not
+verdicts — a shipped feature and a regression look the same from here.
+
+### Semantic baselines beat pixel baselines
+
+`action:"assert" assertion:"aria"` stores the accessibility tree — roles, names,
+states — instead of an image. It survives restyling, theme changes and copy
+edits, and fails when a button becomes a `div`, a heading disappears, or a
+control is left disabled. Screenshot assertions now default to comparing
+**layout structure** rather than pixels for the same reason, with `strict` still
+available when colour genuinely matters.
+
+## Run it without an agent, on a schedule
+
+```powershell
+node runner/g9.mjs run suite:smoke --env test1 --report ./g9-artifacts
+```
+
+Exit code 0/1/2/3, plus `run.json`, `junit.xml`, a self-contained `report.html`,
+and `qa-automation-status.json` — a per-test-case status file an existing manual
+QA suite can read to show which scenarios are already automated. Full details,
+including the port rule that decides whether a scheduled run is even possible,
+are in [`runner/README.md`](runner/README.md).
+
 ## Report a defect while it is still on screen
 
 Side panel → **Issues** → *New issue*. It captures first and asks questions second, because the evidence is only true at that instant:
@@ -196,7 +298,7 @@ node setup/selftest.mjs
 node setup/extensiontest.mjs
 ```
 
-The first command spawns the real bridge, speaks real MCP over stdio, connects a fake extension over a real WebSocket, and checks 26 behaviours including Origin rejection, keepalive, standalone survival, and surviving a malformed frame. The second loads real extension modules under a deterministic browser-API harness and checks 25 recorder, replay, network, snapshot, emulation, data, visual, video, panel, and input-verification regressions. **No browser is needed for either.**
+The first command spawns the real bridge, speaks real MCP over stdio, connects a fake extension over a real WebSocket, and checks 26 behaviours including Origin rejection, keepalive, standalone survival, and surviving a malformed frame. The second loads real extension modules under a deterministic browser-API harness and checks 34 recorder, replay, network, snapshot, emulation, data, visual, video, panel, signature, FlowSpec, and input-verification regressions. **No browser is needed for either.**
 
 A test page with six deliberate defects is included:
 
@@ -225,8 +327,8 @@ MCP, drive the page, exercise the side panel, and clean up:
 node setup/isolated-livetest.mjs
 ```
 
-Current verified result: **26/26 bridge tests, 25/25 extension regressions, and
-42/42 in isolated Edge** over three consecutive runs.
+Current verified result: **26/26 bridge tests, 34/34 extension regressions, and
+57/57 in isolated Edge** over three consecutive runs.
 
 > ⚠️ All three suites are headless, and headless cannot reproduce the most
 > serious bug found so far — see **The tab has to be visible** below. Drive a
@@ -250,7 +352,7 @@ This tool has full control of your logged-in browser sessions. Treat it as you w
 - **Other tabs stay private** — outside multi-tab mode the agent sees other tabs by origin only. Titles and URLs carry subject lines, document names, and search queries, so they are withheld
 - **Stop button** — blocks every tool call immediately, and **the agent cannot lift it**. Only Resume in the side panel does. (`browser_status` still answers, so the agent can tell you *why* it stopped rather than guessing.)
 - **Full activity log** in the side panel; nothing happens invisibly
-- **Least privilege** — seven permissions, all of them used. `scripting` and `downloads` were requested by earlier versions and never called, so they were dropped
+- **Least privilege** — eight permissions, all of them used. `scripting` and `downloads` were requested by earlier versions and never called, so they were dropped
 - **Zero dependencies** — no supply chain under a tool with this much access
 
 **Optional:** set `G9_TOKEN` in the MCP config and enter the same value in the side panel for a shared secret on top of Origin checking.
@@ -297,7 +399,9 @@ g9-browser-agent/
 │   └── panel/              side panel UI (the trust surface)
 ├── bridge/                 zero-dependency Node bridge
 │   └── src/                server · mcp · ws-server · tools (schemas)
+├── runner/                 the unattended CLI — g9 · mcp-client · report
 ├── setup/                  install · bridge/extension tests · live/isolated live harness · seeded page
+├── g9.project.example.json the project adapter template (belongs in YOUR repo, not this one)
 ├── README.md               this file
 └── AIGuide.md              build log + architecture reference
 ```

@@ -453,4 +453,216 @@ await test('version skew between bridge and extension is reported to the agent',
   assert.match(server, /browser_status/);
 });
 
+// ------------------------------------- regression memory (signature/known world)
+
+const signature = await import('../extension/lib/signature.js');
+const flowspec = await import('../extension/lib/flowspec.js');
+
+await test('normalisation removes run-specific values so two runs are comparable', () => {
+  // Without this every run differs from every other run and the whole surprise
+  // detector is noise. Persian digits are folded because the app renders both.
+  assert.equal(
+    signature.normalizeText('task 9f2ab3c4-1111-2222-3333-444455556666 at 2026-09-04T10:11:12Z'),
+    'task {uuid} at {date}',
+  );
+  assert.equal(signature.normalizeText('ردیف ۱۲۳۴۵'), 'ردیف {n}');
+  assert.equal(
+    signature.normalizeUrl('https://app.test/api/task/9f2ab3c4-1111-2222-3333-444455556666?b=2&a=1'),
+    'app.test/api/task/{uuid}?a&b',
+  );
+  // Query VALUES must not matter and query KEYS must: ?page=2 and ?page=3 are
+  // the same operation, ?page=2&debug=1 is not.
+  assert.equal(signature.normalizeUrl('https://a.test/x?page=2'), signature.normalizeUrl('https://a.test/x?page=3'));
+  assert.notEqual(signature.normalizeUrl('https://a.test/x?page=2'), signature.normalizeUrl('https://a.test/x?page=2&debug=1'));
+});
+
+await test('a surprise is raised for something new AND for something newly missing', () => {
+  const base = signature.buildSignature({
+    flowId: 'f1',
+    steps: [{
+      id: 's1', type: 'click', ms: 100,
+      network: [{ method: 'POST', url: 'https://a.test/api/task', status: 201 }],
+      console: [],
+      aria: '- button "Save" [ref=e1]\n- heading "Tasks"',
+    }],
+  });
+  let known = signature.mergeKnownWorld(null, base);
+  known = signature.mergeKnownWorld(known, base);
+
+  const changed = signature.buildSignature({
+    flowId: 'f1',
+    steps: [{
+      id: 's1', type: 'click', ms: 100,
+      // the POST is GONE and a 500 appeared instead
+      network: [{ method: 'GET', url: 'https://a.test/api/task', status: 500 }],
+      console: [{ level: 'error', text: 'Cannot read properties of undefined' }],
+      aria: '- button "Save" [ref=e4]',
+    }],
+  });
+
+  const { surprises } = signature.detectSurprises(known, changed, { sensitivity: { surprise: 'warn' } });
+  const keys = surprises.map((s) => `${s.kind}:${s.layer}`);
+  assert.ok(keys.includes('missing:network'), 'a request that always happened and now does not is a finding');
+  assert.ok(keys.includes('new:network'), 'a request that never happened before is a finding');
+  assert.ok(keys.includes('new:console'), 'a console error nobody asserted on is a finding');
+  assert.ok(keys.includes('missing:ui'), 'a control that always appeared and is now gone is a finding');
+  // The new 5xx and the new console error are failures; a UI change is a warning.
+  const failures = surprises.filter((s) => s.severity === 'fail').map((s) => s.layer);
+  assert.ok(failures.includes('console') && failures.includes('network'));
+  assert.ok(!surprises.some((s) => s.layer === 'ui' && s.severity === 'fail'));
+});
+
+await test('an empty known world seeds instead of reporting everything as a surprise', () => {
+  const sig = signature.buildSignature({ flowId: 'f1', steps: [{ id: 's1', network: [{ method: 'GET', url: 'https://a.test/', status: 200 }] }] });
+  const result = signature.detectSurprises(null, sig);
+  assert.equal(result.seeded, true);
+  assert.equal(result.surprises.length, 0);
+});
+
+await test('confirmation downgrades a one-off; repetition promotes it', () => {
+  const current = [{ layer: 'console', kind: 'new', key: 'error: boom', severity: 'fail' }];
+  const first = signature.classifySurprises(current, []);
+  assert.equal(first[0].confirmed, false);
+  assert.equal(first[0].effectiveSeverity, 'warn', 'one sighting is a note, not a finding');
+
+  const again = signature.classifySurprises(current, [[{ key: 'error: boom', kind: 'new' }]]);
+  assert.equal(again[0].confirmed, true);
+  assert.equal(again[0].effectiveSeverity, 'fail');
+});
+
+await test('calibration marks what differs between two identical runs as volatile', () => {
+  const make = (token) => signature.buildSignature({
+    flowId: 'f1',
+    steps: [{ id: 's1', aria: `- status "${token}"\n- button "Save"`, network: [] }],
+  });
+  // A live counter is the classic volatile region. Normalisation deliberately
+  // does NOT absorb small numbers — collapsing every digit would also hide
+  // "level=2" becoming "level=3" — so this is exactly the case calibration is
+  // for, and it is caught in both directions (the old value went, a new one came).
+  const volatile = signature.calibrateVolatile(make('online 3 users'), make('online 4 users'));
+  assert.equal(volatile.length, 2, 'the changing line is volatile going and coming');
+  assert.ok(volatile.every((key) => key.startsWith('s1 :: ')));
+  assert.ok(!volatile.some((key) => key.includes('Save')), 'the stable control is untouched');
+
+  // And a volatile key is then excluded from surprise detection entirely, even
+  // at the strictest sensitivity — which is what stops a counter from filing a
+  // ticket every night.
+  const known = { ...signature.mergeKnownWorld(null, make('online 3 users')), volatile };
+  const { surprises } = signature.detectSurprises(known, make('online 4 users'), { sensitivity: { surprise: 'fail' } });
+  assert.equal(surprises.length, 0);
+});
+
+await test('FlowSpec is canonical, validated, and refuses to carry a secret', () => {
+  const recording = {
+    id: 'rec_1', name: 'Create a task', suite: 'smoke', tags: ['b', 'a'],
+    parameters: { title: { type: 'string', default: 'G9-x' }, password: { type: 'secretRef', required: true } },
+    steps: [
+      { id: 's1', type: 'navigate', url: 'https://app.test/' },
+      { id: 's2', type: 'click', target: { locators: [{ kind: 'testid', value: 'save' }], fingerprint: { role: 'button', name: 'Save' } } },
+      { id: 's3', type: 'assert', assertion: 'network', status: 201, minCount: 1 },
+    ],
+  };
+  const spec = flowspec.toFlowSpec(recording);
+  assert.deepEqual(flowspec.validateFlowSpec(spec), []);
+  assert.deepEqual(spec.tags, ['a', 'b'], 'tags are sorted so a reorder is not a diff');
+  assert.equal(spec.parameters.password.type, 'secretRef');
+  assert.ok(!('default' in spec.parameters.password));
+  assert.equal(flowspec.canonicalJson(spec), flowspec.canonicalJson(flowspec.toFlowSpec(recording)), 'export is byte-stable');
+
+  // A secret with a literal value must fail loudly — a spec is the artefact
+  // most likely to be committed or pasted into a ticket.
+  assert.throws(() => flowspec.toFlowSpec({
+    ...recording, parameters: { password: { type: 'secretRef', default: 'hunter2' } },
+  }), /never contain a secret/);
+
+  // An unknown action must fail rather than be skipped: a runner that silently
+  // ignores a step it does not understand returns green for a test that never ran.
+  const problems = flowspec.validateFlowSpec({ ...spec, steps: [{ id: 'x', action: 'teleport' }] });
+  assert.ok(problems.some((p) => /unknown action/i.test(p)));
+
+  const round = flowspec.fromFlowSpec(spec);
+  assert.equal(round.steps.length, 3);
+  assert.equal(round.steps[2].assertion, 'network');
+});
+
+await test('layout comparison ignores colour and notices structure', () => {
+  const size = 64;
+  const flat = { algorithm: 'edge-64x64-v1', width: size, height: size, edges: new Array(size * size).fill(0) };
+  const withBox = { ...flat, edges: flat.edges.map((_, i) => (i % size > 10 && i % size < 20 ? 1 : 0)) };
+
+  const same = visual.compareVisual({ structure: flat }, { structure: flat }, { mode: 'layout' });
+  assert.equal(same.pass, true);
+  assert.equal(same.difference, 0);
+
+  const moved = visual.compareVisual({ structure: flat }, { structure: withBox }, { mode: 'layout' });
+  assert.equal(moved.pass, false, 'new structure is a real difference');
+  assert.ok(moved.changedCells.length > 0);
+
+  // A mask over the changed columns removes it — and reports how much it hid,
+  // so a mask that swallows the whole page is visible rather than silent.
+  const masked = visual.compareVisual({ structure: flat }, { structure: withBox }, {
+    mode: 'layout', masks: [{ x: 10 / size, y: 0, w: 12 / size, h: 1 }],
+  });
+  assert.equal(masked.pass, true);
+  assert.ok(masked.maskedCells > 0);
+
+  // An old baseline has no structure map; saying so beats silently comparing
+  // something the caller did not ask for.
+  assert.throws(() => visual.compareVisual({ fingerprint: {} }, { structure: flat }, { mode: 'layout' }), /no structure map/);
+  assert.equal(visual.compareVisual({}, {}, { mode: 'off' }).skipped, true);
+});
+
+await test('pinned network answers every paused request exactly once', async () => {
+  const netpin = await import('../extension/tools/netpin.js');
+  const answered = [];
+  const originalSend = chrome.debugger.sendCommand;
+  chrome.debugger.sendCommand = async (_source, method, params) => {
+    if (/^Fetch\.(fulfillRequest|continueRequest|failRequest)$/.test(method)) answered.push({ method, params });
+    return {};
+  };
+  try {
+    const har = { log: { entries: [{
+      request: { method: 'GET', url: 'https://a.test/api/x?q=1' },
+      response: { status: 200, headers: [{ name: 'content-type', value: 'application/json' }], content: { mimeType: 'application/json', text: '{"ok":true}' } },
+    }] } };
+    await netpin.pin(7, { har });
+
+    await netpin.onRequestPaused(7, { requestId: 'r1', request: { method: 'GET', url: 'https://a.test/api/x?q=9' } });
+    assert.equal(answered.at(-1).method, 'Fetch.fulfillRequest', 'query VALUES do not change the operation');
+
+    await netpin.onRequestPaused(7, { requestId: 'r2', request: { method: 'GET', url: 'https://a.test/other' } });
+    assert.equal(answered.at(-1).method, 'Fetch.continueRequest', 'unmatched passes through by default');
+
+    await netpin.unpin(7);
+    await netpin.pin(7, { har, strict: true });
+    await netpin.onRequestPaused(7, { requestId: 'r3', request: { method: 'GET', url: 'https://a.test/other' } });
+    assert.equal(answered.at(-1).method, 'Fetch.failRequest', 'strict refuses what it did not record');
+
+    const status = await netpin.status(7);
+    assert.equal(status.pinned, true);
+    assert.equal(status.failed, 1);
+    assert.equal((await netpin.unpin(7)).unpinned, true);
+    assert.equal((await netpin.status(7)).pinned, false);
+  } finally {
+    chrome.debugger.sendCommand = originalSend;
+  }
+});
+
+await test('the new assertion and network actions are declared in the bridge schema', () => {
+  const tools = toolsModule.TOOLS;
+  const recording = tools.find((t) => t.name === 'browser_recording');
+  const network = tools.find((t) => t.name === 'browser_network');
+  // A capability the router implements and the schema does not declare is a
+  // capability no agent will ever call.
+  for (const action of ['calibrate', 'approve', 'known_world', 'export_spec', 'import_spec']) {
+    assert.ok(recording.inputSchema.properties.action.enum.includes(action), `browser_recording is missing action "${action}"`);
+  }
+  assert.ok(recording.inputSchema.properties.assertion.enum.includes('aria'));
+  for (const action of ['pin', 'unpin', 'record_har', 'pin_status']) {
+    assert.ok(network.inputSchema.properties.action.enum.includes(action), `browser_network is missing action "${action}"`);
+  }
+  assert.match(toolsModule.INSTRUCTIONS, /known world/i);
+  assert.match(toolsModule.INSTRUCTIONS, /Never approve on your own initiative/);
+});
+
 console.log('\n' + passed + ' passed, 0 failed\n');

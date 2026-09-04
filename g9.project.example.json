@@ -1,0 +1,39 @@
+{
+  "//": [
+    "The project adapter. Copy to g9.project.json in the repo of the app under test —",
+    "NOT into this tool. Everything the tool knows about your product lives here, as data,",
+    "so the extension itself stays usable on any site without being untangled from one.",
+    "Every key is optional."
+  ],
+
+  "defaultEnvironment": "test1",
+
+  "environments": {
+    "test1": "https://test1.example.internal",
+    "test2": "https://test2.example.internal"
+  },
+
+  "//urlNormalizers": "Collapse routes only your app knows are the same operation. Applied to the path before comparison, so /tasks/<guid> and /tasks/<other-guid> stop looking like two different requests.",
+  "urlNormalizers": [
+    { "match": "/tasks/[0-9a-f-]{36}", "as": "/tasks/{id}" },
+    { "match": "/sites/\\d+/pots", "as": "/sites/{id}/pots" }
+  ],
+
+  "//secretRefs": "NAMES only. A value here would be a credential in a file that gets committed.",
+  "secretRefs": ["qa.username", "qa.password"],
+
+  "//volatile": "A last-resort manual mask. Prefer `g9 calibrate`, which finds these by running the flow twice and needs nobody to guess.",
+  "volatile": ["#server-clock", "[data-testid=last-sync]"],
+
+  "//operationAliases": "Friendlier names in reports and Jira summaries.",
+  "operationAliases": {
+    "POST /api/task 2xx": "task.create",
+    "GET /api/task/{uuid} 2xx": "task.read"
+  },
+
+  "//destructiveActions": "Accessible names an exploratory run must never click. Advisory today; the state-graph explorer will enforce it.",
+  "destructiveActions": ["حذف", "Delete", "Remove", "Sign out"],
+
+  "//reportSink": "Where a scheduled run posts its artefacts. The runner writes files regardless.",
+  "reportSink": { "kind": "file", "path": "./g9-artifacts" }
+}

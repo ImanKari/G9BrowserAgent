@@ -2,7 +2,7 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v1.5.4 — 14 context-efficient browser tools; bridge/MCP 26/26, extension regressions 25/25, isolated real-Edge **42/42** over three consecutive runs. **Interaction verifies that the page actually received the event, and a stuck CDP command reports itself instead of timing out the call** — see §4.3a and the v1.4.0/v1.5.1 entries.
+**Status:** v1.6.0 — 14 context-efficient browser tools; bridge/MCP 26/26, extension regressions **34/34**, isolated real-Edge **56/56** (v1.6.0, including regression memory and the assertion wizard). **Interaction verifies that the page actually received the event, and a stuck CDP command reports itself instead of timing out the call** — see §4.3a and the v1.4.0/v1.5.1 entries. **v1.6.0 adds regression memory: signatures, the known world, the surprise detector, calibration, layout-mode visual baselines, semantic (aria) baselines, network pinning, FlowSpec, and an unattended runner** — see §8c.
 **Created:** 2026-08-31
 
 ---
@@ -60,7 +60,9 @@ g9-browser-agent/
 │   │   ├── cdp.js                chrome.debugger wrapper — single choke point
 │   │   ├── refs.js               element ref registry (eN -> backendNodeId)
 │   │   ├── locators.js           MULTI-LOCATOR element identity (recorder core)
-│   │   ├── visual.js             compact screenshot fingerprint + comparison
+│   │   ├── signature.js          journey signature · known world · SURPRISE detector (§8c)
+│   │   ├── flowspec.js           canonical, Git-diffable portable flow form (§8c)
+│   │   ├── visual.js             fingerprint + structure map + masks + diff image
 │   │   ├── store.js              recordings + issues; local for records, IDB for blobs/frames
 │   │   └── transport.js          WebSocket client, keepalive, backoff
 │   ├── tools/
@@ -75,12 +77,18 @@ g9-browser-agent/
 │   │   ├── emulate.js            device/network emulation, JS dialogs
 │   │   ├── record.js             session recording over a CDP binding
 │   │   ├── replay.js             replay engine + failure diagnosis
-│   │   ├── qa.js                 assertions, metadata, data, Playwright export
+│   │   ├── qa.js                 assertions (incl. aria), baselines, Playwright export
+│   │   ├── netpin.js             serve the network from a HAR (Fetch interception)
 │   │   └── issues.js             defect capture, context, attachments
 │   └── panel/                    side panel — the trust surface
 │       ├── panel.html/.css/.js
 │       ├── welcome.html          shown once on install
 │       └── icon{16,48,128}.png   generated, not hand-drawn
+├── runner/                       the unattended CLI — no agent, no QA present
+│   ├── g9.mjs                    run · list · calibrate · approve · spec; exit codes 0-4
+│   ├── mcp-client.mjs            minimal MCP stdio client (the runner is just another client)
+│   ├── report.mjs                run.json · junit.xml · report.html · qa-automation-status.json
+│   └── README.md
 ├── bridge/
 │   ├── package.json              zero dependencies, type: module
 │   └── src/
@@ -598,9 +606,323 @@ Two grouped tools, keeping §4.4's discipline (12 → 14, not 12 → 30):
 `browser_recording` (list/get/start/stop/replay/assert/update/delete/export/import/export_test) and
 `browser_issue` (list/get/create/update/delete/screenshot/attach/attachment/video start/stop/status).
 
+## 8c. Regression memory — signatures, the known world, and surprises
+
+Added in v1.6.0. This is the largest single addition since the recorder, and the
+reasoning matters more than the code.
+
+### The problem it answers
+
+Everything in §8b makes a recorded flow *survive* change. None of it notices
+change that nobody wrote an assertion for — and that is where real regressions
+live. A flow can pass every assertion it has while the page starts throwing a
+console error, stops making a request, or loses a control from a screen the
+assertions do not mention.
+
+So the question is inverted: instead of "did the expected thing happen?", each
+run also asks **"did anything happen that has never happened before?"**
+
+### The pieces
+
+| File | Role |
+|---|---|
+| `lib/signature.js` | Build a run's signature; merge approved runs into a known world; detect surprises; calibrate volatility |
+| `lib/flowspec.js` | The portable, canonical, Git-diffable form of a flow |
+| `tools/netpin.js` | Serve the network from a HAR so the backend stops being a variable |
+| `tools/replay.js` | Collects the evidence, builds the signature, runs the comparison, classifies the verdict |
+| `runner/` | Drives all of it with no agent present |
+
+### Normalisation is the whole game
+
+A signature containing a GUID, a timestamp or a row id differs on every run, so
+everything is a surprise and the feature is noise. `normalizeText` and
+`normalizeUrl` reduce run-specific values to visible placeholders *before*
+anything is compared — `POST /api/task/{uuid} 2xx`, not the raw URL. Both
+failure modes here are silent (too little normalisation → noise, too much →
+blindness), which is why the placeholders appear in the output a human reads.
+
+Two deliberate non-decisions:
+
+- **Query VALUES are dropped, query KEYS are kept.** `?page=2` and `?page=3` are
+  the same operation; `?page=2&debug=1` is not.
+- **Small numbers are NOT normalised.** Collapsing every digit would also hide
+  `level=2` becoming `level=3`. A live counter therefore *does* differ between
+  runs — and that is exactly what calibration is for, rather than something to
+  paper over in the normaliser.
+
+### Both directions, and the one people forget
+
+- **new** — something appeared that never appeared. Usually a regression.
+- **missing** — something that happened on EVERY previous run did not happen.
+  A request that always fired and now does not is a button that no longer does
+  anything, and there was never an assertion for it.
+
+Severity is opinionated: a new error (console error, 4xx/5xx, unexpected dialog)
+is a failure; a universally-missing operation is a failure; a new or missing UI
+node is a *warning* by default, because real products add and remove controls
+constantly and treating that as a failure trains people to ignore the tool.
+`sensitivity.surprise: "fail"` raises it per flow.
+
+### Confirmation, because one sighting is not drift
+
+The accepted rule in drift detection is that a single new failure is not drift —
+a pattern of them is. `classifySurprises` requires the same surprise in 2 of the
+last 3 runs before it reaches its declared severity; below that it is reported
+at warning strength with its evidence attached. Without this, every transient
+blip files a ticket and the tool is muted within a fortnight.
+
+### Calibration replaces hand-written masks
+
+`action:"calibrate"` runs the flow twice on the same build and marks everything
+that differed as volatile. Whatever changes when nothing changed is noise by
+definition, and this is the cheapest correct mask there is.
+
+This matters because hand-masking is the documented way visual suites die:
+teams tighten thresholds and mask dynamic regions until the tool only catches
+regressions in the parts nobody masked. A calibrated mask only ever excludes
+what was *proven* unstable.
+
+Calibration refuses to run on a failing flow. Calibrating a broken run would
+mark the breakage itself as noise — the single worst thing this feature could do.
+
+### Only a human approves
+
+`approveKnownWorld` is the one path that grows the known world, and nothing
+calls it automatically. The single exception is `seedKnownWorld`, which creates
+a first known world where there is none — it can never overwrite an approved
+one. An automatic merge would write a real regression into the baseline as
+normal, which is silent self-healing wearing a different hat.
+
+### Visual: three levels, and why `layout` is the default
+
+1. `luma-32x32-v1` fingerprint — 1KB, inline, a prefilter. Unchanged, because
+   every existing recording carries one.
+2. `edge-64x64-v1` structure map — a binarised gradient. Blind to colour, font
+   smoothing and copy; sharp on things that moved, got clipped or acquired an
+   overlay. This is what `mode: "layout"` compares.
+3. The full PNG — in IndexedDB as an attachment, for a human. Never compared.
+
+An old baseline has no structure map, and `compareVisual` throws rather than
+silently falling back to `strict`: a comparison the caller did not ask for is a
+lie about what was verified.
+
+### Semantic (`aria`) baselines
+
+The accessibility tree, refs stripped and values normalised, stored as a line
+list. It survives restyling and fails on a button that became a `div` or a
+heading that disappeared. Tolerance defaults to zero — a semantic tree that is
+allowed to drift is not a baseline.
+
+The Playwright export writes `toMatchAriaSnapshot()` and lets Playwright own its
+own snapshot file rather than translating our normalised form into their YAML;
+a translated snapshot that never matches is worse than no snapshot.
+
+### Network pinning
+
+`Fetch` interception, matched on **method + normalised URL**, first unconsumed
+entry wins. Request bodies are not matched on — that needs a normaliser per API
+and is the kind of cleverness that fails silently.
+
+Every path in `onRequestPaused` ends in exactly one of `fulfillRequest`,
+`continueRequest` or `failRequest`, including the catch-all: a paused request
+that is never answered hangs the tab forever, so a bug in that file must not be
+able to freeze the page.
+
+Unmatched requests pass through by default and fail under `strict: true`. Strict
+is the honest setting for a test claiming to be hermetic, and it is opt-in
+because one un-recorded font should not look like a product bug.
+
+### The verdict
+
+`PASS` · `PASS_WITH_WARNING` · `SURPRISE` · `FAIL_PRODUCT` · `FAIL_AUTOMATION`.
+
+`FAIL_AUTOMATION` is decided from the *wording* of the step error
+(`AUTOMATION_FAILURE` in `replay.js`) because those two outcomes have different
+owners: one is a bug, one is a broken test, and filing the second as the first is
+how a QA system loses its audience. That regex is a heuristic and will need
+extending as new failure sentences are written — keep it beside the messages it
+matches.
+
+### Evidence attribution is by identity, never by clock
+
+Console entries carry a monotonic `seq` and requests carry an id, so "what
+happened during this step" is a set difference against a watermark taken at the
+start of the run. Filtering by timestamp quietly mis-assigns everything on a
+slow page. The watermark is *recorded*, not cleared — a replay must not destroy
+the console history a human is reading.
+
+### Cost control
+
+`signature: "lite"` (the default) captures network and console for every step
+and the accessibility tree only at assertion steps and the final step.
+`getFullAXTree` is the most expensive thing replay can ask for, and taking one
+after every step of a forty-step flow doubles the run for evidence nobody reads.
+`"full"` is what calibration uses, because calibration needs the UI layer.
+
+### What deliberately did NOT happen
+
+- **No fifteenth tool.** Pinning went into `browser_network` and the known-world
+  actions into `browser_recording`. §4.4's budget is spent on tool *definitions*,
+  which are re-sent every request; actions are free.
+- **No signature in a tool result.** A full signature is kilobytes of normalised
+  evidence. `includeSignature` is an internal flag for calibration; the agent
+  gets counts and surprises.
+- **No automatic approval, no automatic baseline update, no automatic locator
+  repair.** Same rule, three places.
+
 ## 9. Change log
 
 Newest first. **Every change to this repo gets an entry.**
+
+### 2026-09-04 (later) — README figures corrected against a re-run
+
+No code changed. Three numbers in `README.md` had gone stale while the suites grew and were
+corrected after actually re-running them rather than trusting the file: the extension regression
+suite is **34**, not 25 (it says so in its own output); the isolated Edge run is **57/57**, not
+42/42; and `manifest.json` declares **eight** permissions, not seven — `unlimitedStorage` was added
+for the IndexedDB video store and the sentence was never updated.
+
+Worth stating because it is the failure mode this file exists to prevent: a count in prose is a
+claim, and a claim that nobody re-checks quietly becomes wrong. When a suite grows, the number in
+the README is part of the change.
+
+A consumer-facing QA manual now also documents this tool end to end for non-engineers —
+`Agriculture.AgriPad.App/AiGuides/QAAutomationGuide.html` in the AgriPad repo. It is written against
+the behaviour recorded here, so a change to the tool's behaviour needs an edit there too.
+
+### 2026-09-04 — v1.6.0 completion: the wizard, A/B, and two normalisation bugs
+
+Three additions that close the remaining gaps in the plan, plus the fixes the live run forced.
+
+**`action:"suggest"` — the assertion wizard.** A recorded flow with no assertion is a macro: it
+proves the steps could be performed, never that they did anything, and that is how a recorded suite
+goes green for months while the feature underneath is broken. Asking a QA to hand-write oracles does
+not fix it either, because the useful ones are the ones they cannot see — which request fired,
+whether the console is clean, how big the semantic tree is. The tool watched all of that.
+
+It proposes and adds **nothing**. Each suggestion carries a `strength` and a `why`, including
+`blocked` for one that would fail immediately (offering a console-absence assertion on a page that
+already has three errors is handing somebody a red test). The research on LLM-generated oracles is
+blunt that the common defect is not a WRONG assertion but a WEAK one — it passes forever and catches
+nothing — so a weak assertion a person consciously accepted is a decision, and one a tool added
+quietly is a blind spot.
+
+**`action:"signature"` and `g9 ab`.** An approved baseline answers "has this changed since somebody
+blessed it"; in a product shipping several times a week that goes stale between blessings. A/B asks
+the sharper question — what does THIS build do differently from THAT one, right now — with both
+sides minutes apart on the same machine, so nearly all the noise cancels.
+
+It reuses `calibrateVolatile` unchanged: that function already answers "what differed between two
+signatures", written for two runs of the same build to find noise. Point it at two builds and the
+identical computation answers "what changed". One implementation, two readings. The runner imports
+`extension/lib/signature.js` **directly** — it is a plain ES module with no browser APIs — so there
+is no second copy to drift.
+
+`g9 ab` exits 0 on differences, and only fails when a side could not run. A difference is not a
+verdict: a shipped feature and a regression look identical from here, and only a human can say which.
+
+**Two normalisation bugs the live run found**, both of which would have produced constant false
+surprises:
+
+1. A request captured mid-flight produced a spurious PAIR — `GET /x pending` on one run,
+   `GET /x 4xx` on the next, so one "new" key and one "missing" key against a page that had not
+   changed. An unfinished request is not an observation; `buildSignature` now skips it.
+2. Excluding pending was not enough alone: a request that had not finished when its step's evidence
+   was collected stayed out of the known world, then appeared brand-new the next time it completed
+   in time. `settleNetworkEvidence` re-reads the buffer once at the end of a run and patches every
+   request to its FINAL status by `requestId`.
+
+**The lesson worth keeping:** a detector has to be tested against an UNCHANGED world before it is
+tested against a changed one. Both bugs were invisible while only checking whether real changes were
+caught; they surfaced only in the "nothing changed, so nothing should be reported" assertion.
+
+**Live suite: 56 passed, 0 failed** in isolated Edge (was 42 at v1.5.4). Section 9b now covers aria
+baselines, known-world seeding, the quiet-run check, both surprise directions via offline emulation,
+network pinning end to end, the wizard, and the FlowSpec round trip.
+
+A third finding was about the TEST rather than the code: the wizard block initially ran straight
+after the pinning block, so it saw a page served from a HAR and a console buffer pruned by that
+navigation — and asserted against the previous section's leftovers. It now navigates first. Test
+ordering is a fixture, not an accident.
+
+### 2026-09-04 — v1.6.0, the tests grew a memory
+
+Everything in §8c. The short version: a recorded flow now remembers what it
+normally does, and reports anything new or newly missing even when every
+assertion passes.
+
+**Version bumped to 1.6.0 in all THREE places** — `extension/manifest.json`,
+`bridge/package.json` and `bridge/src/server.js`'s `VERSION`. They must move together: the bridge
+compares them and reports `versionSkew` to the agent, so bumping one is worse than bumping none.
+(This was missed on the first pass and caught by the user reloading the extension and seeing 1.5.4.)
+
+New files: `extension/lib/signature.js`, `extension/lib/flowspec.js`,
+`extension/tools/netpin.js`, `runner/g9.mjs`, `runner/mcp-client.mjs`,
+`runner/report.mjs`, `runner/README.md`, `g9.project.example.json`.
+
+Changed: `extension/lib/visual.js` (structure maps, masks, diff image, three
+comparison modes), `extension/tools/qa.js` (`aria` assertion, layout-mode
+screenshots, baseline PNGs as attachments), `extension/tools/replay.js`
+(evidence collection, signature, surprise detection, calibration, verdicts),
+`extension/sw.js` (`Fetch.requestPaused` routing, seven new actions),
+`bridge/src/tools.js` (schemas + a Regression-memory section in INSTRUCTIONS),
+`setup/extensiontest.mjs` (+9 tests), `README.md`.
+
+Nine regressions added to `extensiontest.mjs`, covering normalisation, both
+surprise directions, seeding, confirmation, calibration (including that a
+volatile key is then excluded even at the strictest sensitivity), FlowSpec
+canonicalisation and its refusal to carry a secret, layout comparison with
+masks, pinned-network answering, and schema/router parity. **34 passed.**
+
+Three things were harder than they looked and are worth not rediscovering:
+
+1. **The first test written was wrong about normalisation.** It assumed
+   "3 users" and "4 users" collapse to the same string. They do not, and they
+   should not — collapsing every digit would hide `level=2` → `level=3`. The
+   right answer was that calibration catches a live counter, not the normaliser.
+   The test now asserts that, which documents the boundary between the two
+   mechanisms.
+2. **`publicStep` had to exist.** The step record carries the whole accessibility
+   tree and every request — that is the signature's input, and it is far too
+   much for a tool result. Stripping it at the boundary, while keeping counts so
+   a reader can see the evidence existed, is the difference between a usable
+   result and a context-window flood.
+3. **Calibration needed the raw signature back from `replay`.** The summary
+   only carries `publicStep` output, so comparing two summaries would have
+   compared two empty signatures and reported "fully deterministic" for
+   everything. `includeSignature` is internal for exactly this reason.
+
+**Live-verified on 2026-09-04** — `setup/livetest.mjs` gained section **9b**, which drives the new
+paths against the real seeded page in isolated Edge: **53 passed, 0 failed** (was 42).
+
+It proves the parts that module tests cannot:
+
+- an aria baseline replays and seeds a known world;
+- **an unchanged page produces no surprises** — the check that catches a noisy signature;
+- offline emulation makes the flow do something it has never done, and the *missing* direction
+  catches traffic that always happened and now does not, with **no assertion written for it**;
+- a broken run is not reported as `PASS` (`FAIL_PRODUCT`, 61 surprises);
+- the known world stays at its approved size — nothing grows it but an approval;
+- `record_har` → `pin` → reload actually **serves** recorded responses (`served: 1`), then unpins;
+- a FlowSpec round-trips through canonical JSON with every step intact.
+
+**Two real defects that only a live run could find**, both in signature normalisation, both of
+which would have produced constant false surprises in production use:
+
+1. **A request captured mid-flight produced a spurious pair.** The same request recorded as
+   `GET /x pending` on one run and `GET /x 4xx` on the next generated one "new" key and one
+   "missing" key — against a page that had not changed at all. An unfinished request is not an
+   observation, so `buildSignature` now skips any request with no status.
+2. **Excluding pending was not enough on its own.** A request that had not finished when its step's
+   evidence was collected stayed absent from the known world, then appeared as brand-new the next
+   time it happened to complete in time. `settleNetworkEvidence` now re-reads the buffer once at
+   the end of a run and patches every request to its FINAL status by `requestId`. Requests still
+   unfinished then keep a null status and stay out of the signature.
+
+The general lesson is the one this repo keeps relearning: **a detector has to be tested against an
+unchanged world before it is tested against a changed one.** Both bugs were invisible while only
+looking at whether real changes were caught — they only showed up in the "nothing changed, so
+nothing should be reported" check.
 
 ### 2026-09-01 — v1.5.4, a script that drives the extension without an agent
 

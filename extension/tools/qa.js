@@ -6,14 +6,20 @@
 import { send, evaluate, callOnNode } from '../lib/cdp.js';
 import { resolveRef } from '../lib/refs.js';
 import { LOCATOR_SOURCE } from '../lib/locators.js';
-import { getRecording, saveRecording } from '../lib/store.js';
+import { getRecording, saveRecording, putAttachment } from '../lib/store.js';
 import { screenshot } from './capture.js';
-import { visualFingerprint, visualDifference } from '../lib/visual.js';
+import {
+  visualFingerprint, visualDifference, captureVisual, compareVisual, diffImage,
+} from '../lib/visual.js';
+import { snapshot } from './snapshot.js';
+import { ariaLines } from '../lib/signature.js';
 import { consoleLog, network } from './observe.js';
 import { health } from './diagnose.js';
 
 const ELEMENT_ASSERTIONS = new Set(['visible', 'value', 'state']);
-const ASSERTIONS = new Set(['url', 'text', 'visible', 'value', 'state', 'network', 'console', 'a11y', 'screenshot']);
+const ASSERTIONS = new Set([
+  'url', 'text', 'visible', 'value', 'state', 'network', 'console', 'a11y', 'screenshot', 'aria',
+]);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function addAssertion(tabId, args = {}) {
@@ -47,8 +53,36 @@ export async function addAssertion(tabId, args = {}) {
   }
   if (assertion === 'screenshot') {
     const shot = await screenshot(tabId, { area: 'viewport', format: 'png' });
-    step.baseline = await visualFingerprint(shot.dataBase64, 'image/png');
-    step.threshold = args.threshold ?? 0.08;
+    const captured = await captureVisual(shot.dataBase64, 'image/png');
+    // The fingerprint stays inline under its historical key so a recording made
+    // by an older build still replays, and the structure map rides alongside it.
+    step.baseline = captured.fingerprint;
+    step.baselineStructure = captured.structure;
+    step.visualMode = args.visualMode ?? 'layout';
+    step.masks = args.masks ?? undefined;
+    step.threshold = args.threshold;
+    // The bytes are evidence for a human, so they go to IndexedDB rather than
+    // into the step: a recording with ten inline PNGs is deserialised in full
+    // on every list, and nothing ever compares them anyway.
+    const attachment = await putAttachment({
+      owner: recording.id,
+      name: `baseline-${(recording.steps?.length ?? 0) + 1}.png`,
+      mime: 'image/png',
+      kind: 'baseline',
+      bytes: base64ToBytes(shot.dataBase64),
+      meta: { role: 'expected', createdAt: Date.now() },
+    });
+    step.baselineImageId = attachment.id;
+  }
+  if (assertion === 'aria') {
+    // A semantic baseline: roles, names and states, with refs stripped. It
+    // survives restyling and copy-independent refactors, and fails on a button
+    // that became a div or a heading that disappeared — which is the class of
+    // regression a screenshot reports as "8% of pixels changed".
+    const tree = await snapshot(tabId, { mode: 'a11y', maxNodes: args.maxNodes ?? 400 });
+    step.ariaBaseline = ariaLines(tree.tree);
+    step.maxNodes = args.maxNodes ?? 400;
+    step.threshold = args.threshold;
   }
 
   const steps = [...(recording.steps ?? []), compact(step)];
@@ -58,6 +92,124 @@ export async function addAssertion(tabId, args = {}) {
     step: steps.length,
     assertion,
     summary: summarizeAssertion(step),
+  };
+}
+
+/**
+ * Propose assertions for a recording that has just been stopped.
+ *
+ * ## Why a wizard rather than "write assertions yourself"
+ *
+ * A recorded flow with no assertion is a macro: it proves the steps could be performed, never that
+ * they did anything. That is the single most common way a recorded suite becomes worthless — it
+ * goes green for months while the feature underneath is broken.
+ *
+ * Asking a QA to hand-write oracles does not fix it either, because the useful oracles are the ones
+ * they cannot see: which request fired, what the console said, what the semantic tree looked like
+ * afterwards. The tool watched all of that; it should be the one to offer it.
+ *
+ * ## Proposals, never additions
+ *
+ * Nothing here writes to the recording. It returns candidates with a `why`, and a human picks. That
+ * is deliberate and matches the rule the rest of this system runs on: the research on
+ * LLM-generated oracles is blunt about the failure mode — the common defect is not a WRONG
+ * assertion but a WEAK one, which passes forever and catches nothing. A weak assertion that a
+ * person consciously accepted is a decision; one that a tool added quietly is a blind spot.
+ *
+ * ## Why the suggestions are what they are
+ *
+ * - **URL** — the cheapest possible proof that the flow ended where it was supposed to.
+ * - **Network** — the operation the flow actually performed. This is the oracle that survives a
+ *   complete redesign of the page, because it asserts the business effect rather than the pixels.
+ * - **Console absence** — free, and the one assertion that catches damage the flow did not intend.
+ * - **Aria snapshot** — structure, so a control that disappears fails even though nothing else
+ *   changed. Offered only when the tree is small enough to be a stable baseline rather than a
+ *   snapshot of the whole world.
+ * - **Text** — offered LAST and marked weak, because copy changes and it is the assertion people
+ *   reach for first precisely because it is the easiest to write.
+ */
+export async function suggestAssertions(tabId, id) {
+  const recording = await getRecording(id);
+  if (!recording) throw new Error('No recording with id "' + id + '".');
+
+  const existing = new Set((recording.steps ?? []).filter((step) => step.type === 'assert').map((step) => step.assertion));
+  const suggestions = [];
+
+  const url = await evaluate(tabId, 'location.href').catch(() => null);
+  if (url && !existing.has('url')) {
+    let pathOnly = url;
+    try { pathOnly = new URL(url).pathname; } catch { /* keep the whole thing */ }
+    suggestions.push({
+      assertion: 'url',
+      operator: 'contains',
+      expected: pathOnly,
+      strength: 'strong',
+      why: 'The flow ends here. If a later build routes somewhere else, every other assertion would still pass.',
+    });
+  }
+
+  // The operations this flow actually performed. Failed ones are excluded on purpose: asserting
+  // that a request 500s locks in the bug.
+  const net = await network(tabId, { limit: 200 }).catch(() => null);
+  const successful = (net?.requests ?? []).filter(
+    (request) => typeof request.status === 'number' && request.status >= 200 && request.status < 400
+      && /xhr|fetch/i.test(request.type ?? ''),
+  );
+  if (successful.length && !existing.has('network')) {
+    const chosen = successful[0];
+    let operation = chosen.url;
+    try { operation = new URL(chosen.url).pathname; } catch { /* keep the whole thing */ }
+    suggestions.push({
+      assertion: 'network',
+      contains: operation,
+      method: chosen.method,
+      minCount: 1,
+      strength: 'strong',
+      why: `The flow performed ${chosen.method} ${operation}. This asserts the business effect, so it survives a redesign of the page.`,
+    });
+  }
+
+  const logs = await consoleLog(tabId, { level: ['error'], limit: 5 }).catch(() => null);
+  if (!existing.has('console')) {
+    suggestions.push({
+      assertion: 'console',
+      level: ['error'],
+      absent: true,
+      strength: (logs?.returned ?? 0) === 0 ? 'strong' : 'blocked',
+      why: (logs?.returned ?? 0) === 0
+        ? 'The page is currently error-free, so this assertion is safe to add and costs nothing to check.'
+        : `The page ALREADY has ${logs.returned} console error(s), so this would fail immediately. Fix or investigate them before adding it.`,
+    });
+  }
+
+  const tree = await snapshot(tabId, { mode: 'a11y', maxNodes: 400 }).catch(() => null);
+  const nodes = tree ? ariaLines(tree.tree).length : 0;
+  if (nodes && !existing.has('aria')) {
+    suggestions.push({
+      assertion: 'aria',
+      maxNodes: 400,
+      strength: nodes <= 250 ? 'strong' : 'noisy',
+      why: nodes <= 250
+        ? `${nodes} semantic nodes — small enough to be a stable structural baseline.`
+        : `${nodes} semantic nodes is a lot; expect churn. Consider asserting a smaller screen, or accept that this will need re-approval often.`,
+    });
+  }
+
+  if (!existing.has('text')) {
+    suggestions.push({
+      assertion: 'text',
+      contains: '',
+      strength: 'weak',
+      why: 'Offered last on purpose: text is the easiest assertion to write and the first to break on a copy edit. Prefer the network or aria suggestions above.',
+    });
+  }
+
+  return {
+    id,
+    pageUrl: url,
+    existingAssertions: [...existing],
+    suggestions,
+    note: 'Nothing was added. Pass one of these back through action:"assert" to accept it — a weak assertion somebody chose is a decision; one a tool added quietly is a blind spot.',
   };
 }
 
@@ -144,16 +296,67 @@ export async function executeAssertion(tabId, rawStep, variables = {}) {
     }
     case 'screenshot': {
       const shot = await screenshot(tabId, { area: 'viewport', format: 'png' });
-      const current = await visualFingerprint(shot.dataBase64, 'image/png');
-      const diff = visualDifference(step.baseline, current);
-      const threshold = step.threshold ?? 0.08;
-      if (diff.difference > threshold) {
+      const mode = step.visualMode ?? (step.baselineStructure ? 'layout' : 'strict');
+      const current = mode === 'layout'
+        ? await captureVisual(shot.dataBase64, 'image/png')
+        : { fingerprint: await visualFingerprint(shot.dataBase64, 'image/png') };
+      const baseline = { fingerprint: step.baseline, structure: step.baselineStructure };
+
+      const comparison = compareVisual(baseline, current, {
+        mode,
+        masks: step.masks ?? [],
+        threshold: step.threshold,
+      });
+
+      if (!comparison.pass) {
+        // The diff image is written before the throw, so the evidence exists
+        // for the run that failed rather than for a retry that may pass.
+        let evidenceId = null;
+        try {
+          const png = await diffImage(shot.dataBase64, comparison);
+          if (png && step.recordingId) {
+            const attachment = await putAttachment({
+              owner: step.recordingId,
+              name: 'visual-diff.png',
+              mime: 'image/png',
+              kind: 'diff',
+              bytes: base64ToBytes(png),
+              meta: { role: 'diff', mode, at: Date.now() },
+            });
+            evidenceId = attachment.id;
+          }
+        } catch {
+          /* evidence is best-effort; the failure below is the finding */
+        }
         throw new Error(
-          'Visual assertion failed: difference ' + round(diff.difference) +
-          ' exceeds threshold ' + threshold + ' (' + round(diff.changedRatio) + ' of blocks materially changed).',
+          'Visual assertion failed (' + mode + '): difference ' + round(comparison.difference) +
+          ' exceeds threshold ' + comparison.threshold +
+          (comparison.maskedCells ? ' — ' + comparison.maskedCells + ' cells masked' : '') +
+          (evidenceId ? ' — diff image attachment ' + evidenceId : '') + '.',
         );
       }
-      return { assertion: 'screenshot', ...diff, threshold };
+      return { assertion: 'screenshot', ...comparison };
+    }
+    case 'aria': {
+      const tree = await snapshot(tabId, { mode: 'a11y', maxNodes: step.maxNodes ?? 400 });
+      const current = ariaLines(tree.tree);
+      const expected = step.ariaBaseline ?? [];
+      const currentSet = new Set(current);
+      const expectedSet = new Set(expected);
+      const missing = expected.filter((line) => !currentSet.has(line));
+      const added = current.filter((line) => !expectedSet.has(line));
+      // A tolerance exists because real pages carry a little churn (a live
+      // counter in an aria-label, a row count). It defaults to zero: a semantic
+      // tree that is allowed to drift is not a baseline.
+      const allowed = Math.max(0, Math.round((step.threshold ?? 0) * Math.max(expected.length, 1)));
+      if (missing.length + added.length > allowed) {
+        throw new Error(
+          'Semantic (aria) assertion failed: ' + missing.length + ' node(s) gone, ' + added.length + ' new. ' +
+          (missing.length ? 'Gone: ' + missing.slice(0, 4).map(readableNode).join(' | ') + '. ' : '') +
+          (added.length ? 'New: ' + added.slice(0, 4).map(readableNode).join(' | ') + '.' : ''),
+        );
+      }
+      return { assertion: 'aria', nodes: current.length, missing: missing.length, added: added.length, allowed };
     }
     default:
       throw new Error('Unknown assertion "' + step.assertion + '".');
@@ -338,12 +541,36 @@ function playwrightAssertion(step, locator) {
       if (step.state === 'disabled') return ['  await expect(' + locator + ').' + (step.expected === false ? 'not.' : '') + 'toBeDisabled();'];
       return ['  // G9 state assertion: ' + step.state + ' === ' + JSON.stringify(step.expected ?? true)];
     case 'screenshot': return ['  await expect(page).toHaveScreenshot({ maxDiffPixelRatio: ' + (step.threshold ?? 0.08) + ' });'];
+    case 'aria': {
+      // Playwright's own semantic snapshot. The G9 baseline is a normalised
+      // line list rather than Playwright's YAML, so the export writes the
+      // assertion and lets Playwright own the snapshot file — round-tripping
+      // our normalisation into their format would produce a snapshot that
+      // never matches and a test nobody trusts.
+      return [
+        '  // G9 captured ' + (step.ariaBaseline?.length ?? 0) + ' semantic nodes here.',
+        '  // Run once with --update-snapshots to let Playwright write its own baseline.',
+        '  await expect(page).toMatchAriaSnapshot();',
+      ];
+    }
     default: return ['  // G9 ' + step.assertion + ' assertion uses captured browser evidence; translate for your test fixtures.'];
   }
 }
 
 function compact(value) {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined));
+}
+
+/** `2|button "ذخیره"` → `button "ذخیره"` — depth is for diffing, not for reading. */
+function readableNode(line) {
+  return String(line).replace(/^\d+\|/, '');
+}
+
+function base64ToBytes(b64) {
+  const binary = atob(b64);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
 }
 
 const round = (value) => Math.round(value * 10000) / 10000;

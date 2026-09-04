@@ -88,7 +88,41 @@ to the user instead, because only the user can lift them.
 When asked to test or debug a local app, prefer this loop: snapshot to orient,
 diagnose for a health baseline, act, then re-check console and network. Report
 findings with the specific evidence — the exact error text, the failing URL and
-status, the element that overflows.`;
+status, the element that overflows.
+
+## Regression memory — the part that is not obvious
+A recording does not only replay steps; it remembers what the flow NORMALLY
+does. Every replay builds a signature (which requests were made, what the
+console said, what the semantic tree looked like, how long each step took) and
+compares it against the flow's approved **known world**. Anything outside that
+union comes back as a *surprise*, in both directions:
+
+- **new** — a console error, a request, a dialog, a control that has never
+  appeared before;
+- **missing** — something that happened on every previous run and did not
+  happen now. This is the direction that catches the quiet failures.
+
+This is what finds regressions nobody wrote an assertion for. Your part in it:
+
+1. Record and assert as normal.
+2. Right after stopping, \`action:"suggest"\` proposes assertions from what the
+   tool actually observed — the request that fired, whether the console is clean,
+   how big the semantic tree is — each with a strength and a reason. It adds
+   NOTHING; you and the user pick, and you pass the chosen one back through
+   \`action:"assert"\`. A flow with no assertion is a macro, not a test.
+3. \`action:"calibrate"\` runs the flow twice on the same build and marks
+   whatever differed as volatile. Do this ONCE per flow — it removes the noise
+   that would otherwise make every later run look suspicious.
+4. Replay with \`seedKnownWorld:true\` the first time, so there is something to
+   compare against.
+5. After a run whose surprises are all legitimate (a feature shipped, a label
+   changed), the USER decides — tell them what changed and let them call
+   \`action:"approve"\`. **Never approve on your own initiative.** Approving is
+   how a real regression gets written into the baseline as normal.
+
+A verdict comes back with every replay: PASS, PASS_WITH_WARNING, SURPRISE,
+FAIL_PRODUCT, or FAIL_AUTOMATION. FAIL_AUTOMATION means the test broke, not the
+product — say which one you are reporting.`;
 
 export const TOOLS = [
   {
@@ -247,6 +281,12 @@ export const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
+        action: str(
+          'Default "list". "record_har" captures the tab\'s traffic as a HAR. "pin" then serves every matching request from that HAR, so the backend is frozen and any remaining difference in a run is the client\'s doing — this is how you tell a UI regression from a server one. "unpin" restores live traffic; "pin_status" reports how many requests were served, passed through, or blocked.',
+          { enum: ['list', 'record_har', 'pin', 'unpin', 'pin_status'], default: 'list' },
+        ),
+        har: { type: 'object', description: 'For action:"pin" — a HAR from action:"record_har" or format:"har".' },
+        strict: bool('For action:"pin" — fail requests the HAR does not contain instead of letting them through. The honest setting for a test that claims to be hermetic.', false),
         requestId: str('Fetch full detail including the response body for this request.'),
         filter: str('Substring match on the URL.'),
         method: str('Filter by HTTP method.'),
@@ -340,12 +380,16 @@ export const TOOLS = [
   {
     name: 'browser_recording',
     description:
-      'Recorded user flows, replayable as tests. A QA presses Record in the side panel, works through a flow, and stops; the result is a list of steps that can be replayed later. Each element is stored with several independent locators (test id, role+accessible name, label, text, CSS, XPath) so a step still finds its element after a redeploy. Replay reports WHICH locator matched — a step matching only by "xpath" still passes but is one refactor from breaking, and comes back as a warning. When a step fails you get what it looked for, what it tried, and the closest thing on the page now.',
+      'Recorded user flows, replayable as tests WITH MEMORY. A QA presses Record in the side panel, works through a flow, and stops; the result is a list of steps that can be replayed later. Each element is stored with several independent locators (test id, role+accessible name, label, text, CSS, XPath) so a step still finds its element after a redeploy. Replay reports WHICH locator matched — a step matching only by "xpath" still passes but is one refactor from breaking, and comes back as a warning. When a step fails you get what it looked for, what it tried, and the closest thing on the page now. Beyond the steps, every replay compares what the flow ACTUALLY did against its approved known world and reports anything new or newly missing as a surprise — see the Regression memory section of the instructions. "export_spec"/"import_spec" move a flow in and out as a canonical, Git-diffable G9 FlowSpec.',
     inputSchema: {
       type: 'object',
       properties: {
         action: str('What to do. "list" and "get" work with no tab attached.', {
-          enum: ['list', 'get', 'status', 'start', 'stop', 'replay', 'assert', 'update', 'delete', 'export', 'import', 'export_test'],
+          enum: [
+            'list', 'get', 'status', 'start', 'stop', 'replay', 'assert', 'update', 'delete',
+            'export', 'import', 'export_test', 'export_spec', 'import_spec',
+            'calibrate', 'approve', 'known_world', 'signature', 'suggest',
+          ],
           default: 'list',
         }),
         id: str('Recording id, for get/replay/assert/update/delete/export_test.'),
@@ -357,7 +401,26 @@ export const TOOLS = [
         dryRun: bool('For action:"replay" — resolve every element and change nothing. The cheapest way to find out whether a recording has rotted.', false),
         stopOnFailure: bool('For action:"replay" — stop at the first failing step.', true),
         variables: { type: 'object', description: 'For replay — data values substituted into {{name}} placeholders.' },
-        assertion: str('For action:"assert".', { enum: ['url', 'text', 'visible', 'value', 'state', 'network', 'console', 'a11y', 'screenshot'] }),
+        signature: str(
+          'For action:"replay" — how much of the run\'s own behaviour to record for the surprise detector. "lite" (default) captures network and console for every step and the UI shape at assertions and the final step. "full" captures the UI shape at every step and is what calibration uses. "off" skips it.',
+          { enum: ['off', 'lite', 'full'], default: 'lite' },
+        ),
+        compare: bool('For action:"replay" — compare this run against the approved known world and report surprises. Turn it off only when deliberately producing a reference run.', true),
+        seedKnownWorld: bool('For action:"replay" — if this flow has no known world yet, create one from this run. Only ever seeds; it can never overwrite an approved one.', false),
+        by: str('For action:"approve" — who approved it. Recorded in the known world.'),
+        note: str('For action:"approve" — why. Recorded in the known world.'),
+        spec: { type: 'object', description: 'For action:"import_spec" — a G9 FlowSpec document.' },
+        assertion: str(
+          'For action:"assert". "aria" stores a SEMANTIC baseline (roles, names, states) and is the one to prefer for regression: it survives restyling and copy edits, and fails when a button becomes a div or a control disappears. "screenshot" defaults to comparing layout structure rather than pixels.',
+          { enum: ['url', 'text', 'visible', 'value', 'state', 'network', 'console', 'a11y', 'screenshot', 'aria'] },
+        ),
+        visualMode: str('For a screenshot assertion. "layout" (default) compares structure and ignores colour, fonts and copy. "strict" compares luminance and notices everything. "off" records the baseline without judging it.', { enum: ['off', 'layout', 'strict'], default: 'layout' }),
+        masks: {
+          type: 'array',
+          description: 'For a screenshot assertion — normalised 0..1 rectangles {x,y,w,h} excluded from comparison. Prefer action:"calibrate", which finds volatile regions without anybody guessing.',
+          items: { type: 'object' },
+        },
+        maxNodes: num('For an aria assertion — how much of the semantic tree to baseline.', { default: 400 }),
         expected: { description: 'Expected string, number, boolean, or value for an assertion.' },
         operator: str('Text comparison.', { enum: ['exact', 'contains', 'absent', 'matches'] }),
         contains: str('Substring used by text, network, and console assertions.'),
