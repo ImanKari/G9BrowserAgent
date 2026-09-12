@@ -4,27 +4,38 @@ Replays recorded flows with **no agent and no QA present**, and returns a
 standard exit code plus a report directory. This is the piece that turns "we
 recorded a test" into "it runs every night".
 
+**Documentation audited against v1.7.21 on 2026-09-12.** Browser runs still need a connected
+extension and an execution environment suitable for their interactions. Scheduling the CLI does
+not launch/configure a browser or guarantee background input delivery. See the
+[current implementation limits](../AIGuide.md#8-known-gaps-and-deliberate-omissions).
+
 ```powershell
 node runner/g9.mjs list
 node runner/g9.mjs run suite:smoke --env test1 --report ./g9-artifacts
 node runner/g9.mjs calibrate rec_abc123          # once per flow
 node runner/g9.mjs approve  rec_abc123           # after a human reviewed the run
 node runner/g9.mjs spec     rec_abc123 --out flows/task.create.json
+node runner/g9.mjs ab       rec_abc123 --a https://released.example --b https://candidate.example
 ```
 
 ## It speaks MCP, on purpose
 
-The runner spawns `bridge/src/server.js` and talks to it over stdio — the same
+For browser flows, the runner spawns `bridge/src/server.js` and talks to it over stdio — the same
 interface an agent uses, the same tools, the same boundaries. It can do nothing
 an agent could not do, so pinned mode, the Stop button and cookie scoping still
 apply to a scheduled run. There is no private back door into the extension, and
 there should never be one.
 
+The runner also has an AgriPad adapter (`drivers/agripad.mjs`) selected with `--platform agripad`.
+It uses adb and the device's automation endpoint rather than browser tabs. A working browser flow
+does not imply that adapter/device is configured, and device results are labeled `gray-box`.
+
 ## The port rule — read this before scheduling anything
 
-The extension connects to **exactly one** bridge, on the port set in its side
-panel. If your editor's MCP client already holds 8765, the extension is talking
-to *that* bridge and this runner cannot have the port.
+The extension connects to **exactly one** bridge at a time. Without an explicit port, bridges can
+discover an available port in 8765–8775; `--port` pins the runner's port. A second free port does
+not connect the extension automatically. Select the intended bridge in the panel, or use a separate
+profile/extension instance. If the editor owns a pinned port, the runner cannot own that same port.
 
 So the unattended arrangement is a **second browser profile** with its own copy
 of the extension carrying `dev-bridge.json`, which is precisely what
@@ -34,10 +45,18 @@ of the extension carrying `dev-bridge.json`, which is precisely what
 node runner/g9.mjs run suite:smoke --port 8790
 ```
 
-Running against your own everyday browser works and is convenient for a one-off.
-It is not the thing to put in Task Scheduler — a scheduled run would fight your
-editor for the port, and it needs the tab in the foreground anyway (Chromium
-does not deliver input to a hidden page).
+An everyday profile is convenient for one-off runs, but scheduled interaction shares its tabs,
+logins, focus and bridge ownership with the user. A dedicated browser/profile and coordinated
+bridge port make those dependencies explicit; the CLI does not provision them for you.
+
+Background reads and screenshots can work, and headless background typing succeeded in the latest
+targeted audit. This does not certify minimized/occluded windows or a locked desktop. The current
+generic input witness also has an unresolved defect. Verify action outcomes and test the actual
+scheduled environment before relying on unattended interaction. The isolated harness uses headless
+mode and Node.js 22+; it is not evidence for every headed state.
+
+Named browser sessions are tab aliases, not separate login contexts. Same-origin normal tabs in one
+profile share cookies/localStorage. Separate accounts need an appropriate isolation arrangement.
 
 ## Exit codes
 
@@ -80,7 +99,8 @@ node runner/g9.mjs run rec_abc --report ./art        # (record a HAR from the pa
 node runner/g9.mjs run rec_abc --pin har/task-create.har --strict-pin
 ```
 
-With the backend frozen, any difference left in the run is the client's doing.
-A pinned run red while the live run is green is a client regression; the other
-way round is the server or the data. That single fact removes most of the
-guesswork from triage.
+HAR pinning serves stored responses for matching requests. Matching uses method, origin/path and
+query keys, ignores query values and request bodies, and consumes duplicate entries in order.
+Without `--strict-pin`, unmatched requests still reach the live server. Stored bodies are bounded.
+Use this comparison to narrow a diagnosis; it does not prove a fully frozen backend or attribute
+every remaining difference to the client.

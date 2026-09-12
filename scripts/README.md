@@ -6,10 +6,14 @@ nothing watching. The pattern is the point: once an agent has walked a flow and
 learned how a site actually behaves, that knowledge can be frozen into
 something schedulable.
 
+**Documentation audited against v1.7.21 on 2026-09-12.** These scripts use the existing browser
+connection; they do not provision an isolated profile or make every browser operation background-safe.
+
 ## Save-TelegramImages.ps1
 
-Archives every photo in an open Telegram Web channel, walking backwards through
-its history and naming each file after the moment the post was published.
+Archives photos it can load from an open Telegram Web channel, walking backwards through
+its history and naming each file after the moment the post was published. Coverage depends on
+Telegram's current DOM, available history/media, loading behavior, and the script's round limits.
 
 ```powershell
 .\Save-TelegramImages.ps1
@@ -29,12 +33,14 @@ the channel's real chronology.
 
 ### Before you run it
 
-**Close your editor's MCP client first.** The extension attaches to exactly one
-bridge, on the port set in its side panel. If your editor already holds that
-port, the extension is talking to *that* bridge and this script would sit alone
-with no browser behind it. The script checks and refuses rather than hanging.
+**Free the script's selected port, or give it a separate port and select that bridge in the panel.**
+The extension connects to exactly one bridge at a time. If the editor owns the selected port,
+close that MCP client before using the same port. This script explicitly pins `G9_PORT` and checks
+for a conflict; automatic port selection in other bridge clients does not make it share a connection.
 
-Then: open the channel in Telegram Web, click the G9 icon, **Attach & Pin**.
+Then: open the channel in Telegram Web, click the G9 icon, **Attach & Pin**. Keep the browser,
+extension and selected bridge running. Images are read as page blobs and saved by PowerShell;
+the script does not use the currently broken `browser_network watch_downloads` path.
 
 ### What driving it by hand first taught us
 
@@ -57,8 +63,10 @@ left once you know it.
 
 - Images cross the bridge as base64, so `-BatchSize` is deliberately small. The
   WebSocket transport drops any frame over 64MB — and the connection with it.
-- The script only reads and sets `scrollTop`, so it works on a background tab.
-  Anything that clicks or types would need the tab in the foreground; see
-  **The tab has to be visible** in the root README.
+- The script uses page evaluation and direct `scrollTop` changes, so it can work on a background
+  tab without trusted mouse/key delivery. It still depends on Telegram loading the next batch and
+  the page remaining alive; frozen/discarded pages, changed selectors or a stalled load can stop
+  progress. Input and screenshot behavior are separate; see
+  [Background tabs, focus, and capture](../README.md#background-tabs-focus-and-capture).
 - Already-saved posts are tracked in the page for the run, so re-collecting the
   same mounted post is free.
