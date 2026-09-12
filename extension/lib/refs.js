@@ -28,6 +28,39 @@ export async function getRefs(tabId) {
 }
 
 /**
+ * Which CDP session owns this node?
+ *
+ * Cross-origin frames run in their own process, so a command about one of their
+ * nodes has to carry that frame's `sessionId` or it arrives at an agent that
+ * has never heard of the node ("Node with given id does not belong to the
+ * document").
+ *
+ * **Looked up here rather than threaded through every caller.** The first
+ * attempt passed the session down from `resolveRef` by hand, and interact.js
+ * alone has a dozen places that act on a node — click, hover, type, drag,
+ * select, upload, focus checks, verification reads. Two were patched, ten were
+ * not, and the symptom was that reading inside a frame worked while clicking
+ * did not. A rule that every new call site must remember is a rule that will be
+ * broken; asking the table is a rule that cannot be.
+ *
+ * Returns null for the main document, which is exactly what the CDP helpers
+ * want when no session routing is needed.
+ */
+export async function sessionForNode(tabId, backendNodeId) {
+  try {
+    const table = await getRefs(tabId);
+    if (table) {
+      for (const node of Object.values(table.map)) {
+        if (node?.backendNodeId === backendNodeId) return node.sessionId ?? null;
+      }
+    }
+  } catch {
+    // A missing table is the main document, not an error.
+  }
+  return null;
+}
+
+/**
  * Resolve a ref to a backendNodeId, or throw an error that tells the agent
  * exactly how to recover (which is always: take a fresh snapshot).
  */

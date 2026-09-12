@@ -282,10 +282,47 @@ export const TOOLS = [
       type: 'object',
       properties: {
         action: str(
-          'Default "list". "record_har" captures the tab\'s traffic as a HAR. "pin" then serves every matching request from that HAR, so the backend is frozen and any remaining difference in a run is the client\'s doing — this is how you tell a UI regression from a server one. "unpin" restores live traffic; "pin_status" reports how many requests were served, passed through, or blocked.',
-          { enum: ['list', 'record_har', 'pin', 'unpin', 'pin_status'], default: 'list' },
+          'Default "list". \n\nRECORD AND FREEZE: "record_har" captures the tab\'s traffic as a HAR. "pin" then serves every matching request from that HAR, so the backend is frozen and any remaining difference in a run is the client\'s doing — this is how you tell a UI regression from a server one. "unpin" restores live traffic; "pin_status" reports how many requests were served, passed through, or blocked.\n\nBREAK IT ON PURPOSE: "intercept" takes `rules` and makes chosen requests fail, stall or return a body you pick — the way to test what the UI does on a 500, a 429 or a timeout without waiting for one to happen. "intercept_status" shows each rule and how often it fired; "clear_intercept" removes them. Rules are applied BEFORE a pinned HAR, so a flow can be pinned for determinism and still have one endpoint forced to fail.\n\nDOWNLOADS: "watch_downloads" must be called BEFORE the click that starts a download — a download cannot be observed after the fact. Then "wait_download" blocks until one completes and returns its filename and byte count, and "downloads" lists everything seen. This is what proves an export produced a real file rather than an empty one, which a 200 response cannot tell you. "stop_downloads" ends the watch.',
+          {
+            enum: [
+              'list', 'record_har', 'pin', 'unpin', 'pin_status',
+              'intercept', 'intercept_status', 'clear_intercept',
+              'watch_downloads', 'downloads', 'wait_download', 'stop_downloads',
+            ],
+            default: 'list',
+          },
         ),
         har: { type: 'object', description: 'For action:"pin" — a HAR from action:"record_har" or format:"har".' },
+        rules: {
+          type: 'array',
+          description:
+            'For action:"intercept". Each rule needs "match" (a substring of the URL) and one outcome: ' +
+            '"status" (+ optional "body" and "headers") to answer it yourself, "abort" to fail it at the ' +
+            'network level ("TimedOut", "ConnectionRefused", "Failed", …), or "delayMs" alone to just make ' +
+            'it slow. Optional "method" narrows it to one verb, "times" makes it fire only N times — which ' +
+            'is how "the first save fails, the retry succeeds" is written — and "label" names it in the ' +
+            'response header the rule adds, so an injected 500 is never mistaken for a real one. ' +
+            'Example: [{ "match": "/api/farm", "method": "POST", "status": 500, "times": 1, "label": "first save fails" }]',
+          items: { type: 'object' },
+        },
+        contains: {
+          type: 'string',
+          description:
+            'For action:"wait_download" — wait for a download whose filename or URL contains this. ' +
+            'Omit to wait for any download. Matching on what the flow asked for is safer than an index, ' +
+            'because a page may fetch other things while the export is being built.',
+        },
+        timeoutMs: {
+          type: 'number',
+          description: 'For action:"wait_download" — how long to wait. Default 30000.',
+        },
+        filter: {
+          type: 'string',
+          description:
+            'For action:"pin" and action:"intercept" — only intercept URLs containing this. Narrowing the ' +
+            'pattern keeps every unrelated request off the interception path, which matters on a page that ' +
+            'loads hundreds of assets.',
+        },
         strict: bool('For action:"pin" — fail requests the HAR does not contain instead of letting them through. The honest setting for a test that claims to be hermetic.', false),
         requestId: str('Fetch full detail including the response body for this request.'),
         filter: str('Substring match on the URL.'),
@@ -393,6 +430,15 @@ export const TOOLS = [
           default: 'list',
         }),
         id: str('Recording id, for get/replay/assert/update/delete/export_test.'),
+        atStep: {
+          type: 'number',
+          description:
+            'For action:"assert" — insert the check AFTER this step number (1-based, the numbers ' +
+            'action:"stop" prints in its outline) instead of appending at the end. A long flow needs ' +
+            'this: "search, assert it filtered, clear, assert it came back" is three checks at three ' +
+            'moments, and appending them all describes the final moment three times — which looks ' +
+            'thorough and tests less. Out of range is refused, never clamped.',
+        },
         name: str('For action:"start" — a name for the recording.'),
         timing: str(
           'For action:"replay". "recorded" (DEFAULT) reproduces the pace the person worked at — a ten-second session replayed in 200ms never lets a debounce fire or an animation finish, so it is not the same test. "adaptive" waits only as long as each step needs. "fast" barely waits. Every mode gates each step on the page being loaded and the element being visible, enabled, and no longer moving — the recorded gap is a budget for that wait, never a blind sleep.',
@@ -485,14 +531,18 @@ export const TOOLS = [
   {
     name: 'browser_tabs',
     description:
-      'List, open, close, focus, or pin tabs. Outside multi-tab mode, list shows every tab by ORIGIN only except the one you are driving — titles and URLs are withheld on purpose. Also outside multi-tab mode, ONLY action:"list" is allowed — open/close/focus/pin/unpin are refused, because pinning a different tab would otherwise be a way around the mode. Only the user changes the mode, from the side panel.',
+      'List, open, close, focus, or pin tabs, and manage NAMED SESSIONS for multi-tab flows. Tab visibility follows the mode: in workspace mode every tab inside the project allowlist is shown in full and drivable, everything else by ORIGIN only; in pinned/follow mode only the tab you are driving is shown in full. action:"list" and action:"sessions" are always allowed; the rest need multi-tab mode, or workspace mode with the target URL inside the allowlist. Only the user changes the mode, from the side panel. SESSIONS: action:"session" with a name and a url opens (or re-points) a named tab; with a name and a tabId it names one already open. Pass that name as `session` to any other tool to act on it — that is how a two-user scenario is expressed. NOTE: a browser only delivers input to the tab it is SHOWING, so a session in the background can be read (snapshot, console, network, screenshot) but not clicked or typed into; focus it first.',
     inputSchema: {
       type: 'object',
       properties: {
-        action: str('What to do.', { enum: ['list', 'open', 'close', 'focus', 'pin', 'unpin', 'wait'], default: 'list' }),
-        url: str('For action:"open", or a URL substring for action:"wait".'),
-        tabId: num('For close/focus/pin.'),
-        focus: bool('For action:"open" — bring the new tab to the front.', false),
+        action: str('What to do.', {
+          enum: ['list', 'open', 'close', 'focus', 'pin', 'unpin', 'wait', 'session', 'sessions', 'end_session'],
+          default: 'list',
+        }),
+        url: str('For action:"open"/"session", or a URL substring for action:"wait".'),
+        tabId: num('For close/focus/pin, or for action:"session" to name a tab already open.'),
+        name: str('For action:"session"/"end_session" — the session name, e.g. "buyer".'),
+        focus: bool('For action:"open"/"session" — bring the new tab to the front.', false),
         pin: bool('For action:"open" — attach and pin the new tab immediately.', false),
         title: str('For action:"wait" — title substring for a popup/new tab.'),
         openerTabId: num('For action:"wait" — require this opener tab id.'),
@@ -501,3 +551,21 @@ export const TOOLS = [
     },
   },
 ];
+
+/**
+ * `session` is accepted by every tool that takes a tab, added here in one pass.
+ *
+ * Writing it into fourteen schemas by hand guarantees that the fifteenth tool
+ * is added without it, and the failure is silent: the argument is accepted by
+ * the router, ignored by the schema, and the agent quietly acts on the wrong
+ * tab. Deriving it from the same condition the router uses — "does this tool
+ * take a tabId" — keeps the two in step by construction.
+ */
+for (const tool of TOOLS) {
+  const properties = tool.inputSchema?.properties;
+  if (!properties || !('tabId' in properties) || tool.name === 'browser_tabs') continue;
+  properties.session = str(
+    'Act on a named session instead of the default target. Open one with browser_tabs action:"session". ' +
+      'Background sessions can be read but not clicked — focus the tab first.',
+  );
+}

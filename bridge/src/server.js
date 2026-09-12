@@ -18,11 +18,15 @@
  */
 
 import path from 'node:path';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { McpServer, log } from './mcp.js';
 import { WsServer } from './ws-server.js';
 import { TOOLS, INSTRUCTIONS } from './tools.js';
+import { loadProject, projectForExtension } from './project.js';
+import { FlowLibrary } from './flows.js';
+import * as registry from './registry.js';
 
 /**
  * The bridge is the only component that knows where the repo lives on disk, so
@@ -33,15 +37,64 @@ const SERVER_PATH = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.resolve(path.dirname(SERVER_PATH), '..', '..');
 
 const HOST = process.env.G9_HOST ?? '127.0.0.1';
-const PORT = Number(process.env.G9_PORT ?? 8765);
+
+/**
+ * A pinned port is honoured absolutely; an unset one is discovered.
+ *
+ * If the user wrote `G9_PORT` they also typed that number into the extension's
+ * side panel, so a bridge that helpfully moved elsewhere would break the very
+ * setup they configured. Without it, taking the next free port is strictly
+ * better than failing: two editor windows on two projects is a normal state,
+ * not a fault. See registry.js.
+ */
+const PORT_PINNED = process.env.G9_PORT != null && process.env.G9_PORT !== '';
+const PREFERRED_PORT = Number(process.env.G9_PORT ?? registry.PORT_RANGE_START);
 const TOKEN = process.env.G9_TOKEN ?? '';
 const CALL_TIMEOUT_MS = Number(process.env.G9_TIMEOUT_MS ?? 60_000);
 
-const VERSION = '1.6.0';
+/**
+ * The bridge's version, read from package.json so it cannot drift.
+ *
+ * This was a hand-written string, and it drifted: the constant still said 1.7.4
+ * while package.json had moved eight releases past it. Every "VERSION MISMATCH"
+ * warning the bridge printed was therefore comparing the extension's real
+ * version against a number nobody had updated \u2014 telling people to reload an
+ * extension that was already correct, which is the fastest way to teach them to
+ * ignore the warning entirely.
+ *
+ * A version that is announced in two places will be wrong in one of them. Read
+ * it, and there is only one place to bump.
+ */
+const VERSION = readVersion();
+
+function readVersion() {
+  try {
+    const pkgPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+    if (typeof pkg.version === 'string' && pkg.version) return pkg.version;
+  } catch {
+    // Fall through: a bridge that cannot read its own package.json still works,
+    // and saying so is better than refusing to start over a label.
+  }
+  return '0.0.0-unknown';
+}
+
+/**
+ * The project adapter, read once at startup.
+ *
+ * Deliberately not re-read on every call: a flow library path that changes
+ * under a running session is a source of confusion, not flexibility. Reconnect
+ * to pick up an edit — which is what the panel's "reload project" does.
+ */
+const PROJECT = loadProject(process.cwd());
+const flows = new FlowLibrary(PROJECT.flowsDir);
+
+/** Set once we are actually listening; the discovered port may differ. */
+let ACTIVE_PORT = PREFERRED_PORT;
 
 // ---------------------------------------------------------------- transport
 
-const ws = new WsServer({ host: HOST, port: PORT, token: TOKEN });
+const ws = new WsServer({ host: HOST, port: PREFERRED_PORT, token: TOKEN });
 
 /** In-flight tool calls, keyed by request id. */
 const pending = new Map();
@@ -124,17 +177,61 @@ ws.on('message', (msg) => {
     }
 
     // Hand the extension the real on-disk path so the side panel can show a
-    // copy-pasteable MCP config instead of a placeholder.
+    // copy-pasteable MCP config instead of a placeholder — and the project
+    // adapter, which is what Workspace mode's allowlist is built from. The
+    // extension has no filesystem, so this handshake is the ONLY way product
+    // knowledge reaches it.
     ws.send({
       type: 'welcome',
       serverPath: SERVER_PATH.replace(/\\/g, '/'),
       repoRoot: REPO_ROOT.replace(/\\/g, '/'),
       host: HOST,
-      port: PORT,
+      port: ACTIVE_PORT,
       version: VERSION,
+      project: projectForExtension(PROJECT),
     });
+    return;
+  }
+
+  // Flow-library requests travel extension → bridge, the opposite direction to
+  // everything else here. The panel needs the filesystem and cannot have it;
+  // this is the door. Kept deliberately narrow: five verbs against one rooted
+  // directory, no arbitrary paths, no arbitrary reads.
+  if (msg.type === 'flowlib') {
+    handleFlowLib(msg).then(
+      (result) => ws.send({ type: 'flowlibResult', id: msg.id, ok: true, result }),
+      (err) => ws.send({ type: 'flowlibResult', id: msg.id, ok: false, error: String(err?.message ?? err) }),
+    );
   }
 });
+
+/**
+ * The flow library's request handler.
+ *
+ * An unknown op is refused by name rather than ignored. A library that silently
+ * does nothing for a verb it does not know reports success for work that never
+ * happened — the same failure the whole tool is written against.
+ */
+async function handleFlowLib(msg) {
+  switch (msg.op) {
+    case 'list':
+      return flows.list();
+    case 'read':
+      return { spec: await flows.read(msg.id) };
+    case 'write':
+      return flows.write(msg.spec);
+    case 'remove':
+      return flows.remove(msg.id);
+    case 'status':
+      return flows.status(msg.local ?? []);
+    case 'suite':
+      return flows.resolveSuite(msg.suiteId);
+    default:
+      throw new Error(
+        `Unknown flow-library op "${msg.op}". Known: list, read, write, remove, status, suite.`,
+      );
+  }
+}
 
 /** Version the extension reported on connect, for the skew check below. */
 let extensionVersion = null;
@@ -205,10 +302,27 @@ for (const definition of TOOLS) {
     // Attach the skew warning to browser_status only. Adding it to every result
     // would spend the agent's context repeating itself; browser_status is the
     // orientation tool, and orientation is exactly what skew corrupts.
-    const skew = name === 'browser_status' ? versionSkew() : null;
-    return skew && result && typeof result === 'object' && !Array.isArray(result)
-      ? { ...result, versionMismatch: skew }
-      : result;
+    if (name !== 'browser_status' || !result || typeof result !== 'object' || Array.isArray(result)) {
+      return result;
+    }
+    const skew = versionSkew();
+
+    // The project adapter rides on browser_status for the same reason the skew
+    // warning does: it is the orientation tool, and "which domains am I allowed
+    // to touch" is orientation. An agent that learns the allowlist only by
+    // being refused wastes a round trip discovering it.
+    return {
+      ...result,
+      ...(skew ? { versionMismatch: skew } : {}),
+      bridge: {
+        version: VERSION,
+        port: ACTIVE_PORT,
+        project: PROJECT.found ? PROJECT.path : null,
+        workspaceDomains: PROJECT.workspaceDomains,
+        flowLibrary: flows.available ? PROJECT.flowsDir : null,
+        ...(PROJECT.problems.length ? { projectProblems: PROJECT.problems } : {}),
+      },
+    };
   });
 }
 
@@ -260,7 +374,7 @@ async function describeStartupFailure(err) {
 
   let itIsUs = false;
   try {
-    const res = await fetch(`http://${HOST}:${PORT}/health`, { signal: AbortSignal.timeout(1500) });
+    const res = await fetch(`http://${HOST}:${ACTIVE_PORT}/health`, { signal: AbortSignal.timeout(1500) });
     itIsUs = res.ok && (await res.json())?.ok === true;
   } catch {
     /* not a G9 bridge, or not speaking HTTP at all */
@@ -270,13 +384,13 @@ async function describeStartupFailure(err) {
     `so this bridge has NO connection to the browser extension and no tool will work. `;
 
   return itIsUs
-    ? `Port ${PORT} is already held by another G9 bridge, ${shared}` +
+    ? `Port ${ACTIVE_PORT} is already held by another G9 bridge, ${shared}` +
         `Two bridges cannot share one port. Usually this means a second editor window or MCP ` +
         `client is running, or an earlier bridge was left behind — close it, or stop the stray ` +
         `node process. To run both deliberately, set a different G9_PORT here and the same port ` +
         `in the extension side panel. This bridge retries every 5s, so it recovers on its own ` +
         `once the port is free.`
-    : `Port ${PORT} is in use by another program, ${shared}` +
+    : `Port ${ACTIVE_PORT} is in use by another program, ${shared}` +
         `Free the port, or set G9_PORT to something else in both the MCP config and the extension ` +
         `side panel. This bridge retries every 5s.`;
 }
@@ -296,10 +410,45 @@ async function describeStartupFailure(err) {
  */
 async function listenOrExplain() {
   try {
+    // Discovery happens here rather than once at module load, so a retry after
+    // a conflict re-scans. The port that was taken thirty seconds ago may be
+    // free now, and the one we picked may since have been taken by someone else.
+    const picked = await registry.pickPort({
+      host: HOST,
+      preferred: PREFERRED_PORT,
+      pinned: PORT_PINNED,
+    });
+    ACTIVE_PORT = picked.port;
+    ws.port = picked.port;
+
     await ws.listen();
-    if (startupFailure) log(`[g9] port ${PORT} is free again — bridge listening`);
+    if (startupFailure) log(`[g9] port ${ACTIVE_PORT} is free again — bridge listening`);
     startupFailure = null;
-    log(`[g9] bridge listening on ws://${HOST}:${PORT}`);
+
+    ws.identity = {
+      version: VERSION,
+      port: ACTIVE_PORT,
+      pid: process.pid,
+      project: PROJECT.found ? path.basename(PROJECT.root) : null,
+      projectPath: PROJECT.path,
+      flowsDir: PROJECT.flowsDir,
+      cwd: process.cwd().replace(/\\/g, '/'),
+    };
+    registry.register({ ...ws.identity, serverPath: SERVER_PATH.replace(/\\/g, '/') });
+
+    log(`[g9] bridge listening on ws://${HOST}:${ACTIVE_PORT}`);
+    if (picked.scanned && !PORT_PINNED) {
+      log(
+        `[g9] port ${PREFERRED_PORT} was busy, so this bridge took ${ACTIVE_PORT}. ` +
+          `The side panel discovers running bridges automatically — pick this one there.`,
+      );
+    }
+    if (PROJECT.found) {
+      log(`[g9] project: ${PROJECT.path} (${PROJECT.workspaceDomains.length} workspace domain(s))`);
+    } else {
+      log('[g9] no g9.project.json found — Workspace mode will fall back to Pinned.');
+    }
+    for (const problem of PROJECT.problems) log(`[g9] project warning: ${problem}`);
     log(`[g9] waiting for the browser extension to connect…`);
     return true;
   } catch (err) {
@@ -308,6 +457,15 @@ async function listenOrExplain() {
     return false;
   }
 }
+
+/**
+ * Keep this bridge's registry row warm.
+ *
+ * Unref'd deliberately: this timer must never be the reason the process stays
+ * alive. A bridge whose only remaining job is stamping a file is a bridge that
+ * should have exited.
+ */
+setInterval(() => registry.touch(process.pid, { extensionConnected: ws.connected }), 60_000).unref();
 
 if (!(await listenOrExplain())) {
   // Retry, so closing the other window heals this session without an editor
@@ -324,6 +482,7 @@ if (!(await listenOrExplain())) {
 mcp.start({ standalone: process.argv.includes('--standalone') });
 
 const shutdown = async () => {
+  registry.unregister(process.pid);
   await ws.close().catch(() => {});
   process.exit(0);
 };

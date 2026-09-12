@@ -191,5 +191,18 @@
   $('modalCancel').addEventListener('click', () => $('modal').close());
   $('modalOk').addEventListener('click', () => $('modal').close());
 </script>
+
+  <!--
+    A genuinely CROSS-ORIGIN iframe: this page is served from 127.0.0.1 and the
+    frame from localhost. Different origin, so the browser gives it its own
+    process, so the tab's debugger session has no nodes for it. Reaching inside
+    it needs Target.setAutoAttach with flat sessions — see lib/frames.js.
+  -->
+  <section id="crossOriginSection">
+    <h2>Cross-origin iframe</h2>
+    <iframe id="crossFrame" title="Cross-origin payment frame" src="http://localhost:5199/crossframe.html"
+            width="420" height="230" style="border:1px solid #bbb"></iframe>
+  </section>
+
 </body>
 </html>

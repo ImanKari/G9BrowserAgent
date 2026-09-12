@@ -280,10 +280,33 @@ try {
   });
   await panelCdp.send('Page.reload');
   await delay(1000);
+  // Check STRUCTURE, not copy.
+  //
+  // This used to require the literal words "Attached tab" in the panel's text.
+  // Splitting panel.js into session/automation/issues changed that label to
+  // "Re-attach current tab", and the harness failed a panel that was rendering
+  // perfectly — the third assertion in this repository to break because it was
+  // pinned to wording rather than to what the wording is evidence OF.
+  //
+  // What actually matters here is that the panel booted its session UI: the tab
+  // strip is there, the session body exists, and the attach control rendered.
+  // Those are ids, and ids are what a refactor is supposed to keep.
   const identity = await panelCdp.evaluate(
-    '({ title: document.title, text: document.body.innerText.slice(0, 3000), error: document.getElementById("panelError")?.textContent || "" })',
+    `({
+      title: document.title,
+      tabs: document.querySelectorAll('button[data-tab]').length,
+      sessionBody: !!document.querySelector('[data-body="session"]'),
+      attachControl: !!document.getElementById('attachActive'),
+      modeButtons: document.querySelectorAll('[data-mode]').length,
+      error: document.getElementById('panelError')?.textContent || '',
+      text: document.body.innerText.slice(0, 400),
+    })`,
   );
-  if (identity.title !== 'G9 Browser Agent' || !identity.text.includes('Attached tab')) {
+  const rendered = identity.title === 'G9 Browser Agent'
+    && identity.tabs >= 3
+    && identity.sessionBody
+    && identity.attachControl;
+  if (!rendered) {
     throw new Error('Panel did not render its meaningful session UI: ' + JSON.stringify(identity));
   }
   await panelCdp.evaluate('document.querySelector(\'button[data-tab="automation"]\').click()');

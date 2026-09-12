@@ -774,6 +774,736 @@ after every step of a forty-step flow doubles the run for evidence nobody reads.
 
 Newest first. **Every change to this repo gets an entry.**
 
+### 2026-09-10 — v1.7.0: the panel gets the engine, and three real complaints get answered
+
+The engine had been complete for a release and a half; the side panel exposed five of its nineteen
+actions. So a QA working alone could produce a **macro** — proof that the steps could be performed —
+and never a **test**, which is proof that they did something. The assertion wizard, calibration, the
+known world and the five verdicts were reachable only over MCP, by the agent. `approve` in
+particular: the whole surprise-detection design rests on a human, and only a human, folding a run
+into the known world — and it was callable only by the one caller it was written to exclude.
+
+Three complaints came back from the first team to use this, and all three were real:
+
+**1. "Why do we have to Attach a tab every time?"** — It was never a technical requirement.
+`send()` already attaches whatever tab it is given, which is how follow and multi mode work, so the
+extension has always attached without a user gesture. The Attach button existed to make the DEFAULT
+"one tab", so that glancing at your inbox mid-task did not hand the agent your inbox. That reasoning
+is right and the click was the wrong price for it.
+
+**Workspace mode** (`lib/workspace.js`, now the default) keeps the protection and drops the
+ceremony: tabs whose host is in the project's `workspaceDomains` are driven automatically, and every
+other tab is not merely un-clickable but unlisted — origin only, no title, no URL. The rule that
+makes it safe is one line and it is the line to never get backwards: **an empty allowlist denies
+everything, never allows everything.** With no `g9.project.json`, Workspace behaves exactly as
+Pinned. Three shapes are accepted (`example.com`, `*.example.com`, `localhost:5173`); paths and
+regexes are refused by name, because this list is a security boundary a QA edits by hand and a
+pattern language rich enough to be subtly wrong is the wrong tool for that.
+
+Existing installs are migrated once, `pinned → workspace`. That is only acceptable because it cannot
+widen anyone's exposure — with no allowlist the new mode is the old one — and it is written to the
+activity log rather than done silently.
+
+**2. "The port is always in use."** — Every MCP client launches its own bridge and every one of them
+wanted 8765. The second got EADDRINUSE and said so every five seconds, correctly and uselessly;
+meanwhile the extension was talking to whichever process won the race, and the others were alive,
+listening on nothing, and timing out with no clue why.
+
+Bridges now take the next free port from 8765–8775 (`bridge/src/registry.js`), publish their
+identity on `/health`, and register in `~/.g9/bridges.json`. The panel scans the range and shows a
+picker — including the fact that decides everything, which is whether a browser is already on that
+bridge. An explicit `G9_PORT` is still honoured absolutely: if somebody pinned a port they also
+typed it into the side panel, and a bridge that helpfully moved would break the setup they
+configured. Verified live: with the developer's own bridge on 8765, a second one took 8766 and
+explained itself in one line.
+
+⚠️ `/health` gained CORS, and it is **conditional** — echoed only to extension origins. A blanket
+`*` would hand a malicious page a way to probe for a bridge and read the project path off it,
+defeating the Origin check the entire security model rests on.
+
+**3. "We want to test two pages at once."** — Always possible at the CDP layer; `chrome.debugger`
+attaches to many tabs and `attachedTabs` has been an array from the start. What was missing was an
+ADDRESS. `browser_tabs action:"session"` names a tab, and `session` is accepted by every tool that
+takes a tabId — injected in one pass over the schema rather than written into twelve of them, so the
+thirteenth tool cannot be added without it. A session is a name for a tab and never a grant of
+access to one: `resolveSession` re-checks the mode, so naming a tab cannot route around Workspace.
+
+The honest limit is documented in the tool description itself, because it will otherwise be
+discovered as a bug: a browser delivers input only to the tab it is SHOWING. Two sessions can be
+READ simultaneously — snapshot, console, network, screenshot — but a click into a background one
+does nothing. A two-user flow switches; it does not run in parallel.
+
+**Also in this release:**
+
+- **The panel is four modules** (`ui` / `session` / `automation` / `issues`). It was 657 lines
+  covering three unrelated jobs, and this release roughly doubles the automation half. Splitting
+  after that growth is strictly more expensive than splitting before it.
+- **The verdict and the surprises are rendered.** They were computed on every panel replay and
+  thrown away — so the most original thing in the tool had no user interface at all. Each verdict
+  now carries what to DO about it, because separating `FAIL_PRODUCT` from `FAIL_AUTOMATION` only
+  pays off if the reader is told the difference.
+- **The flow library** (`bridge/src/flows.js`, `bridge/src/project.js`). Recordings lived in
+  `chrome.storage.local`: invisible to every other QA, absent from review, missing from Git, gone
+  with the browser profile. They now sync to FlowSpec files on disk through the bridge — the
+  extension has no filesystem and must not get one. Run history deliberately does **not** travel:
+  committing it would dirty the working tree on every replay, which trains people to
+  `git checkout .` and eventually to discard a real edit.
+- **Suites are queries, not lists.** A hand-maintained array shrinks the first time somebody forgets
+  to add their flow, and the Full test still reports green.
+- **An AgriPad driver** (`runner/drivers/agripad.mjs`). FlowSpec always carried
+  `target: { kind, adapter }`; this fills it in. `node runner/g9.mjs run suite:agripad.full
+  --platform agripad` drives a real device over `adb forward` with no server, no operator and no
+  browser. Runs are labelled `gray-box`, stated rather than implied: actuating a control's own
+  command proves the command works, not that a finger could have reached the control.
+
+**Tests: 26/26 bridge, 48/48 extension** (34 existing plus 14 written for this release, covering the
+empty-allowlist rule, domain matching, session-is-not-a-grant, the before-the-tab-exists URL check,
+and the two-sided hash agreement that stops the sync indicator lying).
+
+A note on that last one, because it was nearly a silent bug: the two sides must hash the *same
+bytes*. The bridge hashes what it wrote to disk; the extension hashes `canonicalJson(spec)`. Those
+are the same string by construction — and had they drifted, every flow would have reported as
+"differs" forever, which is an indicator people stop reading.
+
+The consumer-facing QA documentation moved with this work: it is now `QA/` at the root of the
+AgriPad repo (guides, the flow library, an experience log, and a tool-gap ledger), not
+`Agriculture.AgriPad.App/AiGuides/`. It is written against the behaviour recorded here, so a change
+to this tool still needs an edit there.
+
+### 2026-09-12 (latest) — v1.7.21: three things that were wrong in ways tests could not see
+
+All three came from somebody using the thing and describing what they saw.
+
+**The progress bar was a lie, twice over.** First, no progress ever reached the panel: the
+broadcast object set `type` twice —
+
+```js
+type: 'replayProgress',   // overwritten
+type: step.type,          // wins
+```
+
+— so every message went out labelled `click` or `assert` and no listener recognised one. A duplicate
+key is not an error in JavaScript, it is a silent last-one-wins, and the only symptom was a panel
+reading `step 0/5` for a whole run. Second, the bar was driven by `max(byStep, byTime)`, so on a
+five-step flow it slid to the end in seconds while the label still said step 0. Steps are now the
+skeleton — floor is steps finished, ceiling is the step running, time only interpolates between
+them — and the whole bar is capped at 98% until the run actually ends, because the last step is
+usually the longest and a full bar sitting still is exactly when somebody decides it has hung.
+
+**The agent lost its target whenever anybody touched the agent's own window.** `lastFocusedWindow`
+means whichever window the OS focused last, and the popped-out panel is a window. Reported from real
+use: with the panel detached, every call came back "9 workspace tabs are open and none is focused"
+while a tab was plainly focused. A window whose `type` is not `normal` no longer counts as the
+user's place; the last ordinary window is remembered in `storage.session` as it happens, because
+`windows.getAll` has no ordering and the worker dies between events. And a pinned tab now outranks
+every guess — it is the user saying "this one", and it should not be overruled by where the mouse
+went.
+
+**Another extension's traffic dominated the surprise detector.** The agent drives the user's REAL
+browser, so Grammarly fetching its bundles lands in the same capture as the product's API calls. A
+17-step flow came back with 103 surprises, 8 of them at `fail`, and every single one was somebody
+else's asset. A detector whose loudest findings are never about the product is one nobody reads, and
+the real regression arrives in the middle of that list. Foreign schemes are now excluded from the
+signature — matched on the SCHEME, never a list of known extension ids, because a list of other
+people's extensions is wrong the day it is written. The same rule also applies to keys ALREADY
+stored in a known world, since otherwise every flow approved before this reports those bundles as
+missing forever: not because the request stopped happening, but because we stopped looking, and
+asking everyone to re-approve to silence that would be fixing it in the wrong place.
+
+Also: a long flow's `Tasks` recording had an assertion that could never fail — it looked for the text
+"لیست کارها", which is the left-menu entry present on every page, so it passed on `/sites` just as
+happily. Replaced with the route. It now runs 17/17 twice in a row.
+
+### 2026-09-11 — v1.7.20: a run you can watch, and a baseline that knows data from structure
+
+Everything here came from one person running the thing and saying what was wrong with it. None of
+it was found by a test.
+
+**A replay showed nothing until it finished.** One message went out, one came back when it was all
+over; on a twenty-step flow that is half a minute of a motionless panel, and the honest question
+that follows is whether the button worked at all. `replay` now announces each step at its START —
+after, not before, is useless: the announcement you need is the one that arrives while the slow step
+is still running. The panel turns ▶ into ■, draws a bar, and labels it `step 7/20 · ~12s left`. The
+step count is a fact and the time is an estimate from the last run, and they are worded differently
+on purpose: a guess presented in the same voice as a measurement is how a progress bar loses its
+audience the first time it is wrong. The bar advances on whichever of steps-or-time is further
+along, so it keeps creeping through a long step instead of sitting still exactly when somebody is
+wondering if it has hung. ■ sets the same halt flag the agent honours, so a run stops AFTER the
+current step — stopping mid-click leaves the page in a state nobody can describe.
+
+**Text ran out of the panel.** A surprise line carries a full URL, a URL has no spaces, and the
+browser had nowhere to break it. `overflow-wrap: anywhere` (not `break-word`, which respects tokens
+and therefore loses to a 200-character path) plus a scroll cap on the report, so a long failure
+scrolls inside itself instead of shoving the flow list off screen.
+
+**The panel had nowhere to go.** It is narrow, it sits on top of the page under test, and it moves
+when that page scrolls. `detachPanel` opens the same document in a popup window — resizable,
+movable to a second screen, and still. Same file, so there is no second implementation to keep in
+step; inside it the ↗ button hides itself, because a control that spawns a copy of what you are
+already looking at is just confusing. The id `detach` was already taken by the detach-the-debugger
+button, and a duplicate id would have silently rerouted that one — the new button is `popout`.
+
+**A semantic baseline could not tell live data from a structural change.** The first real page
+`assertion:"aria"` met was a site list where every row carries a temperature, a humidity and a wind
+speed. Every replay reported a hundred changed nodes and the flow went red seven runs out of seven
+with nothing wrong. The fix is not a tolerance — a tree allowed to drift is not a baseline. A
+vanished line and a new line are paired as the same row carrying new data only when BOTH hold: they
+are identical once numbers are masked, AND that masked shape lost exactly as many lines as it
+gained. The second condition is the one doing the work: on a list of sites named NL1, NL2, NL3 every
+row masks to the same shape, so rule one alone would shrug at a search box that stopped filtering —
+the very thing the flow exists to catch. A set that grew or shrank is always structural; only a
+one-for-one swap can be data. And whatever is paired off is reported as a warning on the run, with
+a sample: an assertion that silently ignored a hundred nodes is not an assertion.
+
+### 2026-09-11 — v1.7.19: the first LONG flows, and the four things they broke
+
+One long flow per platform, written against real screens rather than the seeded test page. Writing
+them found four gaps that short flows had never touched — which is the argument for writing long
+ones.
+
+**Assertions could only be appended.** `addAssertion` always pushed to the end, so
+"search, check it filtered, clear, check it came back" put all three checks after the last step,
+where they describe the same final moment three times. That looks thorough and tests less.
+`atStep` now inserts after a given step, refusing an out-of-range position rather than clamping it —
+a silently relocated assertion checks the wrong thing and still passes.
+
+**Assertions ignored their wait budget.** They ran the instant their turn came, so the first check
+after a navigation raced the SPA's first paint: page text still `""`, verdict `FAIL_PRODUCT`, for an
+app that was merely rendering. An assertion is *eventually* true; it now retries inside its declared
+budget and rethrows the real error when the budget runs out. Dry runs deliberately do not wait —
+"resolve everything, change nothing" must not become a slow partial execution.
+
+**A flow could enter a bottom sheet and not leave it.** The tab bar underneath is behind the sheet's
+scrim and the dismiss button has no id, so the FlowSpec had no way to express the exit the bridge
+already supported. `dismiss` is now an action.
+
+**The active tab carries no tappable id.** The bar offers only the tabs you are *not* on, so a flow
+that opens by clicking its own end state passes once and fails on every rerun. The AgriPad flow
+therefore starts on Tasks and ends on Map, and is verified by running it three times in a row rather
+than once: **11.1s / 10.6s / 11.6s, 20/20 each time.**
+
+A fifth thing was not a gap but a message: a `visible` assertion missing its id produced the
+device's own complaint, which is about the command rather than the flow. It now names the step and
+the shape to use.
+
+The flows: `agripad.navigation.site-and-tabs` (20 steps — probes, every tab, the map, the site
+sheet and its search) and `web.tasks.browse-and-open` (17 steps — the grid, the toolbar search,
+clearing it, opening a task and closing it, with nine checks interleaved).
+
+Tests: **26/26 bridge, 70/70 extension.** Both suites now resolve two flows per platform, so none of
+the four is the empty-suite green the design exists to prevent.
+
+### 2026-09-11 — v1.7.18: the flaky check was in the harness that checks for flakiness
+
+Three consecutive runs of the live suite returned **PASS, SKIP and FAIL** from identical code. The
+video-spool check did `sleep(600)` and then asked whether any frames had been captured, which made
+it a race with the compositor — and keyed its SKIP branch on a `reason` string that is only set in
+one of the two zero-frame cases, so the same environment reported SKIP when the wording matched and
+FAIL when it did not.
+
+Noticed only because the failure moved: re-running had made it green, and re-running until green is
+exactly the habit this system exists to remove. It would have been easy to take the second result
+and move on.
+
+It now **waits for a frame rather than for a duration** — polling `video_status` to a bounded
+deadline — and treats zero frames after that deadline as the environment, not a defect. Verified by
+running it three times: `58 passed, 0 failed, 1 skipped` / `59 passed, 0 failed` /
+`59 passed, 0 failed`. It still varies between PASS and SKIP depending on whether the browser
+composited anything, which is honest; it can no longer report FAIL for a limitation of the harness.
+
+Tests: **26/26 bridge, 68/68 extension, live CDP green three runs running.**
+
+### 2026-09-11 — v1.7.17: the first thing a user sees after reloading the extension
+
+Reported from actual use, and the timing is the whole point. Reloading the extension leaves you
+standing on `edge://extensions`, so the very next thing anybody does is press **Attach & Pin** — on
+a page no debugger is allowed to touch. The refusal said:
+
+> Cannot attach to edge://extensions/ — browser-internal pages are off limits.
+
+Accurate, and it reads as *the tool* refusing. The user asked what the error was, which is the
+clearest possible signal that a message has failed: it named a rule without naming whose rule it is
+or what to do about it. Now it says the **browser** forbids it and that this is not a setting, that
+switching to the page under test is the entire fix, and — in Workspace mode — that attaching by
+hand is usually unnecessary because focusing a project tab does it.
+
+The page is also named properly. `originOf()` renders these as `(edge)`, because browser-internal
+URLs carry the opaque origin — useless to somebody trying to work out which page they are on. The
+naive fix, scheme + host, turns `about:blank` into `about://blank`; these schemes are not all
+hierarchical. Both shapes are handled, and both are asserted, because **a message that renders its
+own subject wrongly is one people stop believing.**
+
+Tests: **26/26 bridge, 68/68 extension, 59/59 live CDP.**
+
+### 2026-09-11 — v1.7.16: deleting the measurement nothing read
+
+Housekeeping on v1.7.15, and worth its own entry because of what was deleted rather than added.
+
+Getting a click into a cross-origin frame took four attempts, and three of them assumed the
+coordinates needed translating into the top-level page. That machinery — `frames.offsetOf`, an
+`offset` stored on every ref, a `frameContextForNode` that returned two facts instead of one —
+survived into the working version even though the fix that actually worked made all of it dead:
+input is dispatched into the frame's own session, in the frame's own space, so there is nothing to
+convert.
+
+It was not free. Every snapshot of a page with a cross-origin frame paid two extra CDP round trips
+per frame to measure a number no code read. **And the real cost was the reading**: a future
+maintainer finds `offset` on a ref and reasonably concludes it matters.
+
+So it is gone, and `frames.js` carries a short note saying it is deliberately absent and why —
+because the deleted code looked obviously necessary, and the next person to debug a mis-aimed click
+in a frame will reach for it again.
+
+Tests: **26/26 bridge, 66/66 extension, 59/59 live CDP** — including both cross-origin frame checks.
+
+### 2026-09-11 — v1.7.15: cross-origin iframes, and a `wontfix` that was wrong
+
+The QA ledger said a cross-origin iframe was `wontfix — a browser limit, no amount of development
+removes it`. **That was wrong, and it sat in the ledger for a day because nobody checked it.** The
+premise was right — an out-of-process frame's nodes are genuinely not in the tab's session — and
+the conclusion did not follow: CDP has always reached those child targets, and since **Chrome 125**
+`chrome.debugger` can too, through flat sessions. Checking took ten minutes. Believing it cost a
+capability.
+
+A payment page, an SSO form, a map widget, a help chat — anything an app embeds from another
+origin — is now readable and clickable instead of being where a flow stops.
+
+**Three wrong turns, and they share one lesson.** Getting the click to land took four attempts:
+
+1. Threading `sessionId` from `resolveRef` down through every caller. interact.js has a dozen places
+   that act on a node; two got patched and ten did not, so reading inside a frame worked and
+   clicking did not. Replaced with a lookup — **`sessionForNode` asks the snapshot that produced
+   the node**. A rule every new call site must remember is a rule that will be broken.
+2. Adding the frame's offset, measured at snapshot time. `scrollIntoView` then moved the frame, so
+   the offset was stale by exactly the scroll distance and the point landed off-screen. The error
+   said "outside the viewport — close the overlay first", about an overlay that did not exist.
+3. Measuring the offset live, after the scroll. Still missed.
+4. **Not translating coordinates at all.** The frame's session accepts `Input` commands in its own
+   space, so the answer was to dispatch where the numbers already made sense. *The arithmetic that
+   is not done cannot be done wrong.*
+
+Two more things had to be told which realm they were in: the child session needs its own
+`DOM.enable` + `DOM.getDocument` (without them `DOM.resolveNode` says "Node with given id does not
+belong to the document" — the nodes are real, the agent has just never been told about their
+document), and the **input witness** has to listen in the frame, or a click that worked is reported
+as "the page never received a trusted event", which is an accusation rather than a diagnosis.
+
+**Proven live, not argued.** `setup/livetest.mjs` section 14 serves the page from `127.0.0.1` and
+its frame from `localhost` — same server, different origin, genuinely out-of-process — then types
+a card number, clicks Pay, and asserts the frame reports **PAID**.
+
+One honest limit stays: a **closed** Shadow DOM. That one is a real boundary — the page has chosen
+not to expose the tree and no protocol hands it over.
+
+Tests: **26/26 bridge, 66/66 extension, 59/59 live CDP.**
+
+### 2026-09-11 — v1.7.14: break the network on purpose, and prove the file downloaded
+
+The last two open gaps in the QA ledger are closed. Both were things a tester could describe and
+the tool could not do.
+
+**GAP-0002 — forcing a failure.** `browser_network action:"intercept"` takes rules that match a URL
+substring and then answer the request yourself (`status`, `body`, `headers`), fail it at the network
+level (`abort: "TimedOut"`, `"ConnectionRefused"`, …), or just make it slow (`delayMs`). `times: 1`
+fires once and steps aside, which is how "the first save fails, the retry succeeds" gets written.
+
+The interception machinery already existed for HAR pinning, so this is a rules layer on the same
+`Fetch` session rather than a second interceptor — two of those on one tab would fight over the same
+paused request and one would lose. **Rules are consulted before the pinned HAR**, which is the order
+that lets a flow be pinned for determinism and still have one endpoint forced to fail; the other way
+round makes a rule unreachable for anything the HAR covers, which is most of it. Every injected
+response carries `x-g9-intercepted`, so a fake 500 is never mistaken for a real one.
+
+Validation is strict and loud, because the failure mode here is silent: a rule that never matches
+means the test passes, the error path was never exercised, and nobody finds out.
+
+**GAP-0001 — downloads.** `watch_downloads` → `wait_download` → `downloads`. Built on
+`Browser.setDownloadBehavior` with `eventsEnabled` rather than the `downloads` permission, so no QA
+machine is asked for new trust at install time for one assertion. The result reports filename, URL,
+byte count, and a computed **`empty`** flag — which is the actual defect this exists for: "the
+export button produces a zero-byte file" is something a 200 response reports as success. Honest
+limit, stated in the module and in the ledger: the bytes are what the browser reports, not what is
+read back off disk, so asserting on file CONTENT is still outside this.
+
+**And a bug in my own wiring, caught by the safety net rather than by me.** The new actions needed
+`await`, and the `browser_network` handler was not `async` — so `sw.js` stopped parsing and the
+extension loaded with a **dead service worker**. `node --check` passed it: given a `.js` file it
+parses as CommonJS, where the enclosing structure differs. The only symptom anywhere was the
+isolated live test refusing to start with "bridge port null" — a message about configuration, for a
+syntax error two layers away. That guard did its job; nothing else in the suite would have noticed.
+
+So the suite now parses **every** extension source as a real ES module (copied to `.mjs`, which
+forces module parsing). Parsing rather than importing on purpose: importing needs a chrome stub
+complete enough to survive every listener the worker registers, and a stub that drifts turns a guard
+into a source of false failures.
+
+Tests: **26/26 bridge, 66/66 extension, 57/57 live CDP**, plus a real-browser check that the worker
+starts with the new modules loaded.
+
+### 2026-09-11 — v1.7.13: the bridge had been lying about its own version
+
+`"*"` went live and the first thing it revealed was a bug in the reporting around it. The bridge
+announced **v1.7.4** while `bridge/package.json` said **1.7.12** — because `VERSION` was a
+hand-typed constant in `server.js` that had not been touched in eight releases.
+
+That is worse than a cosmetic slip. The bridge compares that constant against the extension's real
+version and prints VERSION MISMATCH, so the warning had been measured against a number nobody
+maintained: it told people to reload an extension that was already correct, repeatedly, all
+session. A warning that is wrong often enough stops being read, and then it is worth less than no
+warning at all.
+
+`VERSION` is now read from `package.json`. **A version announced in two places will be wrong in one
+of them**, so there is one place to bump and the test asserts both that the constant is gone and
+that the extension manifest and the bridge package agree.
+
+**`"*"` is confirmed live**, and two things that had never worked now do:
+
+- `browser_tabs action:"open"` on a host nowhere near the allowlist — example.com opened,
+  snapshotted, and closed.
+- `file://` — the QA guide was driven in the real browser rather than parsed: 22 sections, 22 nav
+  entries, no broken links. Every check that had been static is now a live one.
+
+One operational note worth keeping: restarting the editor does **not** free the bridge port if a
+second Claude session is still running. Two sessions were up, the older one held 8765, and the new
+bridge sat with no extension. The registry says exactly who holds the port, which is what made it a
+thirty-second diagnosis instead of a guess — and the bridge then took the port on its own, as its
+own error message promises.
+
+Tests: **26/26 bridge, 62/62 extension.**
+
+### 2026-09-11 — v1.7.12: the isolated live test, and a third assertion pinned to copy
+
+`setup/isolated-livetest.mjs` had not been run this session. It is the only check that drives a
+**real Chrome** — its own profile, its own bridge, the user's browser untouched — so everything
+Phase 2 changed had been verified against a stub and against the user's live session, but never
+against a clean browser from cold. It passes: **57/57**, plus the panel render and the Automation
+tab interaction.
+
+It did not pass the first time, and the reason is now familiar. The harness asserted that the panel
+contained the literal words **"Attached tab"**. Splitting `panel.js` into `session` / `automation` /
+`issues` changed that label to "Re-attach current tab", so a panel that was rendering perfectly was
+reported as broken. That is the **third** assertion in this repository to fail for this exact
+reason — after the FAIL_AUTOMATION advice in v1.7.3 and the `app.busy` comment in v1.7.7.
+
+Three times is a pattern, not bad luck, so the fix names it: the check now reads ids and counts
+(`button[data-tab]`, `[data-body="session"]`, `#attachActive`) instead of prose. **A refactor is
+supposed to keep ids and free to change wording.** An assertion that reads copy is testing the
+wrong artefact, and it fails exactly when someone improves the thing it was meant to protect.
+
+The screenshot it captures confirms the panel work end to end: Session / Automation / Issues tabs,
+"Record a flow", "Saved flows", and the **Repository** bar with Pull / Push and an honest empty
+state explaining that the bridge is not connected in this isolated profile.
+
+Tests: **26/26 bridge, 61/61 extension, 57/57 live CDP.**
+
+### 2026-09-11 — v1.7.11: `"*"` — a workspace that is the whole browser
+
+Workspace mode could only ever be as wide as a host list. On a machine dedicated to QA that is
+friction with nothing on the other side of it: the agent should be able to open a new tab, type any
+address, and drive it. `"workspaceDomains": ["*"]` now means exactly that, `file://` included.
+
+**It does not weaken the empty-list rule, and keeping the two apart is the whole design.** An empty
+list is what a MISTAKE looks like — a missing file, a typo, a project nobody set up — and
+guessing "allow everything" there would hand over a browser nobody decided to hand over. `"*"` is a
+sentence somebody typed into a reviewed file. Silence is not consent; a line that says so is.
+
+Two things caught during the change, both worth more than the feature:
+
+**The bridge silently ate it.** `normaliseDomains` rejected `"*"` as "not host-shaped", so the
+extension received an EMPTY list — which it correctly reads as deny-everything. A config line
+saying *allow all* would have meant *allow nothing*: the worst possible direction for a rule about
+permissions to fail, and invisible from the config file. Caught by checking what the bridge actually
+produced rather than assuming the extension's half was the whole story.
+
+**The existing test caught me breaking a real guarantee.** My first version returned `true` for
+`chrome://settings` under `"*"`. The suite had pinned that as "never a browser-internal page,
+whatever the list says", and it was right — not as policy but as fact: Chrome lets no debugger
+attach to those, so answering "yes, that is in your workspace" is a promise the tool cannot keep,
+and the caller gets an obscure CDP error instead of a sentence. `"*"` now means *every host the
+debugger can actually reach*.
+
+**The config keeps the real hosts listed under the `"*"`.** A bridge older than this version drops
+the `"*"` and would be left with an empty list — deny-everything — the moment somebody edits the
+file before restarting their client. With the hosts still there, an old bridge falls back to exactly
+its previous behaviour and a new one allows everything. A config file should never be a trap for the
+version that is currently running.
+
+Tests: **26/26 bridge, 61/61 extension.** The two new ones assert that `"*"` and `[]` never
+converge, and that the bridge stops stripping the entry.
+
+### 2026-09-11 — v1.7.10: the last two unproven paths, both now driven end to end
+
+**Remote execution works.** The one path that had never been run: server → SignalR → device. A
+`qa.ping` through `/api/automation/devices/{id}/command` came back in **111ms**, and the whole
+`agripad.smoke.device-health` flow ran remotely with **PASS, 4/4, 552ms**, persisted to the run
+history and picked up by the coverage board. Everything about that path had been argued from code
+until now.
+
+Worth recording why it took so long to reach: the device was reporting "متصل شد" in the app while
+`/api/fleet` showed it offline for four hours. Both were true. An `adb uninstall` earlier in the
+session had given the emulator a **new client id**, so the device I kept checking was the old
+identity, sitting where it was abandoned. The fleet had the new one, online and consented, the
+whole time. When two sources disagree about the same device, check that they are talking about the
+same device.
+
+**The web flow library is no longer empty.** `web.smoke.sites-search` is recorded, replayed
+(**5/5 PASS**), exported as a FlowSpec and saved to `QA/Flows/web/smoke/`. All four suites now
+select at least one flow, so none of them is a vacuous green any more — which was the failure
+v1.7.5's `requireSelection` was built to catch, now closed from the other end as well.
+
+The first attempt at that flow is the more useful half of the story. Its `aria` assertion captured
+the whole page **after** the weather widgets had loaded, so on replay it failed with
+`7 node(s) gone, 9 new` — all of them `Loading...`. A baseline taken at one load stage and compared
+at another is a coin flip, not a test. `calibrate` refused to paper over it, correctly: *"calibrating
+a broken run would mark the breakage itself as noise."* The flow was rebuilt around two assertions
+that cannot drift — a match that must appear and a non-match that must disappear — because a search
+test that only checks what remained never tested the filter at all.
+
+**`g9 run` now names the bridge that holds the extension.** A bridge owns its port exclusively, so
+with an editor or MCP client running, the runner starts its own and nothing joins it. The old error
+listed three things to check that were all fine. It now reads the registry and says which port and
+pid actually has the extension, and what to do about it.
+
+Tests: **26/26 bridge, 59/59 extension**, plus the AgriPad suite green through the QA launcher.
+
+### 2026-09-11 — v1.7.9: dialogs are automatable, and the report is written for the reader
+
+**GAP-0006 is closed: a dialog no longer freezes quiescence.** `G9SafeCommand` keeps a handler
+registered as running until it returns, and a handler awaiting a modal does not return until the
+user chooses — so `AppQuiescence` reported a `cmd:` reason for as long as any dialog was open
+(341s, measured), and every step after that timed out. `QaModalWatch` now answers "is a blocking
+overlay up?" and a bare `cmd:` entry stops counting while one is. **Only `cmd:`**: `http:`, `ui:`
+and explicit `Busy` scopes are untouched, because those are work whether or not a dialog is open.
+
+Proof on the device: opening the diagnostics chooser went from `settled:false` plus a 30s timeout
+to `ok:true settled:true busy:[]`, with `app.busy` reporting `idle:true` while the dialog was up.
+
+**The first version of that fix was worse than the bug**, and it is worth recording why. It matched
+on the TYPE NAME of every element — anything containing "Popup" or "Sheet". On a completely clean
+screen it reported a dialog every time, because `DeveloperDebugOverlay._devPopup` is a `G9PopupView`
+that lives in the tree permanently and is merely closed. A permanently-true answer there would have
+suppressed every `cmd:` reason forever, so quiescence would never have waited for anything: a wait
+that was too long traded for results that are quietly wrong. It now asks the controls for their
+STATE — `G9PopupView.IsOpen`, `G9BottomSheetHelper.GetOpenSheetCount()` — instead of inferring
+it from a name. Asking beats guessing, and the guess was available the whole time.
+
+**GAP-0007 is closed too.** The chooser's three options carry ids now
+(`DiagnosticsChooser.LiveDiagnostic` and friends) — set by hand, because the popup is built in
+code and there is no `x:Name` to derive from. The dismiss button cannot carry one at all
+(`G9PopupButton` is a description, not a control), so instead there is a new bridge command
+**`ui.dismissOverlay`** that closes any popup or sheet and needs no id — a better answer than
+naming one button, because it works for every dialog rather than this one. Verified end to end:
+open the chooser, tap "Live diagnostics", land on the Live Diagnostic screen, all through
+automation. That path could not be driven at all this morning.
+
+**Written for the person reading it.** The audience for `report.html` is a tester, not the person
+who wrote the runner, so it is now Persian, RTL, and each verdict carries **one sentence saying what
+to do next** — most importantly that `FAIL_AUTOMATION` must NOT be filed as a bug. A report that
+names a category and stops has not told anybody anything they can act on.
+
+The same reasoning produced `QA/Run-Tests.ps1` (one command: finds the device, launches the app,
+waits for it to be genuinely ready, runs, opens the report) and a precondition message that now
+explains the two ordinary causes instead of printing SQL: "no such table" is an unfinished first
+sync, "no active database" is nobody logged in. Both were hit live, and both read like defects
+without the sentence.
+
+Tests: **26/26 bridge, 59/59 extension**, and a clean end-to-end run through the launcher.
+
+### 2026-09-11 — v1.7.8: the wait budget was being sent where nothing reads it
+
+The v1.7.7 fix made the `idle` oracle wait. This one makes the wait it asks for actually arrive.
+
+`QaLocalRequest` reads `TimeoutMs` off the **request root** and defaults it to 30000. A `timeoutMs`
+inside the `args` object is never looked at. The runner's driver was already correct — it passes
+the budget through `command(cmd, args, { timeoutMs })`, which lands at the root — but the server's
+`TranslateAssertion` put it in `Args`, so every remote `idle` assertion silently got the default no
+matter what the flow asked for. An oracle that promises a longer wait and does not take one is a
+flake with a delayed fuse.
+
+Proven on the device rather than argued: `ui.waitIdle` with a root-level `timeoutMs: 45000` ran
+**30.3s and returned `idle: true`**; the same value inside `args` had been cut off at exactly 30s.
+The server now threads a per-step budget through `CommandBody`, and the translator tuple carries it.
+
+Found while trying to complete the one path that had never been driven end to end — remote
+execution through the Diagnostic server. That attempt also turned up two AgriPad blockers, both now
+in the QA gap ledger rather than quietly fixed:
+
+- **GAP-0006** — a handler that awaits a modal stays registered as running, so `AppQuiescence`
+  reports busy for as long as any dialog is open (measured: 341s). Every step after a flow opens a
+  dialog times out. The app is not working; it is waiting for a human.
+- **GAP-0007** — the dialog's own options carry no `AutomationId`, so even a fixed quiescence
+  could not tap them.
+
+One thing did get fixed on the app: the "Live Diagnostic" card on the Profile page was a `Border`
+with a tap handler and no name, which made the only route to the live-access screen invisible to
+automation. It now has `x:Name="LiveDiagnosticCard"`, verified on the emulator after a full
+rebuild — and the rebuild is worth noting too, because an incremental Android build reported
+success twice without repackaging the APK. `--no-incremental` was what actually produced it.
+
+Tests: **26/26 bridge, 59/59 extension**, plus three consecutive green device runs.
+
+### 2026-09-11 — v1.7.7: the `idle` oracle never actually waited
+
+The v1.7.6 verdict fix was the right fix for the wrong layer. It correctly stopped filing
+`still busy: …` as a product regression — but the run should not have been failing at all.
+
+`case 'idle'` in the AgriPad driver called `app.busy`, which is an **instantaneous snapshot**, and
+failed if anything whatsoever was in flight at that microsecond. It never waited. `agripad.smoke`
+asserts `idle` as its very first step, so the entire suite's colour depended on whether a background
+request happened to overlap the moment the run started.
+
+The background request is real and measurable: a periodic `GET /api/NewAuth` token refresh that
+takes **~20 seconds** from this emulator — `ui.waitIdle` returned `idle: true` after 22.9s of
+genuine waiting. So the suite was a coin flip weighted by a 20-second window.
+
+Every action in this driver already waits on `ui.waitIdle`, and the bridge's own capability notes
+say "Every action waits for app quiescence rather than sleeping; a timeout names what was still
+busy." An assertion that the app settles is that sentence. It now calls `ui.waitIdle` with a
+per-flow-overridable 30s budget, and only asks `app.busy` **after** the wait fails, so the error
+still names what was holding it.
+
+Three consecutive runs after the fix: **21.5s, 0.6s, 0.6s — all green.** The first waited the
+refresh out instead of failing on it, which is the whole point.
+
+Worth recording that this is the second test in two versions to break on its own explanatory
+comment: the new test compared the position of `ui.waitIdle` against `app.busy`, and the comment
+above the fix names `app.busy` first. It now strips comment lines before comparing. A test that
+reads prose is testing the wrong artefact.
+
+Tests: **26/26 bridge, 58/58 extension**.
+
+### 2026-09-11 — v1.7.6: the same verdict rule, written three times, had drifted
+
+Found by running the AgriPad smoke suite once more after the v1.7.5 fixes: it came back
+**FAIL_PRODUCT**, with `still busy: http:GET /api/NewAuth`. `app.busy` reported `idle: true`
+seconds later and the identical suite passed. A background token refresh happened to be in flight
+when the flow started — nothing was wrong with the product, and a readiness gate declining to
+proceed is that gate working.
+
+The cause was not the message but the classifier. `verdictForDevice` was four alternations inline
+(`not found|no such|could not find|automationId`) while the browser had twenty documented patterns
+in `AUTOMATION_FAILURE_PATTERNS` and the server ten in `AutomationFailurePhrases`. One rule, three
+copies, and the copy with no documentation was the one that drifted: the browser list names
+"readiness gates that never opened" as automation failures explicitly, and the device path filed
+exactly that as a product regression.
+
+The device rule is now a named list with the same categories and the same stated rule for adding to
+it. This is the third defect of this exact shape (v1.7.2 browser, then the server, now the device),
+which is the signal that three copies of one rule is itself the defect. Until they are merged, the
+comment on each says to keep the others in step.
+
+Tests: **26/26 bridge, 57/57 extension**. The new one classifies five real messages in both
+directions rather than pinning the pattern list, because pinning copy is what broke the suite in
+v1.7.3.
+
+### 2026-09-11 — v1.7.5: the runner could only be run from one directory, and an empty suite passed
+
+Three defects in `runner/g9.mjs`, all found by auditing the finished work rather than by using it,
+and all in the same area: how a run decides *what to run*.
+
+**1. The project file was only ever looked for in the working directory.** `loadProject` resolved
+`g9.project.json` against `process.cwd()` and returned `null` on a miss — silently, because a
+missing project file is a legitimate state for the browser path. `flowsDir` then fell back to a
+cwd-relative default, and the run died with `No AgriPad flows found under
+...(tool dir)/QA/Flows/agripad`, naming a directory that has never existed. The flows were
+fine; only the search was wrong. Running from the tool's own folder — the most natural place for
+QA to be — was the failing case, and the error blamed the flow library for it.
+
+It now climbs to the filesystem root the way git finds `.git` and tsc finds `tsconfig.json`, and a
+malformed file at the right path is an error instead of a reason to keep climbing and then blame a
+missing file three directories up. The second half of the same bug: relative paths in the file now
+resolve against **the file's own directory**, not the cwd, via `flowsRoot(project)`.
+
+**2. A selector that matched nothing reported PASS.** Zero flows selected gave `failed === 0`,
+verdict `PASS`, exit 0 — indistinguishable, in `run.json`, `junit.xml` and the exit code, from a
+suite whose flows all really passed. `web.smoke` and `web.full` select zero flows *today*, because
+no web flow has been recorded yet, so this was not hypothetical: a release gate wired to either
+would have been green forever and loudest at exactly the wrong moment — a renamed tag, a wrong
+`flowsDir`, a suite defined before anything was recorded for it.
+
+The suite files carry a comment explaining that a suite is a query precisely so nobody can forget to
+add a flow. That protects against a shrinking list and did nothing about an empty result.
+`requireSelection` now refuses, naming the selector that emptied the run and listing what was
+available. The one guard covers both platforms.
+
+**3. A suite meant two different things depending on the platform.** The device path read
+`QA/Flows/suites/*.json` and applied `select`; the browser path only matched a literal `suite`
+field on the recording. Same id, two semantics, and a "Full-Test" that covered different things on
+web than on AgriPad. The browser path now reads the same suite files and applies the same query,
+keeping the literal-field match as a fallback so recordings made before the suite files still run.
+
+Also in this version: `bridge/package.json` was still 1.6.0 while the extension was at 1.7.4,
+despite the bridge gaining `project.js`, `flows.js` and `registry.js`. Both are 1.7.5 now.
+
+Tests: **26/26 bridge, 56/56 extension**. The three new ones assert behaviour, not phrasing —
+that `loadProject` climbs and stops, that a non-empty selection passes through untouched while an
+empty one throws, that *both* platform paths route through the guard, and that the browser path
+reads the suite file.
+
+### 2026-09-10 — v1.7.3: two more, both about honesty rather than function
+
+**The self-test's port collided with AgriPad's.** `setup/selftest.mjs` used 8799, which is exactly
+the port the AgriPad QA guide tells people to `adb forward`. Anyone with a device plugged in got
+three failures reading "Port 8799 is in use by another program" — a true sentence about an
+irrelevant collision, and one that reads like a broken bridge. Moved to 8859, outside the discovery
+range as well so a running bridge cannot wander into it either.
+
+**The FAIL_AUTOMATION advice named a cause the verdict no longer implies.** It said "An element
+moved or was renamed" — correct when that verdict only covered locator rot, wrong now that it also
+covers input the browser never delivered and a device that never answered. Someone reading it would
+go re-record a flow when the real answer was "bring the tab to the front". Reworded on both
+platforms to state what the verdict actually means and leave the cause to the step message.
+
+Worth a note on the test that broke while fixing this: it asserted the exact sentence, so correcting
+the copy failed the suite. That is a test guarding the phrasing instead of the behaviour. It now
+asserts the meaning — that the advice says this is not the product — and that it does NOT claim a
+single cause.
+
+Tests: **26/26 bridge, 51/51 extension**, both now passing with a device cable attached.
+
+### 2026-09-10 (later) — v1.7.2: three defects the first live run found
+
+v1.7.0 was written, tested (26/26 + 48/48) and shipped without a browser ever having driven it.
+The first real session found three things no offline suite could have, and each one is the kind
+this project keeps a change log to avoid repeating.
+
+**1. A refusal leaked the URL it was refusing.** `browser_tabs action:"session"` with a tabId
+reached `requireTabControl` carrying a URL read off the BROWSER, and the refusal echoed it in
+full — handing back `https://chatgpt.com/c/<conversation-id>` for a tab the agent was being told
+it may not touch. Titles and URLs are precisely what pinned and workspace mode withhold, so a
+refusal must never become the way to read them. It now names the origin. An agent that supplied
+the URL itself already knows it; redacting costs nothing and closes the case where it did not.
+`refusalFor` had the same shape in its fallback (`host ?? url`) and was tightened with it.
+
+**2. Two harness failures were reported as product regressions.** Both live replays came back
+`FAIL_PRODUCT`:
+
+    "The click was dispatched but the page never received it: the attached tab is HIDDEN…"
+    "Found textbox …, but it never stopped moving…"
+
+The first is Chromium refusing to deliver input to a tab nobody is showing. The second is the
+stability gate declining to click into a running animation — the gate WORKING. `AUTOMATION_FAILURE`
+was a single regex anchored to `^Could not find |^Lost the resolved |…`, so anything phrased
+differently fell through to "the product is broken". It is now a list of fifteen patterns with a
+stated rule for extending it, and a test that asserts BOTH directions — because the worse error is
+excusing a real defect as "just the test", and that is the direction that loses defects rather than
+trust.
+
+**3. One replay returned 103,553 characters.** A page with a live data list produced 180+ surprise
+lines — every row counted as a new UI node — and the result exceeded the agent's token budget
+outright. From a tool whose own README explains that it ships fourteen tools rather than fifty
+precisely to protect context. `surpriseLines` is now ranked (failures, then warnings, then notes),
+capped at twelve, and reports how many it is not showing; `summary.surprises` stays complete for
+the panel and the report, which render locally and pay nothing for volume. A truncation that hid
+its own existence would have been the same silent-omission bug in a new place.
+
+Worth recording plainly: all three were invisible to 48 passing tests, and all three appeared
+within twenty minutes of a real browser. The suites are not the problem — they are checks on
+reasoning that has already happened. Only a live run produces the sentences nobody thought to write
+an assertion about.
+
+Tests: **26/26 bridge, 51/51 extension** (three added, one per defect).
+
 ### 2026-09-04 (later) — README figures corrected against a re-run
 
 No code changed. Three numbers in `README.md` had gone stale while the suites grew and were

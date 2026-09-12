@@ -116,7 +116,11 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '127.0.0.1', () => {
+// Bound to every loopback name, not just 127.0.0.1, so the same server answers
+// on `localhost` as well. Those are DIFFERENT ORIGINS to the browser, which is
+// what lets the test page embed a genuinely cross-origin (out-of-process)
+// iframe without a second server or a real external site.
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`\nTest page:  http://127.0.0.1:${PORT}/`);
   console.log('Open it in Chrome or Edge, then attach it from the G9 side panel.');
   console.log('Ctrl+C to stop.\n');

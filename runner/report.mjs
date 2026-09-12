@@ -21,13 +21,56 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
+/**
+ * How each verdict is shown, and — the part that matters — what the reader
+ * should DO about it.
+ *
+ * The audience for this file is a tester, not the person who wrote the runner.
+ * A report that says `FAIL_AUTOMATION` and stops has named a category; it has
+ * not told anybody whether to file a bug, re-run, or call somebody. Each verdict
+ * therefore carries one sentence of instruction, in the language the team uses.
+ *
+ * `advice` is deliberately about the NEXT ACTION rather than the cause: the
+ * cause is in the step message right below it, and a reader who does not know
+ * what to do next will not get as far as reading it.
+ */
 const VERDICT_STYLE = {
-  PASS: { colour: '#15803d', label: 'PASS' },
-  PASS_WITH_WARNING: { colour: '#a16207', label: 'PASS (warnings)' },
-  SURPRISE: { colour: '#b45309', label: 'SURPRISE' },
-  FAIL_PRODUCT: { colour: '#b91c1c', label: 'FAIL — product' },
-  FAIL_AUTOMATION: { colour: '#6d28d9', label: 'FAIL — automation' },
-  ERROR: { colour: '#b91c1c', label: 'ERROR' },
+  PASS: {
+    colour: '#15803d',
+    label: 'PASS',
+    fa: 'قبول',
+    advice: 'همه‌چیز درست کار کرد. کاری لازم نیست.',
+  },
+  PASS_WITH_WARNING: {
+    colour: '#a16207',
+    label: 'PASS (warnings)',
+    fa: 'قبول با هشدار',
+    advice: 'تست رد شد، ولی چیزی سر جایش نبود. اگر تکرار شد، به برنامه‌نویس بگو.',
+  },
+  SURPRISE: {
+    colour: '#b45309',
+    label: 'SURPRISE',
+    fa: 'تغییر غیرمنتظره',
+    advice: 'صفحه با دفعهٔ قبل فرق دارد. اگر تغییر عمدی بوده، بگذار تأییدش کنند؛ وگرنه گزارشش کن.',
+  },
+  FAIL_PRODUCT: {
+    colour: '#b91c1c',
+    label: 'FAIL — product',
+    fa: 'ایراد در برنامه',
+    advice: 'این یک باگ واقعی است. ثبتش کن و متن خطای پایین را هم بگذار.',
+  },
+  FAIL_AUTOMATION: {
+    colour: '#6d28d9',
+    label: 'FAIL — automation',
+    fa: 'ایراد در ابزار تست',
+    advice: 'باگ برنامه نیست — ابزار نتوانست کارش را تمام کند. به عنوان باگ ثبت نکن؛ به برنامه‌نویس بگو.',
+  },
+  ERROR: {
+    colour: '#b91c1c',
+    label: 'ERROR',
+    fa: 'خطا',
+    advice: 'تست نیمه‌کاره ماند. متن خطا را برای برنامه‌نویس بفرست.',
+  },
 };
 
 export async function writeReports(dir, run) {
@@ -111,43 +154,48 @@ function html(run) {
 
     return `
     <section>
-      <h2><span class="badge" style="background:${style.colour}">${style.label}</span> ${escHtml(flow.name ?? flow.id)}</h2>
-      <p class="meta">${flow.passed ?? 0}/${flow.total ?? 0} steps · ${Math.round((flow.durationMs ?? 0) / 100) / 10}s
-        ${flow.knownWorld?.runs ? ` · known world: ${flow.knownWorld.runs} approved run(s)` : ' · <b>no known world yet</b>'}
-        ${flow.flaky ? ' · <b>flaky</b>' : ''}</p>
-      ${steps ? `<h3>Steps needing attention</h3><ul class="steps">${steps}</ul>` : ''}
-      ${surprises ? `<h3>Surprises</h3><ul class="surprises">${surprises}</ul>` : ''}
+      <h2><span class="badge" style="background:${style.colour}">${style.fa}</span> ${escHtml(flow.name ?? flow.id)}</h2>
+      <p class="advice">${style.advice}</p>
+      <p class="meta">${flow.passed ?? 0} از ${flow.total ?? 0} مرحله · ${Math.round((flow.durationMs ?? 0) / 100) / 10} ثانیه
+        ${flow.knownWorld?.runs ? ` · ${flow.knownWorld.runs} اجرای تأییدشده` : ' · <b>اولین اجرا</b>'}
+        ${flow.flaky ? ' · <b>ناپایدار</b>' : ''}
+        · <span dir="ltr">${escHtml(flow.verdict)}</span></p>
+      ${steps ? `<h3>مراحلی که باید نگاه کنی</h3><ul class="steps" dir="ltr">${steps}</ul>` : ''}
+      ${surprises ? `<h3>تغییرات غیرمنتظره</h3><ul class="surprises" dir="ltr">${surprises}</ul>` : ''}
     </section>`;
   }).join('');
 
   const counts = run.flows.reduce((acc, f) => { acc[f.verdict] = (acc[f.verdict] ?? 0) + 1; return acc; }, {});
 
   return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>G9 run — ${escHtml(run.suite ?? 'all')}</title>
+<html lang="fa" dir="rtl"><head><meta charset="utf-8"><title>گزارش تست — ${escHtml(run.suite ?? 'all')}</title>
 <style>
   :root { color-scheme: light dark; --fg:#111; --bg:#fff; --muted:#666; --line:#e5e5e5; --card:#fafafa; }
   @media (prefers-color-scheme: dark) { :root { --fg:#e8e8e8; --bg:#141414; --muted:#9a9a9a; --line:#2a2a2a; --card:#1c1c1c; } }
-  body { font:14px/1.55 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif; margin:0; padding:32px; color:var(--fg); background:var(--bg); }
+  body { font:15px/1.8 Vazirmatn,Segoe UI,Tahoma,ui-sans-serif,system-ui,sans-serif; margin:0; padding:32px; color:var(--fg); background:var(--bg); }
+  .advice { margin:0 0 10px; font-size:14px; }
+  ul.steps, ul.surprises { text-align:left; }
   h1 { font-size:20px; margin:0 0 4px; } h2 { font-size:16px; margin:0 0 6px; }
   h3 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:14px 0 4px; }
   .meta { color:var(--muted); margin:0 0 8px; font-size:12px; }
   .summary { display:flex; gap:10px; flex-wrap:wrap; margin:14px 0 26px; }
   .pill { border:1px solid var(--line); border-radius:999px; padding:4px 12px; font-size:12px; }
   section { border:1px solid var(--line); background:var(--card); border-radius:10px; padding:16px 18px; margin-bottom:14px; }
-  .badge { color:#fff; border-radius:5px; padding:2px 8px; font-size:11px; font-weight:600; margin-right:8px; }
-  ul { margin:0; padding-left:18px; } li { margin:3px 0; }
+  .badge { color:#fff; border-radius:5px; padding:2px 8px; font-size:11px; font-weight:600; margin-left:8px; }
+  ul { margin:0; padding-right:18px; padding-left:0; } li { margin:3px 0; }
   li span { color:var(--muted); display:block; font-size:12px; }
   .s-fail { color:#b91c1c; } .s-warn { color:#a16207; } .s-info { color:var(--muted); }
   .bad { color:#b91c1c; } .warn { color:#a16207; }
   code { background:rgba(127,127,127,.15); padding:0 4px; border-radius:3px; }
   footer { color:var(--muted); font-size:12px; margin-top:24px; }
 </style></head><body>
-<h1>G9 run — ${escHtml(run.suite ?? 'all flows')}</h1>
-<p class="meta">${new Date(run.startedAt).toLocaleString()} · environment <b>${escHtml(run.environment ?? 'default')}</b> · ${Math.round((run.durationMs ?? 0) / 100) / 10}s${run.pinned ? ' · <b>network pinned</b>' : ''}</p>
+<h1>گزارش تست — ${escHtml(run.suite ?? 'همهٔ سناریوها')}</h1>
+<p class="meta">${new Date(run.startedAt).toLocaleString('fa-IR')} · محیط <b>${escHtml(run.environment ?? 'default')}</b> · ${Math.round((run.durationMs ?? 0) / 100) / 10} ثانیه${run.pinned ? ' · <b>شبکه ثابت‌شده</b>' : ''}</p>
 <div class="summary">${Object.entries(counts).map(([verdict, n]) =>
-  `<span class="pill" style="border-color:${(VERDICT_STYLE[verdict] ?? VERDICT_STYLE.ERROR).colour}">${(VERDICT_STYLE[verdict] ?? VERDICT_STYLE.ERROR).label}: <b>${n}</b></span>`).join('')}</div>
+  `<span class="pill" style="border-color:${(VERDICT_STYLE[verdict] ?? VERDICT_STYLE.ERROR).colour}">${(VERDICT_STYLE[verdict] ?? VERDICT_STYLE.ERROR).fa}: <b>${n}</b></span>`).join('')}</div>
 ${rows}
-<footer>Generated by the G9 runner. A SURPRISE means the flow did something it has never done before — that is not necessarily a bug, but it is never nothing.</footer>
+<footer>ساختهٔ runner خودکار. «تغییر غیرمنتظره» یعنی صفحه کاری کرد که تا امروز نکرده بود —
+الزاماً باگ نیست، ولی هیچ‌وقت هم هیچ نیست.</footer>
 </body></html>
 `;
 }

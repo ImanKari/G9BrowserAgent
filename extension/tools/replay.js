@@ -34,6 +34,7 @@ import { saveRefs, getRefs, clearRefs } from '../lib/refs.js';
 import * as interact from './interact.js';
 import * as nav from './navigate.js';
 import { setReplaying } from './record.js';
+import { broadcast } from '../lib/state.js';
 import { executeAssertion, substitute, summarizeAssertion } from './qa.js';
 import { snapshot } from './snapshot.js';
 import * as observe from './observe.js';
@@ -124,10 +125,48 @@ export async function replay(tabId, {
     const label = `step ${i + 1}/${recording.steps.length}`;
     const stepStarted = Date.now();
 
+    // Tell whoever is watching, before the step runs rather than after.
+    //
+    // A replay used to be one message that returned when the whole thing was
+    // over. On a 20-step flow that is half a minute of a panel showing nothing,
+    // and the first thing a tester asks is whether they actually pressed the
+    // button. Announcing the step at its START is what makes the progress bar
+    // move while the slow step is still going, which is exactly when somebody is
+    // wondering whether it has hung.
+    // `broadcast` and not a bespoke sender: it already carries the `__g9`
+    // envelope every panel listener filters on, and it already swallows the
+    // rejection you get when no panel is open — which is the normal case for an
+    // agent-driven run, and must never fail a replay.
+    // `stepType`, not `type`: `type` is the envelope's own field and a second
+    // one silently overwrote it, so every message went out labelled "click" or
+    // "assert" and no listener ever recognised it. The panel showed step 0 for
+    // the whole run and nobody could see why — a duplicate key is not an error
+    // in JavaScript, it is a quiet last-one-wins.
+    broadcast({
+      type: 'replayProgress',
+      id: recording.id,
+      step: i + 1,
+      total: recording.steps.length,
+      stepType: step.type,
+      describe: describeStep(step),
+      elapsedMs: Date.now() - started,
+    });
+
     try {
       const outcome = dryRun ? await probe(tabId, step) : await runStep(tabId, step, mode);
       const record = { step: i + 1, id: stepId, type: step.type, ok: true, ms: Date.now() - stepStarted, ...outcome };
       results.push(record);
+
+      // A semantic assertion that passed because a hundred rows merely carried
+      // new readings still owes the reader that sentence. Silence here is how a
+      // baseline quietly stops testing anything.
+      if (outcome.dataChanges) {
+        warnings.push(
+          `${label} (${describeStep(step)}) passed, but ${outcome.dataChanges} node(s) came back with ` +
+            `different numbers — live data, not a structural change` +
+            (outcome.dataSample?.length ? `: ${outcome.dataSample.join(' | ')}` : '') + '.',
+        );
+      }
 
       if (outcome.matchedBy && !HEALTHY_MATCH.has(outcome.matchedBy)) {
         warnings.push(
@@ -203,8 +242,41 @@ export async function replay(tabId, {
     if (compare) {
       const detection = detectSurprises(recording.knownWorld, runSignature, { sensitivity });
       classified = classifySurprises(detection.surprises, recording.surpriseHistory ?? []);
+
+      // ⚠️ BOUNDED. The first live run against a real data-heavy page produced
+      // 180+ surprise lines — every row of a site list counted as a new UI node
+      // — and a 103,553-character tool result that blew the agent's token
+      // budget outright. That is the opposite of the discipline this tool
+      // claims elsewhere ("fourteen tools rather than fifty, because
+      // definitions are re-sent on every request").
+      //
+      // The fix is a projection, not a filter: the full classified set stays on
+      // `summary.surprises` for the panel and the report, which render locally
+      // and pay nothing for volume. What crosses to the agent is ranked —
+      // failures first, then warnings, then notes — capped, and told how many
+      // it is not seeing. A truncation that hides its own existence would be
+      // the same silent-omission bug in a new place.
+      const ranked = [...classified].sort(
+        (a, b) => SURPRISE_RANK[b.effectiveSeverity ?? 'info'] - SURPRISE_RANK[a.effectiveSeverity ?? 'info'],
+      );
       summary.surprises = classified;
-      summary.surpriseLines = classified.map(describeSurprise);
+      summary.surpriseLines = ranked.slice(0, MAX_SURPRISE_LINES).map(describeSurprise);
+      if (ranked.length > MAX_SURPRISE_LINES) {
+        const hidden = ranked.length - MAX_SURPRISE_LINES;
+        summary.surpriseLines.push(
+          `… and ${hidden} more, all of lower severity. ${
+            ranked.every((s) => (s.effectiveSeverity ?? 'info') === 'info')
+              ? 'Every one is an unconfirmed note, which is what a first run against a page full of live data looks like. Run action:"calibrate" once to mark this noise as volatile.'
+              : 'Open the flow in the side panel to read them all.'
+          }`,
+        );
+      }
+      summary.surpriseCount = {
+        total: classified.length,
+        fail: classified.filter((s) => s.effectiveSeverity === 'fail').length,
+        warn: classified.filter((s) => s.effectiveSeverity === 'warn').length,
+        info: classified.filter((s) => (s.effectiveSeverity ?? 'info') === 'info').length,
+      };
       summary.knownWorld = detection.seeded
         ? { seeded: false, runs: 0, note: detection.note }
         : { runs: detection.knownWorldRuns, volatileKeys: (recording.knownWorld?.volatile ?? []).length };
@@ -342,7 +414,83 @@ function verdictFor({ failed, warnings, surprises, dryRun }) {
   return 'PASS';
 }
 
-const AUTOMATION_FAILURE = /^(Could not find |Lost the resolved |Assertion target could not be resolved|Step is a file upload|Unknown step type|No recording )/;
+/**
+ * How many surprise lines cross the wire to the agent, and in what order.
+ *
+ * Twelve is enough to carry every failure and warning a healthy flow produces,
+ * and small enough that a noisy first run costs a paragraph instead of a
+ * context window. The panel and the report are not subject to this — they read
+ * `summary.surprises`, which stays complete.
+ */
+const MAX_SURPRISE_LINES = 12;
+
+/** Failures before warnings before notes: the cap must never drop the signal. */
+const SURPRISE_RANK = { fail: 3, warn: 2, info: 1 };
+
+/**
+ * What counts as the TEST breaking rather than the PRODUCT breaking.
+ *
+ * ## Why this list grew on 2026-09-10
+ *
+ * It used to match only locator-resolution failures, anchored to the start of
+ * the message. Two live runs produced these, and both were classified
+ * `FAIL_PRODUCT`:
+ *
+ *   "The click was dispatched but the page never received it: the attached tab
+ *    is HIDDEN (document.visibilityState=\"hidden\")…"
+ *   "Found textbox \"جستجو\", but it never stopped moving…"
+ *
+ * Neither is a product defect. The first is Chromium refusing to deliver input
+ * to a tab nobody is showing — the harness's own environment. The second is the
+ * stability gate declining to click into a running animation, which is the gate
+ * WORKING. Reporting either as a product regression is precisely the failure the
+ * whole `FAIL_PRODUCT` / `FAIL_AUTOMATION` split exists to prevent: a pipeline
+ * that cries wolf about the product teaches people to ignore it.
+ *
+ * ## The rule for adding to this list
+ *
+ * An entry belongs here when the message describes something about the HARNESS
+ * or the ENVIRONMENT — an element that could not be addressed, input that was
+ * never delivered, a readiness gate that never opened. It does NOT belong here
+ * when the page did something and the something was wrong: a failed assertion,
+ * a 500, a value that came back different. When in doubt, leave it out —
+ * mislabelling a real regression as "just the test" is the worse direction, and
+ * it is the direction that loses defects rather than trust.
+ *
+ * Unanchored on purpose: several of these appear after a leading clause.
+ */
+const AUTOMATION_FAILURE_PATTERNS = [
+  // Element identity — the recorded locators no longer address anything.
+  /^Could not find /,
+  /^Lost the resolved /,
+  /^Assertion target could not be resolved/,
+  /^No recording /,
+
+  // Steps this driver cannot perform at all.
+  /^Step is a file upload/,
+  /^Unknown step type/,
+
+  // Input the browser refused to deliver. Environment, never product.
+  /the page never received it/i,
+  /is HIDDEN \(document\.visibilityState/i,
+  /tab is not visible/i,
+  /bring (?:that|the) tab to the front/i,
+
+  // Readiness gates that never opened. The gate doing its job is not a defect.
+  /never stopped moving/i,
+  /still (?:changing|animating)/i,
+  /is covered by /i,
+  /obstructed by /i,
+
+  // The harness could not reach the page at all.
+  /^Timed out waiting for the page/i,
+  /^The tab (?:was closed|no longer exists)/i,
+  /debugger detached/i,
+];
+
+const AUTOMATION_FAILURE = {
+  test: (message) => AUTOMATION_FAILURE_PATTERNS.some((pattern) => pattern.test(message)),
+};
 
 /** The buffer positions this run starts from, so its own slice can be isolated. */
 async function captureWatermark(tabId, evidence) {
@@ -551,6 +699,39 @@ async function locate(tabId, step, { budgetMs }) {
   );
 }
 
+/**
+ * An assertion is "eventually true", not "true this microsecond".
+ *
+ * Assertions used to run the instant their turn came, ignoring the step's wait
+ * budget. After a navigation that is a guaranteed race: the SPA has not painted,
+ * `document.body.innerText` is still empty, and the check fails against a blank
+ * document — reporting FAIL_PRODUCT for an app that was merely still rendering.
+ * Caught on the first long flow written, whose very first assertion failed that
+ * way every single time.
+ *
+ * Retrying inside the declared budget is what makes a long flow possible at all:
+ * a check placed where it belongs, immediately after the step it describes,
+ * has to be allowed to wait for that step to finish.
+ *
+ * `executeAssertion` signals failure by THROWING, so the last error is kept and
+ * rethrown when the budget runs out — the caller still sees the real message,
+ * not a synthetic timeout that hides what was actually wrong.
+ *
+ * A budget of zero means one attempt and no waiting, so every recording made
+ * before this replays exactly as it did.
+ */
+async function assertWithin(tabId, step, budgetMs) {
+  const deadline = Date.now() + Math.max(0, budgetMs || 0);
+  for (;;) {
+    try {
+      return await executeAssertion(tabId, step);
+    } catch (err) {
+      if (Date.now() >= deadline) throw err;
+      await sleep(Math.min(250, Math.max(50, deadline - Date.now())));
+    }
+  }
+}
+
 /** What a dry run does: resolve everything, change nothing. */
 async function probe(tabId, step) {
   if (step.type === 'assert') return executeAssertion(tabId, step);
@@ -567,7 +748,7 @@ async function runStep(tabId, step, mode) {
   const stepStart = Date.now();
   const budgetMs = Math.round((step.waitMs ?? 0) * mode.budget);
 
-  if (step.type === 'assert') return executeAssertion(tabId, step);
+  if (step.type === 'assert') return assertWithin(tabId, step, budgetMs);
 
   if (step.type === 'navigate') {
     await nav.navigate(tabId, { url: step.url, waitUntil: 'load' });

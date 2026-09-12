@@ -12,7 +12,7 @@ import {
   visualFingerprint, visualDifference, captureVisual, compareVisual, diffImage,
 } from '../lib/visual.js';
 import { snapshot } from './snapshot.js';
-import { ariaLines } from '../lib/signature.js';
+import { ariaLines, ariaDataKey } from '../lib/signature.js';
 import { consoleLog, network } from './observe.js';
 import { health } from './diagnose.js';
 
@@ -85,11 +85,36 @@ export async function addAssertion(tabId, args = {}) {
     step.threshold = args.threshold;
   }
 
-  const steps = [...(recording.steps ?? []), compact(step)];
+  // Where the assertion goes.
+  //
+  // Appending is right for a short flow, where the interesting state IS the
+  // final one. It is wrong for a long one: "search, then assert it filtered,
+  // then clear, then assert it came back" needs three checks at three different
+  // moments, and appending all of them describes the last moment three times.
+  // That is not a stricter test, it is a weaker one that looks thorough.
+  //
+  // `atStep` inserts AFTER that step number, 1-based, matching what the
+  // recorder's outline prints. Out of range is refused rather than clamped: a
+  // silently relocated assertion checks the wrong thing and still passes.
+  const existing = [...(recording.steps ?? [])];
+  const at = args.atStep;
+  if (at != null) {
+    const position = Number(at);
+    if (!Number.isInteger(position) || position < 1 || position > existing.length) {
+      throw new Error(
+        `atStep ${at} is outside this recording, which has ${existing.length} step(s). ` +
+          `Use the numbers from the outline, or omit atStep to append at the end.`,
+      );
+    }
+    existing.splice(position, 0, compact(step));
+  } else {
+    existing.push(compact(step));
+  }
+  const steps = existing;
   const saved = await saveRecording({ ...recording, steps });
   return {
     id: saved.id,
-    step: steps.length,
+    step: at != null ? Number(at) + 1 : steps.length,
     assertion,
     summary: summarizeAssertion(step),
   };
@@ -343,8 +368,10 @@ export async function executeAssertion(tabId, rawStep, variables = {}) {
       const expected = step.ariaBaseline ?? [];
       const currentSet = new Set(current);
       const expectedSet = new Set(expected);
-      const missing = expected.filter((line) => !currentSet.has(line));
-      const added = current.filter((line) => !expectedSet.has(line));
+      const { missing, added, dataChanges } = separateDataChurn(
+        expected.filter((line) => !currentSet.has(line)),
+        current.filter((line) => !expectedSet.has(line)),
+      );
       // A tolerance exists because real pages carry a little churn (a live
       // counter in an aria-label, a row count). It defaults to zero: a semantic
       // tree that is allowed to drift is not a baseline.
@@ -353,14 +380,74 @@ export async function executeAssertion(tabId, rawStep, variables = {}) {
         throw new Error(
           'Semantic (aria) assertion failed: ' + missing.length + ' node(s) gone, ' + added.length + ' new. ' +
           (missing.length ? 'Gone: ' + missing.slice(0, 4).map(readableNode).join(' | ') + '. ' : '') +
-          (added.length ? 'New: ' + added.slice(0, 4).map(readableNode).join(' | ') + '.' : ''),
+          (added.length ? 'New: ' + added.slice(0, 4).map(readableNode).join(' | ') + '.' : '') +
+          (dataChanges.length
+            ? ' (' + dataChanges.length + ' further node(s) changed only in their numbers and were not counted.)'
+            : ''),
         );
       }
-      return { assertion: 'aria', nodes: current.length, missing: missing.length, added: added.length, allowed };
+      return {
+        assertion: 'aria',
+        nodes: current.length,
+        missing: missing.length,
+        added: added.length,
+        allowed,
+        // Reported, never hidden: the run passed, and the reader still gets to
+        // see that a hundred rows came back with different readings.
+        dataChanges: dataChanges.length,
+        dataSample: dataChanges.slice(0, 3).map((change) => readableNode(change.now)),
+      };
     }
     default:
       throw new Error('Unknown assertion "' + step.assertion + '".');
   }
+}
+
+/**
+ * Tell "this row now reads 4 degrees instead of 5" apart from "this row is gone".
+ *
+ * A line that vanished and a line that appeared are paired off as the same node
+ * carrying new data only when BOTH hold:
+ *
+ *   1. they are identical once their numbers are masked out, and
+ *   2. that masked shape lost exactly as many lines as it gained.
+ *
+ * The second condition is the one that matters. On a list of sites called NL1,
+ * NL2, NL3 every row masks to the same shape, so rule 1 alone would shrug at a
+ * search box that stopped filtering — the very thing the flow exists to catch.
+ * Requiring the count to balance means a set that GREW or SHRANK is always a
+ * structural change, and only a one-for-one swap can be data.
+ *
+ * Anything paired off is returned, not discarded, because a passing assertion
+ * that quietly ignored a hundred nodes is not a passing assertion.
+ */
+function separateDataChurn(missing, added) {
+  if (!missing.length || !added.length) return { missing, added, dataChanges: [] };
+
+  const group = (lines) => {
+    const map = new Map();
+    for (const line of lines) {
+      const key = ariaDataKey(line);
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(line);
+    }
+    return map;
+  };
+  const goneBy = group(missing);
+  const newBy = group(added);
+
+  const dataChanges = [];
+  const paired = new Set();
+  for (const [key, gone] of goneBy) {
+    const fresh = newBy.get(key);
+    if (!fresh || fresh.length !== gone.length) continue;
+    paired.add(key);
+    for (let i = 0; i < gone.length; i += 1) dataChanges.push({ was: gone[i], now: fresh[i] });
+  }
+  if (!paired.size) return { missing, added, dataChanges };
+
+  const survives = (line) => !paired.has(ariaDataKey(line));
+  return { missing: missing.filter(survives), added: added.filter(survives), dataChanges };
 }
 
 async function executeElementAssertion(tabId, step) {

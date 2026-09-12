@@ -42,6 +42,7 @@
  */
 
 import { send, ensureDomain } from '../lib/cdp.js';
+import * as netrules from './netrules.js';
 import { har as captureHar } from './observe.js';
 
 const api = globalThis.browser ?? globalThis.chrome;
@@ -131,6 +132,26 @@ export async function pin(tabId, { har, strict = false, filter } = {}) {
   return { pinned: true, operations: Object.keys(index).length, responses: total, strict, filter: filter ?? null };
 }
 
+/**
+ * Turn on interception for RULES alone, with no HAR behind it.
+ *
+ * Pinning and rules share one `Fetch` session, so whichever is switched on
+ * first owns it. This is the entry point for "I only want to force a 500":
+ * enabling Fetch without a HAR means every unmatched request simply continues.
+ */
+export async function enableForRules(tabId, { filter } = {}) {
+  await ensureDomain(tabId, 'Fetch');
+  await send(tabId, 'Fetch.enable', {
+    patterns: [{ urlPattern: filter ? `*${filter}*` : '*', requestStage: 'Request' }],
+  });
+  return { enabled: true, filter: filter ?? null };
+}
+
+/** Is a HAR pinned on this tab? Used to decide whether disabling Fetch is safe. */
+export async function isPinned(tabId) {
+  return (await stateOf(tabId)) != null;
+}
+
 export async function unpin(tabId) {
   const state = await stateOf(tabId);
   await send(tabId, 'Fetch.disable').catch(() => {});
@@ -170,6 +191,41 @@ async function stateOf(tabId) {
  * returning — a bug in this file must not be able to freeze the tab.
  */
 export async function onRequestPaused(tabId, params) {
+  // Rules first, then the pinned HAR, then pass-through.
+  //
+  // That order is what lets a flow be pinned for determinism AND still force one
+  // endpoint to fail. The other order would make the rule unreachable for any
+  // request the HAR happened to cover, which is most of them.
+  try {
+    const rule = await netrules.pick(tabId, params.request?.method, params.request?.url);
+    if (rule) {
+      if (rule.delayMs) await new Promise((resolve) => setTimeout(resolve, rule.delayMs));
+
+      if (rule.abort) {
+        await send(tabId, 'Fetch.failRequest', { requestId: params.requestId, errorReason: rule.abort });
+        return;
+      }
+      if (rule.status != null) {
+        await send(tabId, 'Fetch.fulfillRequest', {
+          requestId: params.requestId,
+          responseCode: rule.status,
+          responseHeaders: [
+            ...rule.headers,
+            // Say so in the response itself. A 500 that a rule produced and a 500
+            // the server produced are indistinguishable in devtools otherwise, and
+            // somebody will eventually chase the wrong one.
+            { name: 'x-g9-intercepted', value: rule.label ?? rule.match },
+          ],
+          body: toBase64(rule.body ?? ''),
+        });
+        return;
+      }
+      // delay-only: fall through and let the request proceed, just later.
+    }
+  } catch {
+    // A broken rule must not hang the tab; fall through to the normal paths.
+  }
+
   const state = await stateOf(tabId);
   if (!state) {
     // Not pinned (any more). Let it through; Fetch may still be enabled for a

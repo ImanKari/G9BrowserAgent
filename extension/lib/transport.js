@@ -38,6 +38,47 @@ let attempt = 0;
 let handler = null;
 let wantConnection = false;
 
+/** In-flight flow-library requests, keyed by id. See flowLib() below. */
+const flowLibPending = new Map();
+let flowLibId = 1;
+
+/**
+ * Ask the bridge to do something with the flow library on disk.
+ *
+ * This is the only request that travels extension → bridge and expects an
+ * answer. It exists because the panel needs the filesystem and must never have
+ * it: the extension holds `debugger` over every tab the user is logged into, so
+ * adding file access to that blast radius to save one hop would be a poor
+ * trade. The bridge already knows where the repo is and already has a socket
+ * open, so the hop is nearly free.
+ *
+ * A short timeout on purpose: this backs a button a human is watching, and a
+ * spinner that never resolves is worse than an error that names the cause.
+ */
+export function flowLib(op, payload = {}, { timeoutMs = 15_000 } = {}) {
+  return new Promise((resolve, reject) => {
+    if (!isConnected()) {
+      return reject(
+        new Error(
+          'The bridge is not connected, so the flow library on disk is unreachable. Start the ' +
+            'bridge (or your MCP client) and try again — recordings in this browser are unaffected.',
+        ),
+      );
+    }
+    const id = flowLibId++;
+    const timer = setTimeout(() => {
+      flowLibPending.delete(id);
+      reject(new Error(`The bridge did not answer the flow-library request "${op}" within ${timeoutMs / 1000}s.`));
+    }, timeoutMs);
+    flowLibPending.set(id, { resolve, reject, timer });
+    if (!send({ type: 'flowlib', id, op, ...payload })) {
+      clearTimeout(timer);
+      flowLibPending.delete(id);
+      reject(new Error('The bridge connection dropped while sending the flow-library request.'));
+    }
+  });
+}
+
 export function onMessage(fn) {
   handler = fn;
 }
@@ -110,7 +151,33 @@ export async function connect({ force = false } = {}) {
           repoRoot: msg.repoRoot,
           bridgeVersion: msg.version,
         },
+        // The project adapter arrives here and nowhere else. The extension has
+        // no filesystem, so this handshake is the only path by which product
+        // knowledge — above all the Workspace allowlist — can reach it. It is
+        // deliberately NOT cached to disk: a stale allowlist outliving the file
+        // it came from is the one kind of stale state with a security cost.
+        project: msg.project ?? {
+          found: false,
+          path: null,
+          workspaceDomains: [],
+          environments: {},
+          defaultEnvironment: null,
+          flowsDir: null,
+          problems: [],
+        },
       });
+      return;
+    }
+
+    // The bridge answering a flow-library request we sent. Correlated by id,
+    // exactly as tool calls are in the other direction.
+    if (msg.type === 'flowlibResult') {
+      const entry = flowLibPending.get(msg.id);
+      if (!entry) return;
+      clearTimeout(entry.timer);
+      flowLibPending.delete(msg.id);
+      if (msg.ok) entry.resolve(msg.result);
+      else entry.reject(new Error(msg.error));
       return;
     }
 
@@ -169,6 +236,72 @@ export function send(payload) {
 
 export function isConnected() {
   return !!socket && socket.readyState === WebSocket.OPEN;
+}
+
+/**
+ * The port range the bridge picks from. Must match registry.js in the bridge.
+ *
+ * Duplicated rather than shared because the two sides ship separately: the
+ * extension is reloaded in the browser and the bridge is restarted by the MCP
+ * client, and a constant imported across that boundary would be a constant that
+ * silently disagrees with itself. Eleven numbers are cheap to keep in step; a
+ * cross-process import is not.
+ */
+export const PORT_RANGE = { start: 8765, end: 8775 };
+
+/**
+ * Find every bridge running on this machine.
+ *
+ * ## Why this exists
+ *
+ * The MCP client launches the bridge, and every editor window launches its own.
+ * They all wanted port 8765, so the second one failed with EADDRINUSE and said
+ * so every five seconds — while the extension, which connects to exactly ONE
+ * bridge, sat on whichever process won the race. The user saw "port in use" and
+ * had no way to find out which bridge their browser was actually talking to.
+ *
+ * Bridges now take the next free port and publish their identity on `/health`.
+ * The extension cannot read `~/.g9/bridges.json` — no filesystem — so it asks
+ * each port directly. Eleven parallel requests to localhost, once, when a human
+ * opens the dropdown.
+ *
+ * The `/health` endpoint only sends CORS headers back to extension origins, so
+ * this scan works and the same scan from a web page does not.
+ */
+export async function discoverBridges({ host = '127.0.0.1', timeoutMs = 1200 } = {}) {
+  const ports = [];
+  for (let p = PORT_RANGE.start; p <= PORT_RANGE.end; p += 1) ports.push(p);
+
+  const found = await Promise.all(
+    ports.map(async (port) => {
+      try {
+        const res = await fetch(`http://${host}:${port}/health`, {
+          signal: AbortSignal.timeout(timeoutMs),
+          cache: 'no-store',
+        });
+        if (!res.ok) return null;
+        const body = await res.json();
+        if (body?.ok !== true) return null;
+        return {
+          host,
+          port,
+          version: body.version ?? null,
+          pid: body.pid ?? null,
+          project: body.project ?? null,
+          projectPath: body.projectPath ?? null,
+          flowsDir: body.flowsDir ?? null,
+          cwd: body.cwd ?? null,
+          // "Some other browser is already on this one" is the single most
+          // useful fact in the list: connecting to it displaces that session.
+          extensionConnected: body.extensionConnected === true,
+        };
+      } catch {
+        return null; // nothing listening, or not one of ours
+      }
+    }),
+  );
+
+  return found.filter(Boolean);
 }
 
 function startPing() {

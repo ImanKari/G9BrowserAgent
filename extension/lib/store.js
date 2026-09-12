@@ -269,11 +269,18 @@ export async function saveRecording(recording) {
     createdAt: recording.createdAt ?? Date.now(),
   };
   await api.storage.local.set({ [recordingKey(id)]: record });
+  const steps = record.steps ?? [];
   await upsertIndex(RECORDING_INDEX, {
     id,
     name: record.name ?? '(unnamed)',
     startUrl: record.startUrl ?? null,
-    stepCount: (record.steps ?? []).length,
+    stepCount: steps.length,
+    // Counted into the index rather than derived in the panel, because the
+    // index exists so that listing fifty flows does not deserialise fifty step
+    // arrays — and "does this flow assert anything at all?" is the first thing
+    // a reader needs. A flow with no checks is a macro, and the list should
+    // say so without being opened.
+    assertionCount: steps.filter((s) => s.type === 'assert').length,
     durationMs: record.durationMs ?? null,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
@@ -281,6 +288,8 @@ export async function saveRecording(recording) {
     suite: record.suite ?? null,
     folder: record.folder ?? null,
     tags: record.tags ?? [],
+    qaTestCaseIds: record.qaTestCaseIds ?? [],
+    platform: record.platform ?? 'web',
     environment: record.environment?.name ?? record.environment ?? null,
     flaky: record.flaky ?? null,
   });

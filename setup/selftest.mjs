@@ -17,7 +17,19 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SERVER = path.join(HERE, '..', 'bridge', 'src', 'server.js');
-const PORT = Number(process.env.G9_TEST_PORT ?? 8799);
+/**
+ * The test port, deliberately NOT 8799.
+ *
+ * 8799 is the port AgriPad's local QA listener uses, and the QA guide tells
+ * people to run `adb forward tcp:8799 tcp:8799`. Anyone with a device plugged in
+ * therefore had this suite fail with "Port 8799 is in use by another program" —
+ * a true message about an irrelevant collision, and one that reads like a broken
+ * bridge. Found on 2026-09-10 doing exactly that.
+ *
+ * 8859 is outside the bridge's own discovery range (8765–8775) as well, so a
+ * running bridge cannot wander into it either.
+ */
+const PORT = Number(process.env.G9_TEST_PORT ?? 8859);
 
 let passed = 0;
 let failed = 0;

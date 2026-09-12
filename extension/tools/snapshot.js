@@ -15,6 +15,7 @@
 
 import { send, ensureDomain } from '../lib/cdp.js';
 import { saveRefs } from '../lib/refs.js';
+import * as frames from '../lib/frames.js';
 
 /** Roles that are always worth showing — the agent can act on these. */
 const INTERACTIVE = new Set([
@@ -52,6 +53,8 @@ export async function snapshot(tabId, { mode = 'a11y', maxNodes = 900, includeTe
   let emitted = 0;
   let refCounter = 0;
   let truncated = false;
+  // Set while walking a child frame, so each ref remembers where it can be used.
+  let activeSession = null;
 
   const root = nodes.find((n) => !n.parentId) ?? nodes[0];
 
@@ -84,7 +87,9 @@ export async function snapshot(tabId, { mode = 'a11y', maxNodes = 900, includeTe
         let ref = '';
         if (isInteractive && backendNodeId != null) {
           ref = `e${++refCounter}`;
-          entries.push([ref, { backendNodeId, role, name }]);
+          // sessionId is null for the main document and set inside a cross-origin
+          // frame, so resolveRef can route the click to the process that owns the node.
+          entries.push([ref, { backendNodeId, role, name, sessionId: activeSession }]);
         }
         const indent = '  '.repeat(Math.min(depth, 12));
         const label = name ? ` "${truncate(name, 120)}"` : '';
@@ -99,6 +104,44 @@ export async function snapshot(tabId, { mode = 'a11y', maxNodes = 900, includeTe
   };
 
   walk(root, 0);
+
+  // Cross-origin frames live in another process, so their nodes are simply not
+  // in the tree above. Each attached child session is walked on its own and
+  // appended under a header, with every ref remembering which session it came
+  // from — that is what lets browser_interact click inside a payment iframe
+  // instead of reporting that the button does not exist.
+  const childFrames = await frames.list(tabId).catch(() => []);
+  for (const frame of childFrames) {
+    if (emitted >= maxNodes) { truncated = true; break; }
+    try {
+      // Each child session is its own agent with its own node map. Without
+      // DOM.enable + DOM.getDocument on THAT session, a later DOM.resolveNode
+      // for one of its backendNodeIds fails with "Node with given id does not
+      // belong to the document" — the nodes are real, the agent just has never
+      // been told about the document they live in. Reading worked without this
+      // and clicking did not, which is a confusing way to find out.
+      const opts = { sessionId: frame.sessionId };
+      await send(tabId, 'DOM.enable', {}, opts).catch(() => {});
+      await send(tabId, 'Accessibility.enable', {}, opts).catch(() => {});
+      await send(tabId, 'DOM.getDocument', { depth: -1, pierce: true }, opts).catch(() => {});
+
+      const child = await send(tabId, 'Accessibility.getFullAXTree', { depth: -1 }, opts);
+      const childNodes = child?.nodes ?? [];
+      if (!childNodes.length) continue;
+
+      for (const n of childNodes) byId.set(n.nodeId, n);
+      const childRoot = childNodes.find((n) => !n.parentId) ?? childNodes[0];
+
+      lines.push(`  \u2514\u2500 [cross-origin frame] ${truncate(frame.url, 80)}`);
+      activeSession = frame.sessionId;
+      walk(childRoot, 1);
+      activeSession = null;
+    } catch {
+      // A frame that navigated away mid-snapshot is not a failure of the
+      // snapshot; the rest of the page is still worth returning.
+      lines.push(`  \u2514\u2500 [cross-origin frame] ${truncate(frame.url, 80)} \u2014 gone before it could be read`);
+    }
+  }
 
   const generation = await saveRefs(tabId, { url, entries });
 

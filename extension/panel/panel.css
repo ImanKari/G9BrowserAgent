@@ -312,3 +312,239 @@ button.danger:hover { border-color: var(--err); background: var(--err-bg); }
 .report.bad { border-color: var(--err); background: var(--err-bg); color: var(--err); }
 .report.good { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
 .report .warn { margin-top: 6px; }
+
+/* ------------------------------------------------------------ v1.7.0 additions
+ *
+ * Workspace allowlist, named sessions, the assertion wizard, and the replay
+ * report's new half (verdict, advice, surprises).
+ *
+ * Follows the existing rule of the file: colour comes from the tokens at the
+ * top, never from a literal, so both themes stay correct without a second
+ * block per component.
+ */
+
+/* --- workspace allowlist ------------------------------------------------- */
+
+.wsbox {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accent) 5%, var(--card));
+}
+.wsbox.warn {
+  border-color: color-mix(in srgb, var(--warn) 50%, var(--line));
+  background: color-mix(in srgb, var(--warn) 8%, var(--card));
+  color: inherit;
+}
+.wsbox .nm { font-weight: 600; }
+.wsbox .sub { color: var(--muted); font-size: 10.5px; margin-top: 2px; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 2px; }
+.chip {
+  font: 10.5px/1.6 var(--mono);
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--muted);
+}
+
+/* --- flow list: the detail row and its controls -------------------------- */
+
+.minilist.flows li.detail,
+.minilist.flows li.reportrow {
+  display: block;
+  border-color: color-mix(in srgb, var(--accent) 25%, var(--line));
+  background: color-mix(in srgb, var(--accent) 4%, var(--card));
+}
+
+.btnrow.wrap { flex-wrap: wrap; gap: 4px; }
+
+.metaedit {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 8px;
+}
+.metafield { display: flex; flex-direction: column; gap: 2px; font-size: 10.5px; color: var(--muted); }
+.metafield input {
+  font: 11.5px/1.6 var(--mono);
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--ink);
+}
+.metafield input:focus { outline: none; border-color: var(--accent); }
+
+/* --- the assertion wizard ------------------------------------------------ */
+
+.wizard:empty { display: none; }
+.wizard { margin-top: 10px; }
+.wizlist { display: flex; flex-direction: column; gap: 3px; margin: 6px 0; }
+
+.wizrow {
+  display: grid;
+  grid-template-columns: auto 68px 56px 1fr;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+  padding: 3px 4px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.wizrow:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+
+/* A blocked suggestion is shown, not hidden. "You cannot assert a clean
+ * console here, the page already has 3 errors" is one of the most useful
+ * things the tool says; hiding it leaves the reader wondering why the obvious
+ * check is missing. */
+.wizrow.blocked { opacity: 0.55; cursor: not-allowed; }
+
+.wizrow .kind { font: 11px/1.4 var(--mono); font-weight: 600; }
+.wizrow .strength { font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em; }
+.wizrow .strength.strong { color: var(--ok); }
+.wizrow .strength.weak { color: var(--warn); }
+.wizrow .strength.blocked { color: var(--err); }
+.wizrow .why { color: var(--muted); }
+
+/* --- the replay report's new half ---------------------------------------- */
+
+.report.warn {
+  border-color: color-mix(in srgb, var(--warn) 50%, var(--line));
+  background: color-mix(in srgb, var(--warn) 8%, var(--card));
+  color: inherit;
+}
+.report .advice { margin-top: 4px; color: var(--muted); }
+.report .failline { margin-top: 6px; font-family: var(--mono); font-size: 11px; }
+
+/* A surprise is the one line no other tool prints: something happened that has
+ * never happened on this flow, in either direction. Given its own colour so it
+ * is not read as just another warning. */
+.report .surprise {
+  margin-top: 4px;
+  padding-left: 8px;
+  border-left: 2px solid var(--accent);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.report .link {
+  display: inline-block;
+  margin-top: 8px;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--muted);
+  font-size: 10.5px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+
+/* ------------------------------------------------------- v1.7.20 additions
+ *
+ * Two complaints from real use, and they share a cause: the report was built
+ * for short lines and short runs.
+ *
+ * 1. A surprise line carries a full URL, which has no spaces in it, so the
+ *    browser had nowhere to break and the text ran straight out of the panel.
+ *    Reported as "the text falls out of the box and looks bad", which it did.
+ * 2. A replay showed nothing at all until it finished. A twenty-step flow is
+ *    half a minute of an unchanged panel, and the honest question that follows
+ *    is whether the button worked.
+ */
+
+/* --- nothing escapes its box --------------------------------------------- */
+
+.report,
+.report .failline,
+.report .surprise,
+.report .warn,
+.report .advice,
+.report .sub {
+  /* `anywhere` and not `break-word`: a 200-character URL with no separator has
+   * to be breakable mid-token or it wins against any container. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  min-width: 0;
+}
+
+/* A long report scrolls inside itself rather than pushing the list around. The
+ * cap is generous enough to read a failure without opening anything, and small
+ * enough that the flow list stays usable underneath it. */
+.report {
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* --- a run you can watch -------------------------------------------------- */
+
+.report.running {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg));
+}
+
+.report .bar {
+  margin-top: 8px;
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg));
+  overflow: hidden;
+}
+
+.report .bar > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  /* Eased, because a bar that jumps between steps reads as broken and one that
+   * glides reads as working — and during a long step the glide is the only
+   * thing telling the viewer it has not hung. */
+  transition: width 240ms ease-out;
+}
+
+.report .runlabel {
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+
+/* The stop button has to be unmistakable: it is the one control here that
+ * interrupts something already in motion. */
+.minilist .btn.danger {
+  border-color: var(--err);
+  color: var(--err);
+}
+.minilist .btn.danger:hover {
+  background: var(--err-bg);
+}
+
+/* --- pop the panel into its own window ----------------------------------- */
+
+.hd .popout {
+  /* The header is space-between, so a third child would otherwise float alone
+   * in the middle. Pushing it right keeps the two buttons as one group. */
+  margin-left: auto;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 4px 7px;
+}
+.hd .popout:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* In the popped-out window there is real height to use, so the report cap that
+ * exists to protect a cramped side panel would just waste it. */
+body.detached .report {
+  max-height: none;
+}

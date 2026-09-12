@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Cross-origin frame</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 0; padding: 16px; background: #f3f4f6; color: #111; }
+  button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid #999; cursor: pointer; }
+  h3 { margin: 10px 0 0; }
+</style></head>
+<body>
+  <!--
+    Served from `localhost` while the page embedding it is served from
+    `127.0.0.1`. Same server, same port, different ORIGIN — which is what makes
+    the browser put this document in its own process. That is the whole point:
+    an out-of-process iframe is the case that used to be unreachable.
+
+    The result is an <h3> and not a <p> on purpose. A bare paragraph's text does
+    not reliably surface as a named node in the accessibility tree, so a test
+    reading the tree could not tell a working click from a broken one — and the
+    first version of this page failed for exactly that reason, which looked like
+    a product failure and was a test-observability one. A heading always carries
+    its text as its accessible name.
+  -->
+  <h2>Payment (cross-origin)</h2>
+  <label for="frameCard">Card number</label>
+  <input id="frameCard" type="text" placeholder="4111 1111 1111 1111">
+  <p><button id="framePay">Pay now</button></p>
+  <h3 id="frameResult">not paid</h3>
+  <script>
+    document.getElementById('framePay').addEventListener('click', () => {
+      const card = document.getElementById('frameCard').value.trim();
+      document.getElementById('frameResult').textContent = card ? 'PAID ' + card.slice(-4) : 'PAID';
+    });
+  </script>
+</body></html>

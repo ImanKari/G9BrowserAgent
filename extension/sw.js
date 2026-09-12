@@ -12,9 +12,9 @@
  * No module-level variable is a source of truth — storage is.
  */
 
-import { getState, setState, logActivity, clearActivity, broadcast } from './lib/state.js';
+import { getState, setState, logActivity, clearActivity, broadcast, migrateModeDefault } from './lib/state.js';
 import * as transport from './lib/transport.js';
-import { detachAll, evaluate, attachedTabIds } from './lib/cdp.js';
+import { detachAll, evaluate, attachedTabIds, send as cdpSend } from './lib/cdp.js';
 import { clearRefs } from './lib/refs.js';
 
 import * as tabsTool from './tools/tabs.js';
@@ -32,6 +32,9 @@ import * as issues from './tools/issues.js';
 import * as store from './lib/store.js';
 import * as qa from './tools/qa.js';
 import * as netpin from './tools/netpin.js';
+import * as netrules from './tools/netrules.js';
+import * as downloads from './tools/downloads.js';
+import * as frames from './lib/frames.js';
 import { toFlowSpec, fromFlowSpec, canonicalJson, validateFlowSpec } from './lib/flowspec.js';
 
 const api = globalThis.browser ?? globalThis.chrome;
@@ -90,6 +93,15 @@ async function bootstrap() {
   }
   // Before connect(), never after — see applyDevBridgeOverride.
   await applyDevBridgeOverride();
+
+  // Move anyone still carrying v1.6.0's stored default onto Workspace. Safe by
+  // construction: with no allowlist the new mode behaves exactly as Pinned, so
+  // this migration cannot widen what an agent can reach. It is logged rather
+  // than silent, because changing someone's stored preference under them is
+  // something they are entitled to see.
+  const migration = await migrateModeDefault().catch(() => null);
+  if (migration) await logActivity({ kind: 'system', ok: true, detail: migration });
+
   transport.onMessage(handleBridgeMessage);
   transport.connect();
   // A heartbeat alarm resurrects the worker if it was torn down while the
@@ -131,6 +143,25 @@ api.debugger.onEvent.addListener((source, method, params) => {
 
   if (method === 'Page.screencastFrame') {
     issues.ingestFrame(source.tabId, params).catch(() => {});
+  }
+
+  // Downloads are reported by the browser, not the page, so they arrive here or
+  // not at all. Both events matter: willBegin carries the filename the user
+  // asked for, progress carries the byte count that says whether it was empty.
+  // A cross-origin iframe is a separate target in a separate process, so the
+  // only way to reach it is to be told when it attaches. Without this the frame
+  // is visible in the page and has no nodes anyone can click.
+  if (method === 'Target.attachedToTarget') {
+    frames.onAttached(source.tabId, params).catch(() => {});
+  }
+  if (method === 'Target.detachedFromTarget') {
+    frames.onDetached(source.tabId, params).catch(() => {});
+  }
+
+  if (method === 'Browser.downloadWillBegin' || method === 'Browser.downloadProgress') {
+    downloads.ingest(source.tabId, method, params).catch((err) => {
+      console.error('[G9] download capture failed', method, err);
+    });
   }
 
   // A paused request is a request the page is WAITING on. Every branch inside
@@ -190,6 +221,16 @@ api.tabs.onRemoved.addListener(async (tabId) => {
   await observe.clearBuffers(tabId).catch(() => {});
 });
 
+// Which ordinary browser window the user was last in.
+//
+// Needed because the agent's own surfaces are windows too. With the panel popped
+// out, `lastFocusedWindow` is the PANEL, and every tool call then reported that
+// no workspace tab was focused while the user was looking straight at one. See
+// tools/tabs.js `getActiveTab`.
+api.windows.onFocusChanged.addListener((windowId) => {
+  tabsTool.rememberFocus(windowId).catch(() => {});
+});
+
 // --------------------------------------------------------------- tool routing
 
 /**
@@ -208,9 +249,13 @@ const TOOLS = {
     run: async ({ args }) => {
       const action = args.action ?? 'list';
       // browser_tabs is the only tool that never goes through resolveTarget(),
-      // because it has no target to resolve. Every action except "list" still
-      // changes what the agent can reach, so it gets the same mode boundary.
-      if (action !== 'list') await tabsTool.requireMultiMode(action);
+      // because it has no target to resolve. Every action except the read-only
+      // ones still changes what the agent can reach, so it gets the same mode
+      // boundary — and in workspace mode that boundary is the URL allowlist,
+      // checked BEFORE the tab is opened.
+      if (action !== 'list' && action !== 'sessions') {
+        await tabsTool.requireTabControl(action, urlFor(action, args));
+      }
 
       switch (action) {
         case 'list':
@@ -235,8 +280,27 @@ const TOOLS = {
           return { unpinned: true };
         case 'wait':
           return tabsTool.waitForTab(args);
+
+        // --- named sessions ----------------------------------------------
+        // Several tabs at once was always possible at the CDP layer; these four
+        // actions are the addressing that was missing. See tools/tabs.js.
+        case 'session': {
+          if (!args.name) throw new Error('action:"session" needs a name, e.g. name:"buyer".');
+          return args.url
+            ? tabsTool.openSession(args.name, args.url, { active: args.focus ?? false })
+            : tabsTool.nameSession(args.name, requireTabId(args));
+        }
+        case 'sessions':
+          return { sessions: await tabsTool.listSessions() };
+        case 'end_session':
+          if (!args.name) throw new Error('action:"end_session" needs a name.');
+          return tabsTool.closeSession(args.name);
+
         default:
-          throw new Error(`Unknown tabs action "${action}".`);
+          throw new Error(
+            `Unknown tabs action "${action}". Known: list, open, close, focus, pin, unpin, wait, ` +
+              `session, sessions, end_session.`,
+          );
       }
     },
   },
@@ -312,7 +376,9 @@ const TOOLS = {
   },
 
   browser_network: {
-    run: ({ tabId, args }) => {
+    // async because the interception actions have to ask whether a HAR is
+    // already pinned before touching the shared Fetch session.
+    run: async ({ tabId, args }) => {
       // Pinning lives here rather than in a fifteenth tool: it is the network
       // tool doing a network thing, and §4.4's budget is spent on definitions,
       // not on actions.
@@ -321,6 +387,30 @@ const TOOLS = {
         case 'pin': return netpin.pin(tabId, args);
         case 'unpin': return netpin.unpin(tabId);
         case 'pin_status': return netpin.status(tabId);
+
+        // --- deliberate failure injection (GAP-0002) ---------------------
+        case 'intercept': {
+          // Rules and a pinned HAR share one Fetch session, so only enable it
+          // here when pinning has not already done so — a second Fetch.enable
+          // would reset the patterns the pin is relying on.
+          if (!(await netpin.isPinned(tabId))) await netpin.enableForRules(tabId, args);
+          return netrules.setRules(tabId, args.rules);
+        }
+        case 'intercept_status': return netrules.rulesStatus(tabId);
+        case 'clear_intercept': {
+          const cleared = await netrules.clearRules(tabId);
+          // Leave Fetch on if a HAR is still pinned; it owns the session then.
+          if (!(await netpin.isPinned(tabId))) {
+            await cdpSend(tabId, 'Fetch.disable').catch(() => {});
+          }
+          return cleared;
+        }
+
+        // --- downloads (GAP-0001) ----------------------------------------
+        case 'watch_downloads': return downloads.watch(tabId, { send: cdpSend });
+        case 'downloads': return downloads.list(tabId);
+        case 'wait_download': return downloads.waitFor(tabId, args);
+        case 'stop_downloads': return downloads.stop(tabId, { send: cdpSend });
         default: break;
       }
       if (args.format === 'har') return observe.har(tabId, args);
@@ -460,6 +550,20 @@ function requireTabId(args) {
   return args.tabId;
 }
 
+/**
+ * The URL a tab action is about to reach, for the workspace check.
+ *
+ * Only actions that CREATE or NAVIGATE carry a URL worth checking before the
+ * fact. `close`, `focus` and `pin` act on a tab that already exists, and
+ * `requireTabControl` treats a null URL as "check the mode, not the address" —
+ * the tab itself is then validated by resolveTarget on the next call that
+ * touches its contents.
+ */
+function urlFor(action, args) {
+  if (action === 'open' || (action === 'session' && args.url)) return args.url ?? null;
+  return null;
+}
+
 /** Live session state — the agent's orientation tool. */
 async function status() {
   const state = await getState();
@@ -491,12 +595,31 @@ async function status() {
   const reallyAttached = await attachedTabIds().catch(() => []);
   const held = state.attachedTabs.filter((id) => reallyAttached.includes(id));
 
+  const sessions = await tabsTool.listSessions().catch(() => []);
+  const domains = state.project?.workspaceDomains ?? [];
+  const workspaceActive = state.mode === 'workspace' && domains.length > 0;
+
   return {
     connected: transport.isConnected(),
     mode: state.mode,
     halted: state.halted,
     debuggedTabs: held.length,
     bridge: { host: state.bridge.host, port: state.bridge.port },
+    // The allowlist rides on the orientation tool so an agent learns what it may
+    // touch by asking, instead of by being refused. A refusal costs a round trip
+    // and teaches the same fact.
+    workspace: workspaceActive
+      ? { domains, project: state.project?.path ?? null }
+      : state.mode === 'workspace'
+        ? {
+            domains: [],
+            project: state.project?.path ?? null,
+            note:
+              'Workspace mode is selected but this project declares no workspaceDomains, so it is ' +
+              'behaving exactly as Pinned. An empty allowlist never means "allow everything".',
+          }
+        : undefined,
+    ...(sessions.length ? { sessions } : {}),
     attached: target
       ? { tabId: target.tabId, title: target.title, url: target.url, active: target.active }
       : null,
@@ -507,11 +630,16 @@ async function status() {
     otherTabsNote:
       state.mode === 'multi'
         ? undefined
-        : `Mode is "${state.mode}", so other tabs are listed by origin only — their titles and ` +
-          `URLs are withheld. The user can change this from the G9 side panel.`,
+        : workspaceActive
+          ? `Mode is "workspace": tabs inside ${domains.join(', ')} are shown in full and can be ` +
+            `driven; everything else is listed by origin only and cannot be touched.`
+          : `Mode is "${state.mode}", so other tabs are listed by origin only — their titles and ` +
+            `URLs are withheld. The user can change this from the G9 side panel.`,
     hint: target
       ? 'Ready. Start with browser_snapshot to see the page, then use the refs it returns.'
-      : 'No tab is attached. Ask the user to open the G9 side panel and press "Attach & Pin".',
+      : workspaceActive
+        ? `No workspace tab is open or focused. Ask the user to open the app under test (${domains.join(', ')}).`
+        : 'No tab is attached. Ask the user to open the G9 side panel and press "Attach & Pin".',
   };
 }
 
@@ -553,7 +681,10 @@ async function handleBridgeMessage(msg) {
     let tabId = null;
     let tab = null;
     if (entry.needsTab !== false) {
-      tab = await tabsTool.resolveTarget(args.tabId);
+      // `session` is accepted on EVERY tab-taking tool, which is what makes a
+      // two-tab flow expressible without a second protocol: the same click,
+      // type and snapshot calls, addressed by name.
+      tab = await tabsTool.resolveTarget(args.tabId, args.session ?? null);
       tabId = tab.id;
     }
 
@@ -579,6 +710,36 @@ async function handleBridgeMessage(msg) {
       ms: Date.now() - started,
     });
     transport.send({ type: 'result', id, ok: false, error: message });
+  }
+}
+
+/**
+ * The content hash, computed identically on both sides of the socket.
+ *
+ * Two rules, and getting either one wrong makes the sync indicator lie:
+ *
+ * 1. **Hash the SPEC, never the recording.** A recording carries run history
+ *    and IndexedDB attachment ids that differ between two machines holding the
+ *    same flow. Hashing those reports everything as divergent, and an indicator
+ *    that always says "different" is one people stop reading.
+ * 2. **Hash the exact bytes that land in the file.** `canonicalJson()` produces
+ *    precisely what `flows.js` writes, so the bridge can hash what it read off
+ *    disk and get the same answer without re-deriving anything. SHA-1 on both
+ *    sides, first 12 hex — the bridge uses node:crypto, we use Web Crypto,
+ *    and they agree because the input and the algorithm are the same.
+ */
+async function specHash(recording) {
+  if (!recording) return null;
+  try {
+    const spec = toFlowSpec(recording, { platform: recording.platform ?? 'web' });
+    const bytes = new TextEncoder().encode(canonicalJson(spec));
+    const digest = await crypto.subtle.digest('SHA-1', bytes);
+    return [...new Uint8Array(digest)]
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('')
+      .slice(0, 12);
+  } catch {
+    return null;
   }
 }
 
@@ -681,6 +842,34 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         await logActivity({ kind: 'system', ok: true, detail: 'Resumed by user' });
         sendResponse({ ok: true });
         break;
+      case 'detachPanel': {
+        // The side panel in its own window.
+        //
+        // Asked for directly: the panel is narrow, a long report has nowhere to
+        // go in it, and it sits on top of the page being tested. A popup window
+        // is resizable, movable to a second screen, and stays put while the tab
+        // under test scrolls — which is the whole point when you are watching a
+        // run and the page is moving.
+        //
+        // Same document, so there is no second implementation to keep in step;
+        // it simply has more room.
+        const existing = (await api.windows.getAll({ populate: true }).catch(() => []))
+          .find((w) => w.type === 'popup' && (w.tabs ?? []).some((t) => t.url?.includes('panel/panel.html')));
+        if (existing) {
+          await api.windows.update(existing.id, { focused: true });
+          sendResponse({ ok: true, windowId: existing.id, reused: true });
+          break;
+        }
+        const win = await api.windows.create({
+          url: api.runtime.getURL('panel/panel.html?detached=1'),
+          type: 'popup',
+          width: 520,
+          height: 860,
+        });
+        sendResponse({ ok: true, windowId: win.id, reused: false });
+        break;
+      }
+
       case 'clearLog':
         await clearActivity();
         sendResponse({ ok: true });
@@ -711,6 +900,158 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
       case 'recDelete':
         sendResponse({ ok: true, ...(await store.deleteRecording(msg.id)) });
+        break;
+
+      // ---------------------------------------------------------------------
+      // The rest of the automation surface, finally reachable without an agent.
+      //
+      // Every one of these already existed and was callable only over MCP. That
+      // made the engine's best ideas — the assertion wizard, calibration, the
+      // known world — invisible to the people the tool is for. A QA who cannot
+      // add an assertion records a macro, and a macro proves that the steps
+      // could be performed, never that they did anything.
+      //
+      // `approve` in particular BELONGS here rather than in MCP: the whole
+      // design rests on a human, and only a human, folding a run into the
+      // known world. It was previously reachable only by the agent, which is
+      // the one caller it was written to exclude.
+      // ---------------------------------------------------------------------
+      case 'recGet':
+        sendResponse({ ok: true, recording: await store.getRecording(msg.id) });
+        break;
+      case 'recSuggest': {
+        const tab = await tabsTool.resolveTarget();
+        sendResponse({ ok: true, ...(await qa.suggestAssertions(tab.id, msg.id)) });
+        break;
+      }
+      case 'recAssert': {
+        const tab = await tabsTool.resolveTarget();
+        sendResponse({ ok: true, ...(await qa.addAssertion(tab.id, { ...msg.assertion, id: msg.id })) });
+        break;
+      }
+      case 'recUpdate':
+        sendResponse({ ok: true, ...(await qa.updateRecording(msg.id, msg.patch ?? {})) });
+        break;
+      case 'recCalibrate': {
+        const tab = await tabsTool.resolveTarget();
+        sendResponse({ ok: true, ...(await replay.calibrate(tab.id, { id: msg.id })) });
+        break;
+      }
+      case 'recApprove':
+        sendResponse({
+          ok: true,
+          ...(await replay.approveKnownWorld(msg.id, { by: msg.by ?? 'side panel', note: msg.note })),
+        });
+        break;
+      case 'recKnownWorld': {
+        const rec = await store.getRecording(msg.id);
+        if (!rec) throw new Error(`No recording ${msg.id}.`);
+        sendResponse({
+          ok: true,
+          knownWorld: rec.knownWorld ?? null,
+          runHistory: rec.runHistory ?? [],
+          surpriseHistory: rec.surpriseHistory ?? [],
+        });
+        break;
+      }
+      case 'recExportTest':
+        sendResponse({ ok: true, ...(await qa.exportPlaywright(msg.id)) });
+        break;
+
+      // --- flow library on disk (see lib/transport.js flowLib) --------------
+      case 'flowStatus': {
+        const local = await store.listRecordings();
+        const withHashes = await Promise.all(
+          local.map(async (entry) => {
+            const full = await store.getRecording(entry.id);
+            return { id: full?.flowId ?? entry.id, name: entry.name, hash: await specHash(full) };
+          }),
+        );
+        sendResponse({ ok: true, ...(await transport.flowLib('status', { local: withHashes })) });
+        break;
+      }
+      case 'flowPull': {
+        const { flows } = await transport.flowLib('list');
+        let imported = 0;
+        const problems = [];
+        for (const entry of flows) {
+          if (entry.broken) {
+            problems.push(`${entry.file}: ${entry.error}`);
+            continue;
+          }
+          try {
+            const { spec } = await transport.flowLib('read', { id: entry.id });
+            const recording = fromFlowSpec(spec);
+            // Keep whatever local run history exists for this flow. It is the
+            // machine's own truth about reliability and the repo has no
+            // business overwriting it — that is exactly why it never leaves.
+            const existing = await store.getRecording(recording.id).catch(() => null);
+            await store.saveRecording({
+              ...recording,
+              ...(existing
+                ? {
+                    runHistory: existing.runHistory,
+                    lastRun: existing.lastRun,
+                    flaky: existing.flaky,
+                    knownWorld: existing.knownWorld,
+                    surpriseHistory: existing.surpriseHistory,
+                  }
+                : {}),
+            });
+            imported += 1;
+          } catch (err) {
+            problems.push(`${entry.file}: ${err.message}`);
+          }
+        }
+        sendResponse({ ok: true, imported, problems });
+        break;
+      }
+      case 'flowPush': {
+        const ids = msg.ids ?? (await store.listRecordings()).map((r) => r.id);
+        const written = [];
+        const problems = [];
+        for (const id of ids) {
+          try {
+            const rec = await store.getRecording(id);
+            if (!rec) throw new Error('not found in this browser');
+            const spec = toFlowSpec(rec, { platform: rec.platform ?? 'web' });
+            const problem = validateFlowSpec(spec);
+            if (problem?.length) throw new Error(problem.join('; '));
+            written.push(await transport.flowLib('write', { spec }));
+          } catch (err) {
+            problems.push(`${id}: ${err.message}`);
+          }
+        }
+        sendResponse({
+          ok: true,
+          written: written.length,
+          changed: written.filter((w) => w.changed).length,
+          files: written.map((w) => w.file),
+          problems,
+        });
+        break;
+      }
+      case 'flowSuite':
+        sendResponse({ ok: true, ...(await transport.flowLib('suite', { suiteId: msg.suiteId })) });
+        break;
+
+      // --- named sessions, from the panel -----------------------------------
+      case 'sessionList':
+        sendResponse({ ok: true, sessions: await tabsTool.listSessions() });
+        break;
+      case 'sessionName': {
+        const tab = msg.tabId != null ? { id: msg.tabId } : await tabsTool.getActiveTab();
+        if (!tab) throw new Error('No tab to name.');
+        sendResponse({ ok: true, ...(await tabsTool.nameSession(msg.name, tab.id)) });
+        break;
+      }
+      case 'sessionEnd':
+        sendResponse({ ok: true, ...(await tabsTool.closeSession(msg.name)) });
+        break;
+
+      // --- bridge discovery --------------------------------------------------
+      case 'discoverBridges':
+        sendResponse({ ok: true, bridges: await transport.discoverBridges() });
         break;
       case 'issueList':
         sendResponse({ ok: true, issues: await store.listIssues(), usage: await store.usage() });

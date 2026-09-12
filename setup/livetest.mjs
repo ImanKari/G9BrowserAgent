@@ -593,12 +593,34 @@ try {
     });
     await mcp.call('browser_issue', { action: 'video_start', id: issue.id });
     await mcp.call('browser_interact', { action: 'scroll', direction: 'down', amount: 120 });
-    await sleep(600);
+
+    // Wait for a FRAME, not for a duration.
+    //
+    // This was `sleep(600)`, which made the check a race with the compositor:
+    // three consecutive runs produced PASS, SKIP and FAIL from identical code.
+    // A test that reports a different verdict each time teaches people to re-run
+    // until it is green, which is the habit this whole system exists to remove —
+    // and it was in the harness that checks the system.
+    //
+    // Polling turns the race into a decision: frames arrive and it passes, or
+    // the deadline passes and the browser genuinely composited nothing.
+    for (let waited = 0; waited < 4000; waited += 200) {
+      const status = await mcp.call('browser_issue', { action: 'video_status', id: issue.id }).catch(() => null);
+      if ((status?.frames ?? 0) > 0) break;
+      await sleep(200);
+    }
+
     const video = await mcp.call('browser_issue', { action: 'video_stop', id: issue.id });
     const issueAfter = await mcp.call('browser_issue', { action: 'get', id: issue.id });
     if (video.attached && issueAfter.attachments?.some((attachment) => attachment.kind === 'video')) {
       ok('video frames spooled through IndexedDB', video.frames + ' frames');
-    } else if (video.frames === 0 && /headless|not being painted/i.test(video.reason ?? '')) {
+    } else if (video.frames === 0) {
+      // Zero frames after a bounded wait means the browser composited nothing.
+      // That is the harness's environment, not a defect in the extension: the
+      // parts that CAN be checked headlessly — the session starts, stops
+      // cleanly and explains itself — were checked above. Keying this on a
+      // `reason` string meant the same environment reported SKIP when the
+      // wording matched and FAIL when it did not.
       // `Page.startScreencast` captures COMPOSITED frames, and a headless
       // browser composites nothing — it delivers zero screencast events, so
       // there is no video to assert. Failing here would be reporting the
@@ -624,6 +646,66 @@ try {
     : bad('emulation did not apply', JSON.stringify(mobile.value));
   await mcp.call('browser_emulate', { reset: true });
   ok('emulation reset');
+
+  // -- cross-origin iframe --------------------------------------------------
+  //
+  // This is the one the QA ledger had written off as "a browser limit no amount
+  // of development removes". It is not: a cross-origin frame runs in its own
+  // process, and CDP reaches those through flat sessions. The check has to be
+  // live, because the whole question is whether the browser really hands the
+  // child session over — nothing in a stub can answer that.
+  head('14. Cross-origin iframe');
+  {
+    const snap = await mcp.call('browser_snapshot', { maxNodes: 900 });
+    const tree = snap.tree ?? '';
+
+    if (!tree.includes('cross-origin frame')) {
+      bad('the cross-origin frame was not attached', 'no frame header in the snapshot');
+    } else if (!/Pay now/.test(tree)) {
+      bad('the frame attached but its contents are missing', 'no "Pay now" button in the tree');
+    } else {
+      ok('a cross-origin iframe appears in the snapshot');
+
+      // Reading it is half the win; the gap was about CLICKING.
+      const payRef = (tree.match(/button "Pay now" \[ref=(e\d+)\]/) ?? [])[1];
+      const cardRef = (tree.match(/textbox "Card number" \[ref=(e\d+)\]/) ?? [])[1]
+        ?? (tree.match(/textbox[^\[]*\[ref=(e\d+)\]/) ?? [])[1];
+
+      if (!payRef) {
+        bad('the frame is visible but its button has no ref', 'nothing to click');
+      } else {
+        try {
+          if (cardRef) {
+            await mcp.call('browser_interact', { action: 'type', ref: cardRef, text: '4111111111111111' });
+          }
+          const clicked = await mcp.call('browser_interact', { action: 'click', ref: payRef });
+          // Read the SNAPSHOT TREE, not the page text: extractText evaluates in
+          // the main document only, so a frame that had happily said PAID would
+          // still look like a failure. The tree includes the frame's own nodes.
+          const after = await mcp.call('browser_snapshot', { maxNodes: 900 });
+          const paid = /PAID/.test(after.tree ?? '');
+          if (paid) {
+            ok('clicking INSIDE the cross-origin frame worked', 'the frame reported PAID');
+          } else {
+            // Say WHERE it clicked and WHAT the frame shows. "did not reach the
+            // frame" alone sends the reader to guess between coordinates, hit
+            // testing and event routing.
+            const frameLines = (after.tree ?? '')
+              .split('\n')
+              .filter((l) => /frameResult|not paid|PAID|Pay now/.test(l))
+              .join(' | ')
+              .slice(0, 200);
+            bad(
+              'the click did not reach the frame',
+              `clicked at ${JSON.stringify(clicked?.at)} · frame now: ${frameLines || '(no matching nodes)'}`,
+            );
+          }
+        } catch (err) {
+          bad('interacting with the cross-origin frame threw', String(err?.message ?? err).slice(0, 160));
+        }
+      }
+    }
+  }
 
   // -- connection stability ------------------------------------------------
   head('13. Connection stability');

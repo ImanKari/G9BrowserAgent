@@ -67,20 +67,42 @@ You do **not** need to start the bridge yourself — the MCP client launches it.
 
 1. Open the page you want worked on.
 2. Click the **G9 toolbar icon** → the side panel opens.
-3. Press **Attach & Pin current tab**.
+3. Confirm the panel shows your project's sites under **Workspace** — if it does, there is nothing
+   to attach. (No project file yet? Press **Attach & Pin current tab** instead, or add one: copy
+   `g9.project.example.json` into the repo under test.)
 4. Talk to your agent normally: *"check this page for problems"*, *"log in as admin and confirm the orders list loads"*, *"why is the save button not responding?"*
 
 ---
 
-## The three modes
+## The four control modes
 
 | Mode | Behaviour | Use when |
 |---|---|---|
-| 📌 **Pinned** *(default)* | Locked to one tab. You can browse anywhere else freely and the agent will not follow. *(It can still read that tab while you are away, but not click or type in it — see below.)* | Almost always. |
+| 🧪 **Workspace** *(default)* | Acts on any tab whose host is listed in your project's `g9.project.json` — **no Attach click**. Every other tab is not merely un-clickable but unlisted: origin only, no title, no URL. | Almost always. |
+| 📌 **Pinned** | Locked to one tab you attached by hand. *(It can still read that tab while you are away, but not click or type in it — see below.)* | A one-off on a site the project does not declare. |
 | 👁 **Follow** | Acts on whichever tab is focused. | Quick exploration across pages. |
 | 🌐 **Multi** | May open, close, and switch tabs itself. | Multi-tab flows, cross-page journeys. |
 
-Pinned is the default deliberately: without it, switching to your email mid-task would hand the agent your inbox.
+Workspace is the default deliberately, and it keeps the reasoning Pinned was built on: without some
+boundary, switching to your email mid-task would hand the agent your inbox. An allowlist enforces
+that without charging a click for it — your email host is not in the project file, so it never
+enters the tool's world.
+
+**The rule that makes it safe: an empty allowlist denies everything, never allows everything.** With
+no `g9.project.json`, or none that declares `workspaceDomains`, Workspace behaves exactly as Pinned
+and says so in the panel. Three pattern shapes are accepted — `example.com`, `*.example.com`,
+`localhost:5173` — and paths and regexes are refused by name, because this list is a security
+boundary a QA edits by hand.
+
+### Two pages at once
+
+`browser_tabs action:"session" name:"buyer" url:"…"` names a tab; pass `session:"buyer"` to any
+other tool to act on it. `chrome.debugger` always supported several tabs at once — what was missing
+was a way to address them.
+
+> ⚠️ A browser delivers input only to the tab it is **showing**. Both sessions can be *read*
+> simultaneously (snapshot, console, network, screenshot); a click into a background one does
+> nothing. A two-user flow **switches** between tabs rather than running them in parallel.
 
 The side panel shows every action live, and **Stop** halts the agent instantly.
 
@@ -122,7 +144,7 @@ and tells you to bring the tab forward if it did not.
 | `browser_screenshot` | viewport / fullpage / element |
 | `browser_emulate` | Device, viewport, network throttle, CPU, colour scheme, locale, timezone |
 | `browser_dialog` | Accept or dismiss `alert` / `confirm` / `prompt` |
-| `browser_tabs` | List/open/close/focus/pin tabs; wait for popups by URL, title, or opener in multi mode |
+| `browser_tabs` | List/open/close/focus/pin tabs; **named sessions** for multi-tab flows; wait for popups by URL, title, or opener |
 | `browser_recording` | Record/replay flows; assertions, suites/tags/data, history/flaky signal, backup, Playwright export, **the assertion wizard, FlowSpec export/import, calibration, and the known world** |
 | `browser_issue` | Defects with screenshot, durable tab video, console, failed requests and page context attached |
 
@@ -347,8 +369,9 @@ This tool has full control of your logged-in browser sessions. Treat it as you w
 - The bridge binds to **127.0.0.1 only** — never `0.0.0.0`
 - **Origin validation**: only `chrome-extension://` / `edge-extension://` origins may connect. A malicious web page attempting `new WebSocket('ws://127.0.0.1:8765')` sends its own `https://` origin and is rejected with 403. *(The self-test asserts this.)*
 - **Single client** — a second connection displaces the first rather than silently sharing
-- **Pinned mode** — the agent reaches exactly one tab, the one you consented to. It also may not open, close, focus, pin, or unpin tabs; outside multi-tab mode `browser_tabs` can only *list*, because pinning a different tab would otherwise be a way around the mode
+- **Workspace / Pinned mode** — the agent reaches only what you consented to: in Workspace, the hosts your project declares; in Pinned, the single tab you attached. Outside multi-tab mode it may not open, close, focus, pin, or unpin arbitrary tabs — `browser_tabs` can only *list*, because pinning a different tab would otherwise be a way around the mode. Workspace may open a tab, but only after the URL is checked against the allowlist, and the check happens **before** the tab exists
 - **Cookies stay scoped** — `chrome.cookies` can see every domain you are signed in to, so outside multi-tab mode the agent may only read cookies for the attached tab's own origin
+- **An empty allowlist denies everything** — a missing or empty `workspaceDomains` makes Workspace behave as Pinned. It never means "allow all"; that inversion would be the single most dangerous line in this codebase
 - **Other tabs stay private** — outside multi-tab mode the agent sees other tabs by origin only. Titles and URLs carry subject lines, document names, and search queries, so they are withheld
 - **Stop button** — blocks every tool call immediately, and **the agent cannot lift it**. Only Resume in the side panel does. (`browser_status` still answers, so the agent can tell you *why* it stopped rather than guessing.)
 - **Full activity log** in the side panel; nothing happens invisibly
@@ -357,7 +380,14 @@ This tool has full control of your logged-in browser sessions. Treat it as you w
 
 **Optional:** set `G9_TOKEN` in the MCP config and enter the same value in the side panel for a shared secret on top of Origin checking.
 
-**Known and unavoidable:** the "browser is being debugged" banner cannot be hidden. Browser-internal pages (`chrome://`, `edge://`, extension stores) can never be controlled. Native OS dialogs (print, basic auth) are outside the browser's reach — but file uploads work via `browser_interact action:"upload"`, which bypasses the picker entirely.
+**The "browser is being debugged" banner CAN be removed** — this used to say it could not, and that
+was wrong. Two documented ways: launch the browser with `--silent-debugger-extension-api` (global,
+covers every extension, and depends on how the browser is started), or **install this extension
+through the `ExtensionInstallForcelist` enterprise policy** — policy-installed extensions never
+raise the bar. For a QA fleet the second is the right one: one setup, survives restarts, scoped to
+this extension, and it removes the manual "Load unpacked" and the manual update on every machine.
+
+**Known and unavoidable:** Browser-internal pages (`chrome://`, `edge://`, extension stores) can never be controlled. Native OS dialogs (print, basic auth) are outside the browser's reach — but file uploads work via `browser_interact action:"upload"`, which bypasses the picker entirely.
 
 **Intentional capability limits:** request interception/mocking and download-file verification are not implemented yet; cross-origin iframes and closed Shadow DOM remain browser boundaries; full Lighthouse audits and heap snapshots are not bundled. The automated live suite currently proves Edge; Chrome parity, long-running service-worker endurance, and controlled-input behavior across large React/Vue applications still need dedicated live runs.
 
@@ -374,7 +404,7 @@ This tool has full control of your logged-in browser sessions. Treat it as you w
 | `ERR_CONNECTION_REFUSED` in the extension's **Errors** page | **Expected when no bridge is running.** The browser logs failed WebSocket handshakes itself, below our code, so it cannot be suppressed. The extension retries on a backoff that climbs to 60s, so it stays to about one entry a minute. Start the bridge (or open the side panel) and it connects immediately. |
 | Side panel says **Bridge offline** | Nothing is listening on the port — the bridge is not running. Either restart your MCP client (it launches the bridge), or start it yourself: `node bridge/src/server.js`. That command stays up in standalone mode, so you can watch the extension connect. |
 | MCP client says **Connection closed / Failed**, but the side panel says **Bridge connected** | Another bridge already holds the port, and the extension connected to *that* one. Usually a second editor window, or a leftover `node` process. Find it with `netstat -ano \| findstr 8765`, stop it, then hit **Reconnect** in your MCP client. The blocked bridge also retries every 5s on its own, and its tool calls now say exactly this. |
-| `EADDRINUSE` | Another bridge is running. Stop it, or change `G9_PORT` in **both** the MCP config and the side panel. The bridge no longer exits on this — it stays up and reports the conflict through the agent. |
+| `EADDRINUSE` | Since v1.7.0 the bridge takes the next free port from 8765–8775 instead, and logs which one it took. You should only see this when `G9_PORT` is pinned — an explicit port is honoured absolutely, because you also typed it into the side panel. In the panel: **settings → find bridges** lists every bridge running on this machine, with its project name and whether a browser is already on it. |
 | *"Another debugger is already attached"* | A DevTools window is open on that tab. Close DevTools, or attach a different tab. |
 | *"the page never received it: the attached tab is HIDDEN"* | Working as intended. Chromium does not deliver input to a page it is not showing. Bring that tab to the front, in a window that is not minimised or fully covered, and retry. Reading tools keep working regardless. |
 | Agent says it typed or clicked, but nothing changed | Only possible before v1.4.0 — that version made every action verify delivery. Check `browser_status` for a `versionMismatch`: if the extension and bridge are different versions, reload the extension **and** restart your MCP client. |

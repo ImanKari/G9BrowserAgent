@@ -12,6 +12,7 @@
       <img src="icon48.png" alt="" width="20" height="20" />
       <span>G9 Browser Agent</span>
     </div>
+    <button id="popout" class="popout" title="Open this panel in its own window — more room for a long report, and it stays put while the page under test scrolls">↗</button>
     <button id="stop" class="stop" title="Immediately block all agent actions">Stop</button>
   </header>
 
@@ -36,6 +37,14 @@
       </div>
       <p class="muted" id="bridgeHint">Waiting for the local bridge.</p>
       <div class="settings" id="bridgeSettings" hidden>
+        <!-- Discovery first, manual entry second. Typing a port number was
+             never the thing anyone wanted to do; it was the only thing on
+             offer when two editor windows fought over 8765. -->
+        <div class="row spread">
+          <span class="muted sm">Bridges running on this machine</span>
+          <button class="link" id="discoverBtn" type="button">find bridges</button>
+        </div>
+        <ul class="minilist" id="bridgeList" hidden></ul>
         <label>Host <input id="host" value="127.0.0.1" spellcheck="false" /></label>
         <label>Port <input id="port" value="8765" inputmode="numeric" /></label>
         <label>Token <input id="token" placeholder="(optional)" spellcheck="false" /></label>
@@ -45,13 +54,16 @@
 
     <section class="card">
       <div class="row spread">
-        <strong>Attached tab</strong>
+        <strong>What the agent may touch</strong>
         <div class="modes" id="modes">
+          <button data-mode="workspace" title="Agent works on this project's own sites, automatically">Workspace</button>
           <button data-mode="pinned" title="Agent is locked to one tab">Pinned</button>
           <button data-mode="follow" title="Agent follows whichever tab is active">Follow</button>
           <button data-mode="multi" title="Agent may switch and open tabs">Multi</button>
         </div>
       </div>
+
+      <div class="wsbox" id="workspaceBox" hidden></div>
 
       <div id="attached" class="attached empty">
         <p class="muted">No tab attached yet.</p>
@@ -62,6 +74,16 @@
         <button id="detach" class="ghost" hidden>Detach</button>
       </div>
       <p class="warn" id="modeWarn" hidden></p>
+    </section>
+
+    <!-- Named sessions: hidden until one exists, because it is meaningless
+         until then and an empty card is one more thing to read past. -->
+    <section class="card" id="sessionCard" hidden>
+      <div class="row spread">
+        <strong>Named tabs</strong>
+        <span class="muted sm">a browser only clicks into the tab it is showing</span>
+      </div>
+      <ul class="minilist" id="sessionList"></ul>
     </section>
 
     <section class="card">
@@ -107,9 +129,30 @@
         <strong>Saved flows</strong>
         <span class="muted sm" id="recCount"></span>
       </div>
-      <ul class="minilist" id="recList"></ul>
+      <ul class="minilist flows" id="recList"></ul>
       <p class="muted pad" id="recEmpty">No flows recorded yet.</p>
-      <div id="replayReport" hidden></div>
+    </section>
+
+    <section class="card" id="suiteCard" hidden>
+      <div class="row spread">
+        <strong>Run everything</strong>
+        <button id="suiteBtn" class="primary sm">▶ Full test</button>
+      </div>
+      <p class="muted" id="suiteProgress">
+        Runs every saved flow in order, skipping any tagged <code>@manual</code>.
+      </p>
+    </section>
+
+    <section class="card">
+      <div class="row spread">
+        <strong>Repository</strong>
+        <button class="link" id="syncRefresh" type="button">check</button>
+      </div>
+      <p class="muted" id="syncLine">Flows in this browser live only in this browser until you push them.</p>
+      <div class="btnrow">
+        <button id="syncPull" class="ghost sm">↓ Pull from repo</button>
+        <button id="syncPush" class="ghost sm">↑ Push all to repo</button>
+      </div>
     </section>
   </div>
 

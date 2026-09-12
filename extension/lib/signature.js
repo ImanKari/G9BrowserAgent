@@ -120,6 +120,43 @@ export function normalizeUrl(rawUrl, normalizers = []) {
   return `${host}${path}${query}`;
 }
 
+/**
+ * Traffic that belongs to the browser, not to the app under test.
+ *
+ * The agent drives the user's REAL browser, so whatever else that browser is
+ * running shows up in the same capture: Grammarly fetching its bundles, a
+ * password manager injecting a content script, a chat widget's CDN. None of it
+ * is the product's behaviour, none of it is under anyone's control, and all of
+ * it changes on its own schedule.
+ *
+ * Left in, it dominated: a 17-step flow came back with 103 surprises, 8 of them
+ * at `fail`, and every single one was another extension's asset. A detector
+ * whose loudest findings are never about the product is one nobody reads — and
+ * the real regression it was built for arrives in the middle of that list.
+ *
+ * Matched on the SCHEME, not on a list of known extension ids: an allowlist of
+ * other people's extensions is a list that is wrong the day it is written.
+ */
+const FOREIGN_SCHEME = /^(chrome-extension|moz-extension|safari-web-extension|chrome|edge|devtools|data|blob|about):/i;
+
+/**
+ * The same rule, applied to a stored operation key rather than a URL.
+ *
+ * `operationKey` has already reduced the URL to `METHOD host/path status`, and a
+ * chrome-extension URL reduces to the extension's own id as the host — a
+ * 32-character run of lowercase letters with no dot in it. Real hosts have dots;
+ * an extension id never does.
+ */
+const FOREIGN_OPERATION = /^[A-Z]+\s+(?:[a-p]{32}\/|data:|blob:|image\/|chrome-extension|moz-extension)/;
+
+export function isProductOperation(key) {
+  return !FOREIGN_OPERATION.test(String(key ?? ''));
+}
+
+export function isProductTraffic(url) {
+  return !!url && !FOREIGN_SCHEME.test(String(url));
+}
+
 /** `POST /api/task 2xx` — the unit the network layer is compared in. */
 export function operationKey(request, normalizers = []) {
   const method = (request.method ?? 'GET').toUpperCase();
@@ -160,6 +197,32 @@ export function ariaLines(tree) {
     .filter(Boolean);
 }
 
+/**
+ * The same aria line with its numbers taken out.
+ *
+ * A semantic baseline is supposed to notice a button becoming a div and ignore
+ * the copy inside it. In practice the first real page it met was a site list
+ * where every row carries a live temperature, a humidity reading and a wind
+ * speed, so every replay produced a hundred "changed" nodes and the assertion
+ * failed seven runs out of seven while nothing was wrong.
+ *
+ * This key is how two lines are recognised as the same row carrying new data.
+ * The depth prefix is kept intact — it is structure, not content — and only the
+ * body is masked, or `2|option` would become `#|option` and every depth would
+ * collapse into one.
+ *
+ * It is deliberately NOT used on its own: on a list of sites named NL1, NL2,
+ * NL3 the masked lines are identical, so a key match alone would happily accept
+ * a search that stopped filtering. The multiplicity check at the call site is
+ * the other half of the rule.
+ */
+export function ariaDataKey(line) {
+  const match = /^(\d+\|)([\s\S]*)$/.exec(String(line));
+  const depth = match ? match[1] : '';
+  const body = match ? match[2] : String(line);
+  return depth + body.replace(/-?\d+(?:[.,]\d+)?/g, '#');
+}
+
 // ------------------------------------------------------------------ signature
 
 /**
@@ -190,6 +253,8 @@ export function buildSignature({
       // spurious "new" key and one spurious "missing" key. Found live on 2026-09-04, against a
       // page that had not changed at all. An unfinished request is not an observation.
       if (request.status == null) continue;
+      // Another extension's bundles are not this product's behaviour.
+      if (!isProductTraffic(request.url)) continue;
       const key = operationKey(request, normalizers);
       network.set(key, (network.get(key) ?? 0) + 1);
     }
@@ -348,6 +413,12 @@ export function detectSurprises(knownWorld, signature, { sensitivity = {} } = {}
   }
   for (const [key, count] of Object.entries(knownWorld.network ?? {})) {
     if (signature.network?.[key] != null) continue;
+    // A key recorded BEFORE foreign traffic was filtered out would otherwise be
+    // reported as missing forever: it is not that the request stopped happening,
+    // it is that this detector stopped looking at it. Dropping the rule would
+    // have meant asking everyone to re-approve their known world to stop seeing
+    // another extension's bundles listed as regressions in their product.
+    if (!isProductOperation(key)) continue;
     const universal = count >= knownWorld.runs;
     push({
       layer: 'network',

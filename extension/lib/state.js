@@ -9,12 +9,46 @@
 const api = globalThis.browser ?? globalThis.chrome;
 
 const DEFAULTS = {
-  /** 'pinned' | 'follow' | 'multi' */
-  mode: 'pinned',
+  /**
+   * 'workspace' | 'pinned' | 'follow' | 'multi'
+   *
+   * Workspace is the default as of v1.7.0. Pinned's reasoning — never let a
+   * glance at your inbox hand the agent your inbox — is preserved by the
+   * allowlist instead of by a click. With no allowlist, workspace behaves
+   * exactly as pinned, so the weaker configuration is never the more permissive
+   * one. See lib/workspace.js.
+   */
+  mode: 'workspace',
   /** tabId the agent is locked onto */
   pinnedTabId: null,
   /** tabIds we currently hold a chrome.debugger session on */
   attachedTabs: [],
+  /**
+   * Named tabs: { [name]: tabId }.
+   *
+   * chrome.debugger has always supported attaching to several tabs at once —
+   * `attachedTabs` is an array precisely because follow and multi mode already
+   * accumulate them. What was missing was a way to ADDRESS them, so a two-user
+   * scenario ("seller lists an item, buyer buys it") could not be expressed.
+   * A name is the address.
+   */
+  sessions: {},
+  /**
+   * The project adapter, as delivered by the bridge on connect.
+   *
+   * Not persisted to disk: it is the bridge's truth, re-sent on every connect.
+   * Caching it would mean a stale allowlist outliving the file it came from —
+   * and a stale ALLOWLIST is the one piece of stale state with a security cost.
+   */
+  project: {
+    found: false,
+    path: null,
+    workspaceDomains: [],
+    environments: {},
+    defaultEnvironment: null,
+    flowsDir: null,
+    problems: [],
+  },
   /** bridge connection settings + live status */
   bridge: {
     host: '127.0.0.1',
@@ -131,6 +165,35 @@ export function setState(patch) {
     broadcast({ type: 'state', state: next });
     return next;
   });
+}
+
+/**
+ * One-time move of the stored default from Pinned to Workspace.
+ *
+ * Anyone who used v1.6.0 has `mode: 'pinned'` written to disk, which would beat
+ * the new default forever — they would upgrade and see no change, then report
+ * that Workspace mode does not work.
+ *
+ * **This migration cannot widen anyone's exposure**, and that is the only
+ * reason it is acceptable to change a stored preference under someone. With no
+ * `workspaceDomains` the new mode behaves exactly as Pinned; with domains, it
+ * is still narrower than Follow, which was already one click away. A migration
+ * that could grant access nobody asked for would have to be a prompt instead.
+ *
+ * `follow` and `multi` are left alone: those are deliberate choices.
+ */
+export async function migrateModeDefault() {
+  const { settings } = await api.storage.local.get('settings');
+  if (!settings || settings.modeDefaultMigrated) return null;
+
+  const shouldMove = !settings.mode || settings.mode === 'pinned';
+  await api.storage.local.set({
+    settings: { ...settings, modeDefaultMigrated: true, ...(shouldMove ? { mode: 'workspace' } : {}) },
+  });
+  if (!shouldMove) return null;
+
+  await setState({ mode: 'workspace' });
+  return 'Mode moved from Pinned to Workspace (v1.7.0). With no project allowlist it behaves exactly as Pinned.';
 }
 
 /**

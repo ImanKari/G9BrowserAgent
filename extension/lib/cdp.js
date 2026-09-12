@@ -7,6 +7,7 @@
  */
 
 import { getState, setState, logActivity } from './state.js';
+import { sessionForNode } from './refs.js';
 
 const api = globalThis.browser ?? globalThis.chrome;
 
@@ -75,6 +76,23 @@ export async function attach(tabId) {
     } catch {
       /* some domains are unavailable on some target types; not fatal */
     }
+  }
+
+  // Attach to cross-origin children as they appear.
+  //
+  // Done here rather than on demand because a frame that loads before anyone
+  // asks for a snapshot would otherwise never be attached, and the symptom is
+  // the old one: the iframe is right there on screen and has no nodes. Failure
+  // is non-fatal — on a browser without flat-session support (before Chrome
+  // 125) this simply does nothing and same-origin work is unaffected.
+  try {
+    await rawSend(tabId, 'Target.setAutoAttach', {
+      autoAttach: true,
+      waitForDebuggerOnStart: false,
+      flatten: true,
+    });
+  } catch {
+    /* older Chrome, or a target type that has no children */
   }
 
   const fresh = await getState();
@@ -155,9 +173,18 @@ export async function detachAll() {
   return detachMany(state.attachedTabs);
 }
 
-/** Send without the attach guard — used during attach itself. */
-function rawSend(tabId, method, params = {}) {
-  return api.debugger.sendCommand({ tabId }, method, params);
+/**
+ * Send without the attach guard — used during attach itself.
+ *
+ * `sessionId` routes the command to a CHILD target: a cross-origin iframe, or a
+ * worker. Chrome 125 added flat sessions to `chrome.debugger`, which is what
+ * makes this a property on the debuggee rather than a second `attach` call per
+ * frame. Without it, a cross-origin iframe is visible and untouchable — the tab
+ * session simply has no nodes for a document that lives in another process.
+ */
+function rawSend(tabId, method, params = {}, sessionId = null) {
+  const debuggee = sessionId ? { tabId, sessionId } : { tabId };
+  return api.debugger.sendCommand(debuggee, method, params);
 }
 
 /**
@@ -211,22 +238,33 @@ function withTimeout(promise, method, tabId, timeoutMs) {
  */
 export async function send(tabId, method, params = {}, options = {}) {
   const timeoutMs = options.timeoutMs ?? SLOW_COMMANDS.get(method) ?? COMMAND_TIMEOUT_MS;
+  const sessionId = options.sessionId ?? null;
   const state = await getState();
   if (state.halted) throw new CdpError('Agent is halted by the user (Stop was pressed)', { method, tabId });
 
   await attach(tabId);
 
   try {
-    const result = await withTimeout(rawSend(tabId, method, params), method, tabId, timeoutMs);
+    const result = await withTimeout(rawSend(tabId, method, params, sessionId), method, tabId, timeoutMs);
     return result ?? {};
   } catch (err) {
     const msg = String(err?.message ?? err);
     // A navigation can tear down the session mid-command. One retry after
     // re-attaching resolves the overwhelming majority of these.
-    if (msg.includes('Detached') || msg.includes('not attached') || msg.includes('Target closed')) {
+    //
+    // A CHILD session is not re-created by re-attaching to the tab, so retrying
+    // one would send the command to a session that no longer exists. A frame
+    // that went away is reported, and the caller takes a fresh snapshot.
+    if (!sessionId && (msg.includes('Detached') || msg.includes('not attached') || msg.includes('Target closed'))) {
       await attach(tabId);
       const result = await withTimeout(rawSend(tabId, method, params), method, tabId, timeoutMs);
       return result ?? {};
+    }
+    if (sessionId && (msg.includes('Session') || msg.includes('not attached') || msg.includes('Target closed'))) {
+      throw new CdpError(
+        `${msg} — that cross-origin frame is gone (it navigated or was removed). Take a fresh browser_snapshot.`,
+        { method, tabId },
+      );
     }
     throw new CdpError(msg, { method, tabId });
   }
@@ -279,8 +317,17 @@ export async function evaluate(tabId, expression, { awaitPromise = true, returnB
 }
 
 /** Call a function with `this` bound to a specific DOM node. */
-export async function callOnNode(tabId, backendNodeId, fnDecl, args = []) {
-  const { object } = await send(tabId, 'DOM.resolveNode', { backendNodeId });
+export async function callOnNode(tabId, backendNodeId, fnDecl, args = [], sessionId = null) {
+  // `sessionId` is the fifth parameter and not the fourth on purpose: `args`
+  // was already there and callers pass it positionally, so inserting ahead of
+  // it would have silently handed a session string to `args.map`.
+  //
+  // When the caller does not say, ASK. Every node this extension acts on came
+  // from a snapshot, and the snapshot recorded which frame it lives in — so the
+  // routing is knowable without a dozen call sites each remembering to pass it.
+  const resolved = sessionId ?? await sessionForNode(tabId, backendNodeId);
+  const opts = { sessionId: resolved };
+  const { object } = await send(tabId, 'DOM.resolveNode', { backendNodeId }, opts);
   if (!object?.objectId) throw new CdpError('Node is no longer in the document', { tabId });
   try {
     const res = await send(tabId, 'Runtime.callFunctionOn', {
@@ -290,12 +337,12 @@ export async function callOnNode(tabId, backendNodeId, fnDecl, args = []) {
       returnByValue: true,
       awaitPromise: true,
       userGesture: true,
-    });
+    }, opts);
     if (res.exceptionDetails) {
       throw new CdpError(res.exceptionDetails.exception?.description ?? 'Call threw', { tabId });
     }
     return res.result?.value;
   } finally {
-    await send(tabId, 'Runtime.releaseObject', { objectId: object.objectId }).catch(() => {});
+    await send(tabId, 'Runtime.releaseObject', { objectId: object.objectId }, opts).catch(() => {});
   }
 }

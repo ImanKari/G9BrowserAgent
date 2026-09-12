@@ -10,7 +10,8 @@
  */
 
 import { send, callOnNode, evaluate } from '../lib/cdp.js';
-import { resolveRef } from '../lib/refs.js';
+import { resolveRef, sessionForNode } from '../lib/refs.js';
+import * as frames from '../lib/frames.js';
 
 /** Modifier bitmask used by CDP: Alt=1, Ctrl=2, Meta=4, Shift=8 */
 export const MODIFIERS = { Alt: 1, Control: 2, Meta: 4, Shift: 8 };
@@ -82,7 +83,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  *
  * Do NOT await the returned promise before dispatching. Arm, act, then await.
  */
-async function watchForInput(tabId, types, timeoutMs) {
+async function watchForInput(tabId, types, timeoutMs, sessionId = null) {
+  // The listener has to go in the realm the event will actually land in.
+  //
+  // A click inside a cross-origin frame is delivered to THAT document, so a
+  // witness installed in the top-level one never fires and the guard reports
+  // "the click was dispatched but the page never received a trusted event" —
+  // an accusation about input interception, for a click that worked perfectly.
+  // That message is convincing enough to send somebody looking for an overlay
+  // that does not exist.
   // Two CDP calls, and the split is the whole point.
   //
   // `Runtime.evaluate` with awaitPromise:false returns as soon as the
@@ -111,7 +120,7 @@ async function watchForInput(tabId, types, timeoutMs) {
          const onEvent = (event) => { if (event.isTrusted) finish(true); };
          for (const kind of kinds) addEventListener(kind, onEvent, { capture: true, passive: true });
          setTimeout(() => finish(false), ${timeoutMs});
-       })`,
+       }, { sessionId })`,
       awaitPromise: false,
       returnByValue: false,
     });
@@ -127,7 +136,7 @@ async function watchForInput(tabId, types, timeoutMs) {
       const settled = await send(tabId, 'Runtime.awaitPromise', {
         promiseObjectId,
         returnByValue: true,
-      });
+      }, { sessionId });
       return settled?.result?.value ?? null;
     } catch {
       // The context went away — a navigation, a router move. We genuinely
@@ -187,10 +196,10 @@ const WITNESS_TIMEOUT_MS = 1500;
  * directly, and an outcome outranks any opinion about events. Typing uses it,
  * because a field that now holds the text is not open to argument.
  */
-async function witnessed(tabId, expect, action, run, verify = null) {
+async function witnessed(tabId, expect, action, run, verify = null, sessionId = null) {
   const kinds = Array.isArray(expect) ? expect : [expect];
   // Awaited: this only installs the listener, it does not wait for the event.
-  const settled = await watchForInput(tabId, kinds, WITNESS_TIMEOUT_MS);
+  const settled = await watchForInput(tabId, kinds, WITNESS_TIMEOUT_MS, sessionId);
   const result = await run();
   const saw = await settled();
 
@@ -202,16 +211,34 @@ async function witnessed(tabId, expect, action, run, verify = null) {
 }
 
 /** Scroll into view, then return viewport-relative interaction coordinates. */
-async function pointFor(tabId, backendNodeId) {
+async function pointFor(tabId, backendNodeId, sessionId = null) {
+  // Same rule as callOnNode: if the caller did not say which frame owns this
+  // node, ask the snapshot that produced it rather than assuming the main
+  // document. Threading it through every call site is what left ten of them
+  // behind the first time.
+  sessionId = sessionId ?? await sessionForNode(tabId, backendNodeId);
+
   await callOnNode(
     tabId,
     backendNodeId,
     `function () { this.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); }`,
+    [],
+    sessionId,
   );
+
+  // NO coordinate translation for an out-of-process frame.
+  //
+  // Two attempts at translating failed in opposite directions — a stale
+  // snapshot-time offset put the point off-screen, a live one still missed —
+  // because the premise was wrong. The frame's session accepts `Input` commands
+  // in ITS OWN space, so the right answer is not to convert the coordinates but
+  // to dispatch them where they already make sense. The arithmetic that is not
+  // done cannot be done wrong.
+  const oop = { x: 0, y: 0 };
 
   let box = null;
   try {
-    ({ model: box } = await send(tabId, 'DOM.getBoxModel', { backendNodeId }));
+    ({ model: box } = await send(tabId, 'DOM.getBoxModel', { backendNodeId }, { sessionId }));
   } catch {
     box = null;
   }
@@ -219,8 +246,10 @@ async function pointFor(tabId, backendNodeId) {
   if (box && Array.isArray(box.content) && box.content.length >= 8 && box.width > 0 && box.height > 0) {
     const q = box.content;
     return {
-      x: (q[0] + q[2] + q[4] + q[6]) / 4,
-      y: (q[1] + q[3] + q[5] + q[7]) / 4,
+      // The offset is zero for the main document and the frame's origin for an
+      // out-of-process one, measured after the scroll just above.
+      x: (q[0] + q[2] + q[4] + q[6]) / 4 + oop.x,
+      y: (q[1] + q[3] + q[5] + q[7]) / 4 + oop.y,
       width: box.width,
       height: box.height,
       // DOM.getBoxModel answers in TOP-LEVEL viewport coordinates, already
@@ -228,6 +257,9 @@ async function pointFor(tabId, backendNodeId) {
       // wants, and it is NOT the space an in-page getBoundingClientRect()
       // answers in when the element lives in an iframe. See frameOffset().
       space: 'viewport',
+      // Carried with the point so the input witness listens in the realm the
+      // event will land in. One less thing for a call site to remember.
+      sessionId,
     };
   }
 
@@ -239,13 +271,15 @@ async function pointFor(tabId, backendNodeId) {
        const r = this.getBoundingClientRect();
        return { x: r.x + r.width / 2, y: r.y + r.height / 2, width: r.width, height: r.height };
      }`,
+    [],
+    sessionId,
   );
   if (!rect || (rect.width === 0 && rect.height === 0)) {
     throw new Error('Element has zero size or is not rendered — it may be inside a collapsed or hidden parent.');
   }
   // This one came from inside the element's own frame, so it is frame-relative.
-  const offset = await frameOffset(tabId, backendNodeId);
-  return { ...rect, x: rect.x + offset.x, y: rect.y + offset.y, space: 'viewport' };
+  const offset = await frameOffset(tabId, backendNodeId, sessionId);
+  return { ...rect, x: rect.x + offset.x + oop.x, y: rect.y + offset.y + oop.y, space: 'viewport', sessionId };
 }
 
 /**
@@ -262,7 +296,8 @@ async function pointFor(tabId, backendNodeId) {
  * Walking `frameElement` up to the top window keeps this correct for nested
  * frames too, and returns {0,0} for the common case of a top-level element.
  */
-function frameOffset(tabId, backendNodeId) {
+async function frameOffset(tabId, backendNodeId, sessionId = null) {
+  sessionId = sessionId ?? await sessionForNode(tabId, backendNodeId);
   return callOnNode(
     tabId,
     backendNodeId,
@@ -280,6 +315,8 @@ function frameOffset(tabId, backendNodeId) {
        }
        return { x, y };
      }`,
+    [],
+    sessionId,
   ).catch(() => ({ x: 0, y: 0 }));
 }
 
@@ -306,7 +343,8 @@ function frameOffset(tabId, backendNodeId) {
  * ancestor that legitimately forwards activation is a <label>, so that stays
  * allowed explicitly rather than by accident.
  */
-async function checkObscured(tabId, backendNodeId, x, y) {
+async function checkObscured(tabId, backendNodeId, x, y, sessionId = null) {
+  sessionId = sessionId ?? await sessionForNode(tabId, backendNodeId);
   const verdict = await callOnNode(
     tabId,
     backendNodeId,
@@ -366,11 +404,12 @@ async function checkObscured(tabId, backendNodeId, x, y) {
        return { ok: false, reason: 'it is covered by <' + describe(top) + '>' };
      }`,
     [x, y],
+    sessionId,
   );
   return verdict ?? { ok: true };
 }
 
-async function mouse(tabId, type, x, y, { button = 'left', clickCount = 1, modifiers = 0 } = {}) {
+async function mouse(tabId, type, x, y, { button = 'left', clickCount = 1, modifiers = 0, sessionId = null } = {}) {
   const buttons = type === 'mouseReleased' || button === 'none'
     ? 0
     : button === 'left' ? 1 : button === 'right' ? 2 : 4;
@@ -383,7 +422,7 @@ async function mouse(tabId, type, x, y, { button = 'left', clickCount = 1, modif
     modifiers,
     buttons,
     pointerType: 'mouse',
-  });
+  }, { sessionId });
 }
 
 export async function click(tabId, opts = {}) {
@@ -393,10 +432,10 @@ export async function click(tabId, opts = {}) {
 
   if (ref) {
     const node = await resolveRef(tabId, ref, url);
-    point = await pointFor(tabId, node.backendNodeId);
+    point = await pointFor(tabId, node.backendNodeId, node.sessionId);
     target = `${node.role} "${node.name}"`;
     if (!force) {
-      const v = await checkObscured(tabId, node.backendNodeId, point.x, point.y);
+      const v = await checkObscured(tabId, node.backendNodeId, point.x, point.y, node.sessionId);
       if (!v.ok) {
         throw new Error(
           `"${node.name || ref}" is not clickable at its centre — ${v.reason}. ` +
@@ -411,12 +450,13 @@ export async function click(tabId, opts = {}) {
   }
 
   await witnessed(tabId, 'mousedown', `${clickCount > 1 ? 'double ' : ''}click`, async () => {
-    await mouse(tabId, 'mouseMoved', point.x, point.y, { button: 'none', modifiers });
+    const ses = point.sessionId ?? null;
+    await mouse(tabId, 'mouseMoved', point.x, point.y, { button: 'none', modifiers, sessionId: ses });
     for (let i = 1; i <= clickCount; i++) {
-      await mouse(tabId, 'mousePressed', point.x, point.y, { button, clickCount: i, modifiers });
-      await mouse(tabId, 'mouseReleased', point.x, point.y, { button, clickCount: i, modifiers });
+      await mouse(tabId, 'mousePressed', point.x, point.y, { button, clickCount: i, modifiers, sessionId: ses });
+      await mouse(tabId, 'mouseReleased', point.x, point.y, { button, clickCount: i, modifiers, sessionId: ses });
     }
-  });
+  }, null, point.sessionId ?? null);
 
   return { clicked: target, at: { x: Math.round(point.x), y: Math.round(point.y) }, button, clickCount };
 }
@@ -425,14 +465,15 @@ export async function hover(tabId, { ref, x, y, url } = {}) {
   let point;
   if (ref) {
     const node = await resolveRef(tabId, ref, url);
-    point = await pointFor(tabId, node.backendNodeId);
+    point = await pointFor(tabId, node.backendNodeId, node.sessionId);
   } else if (x != null && y != null) {
     point = { x, y };
   } else {
     throw new Error('hover needs a ref or x/y coordinates.');
   }
   await witnessed(tabId, 'mousemove', 'hover', () =>
-    mouse(tabId, 'mouseMoved', point.x, point.y, { button: 'none' }),
+    mouse(tabId, 'mouseMoved', point.x, point.y, { button: 'none', sessionId: point.sessionId ?? null }),
+    null, point.sessionId ?? null,
   );
   return { hovered: { x: Math.round(point.x), y: Math.round(point.y) } };
 }
@@ -451,7 +492,7 @@ export async function type(tabId, opts = {}) {
   let node = null;
   if (ref) {
     node = await resolveRef(tabId, ref, url);
-    const point = await pointFor(tabId, node.backendNodeId);
+    const point = await pointFor(tabId, node.backendNodeId, node.sessionId);
     await mouse(tabId, 'mouseMoved', point.x, point.y, { button: 'none' });
     await mouse(tabId, 'mousePressed', point.x, point.y, {});
     await mouse(tabId, 'mouseReleased', point.x, point.y, {});
@@ -482,7 +523,10 @@ export async function type(tabId, opts = {}) {
            s.removeAllRanges();
            s.addRange(r);
          }`,
-      ).catch(() => {});
+      
+    [],
+    node.sessionId,
+  ).catch(() => {});
     } else {
       await key(tabId, { key: 'a', modifiers: SELECT_ALL_MODIFIER });
     }
@@ -696,7 +740,7 @@ export async function scroll(tabId, { ref, direction = 'down', amount = 400, x, 
   let py = y ?? 300;
   if (ref) {
     const node = await resolveRef(tabId, ref, url);
-    const p = await pointFor(tabId, node.backendNodeId);
+    const p = await pointFor(tabId, node.backendNodeId, node.sessionId);
     px = p.x;
     py = p.y;
   }
@@ -783,8 +827,8 @@ export async function scroll(tabId, { ref, direction = 'down', amount = 400, x, 
 export async function drag(tabId, { from, to, url, steps = 12 } = {}) {
   const a = await resolveRef(tabId, from, url);
   const b = await resolveRef(tabId, to, url);
-  const pa = await pointFor(tabId, a.backendNodeId);
-  const pb = await pointFor(tabId, b.backendNodeId);
+  const pa = await pointFor(tabId, a.backendNodeId, a.sessionId);
+  const pb = await pointFor(tabId, b.backendNodeId, b.sessionId);
 
   await witnessed(tabId, 'mousedown', 'drag', async () => {
     await mouse(tabId, 'mouseMoved', pa.x, pa.y, { button: 'none' });

@@ -32,6 +32,12 @@ export class WsServer extends EventEmitter {
     this.port = port;
     this.token = token;
     this.allowAnyOrigin = allowAnyOrigin;
+    /**
+     * What `/health` reports about this bridge, set by the server once it knows
+     * its own identity. Kept as plain data so ws-server stays ignorant of what
+     * a "project" is — it only serves what it was handed.
+     */
+    this.identity = {};
     this.client = null;
     this.server = http.createServer((req, res) => this.#handleHttp(req, res));
     this.server.on('upgrade', (req, socket, head) => this.#handleUpgrade(req, socket, head));
@@ -67,11 +73,34 @@ export class WsServer extends EventEmitter {
     }
   }
 
-  /** A tiny health endpoint, handy for `curl` when debugging setup. */
+  /**
+   * The health endpoint — now also how the side panel FINDS us.
+   *
+   * The panel scans the port range and asks each port who it is, because the
+   * extension has no filesystem and cannot read `~/.g9/bridges.json`. So this
+   * answer has to carry enough identity to fill a dropdown: which project this
+   * bridge serves, what version it is, and whether a browser is already on it.
+   *
+   * ## Why the CORS header is conditional
+   *
+   * The whole security model of this tool rests on Origin validation: a
+   * malicious page attempting `new WebSocket('ws://127.0.0.1:8765')` sends its
+   * own https origin and is refused. A blanket `access-control-allow-origin: *`
+   * here would hand that same page a way to probe for a running bridge and read
+   * the project path off it. So the header is echoed only for the extension
+   * origins that are allowed to hold a socket in the first place — the same
+   * rule, applied in the same place, for the same reason.
+   */
   #handleHttp(req, res) {
     if (req.url?.startsWith('/health')) {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, extensionConnected: this.connected }));
+      const origin = req.headers.origin ?? '';
+      const headers = { 'content-type': 'application/json' };
+      if (this.allowAnyOrigin || ALLOWED_ORIGIN.test(origin)) {
+        headers['access-control-allow-origin'] = origin || '*';
+        headers.vary = 'Origin';
+      }
+      res.writeHead(200, headers);
+      res.end(JSON.stringify({ ok: true, extensionConnected: this.connected, ...this.identity }));
       return;
     }
     res.writeHead(426, { 'content-type': 'text/plain' });
