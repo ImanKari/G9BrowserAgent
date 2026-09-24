@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <!-- Everything this page loads is its own: no CDN, no remote font, no network at all
+       (connect-src 'none' — the daemon is reached only through the main process). -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="light dark">
+  <title>G9</title>
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <div class="shell">
+    <nav class="rail" aria-label="Sections">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-name">G9</span>
+        <span class="brand-version" id="app-version" title="Version of this app">…</span>
+      </div>
+      <ul class="nav" id="nav">
+        <li><button type="button" data-view="agents">Agents</button></li>
+        <li><button type="button" data-view="engines">Engines</button></li>
+        <li><button type="button" data-view="watch">Watch</button></li>
+        <li><button type="button" data-view="runs">Runs</button></li>
+        <li><button type="button" data-view="approvals">Approvals <span class="count" id="approvals-count" hidden></span></button></li>
+        <li><button type="button" data-view="schedule">Schedule</button></li>
+        <li><button type="button" data-view="settings">Settings</button></li>
+        <li><button type="button" data-view="setup">Setup <span class="count" id="setup-count" hidden></span></button></li>
+      </ul>
+      <div class="rail-foot">
+        <button type="button" class="update-line" id="update-line" aria-live="polite" title="Open update settings">Updates: …</button>
+      </div>
+    </nav>
+
+    <header class="bar" id="bar">
+      <div class="conn" id="conn" role="status" aria-live="polite">
+        <span class="dot" aria-hidden="true"></span>
+        <span class="conn-text" id="conn-text">Connecting to the daemon…</span>
+        <button type="button" class="btn small ghost" id="reconnect" hidden>Reconnect</button>
+      </div>
+      <div class="halt" id="halt">
+        <span class="halt-text" id="halt-text" hidden></span>
+        <button type="button" class="btn stop" id="stop-all" disabled>Stop all</button>
+        <button type="button" class="btn primary" id="resume-all" hidden>Resume</button>
+      </div>
+    </header>
+
+    <main class="main" id="main" tabindex="-1">
+      <div class="notices" id="notices" aria-live="polite"></div>
+      <section class="view" id="view-agents" data-title="Agents" hidden></section>
+      <section class="view" id="view-engines" data-title="Engines" hidden></section>
+      <section class="view view-fill" id="view-watch" data-title="Watch" hidden></section>
+      <section class="view view-fill" id="view-runs" data-title="Runs" hidden></section>
+      <section class="view" id="view-approvals" data-title="Approvals" hidden></section>
+      <section class="view" id="view-schedule" data-title="Schedule" hidden></section>
+      <section class="view" id="view-settings" data-title="Settings" hidden></section>
+      <section class="view" id="view-setup" data-title="Setup" hidden></section>
+    </main>
+  </div>
+
+  <dialog class="modal" id="modal" aria-labelledby="modal-title">
+    <form method="dialog" class="modal-body">
+      <h2 id="modal-title"></h2>
+      <div id="modal-content"></div>
+      <div class="modal-actions" id="modal-actions"></div>
+    </form>
+  </dialog>
+
+  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+</body>
+</html>

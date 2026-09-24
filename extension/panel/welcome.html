@@ -3,37 +3,76 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>G9 Browser Agent — installed</title>
+  <!-- welcome.js sets the full title with the version from the manifest. -->
+  <title>G9 Browser Agent</title>
+  <!-- Self-contained on purpose: no fonts, scripts or images from anywhere but
+       this extension. It is the first page a new install shows, often on a
+       machine whose proxy has not been sorted out yet. -->
   <style>
     :root {
       --bg: #f7f7f9; --card: #fff; --ink: #17171c; --muted: #6a6a78;
-      --line: #e3e3ea; --accent: #4f46e5;
+      --line: #e3e3ea; --accent: #4f46e5; --ok: #12855a; --warn: #a15c00;
       --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
     }
     @media (prefers-color-scheme: dark) {
-      :root { --bg:#16161a; --card:#1e1e24; --ink:#ececf1; --muted:#9a9aa8; --line:#2e2e38; --accent:#7c74f0; }
+      :root {
+        --bg: #16161a; --card: #1e1e24; --ink: #ececf1; --muted: #9a9aa8;
+        --line: #2e2e38; --accent: #7c74f0; --ok: #3ecf8e; --warn: #e0a33c;
+      }
     }
     * { box-sizing: border-box; }
+    /* The banner is display:flex, which beats the UA's [hidden] rule — without
+       this every fresh install claimed to be an update. */
+    [hidden] { display: none !important; }
+    html { background: var(--bg); }
     body {
-      margin: 0; padding: 48px 24px; background: var(--bg); color: var(--ink);
+      margin: 0; padding: 40px 20px 56px; background: var(--bg); color: var(--ink);
       font: 15px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif;
     }
-    main { max-width: 640px; margin: 0 auto; }
-    h1 { font-size: 26px; letter-spacing: -0.02em; margin: 0 0 6px; }
-    .lede { color: var(--muted); margin: 0 0 28px; }
-    ol { padding-left: 0; list-style: none; counter-reset: s; display: grid; gap: 12px; }
-    li {
+    main { max-width: 680px; margin: 0 auto; }
+
+    .hero { display: flex; align-items: center; gap: 18px; margin-bottom: 8px; }
+    .hero img { flex: none; }
+    .hero h1 { font-size: 22px; letter-spacing: -0.01em; margin: 0; font-weight: 650; }
+    .bigver {
+      font: 800 56px/1 var(--mono); letter-spacing: -0.04em; color: var(--accent);
+      margin: 4px 0 2px;
+    }
+    .status { color: var(--muted); margin: 0; font-size: 14px; }
+    .lede { color: var(--muted); margin: 18px 0 26px; }
+
+    .banner {
+      display: flex; align-items: center; gap: 12px; margin: 18px 0 0;
+      padding: 12px 16px; border-radius: 10px; font-size: 14.5px;
+      background: color-mix(in srgb, var(--ok) 10%, var(--card));
+      border: 1px solid color-mix(in srgb, var(--ok) 40%, var(--line));
+    }
+    .banner strong { font-family: var(--mono); }
+    .banner .arrow { color: var(--ok); font-weight: 700; }
+
+    h2 { font-size: 17px; margin: 34px 0 10px; letter-spacing: -0.01em; }
+    ol { padding-left: 0; list-style: none; counter-reset: s; display: grid; gap: 12px; margin: 0; }
+    ol > li {
       counter-increment: s; background: var(--card); border: 1px solid var(--line);
       border-radius: 10px; padding: 14px 16px 14px 52px; position: relative;
     }
-    li::before {
+    ol > li::before {
       content: counter(s); position: absolute; left: 14px; top: 14px;
       width: 24px; height: 24px; border-radius: 50%;
       background: var(--accent); color: #fff; font-size: 13px; font-weight: 700;
       display: grid; place-items: center;
     }
+    ol > li.done::before { content: "✓"; background: var(--ok); }
     li strong { display: block; margin-bottom: 2px; }
-    li p { margin: 0; color: var(--muted); font-size: 13.5px; }
+    li p, .card p { margin: 0; color: var(--muted); font-size: 13.5px; }
+    li p + p { margin-top: 6px; }
+
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+    .card {
+      background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px;
+    }
+    .card strong { display: block; margin-bottom: 2px; font-size: 14px; }
+
     code {
       font: 12.5px var(--mono); background: var(--bg);
       border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px;
@@ -42,6 +81,15 @@
       font: 12.5px/1.5 var(--mono); background: var(--bg); border: 1px solid var(--line);
       border-radius: 8px; padding: 12px; overflow-x: auto; margin: 8px 0 0;
     }
+    button {
+      font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+      padding: 8px 14px; border-radius: 8px; border: 1px solid var(--accent);
+      background: var(--accent); color: #fff;
+    }
+    button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 22px; }
+    .actions .hint { color: var(--muted); font-size: 13px; }
+
     .note {
       margin-top: 28px; padding: 14px 16px; border-radius: 10px;
       background: color-mix(in srgb, var(--accent) 8%, transparent);
@@ -49,38 +97,127 @@
       font-size: 13.5px;
     }
     .note strong { color: var(--accent); }
+    .note p { margin: 0; }
+    .note p + p { margin-top: 8px; }
+    footer { margin-top: 36px; color: var(--muted); font-size: 12.5px; }
+
+    @media (max-width: 520px) {
+      .bigver { font-size: 44px; }
+      .hero { gap: 12px; }
+    }
   </style>
 </head>
 <body>
   <main>
-    <h1>G9 Browser Agent is installed</h1>
-    <p class="lede">Three steps and your AI agent can drive this browser.</p>
+    <div class="hero">
+      <img src="icon128.png" alt="" width="64" height="64" />
+      <div>
+        <h1>G9 Browser Agent</h1>
+        <div class="bigver" id="ver" aria-label="Version">v2</div>
+        <p class="status" id="status">is installed in this browser.</p>
+      </div>
+    </div>
 
+    <!-- ?updated=1: "Updated from vX to vY", filled in by welcome.js. -->
+    <div class="banner" id="updated" role="status" hidden>
+      <span>Updated from <strong id="fromVer">v1</strong> <span class="arrow">→</span> <strong id="toVer">v2</strong></span>
+      <span class="status" id="updatedWhen"></span>
+    </div>
+
+    <p class="lede">
+      This extension is <b>Engine 1</b> of G9: your AI agents drive the tabs of this
+      browser — your sign-ins, your pages — through the local G9 daemon. For runs that
+      should not tie up your screen, the daemon launches its own browser in the
+      background (<b>Engine 2</b>). Both run the same tools.
+    </p>
+
+    <h2>Set up — three steps</h2>
     <ol>
       <li>
-        <strong>Start the bridge</strong>
-        <p>From the repo root — or let your MCP client launch it for you.</p>
-        <pre>node bridge/src/server.js</pre>
+        <strong>Install G9 Desktop</strong>
+        <p>Run <code>G9-Setup.exe</code> once — per user, no admin rights. Its wizard picks
+        the browser for background runs (your Edge or Chrome, or it downloads Chrome for
+        Testing), opens the automation profile once so you can sign in, applies the
+        recommended browser policies (listed, with an undo), and registers G9 with the AI
+        clients it finds.</p>
+      </li>
+      <li class="done">
+        <strong>Add this extension — done</strong>
+        <p>You are reading this, so it is loaded. For the record: <em>Developer mode</em> →
+        <em>Load unpacked</em> → paste the folder path the wizard copied to your clipboard.
+        Leave that folder where it is: the extension's id comes from its path, and G9
+        Desktop updates it in place. On managed machines a policy installs it instead.</p>
       </li>
       <li>
-        <strong>Point your agent at it</strong>
-        <p>Copy <code>setup/mcp.json</code> into your MCP client config.</p>
-      </li>
-      <li>
-        <strong>Attach a tab</strong>
-        <p>Open the page you want tested, click the G9 toolbar icon, then press
-        <em>Attach &amp; Pin current tab</em>. The agent is now locked to that tab
-        and cannot wander into your other windows.</p>
+        <strong>Open your AI client</strong>
+        <p>Ask it to call <code>browser_status</code>. It answers — and everything else is
+        the agent's job.</p>
       </li>
     </ol>
 
-    <p class="note">
-      <strong>What the agent can do:</strong> read the DOM, computed styles, console,
-      network bodies, storage and cookies; click, type, drag and scroll with real
-      trusted input events; navigate, emulate devices, throttle the network, and
-      capture screenshots. Everything it does is listed live in the side panel,
-      and <strong>Stop</strong> halts it instantly.
-    </p>
+    <div class="actions">
+      <button id="openPanel" type="button">Open the G9 panel</button>
+      <span class="hint">or click the G9 icon in the toolbar at any time.</span>
+    </div>
+
+    <h2>What changed in v2</h2>
+    <div class="grid">
+      <div class="card">
+        <strong>No modes</strong>
+        <p>Attach a tab — or turn on <em>Auto-attach</em> — and agents can use it fully.
+        Workspace, Pinned, Follow and Multi are gone, and so is the allowlist.</p>
+      </div>
+      <div class="card">
+        <strong>One daemon, many agents</strong>
+        <p>Any number of AI agents connect at once. Each tab has one owner at a time, and
+        the panel shows who owns what.</p>
+      </div>
+      <div class="card">
+        <strong>Human input</strong>
+        <p><em>Direct</em>, <em>Human</em> or <em>Stealth</em>: curved mouse paths, real
+        click timing and typing rhythm, set in the panel.</p>
+      </div>
+      <div class="card">
+        <strong>Pop out tab</strong>
+        <p>Keeps a page alive in its own window while you work elsewhere. The one rule: do
+        not minimise that window.</p>
+      </div>
+      <div class="card">
+        <strong>Send to background</strong>
+        <p>Continues a tab in a browser G9 launches. The page reloads there with its
+        cookies and storage; unsaved in-page state stays behind.</p>
+      </div>
+      <div class="card">
+        <strong>The version, everywhere</strong>
+        <p>In the panel header, the panel window's title and its About tab — so after a
+        reload you can see at a glance which build is running.</p>
+      </div>
+    </div>
+
+    <h2>Without G9 Desktop (developer setup)</h2>
+    <p class="status">Point your MCP client at the shim in a clone of the repository. It
+    starts the daemon on <code>127.0.0.1:8765</code> when it needs it.</p>
+    <pre>{
+  "mcpServers": {
+    "g9-browser": {
+      "command": "node",
+      "args": ["&lt;path to the repo&gt;/mcp/shim.mjs"]
+    }
+  }
+}</pre>
+
+    <div class="note">
+      <p><strong>Coming from v1?</strong> The bridge is replaced by the daemon. Old MCP
+      configs that point at <code>bridge/src/server.js</code> keep working — it now forwards
+      to the shim. If a v1 bridge is still running on port 8765, the panel says so and
+      does not connect to it; close the editor or AI client that started it.</p>
+      <p><strong>Always in your hands:</strong> everything an agent does is listed live in
+      the panel's activity log, and <strong>Stop</strong> halts every agent at once — in
+      this browser and in the background.</p>
+    </div>
+
+    <footer id="footer">G9 Browser Agent</footer>
   </main>
+  <script src="welcome.js" type="module"></script>
 </body>
 </html>

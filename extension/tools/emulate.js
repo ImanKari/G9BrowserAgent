@@ -6,28 +6,28 @@
  * the user's browser. That is intentional.
  */
 
-import { send, evaluate } from '../lib/cdp.js';
-import { setState } from '../lib/state.js';
+import { platform } from '../lib/platform.js';
+import { send } from '../lib/cdp.js';
+import { levelFor } from '../lib/humanize.js';
+import { forgetDialog } from '../lib/state.js';
 import { clearRefs } from '../lib/refs.js';
+import { inWorld } from '../lib/world.js';
 import { clearBuffers } from './observe.js';
 
-const api = globalThis.browser ?? globalThis.chrome;
+const session = () => platform.storage.session;
+
+// Every page read here (the real user agent, the viewport, readyState) runs in
+// G9's isolated world: same values, and nothing visible to the page.
 
 /**
- * CDP has no "clear user-agent override" command — you can only set another
- * one — so the real one has to be captured before the first override, or it is
- * gone for the life of the session. Kept in session storage because the
- * service worker may restart between the override and the reset.
+ * Clearing the user-agent override is `Emulation.setUserAgentOverride {userAgent: ''}`: measured on
+ * Edge 153 (2026-09-22), that gives the browser's own UA, its `navigator.userAgentData` brands and
+ * platform, and its Sec-CH-UA request headers back. Setting the REAL UA string back (what this
+ * tool used to do) leaves an override in place with NO userAgentData: the tab then reported empty
+ * brands and platform and sent no Client Hints for the rest of its life — a bot tell, and a reason
+ * for a site to behave differently, reported as `cleared: [… "userAgent"]`.
  */
 const UA_KEY = (tabId) => `emulate-ua:${tabId}`;
-
-async function rememberUserAgent(tabId) {
-  const key = UA_KEY(tabId);
-  const stored = await api.storage.session.get(key);
-  if (stored[key]) return;
-  const userAgent = await evaluate(tabId, 'navigator.userAgent').catch(() => null);
-  if (userAgent) await api.storage.session.set({ [key]: userAgent });
-}
 
 const DEVICES = {
   'iphone-15': { width: 393, height: 852, deviceScaleFactor: 3, mobile: true,
@@ -82,6 +82,26 @@ export async function emulate(tabId, opts = {}) {
   } = opts;
   const applied = {};
 
+  // Not stealth-safe, so not allowed on a stealth tab (docs review, 2026-09-22): a device preset
+  // replaces the user agent (and leaves Client Hints empty), and a locale here changes Intl only —
+  // navigator.languages and Accept-Language stay the profile's, the contradiction STEALTH.md says
+  // detectors look for, and the one EngineManager.createContext already refuses at stealth.
+  if (!reset && (device || locale)) {
+    const hz = await levelFor(tabId, opts);
+    if (hz.level === 'stealth') {
+      const parts = [];
+      if (device && DEVICES[device]?.userAgent) parts.push(`the "${device}" preset replaces the user agent (and empties navigator.userAgentData)`);
+      if (locale) parts.push(`locale "${locale}" changes Intl only — navigator.languages and Accept-Language stay the profile's, which is the contradiction detectors compare`);
+      if (parts.length) {
+        throw new Error(
+          `Refused on a stealth tab: ${parts.join('; ')}. Nothing was emulated. ` +
+            'Use width/height (and the other presets) for layout, and launch a profile with that locale ' +
+            '(browser_engine action:"launch" locale:"…") for a consistent persona.',
+        );
+      }
+    }
+  }
+
   if (reset) {
     // Reset every override this tool can apply. It used to clear four of the
     // seven, so a page emulated as an iPhone in Tehran kept reporting an iPhone
@@ -112,15 +132,10 @@ export async function emulate(tabId, opts = {}) {
     await step('timezone', 'Emulation.setTimezoneOverride', { timezoneId: '' });
     await step('locale', 'Emulation.setLocaleOverride', {});
 
-    const key = UA_KEY(tabId);
-    const stored = await api.storage.session.get(key);
-    if (stored[key]) {
-      const failuresBeforeUa = failed.length;
-      await step('userAgent', 'Emulation.setUserAgentOverride', { userAgent: stored[key] });
-      // Retain the real UA when reset failed so a later retry can still
-      // restore it. Removing it here made a partial failure irreversible.
-      if (failed.length === failuresBeforeUa) await api.storage.session.remove(key);
-    }
+    // '' removes the override outright (UA, userAgentData and the Client Hints headers).
+    const failuresBeforeUa = failed.length;
+    await step('userAgent', 'Emulation.setUserAgentOverride', { userAgent: '' });
+    if (failed.length === failuresBeforeUa) await session().remove(UA_KEY(tabId)).catch(() => {});
 
     return { reset: failed.length === 0, cleared, failed };
   }
@@ -152,16 +167,17 @@ export async function emulate(tabId, opts = {}) {
       await send(tabId, 'Emulation.setPageScaleFactor', { pageScaleFactor: 1 });
     }
     if (preset?.userAgent) {
-      // Capture the real one first — reset has no other way to get it back.
-      await rememberUserAgent(tabId);
       await send(tabId, 'Emulation.setUserAgentOverride', { userAgent: preset.userAgent });
+      // Marked so a reset knows an override was applied here; reset clears it with ''.
+      await session().set({ [UA_KEY(tabId)]: preset.userAgent });
       applied.userAgent = true;
+      applied.userAgentNote = 'The user agent is overridden; navigator.userAgentData then reports empty brands and no Client Hints are sent — a tell. reset:true gives the browser its own back.';
     }
     if (preset?.mobile) {
       await send(tabId, 'Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
       applied.touch = true;
     }
-    let viewport = await evaluate(tabId, '({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio })');
+    let viewport = await inWorld(tabId, '({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio })');
     if (metrics.mobile && reloadIfNeeded &&
         (viewport?.width !== metrics.width || viewport?.height !== metrics.height)) {
       // Chromium applies the device screen immediately, but a document first
@@ -173,16 +189,16 @@ export async function emulate(tabId, opts = {}) {
       const deadline = Date.now() + 15_000;
       while (Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 100));
-        const state = await evaluate(tabId, 'document.readyState').catch(() => 'loading');
+        const state = await inWorld(tabId, 'document.readyState').catch(() => 'loading');
         if (state === 'complete') break;
       }
-      viewport = await evaluate(tabId, '({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio })');
+      viewport = await inWorld(tabId, '({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio })');
       applied.reloadedForViewport = true;
     }
     if (metrics.mobile &&
         (viewport?.width !== metrics.width || viewport?.height !== metrics.height)) {
       // Some Chromium/headless combinations ignore the document's viewport
-      // meta state when mobile mode is enabled through chrome.debugger and
+      // meta state when mobile mode is enabled through the debugger and
       // expose a 4x layout viewport. Keep the requested CSS viewport exact and
       // retain the mobile UA/touch overrides. Surface the compatibility mode
       // so callers know text autosizing/overlay-scrollbar emulation is absent.
@@ -195,7 +211,7 @@ export async function emulate(tabId, opts = {}) {
         positionY: 0,
         dontSetVisibleSize: false,
       });
-      viewport = await evaluate(tabId, '({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio })');
+      viewport = await inWorld(tabId, '({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio })');
       applied.mobileCompatibilityMode = 'exact-responsive-viewport-with-mobile-UA-and-touch';
       applied.warning = 'Chromium rejected an exact layout viewport in full mobile mode; responsive dimensions, mobile user agent, DPR, and touch remain emulated.';
     }
@@ -253,7 +269,7 @@ export async function handleDialog(tabId, { accept = true, promptText } = {}) {
       accept,
       ...(promptText != null ? { promptText } : {}),
     });
-    await setState({ dialogOpen: null });
+    await forgetDialog(tabId);
     return { handled: true, accept, promptText };
   } catch (err) {
     if (String(err.message).includes('No dialog')) {
@@ -263,7 +279,11 @@ export async function handleDialog(tabId, { accept = true, promptText } = {}) {
       // service-worker restart at the wrong moment — the agent would be locked
       // out with no way back. Clearing it here means the recovery the error
       // message already names always works, whether or not a dialog was real.
-      await setState({ dialogOpen: null });
+      //
+      // Only THIS tab's state (state.forgetDialog): with several agents on
+      // several tabs, handling a dialog in one must not unblock a different tab
+      // whose dialog is still open.
+      await forgetDialog(tabId);
       return { handled: false, reason: 'No dialog is currently open. Cleared the blocked state; retry your call.' };
     }
     throw err;

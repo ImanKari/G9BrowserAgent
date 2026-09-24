@@ -123,18 +123,6 @@ button.stop.armed { background: var(--err); color: #fff; }
 
 .btnrow { display: flex; gap: 6px; }
 
-.modes { display: flex; gap: 3px; }
-.modes button {
-  padding: 4px 8px; font-size: 11.5px; border-radius: 6px;
-  color: var(--muted);
-}
-.modes button[aria-pressed="true"] {
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  border-color: var(--accent);
-  color: var(--accent);
-  font-weight: 600;
-}
-
 .attached {
   border: 1px dashed var(--line);
   border-radius: 8px;
@@ -218,7 +206,11 @@ button.stop.armed { background: var(--err); color: #fff; }
   background: var(--err-bg); color: var(--err);
   border: 1px solid currentColor; border-radius: 6px;
   font-size: 11.5px; line-height: 1.45; word-break: break-word;
+  /* A pull from the repo can fail several flows at once: one per line. */
+  white-space: pre-line;
 }
+/* An action's error stays until read; a click dismisses it (ui.js). */
+.panelerr[title] { cursor: pointer; }
 
 .toast {
   position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
@@ -315,40 +307,14 @@ button.danger:hover { border-color: var(--err); background: var(--err-bg); }
 
 /* ------------------------------------------------------------ v1.7.0 additions
  *
- * Workspace allowlist, named sessions, the assertion wizard, and the replay
- * report's new half (verdict, advice, surprises).
+ * Named sessions, the assertion wizard, and the replay report's new half
+ * (verdict, advice, surprises). (The workspace allowlist box that also lived
+ * here went with the modes in v2.0.0.)
  *
  * Follows the existing rule of the file: colour comes from the tokens at the
  * top, never from a literal, so both themes stay correct without a second
  * block per component.
  */
-
-/* --- workspace allowlist ------------------------------------------------- */
-
-.wsbox {
-  margin: 8px 0 0;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: color-mix(in srgb, var(--accent) 5%, var(--card));
-}
-.wsbox.warn {
-  border-color: color-mix(in srgb, var(--warn) 50%, var(--line));
-  background: color-mix(in srgb, var(--warn) 8%, var(--card));
-  color: inherit;
-}
-.wsbox .nm { font-weight: 600; }
-.wsbox .sub { color: var(--muted); font-size: 10.5px; margin-top: 2px; }
-
-.chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 2px; }
-.chip {
-  font: 10.5px/1.6 var(--mono);
-  padding: 0 6px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--card);
-  color: var(--muted);
-}
 
 /* --- flow list: the detail row and its controls -------------------------- */
 
@@ -547,4 +513,248 @@ button.danger:hover { border-color: var(--err); background: var(--err-bg); }
  * exists to protect a cramped side panel would just waste it. */
 body.detached .report {
   max-height: none;
+}
+
+
+/* ------------------------------------------------------------ v2.0.0 additions
+ *
+ * The version everywhere, the daemon (agents, engines), the tab controls that
+ * replaced the four modes (attach, auto-attach, pop out, send to background),
+ * the input level, and the About tab.
+ *
+ * Same rule as above: colour only from the tokens, so both themes hold.
+ */
+
+html { background: var(--bg); }
+
+button:focus-visible,
+.tabs button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* --- the version badge ---------------------------------------------------- */
+
+.brand .ver {
+  font: 600 10.5px/1.6 var(--mono);
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line));
+  background: color-mix(in srgb, var(--accent) 10%, var(--card));
+  color: var(--accent);
+  letter-spacing: 0;
+}
+.brand .ver:hover { border-color: var(--accent); }
+/* The name gives way before the Stop button does: at the narrowest panel width
+ * an ellipsis on the product name costs nothing, a clipped Stop costs trust. */
+.hd .brand { min-width: 0; flex: 0 1 auto; }
+.brand .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.brand .ver, .hd .stop, .hd .popout { flex: none; }
+
+/* A card title never wraps; the hint beside it does, right-aligned. */
+.row.spread > strong { flex: none; }
+.row.spread > .muted { text-align: right; min-width: 0; }
+
+.pill {
+  font: 10.5px/1.6 var(--mono);
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.push { margin-left: auto; }
+
+/* --- the update notice ---------------------------------------------------- */
+
+.updnote {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  font-size: 12px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+}
+.updnote #updateText { flex: 1; min-width: 0; }
+
+/* --- the daemon card ------------------------------------------------------ */
+
+.dot.warn { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 20%, transparent); }
+
+#daemonHint { overflow-wrap: anywhere; }
+.btnrow .grow-text { align-self: center; flex: 1; min-width: 0; }
+
+.subblock {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+.subblock .minilist { margin-top: 2px; }
+
+.label {
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.minilist li.self { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
+.minilist li.halted .nm { color: var(--err); }
+
+/* Owned tabs, one chip each: a click brings that tab to the front. */
+.tabchips { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 3px; min-width: 0; }
+.minilist .tabchip {
+  max-width: 100%;
+  padding: 0 6px;
+  font-size: 10.5px;
+  line-height: 1.7;
+  border-radius: 999px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.minilist .tabchip.cur { border-color: var(--ok); }
+
+/* --- the current tab ------------------------------------------------------ */
+
+.switch {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.switch input {
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 30px;
+  height: 17px;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.switch .track {
+  flex: none;
+  position: relative;
+  width: 30px;
+  height: 17px;
+  margin-top: 1px;
+  border-radius: 999px;
+  background: var(--line);
+  transition: background 0.15s;
+}
+.switch .track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--card);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s;
+}
+.switch input:checked + .track { background: var(--accent); }
+.switch input:checked + .track::after { transform: translateX(13px); }
+.switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+.switch .txt .muted { font-size: 11.5px; }
+
+/* Two actions that move the tab somewhere else, each with the one sentence
+ * that says what it costs. Side by side while there is room for both. */
+.tabacts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.tabact { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.tabact .muted { font-size: 11px; line-height: 1.4; }
+@media (max-width: 300px) {
+  .tabacts { grid-template-columns: 1fr; }
+}
+
+.result {
+  font-size: 11.5px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg);
+  overflow-wrap: anywhere;
+}
+.result.good { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
+.result.bad { border-color: var(--err); background: var(--err-bg); color: var(--err); }
+.result .sub { color: var(--muted); font-size: 10.5px; margin-top: 2px; }
+.result.bad .sub { color: inherit; }
+
+/* --- input level ---------------------------------------------------------- */
+
+fieldset.inputmode {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+fieldset.inputmode legend { font-weight: 650; padding: 0; margin-bottom: 4px; }
+fieldset.inputmode:disabled { opacity: 0.6; }
+
+.opt {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  align-items: start;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.opt:hover { border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); }
+.opt:has(input:checked) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--card));
+}
+.opt input { margin: 2px 0 0; accent-color: var(--accent); }
+.opt .muted { font-size: 11.5px; }
+
+/* --- About ---------------------------------------------------------------- */
+
+.card.hero { flex-direction: row; align-items: center; gap: 12px; }
+.herotext { min-width: 0; }
+.heroname { font-weight: 650; }
+.herover {
+  font: 700 26px/1.15 var(--mono);
+  letter-spacing: -0.02em;
+  color: var(--accent);
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 12px;
+}
+.facts dt { color: var(--muted); white-space: nowrap; }
+.facts dd {
+  margin: 0;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+/* --- the detached window --------------------------------------------------- */
+
+/* A window can be as wide as a monitor; a line of the activity log should not
+ * be. Centred, so a maximised panel window still reads like the panel. */
+body.detached {
+  width: 100%;
+  max-width: 760px;
+  margin-inline: auto;
 }

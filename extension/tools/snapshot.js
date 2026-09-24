@@ -14,8 +14,9 @@
  */
 
 import { send, ensureDomain } from '../lib/cdp.js';
-import { saveRefs } from '../lib/refs.js';
+import { saveRefs, refNumbering, ownerOf } from '../lib/refs.js';
 import * as frames from '../lib/frames.js';
+import { inWorld } from '../lib/world.js';
 
 /** Roles that are always worth showing — the agent can act on these. */
 const INTERACTIVE = new Set([
@@ -36,14 +37,33 @@ const STRUCTURAL = new Set([
 /** Never useful on their own. */
 const NOISE = new Set(['none', 'presentation', 'generic', 'InlineTextBox', 'StaticText', 'LineBreak']);
 
-export async function snapshot(tabId, { mode = 'a11y', maxNodes = 900, includeText = true } = {}) {
+/** An accessibility tree with nothing in it but its root: not built yet, or a truly empty page. */
+const looksUnbuilt = (nodes) => (nodes ?? []).filter((n) => n.ignored !== true).length <= 1;
+
+/**
+ * `caller` decides which agent's four kept generations this snapshot joins (lib/refs.js): another
+ * agent reading the same tab must never age this one's refs out. G9's own internal snapshots (qa,
+ * replay) pass none and share the null owner.
+ */
+export async function snapshot(tabId, { mode = 'a11y', maxNodes = 900, includeText = true } = {}, caller = null) {
   await ensureDomain(tabId, 'Accessibility');
   await ensureDomain(tabId, 'DOM');
 
-  const [{ nodes }, docInfo] = await Promise.all([
+  let [{ nodes }, docInfo] = await Promise.all([
     send(tabId, 'Accessibility.getFullAXTree', { depth: -1 }),
     send(tabId, 'DOM.getDocument', { depth: 0 }),
   ]);
+
+  // A tree with only its root while the document HAS a body with elements is one the renderer has
+  // not built (again) yet — right after a tab moved into a window of its own (popout), Chrome for
+  // Testing's first snapshot had no page in it, and the click that followed had no ref (live round
+  // 3, 1/11 CfT popouts). Asked again, briefly; a page that really is empty costs one DOM read.
+  for (let attempt = 0; attempt < 4 && looksUnbuilt(nodes); attempt++) {
+    const elements = await inWorld(tabId, 'document.body ? document.body.childElementCount : 0', { timeoutMs: 3000 }).catch(() => 0);
+    if (!(elements > 0)) break;
+    await new Promise((r) => setTimeout(r, 250));
+    ({ nodes } = await send(tabId, 'Accessibility.getFullAXTree', { depth: -1 }));
+  }
 
   const url = docInfo?.root?.documentURL ?? '';
   const byId = new Map(nodes.map((n) => [n.nodeId, n]));
@@ -51,7 +71,9 @@ export async function snapshot(tabId, { mode = 'a11y', maxNodes = 900, includeTe
   const entries = [];
   const lines = [];
   let emitted = 0;
-  let refCounter = 0;
+  // Refs continue the page's numbering (lib/refs.js): an earlier snapshot's e2 — this agent's or
+  // another's — keeps naming the element IT showed, never whatever is second now.
+  const numbering = await refNumbering(tabId, url);
   let truncated = false;
   // Set while walking a child frame, so each ref remembers where it can be used.
   let activeSession = null;
@@ -86,7 +108,7 @@ export async function snapshot(tabId, { mode = 'a11y', maxNodes = 900, includeTe
         const backendNodeId = node.backendDOMNodeId;
         let ref = '';
         if (isInteractive && backendNodeId != null) {
-          ref = `e${++refCounter}`;
+          ref = numbering.next();
           // sessionId is null for the main document and set inside a cross-origin
           // frame, so resolveRef can route the click to the process that owns the node.
           entries.push([ref, { backendNodeId, role, name, sessionId: activeSession }]);
@@ -143,7 +165,7 @@ export async function snapshot(tabId, { mode = 'a11y', maxNodes = 900, includeTe
     }
   }
 
-  const generation = await saveRefs(tabId, { url, entries });
+  const generation = await saveRefs(tabId, { url, entries, by: ownerOf(caller) });
 
   const result = {
     url,
@@ -214,15 +236,25 @@ function describeProps(node) {
  * every letter "s" with a space. "browser_interact" arrived as "brow er_interact"
  * and "/api/missing" as "/api/mi ing", from v1.0.0 until it was finally read in
  * v1.0.13. Self-test section 13 now scans for this.
+ *
+ * Runs in G9's isolated world (lib/world.js): the same DOM and computed
+ * styles, none of the page's globals — a page that overrides
+ * `getComputedStyle` or `NodeFilter` cannot bend what G9 reads, and nothing
+ * G9 runs here is visible to the page.
  */
 async function extractText(tabId) {
-  const { result } = await send(tabId, 'Runtime.evaluate', {
-    expression: `(() => {
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+  // A document with no <body> yet (still parsing) or none at all (a frameset,
+  // an SVG or XML document) has less text, not an error: v1 returned '' there
+  // because its exception was never read, and a snapshot must not fail on it
+  // now that page exceptions are.
+  const text = await inWorld(tabId, `(() => {
+      const root = document.body || document.documentElement;
+      if (!root) return '';
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
         acceptNode(n) {
           const p = n.parentElement;
           if (!p) return NodeFilter.FILTER_REJECT;
-          if (/^(SCRIPT|STYLE|NOSCRIPT)$/.test(p.tagName)) return NodeFilter.FILTER_REJECT;
+          if (/^(SCRIPT|STYLE|NOSCRIPT|TITLE)$/.test(p.tagName)) return NodeFilter.FILTER_REJECT;
           const s = getComputedStyle(p);
           if (s.display === 'none' || s.visibility === 'hidden') return NodeFilter.FILTER_REJECT;
           return n.textContent.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
@@ -231,10 +263,8 @@ async function extractText(tabId) {
       const out = []; let n;
       while ((n = walker.nextNode()) && out.length < 4000) out.push(n.textContent.trim());
       return out.join(' ').replace(/\\s+/g, ' ').slice(0, 24000);
-    })()`,
-    returnByValue: true,
-  });
-  return result?.value ?? '';
+    })()`);
+  return text ?? '';
 }
 
 function truncate(s, n) {

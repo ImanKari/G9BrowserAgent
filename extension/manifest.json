@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "G9 Browser Agent",
-  "version": "1.7.21",
-  "description": "Gives an AI agent full DevTools-level control over your real browser tabs — inspect, debug, and interact with trusted input events.",
-  "minimum_chrome_version": "116",
+  "version": "2.0.3",
+  "description": "G9 v2 Engine 1: lets your AI agents drive the tabs of this browser through the local G9 daemon, with human-like input.",
+  "minimum_chrome_version": "125",
   "permissions": [
     "debugger",
     "tabs",
@@ -12,7 +12,8 @@
     "storage",
     "alarms",
     "sidePanel",
-    "unlimitedStorage"
+    "unlimitedStorage",
+    "downloads"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -22,7 +23,7 @@
     "type": "module"
   },
   "action": {
-    "default_title": "G9 Browser Agent — click to open control panel"
+    "default_title": "G9 Browser Agent v2"
   },
   "side_panel": {
     "default_path": "panel/panel.html"

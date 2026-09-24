@@ -9,6 +9,15 @@ something schedulable.
 **Documentation audited against v1.7.21 on 2026-09-12.** These scripts use the existing browser
 connection; they do not provision an isolated profile or make every browser operation background-safe.
 
+**Not updated for v2 (checked against G9 2.0.3 on 2026-09-25, by reading the code; not run).** The
+text below describes v1. `Save-TelegramImages.ps1` does not work with v2 as written: it refuses to
+start when anything listens on its port (v1's one-bridge rule), and in v2 the shared daemon normally
+listens there; and it waits for `browser_status` to report `connected` and `attached`, fields v1 had
+and v2's status does not (v2 reports `current`, `engines` and `owned`), so it stops with "No attached
+tab". In v2 `bridge/src/server.js` only starts the MCP shim, which shares the one daemon with every
+agent; there is no bridge to select and no **Attach & Pin** (the panel's button is **Attach current
+tab**).
+
 ## Save-TelegramImages.ps1
 
 Archives photos it can load from an open Telegram Web channel, walking backwards through
@@ -67,6 +76,6 @@ left once you know it.
   tab without trusted mouse/key delivery. It still depends on Telegram loading the next batch and
   the page remaining alive; frozen/discarded pages, changed selectors or a stalled load can stop
   progress. Input and screenshot behavior are separate; see
-  [Background tabs, focus, and capture](../README.md#background-tabs-focus-and-capture).
+  [What works in which state (measured)](../README.md#what-works-in-which-state-measured).
 - Already-saved posts are tracked in the page for the run, so re-collecting the
   same mounted post is free.

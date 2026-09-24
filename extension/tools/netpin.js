@@ -36,18 +36,39 @@
  *   instead, which is the honest setting for a test that claims to be hermetic —
  *   but it is opt-in, because a page that loads one un-recorded font should not
  *   look like a product bug.
- * - The HAR lives in `chrome.storage.session`, so it is per-tab, never touches
+ * - The HAR lives in session storage, so it is per-tab, never touches
  *   disk, and dies with the browser. Bodies are capped; a pinned HAR is a test
  *   fixture, not an archive.
  */
 
-import { send, ensureDomain } from '../lib/cdp.js';
+import { platform } from '../lib/platform.js';
+import { send, ensureDomain, sendOnLiveSession } from '../lib/cdp.js';
 import * as netrules from './netrules.js';
 import { har as captureHar } from './observe.js';
 
-const api = globalThis.browser ?? globalThis.chrome;
+const session = () => platform.storage.session;
 
 const KEY = (tabId) => `netpin:${tabId}`;
+
+/**
+ * One tab's pin state changes one step at a time (storage only — never a CDP
+ * call inside, so a slow browser cannot hold a paused request behind it).
+ *
+ * Paused requests arrive in parallel. Unserialised, two requests for the same
+ * operation both took the FIRST recorded response (each shifted its own copy
+ * of the queue) and the counters lost hits; and a request handled across an
+ * `unpin` wrote the pin back, so `pin_status` said pinned after unpin.
+ */
+const chains = new Map();
+function exclusive(tabId, fn) {
+  const run = (chains.get(tabId) ?? Promise.resolve()).then(fn, fn);
+  const tail = run.catch(() => {});
+  chains.set(tabId, tail);
+  tail.then(() => {
+    if (chains.get(tabId) === tail) chains.delete(tabId);
+  });
+  return run;
+}
 
 /** Bodies above this are served as an empty 200 with a header saying so. */
 const MAX_BODY_BYTES = 512 * 1024;
@@ -125,9 +146,9 @@ export async function pin(tabId, { har, strict = false, filter } = {}) {
     patterns: [{ urlPattern: filter ? `*${filter}*` : '*', requestStage: 'Request' }],
   });
 
-  await api.storage.session.set({
+  await exclusive(tabId, () => session().set({
     [KEY(tabId)]: { index, strict, filter: filter ?? null, served: 0, passed: 0, failed: 0, at: Date.now() },
-  });
+  }));
 
   return { pinned: true, operations: Object.keys(index).length, responses: total, strict, filter: filter ?? null };
 }
@@ -153,9 +174,17 @@ export async function isPinned(tabId) {
 }
 
 export async function unpin(tabId) {
-  const state = await stateOf(tabId);
-  await send(tabId, 'Fetch.disable').catch(() => {});
-  await api.storage.session.remove(KEY(tabId));
+  // Intercept rules share this Fetch session. While any remain, Fetch stays on
+  // — for every URL again, since a pin may have narrowed it with a filter —
+  // or unpinning would silently switch off a failure the agent is testing.
+  const rules = await netrules.rulesOf(tabId).catch(() => null);
+  if (rules?.rules?.length) await enableForRules(tabId).catch(() => {});
+  else await send(tabId, 'Fetch.disable').catch(() => {});
+  const state = await exclusive(tabId, async () => {
+    const current = await stateOf(tabId);
+    await session().remove(KEY(tabId));
+    return current;
+  });
   return {
     unpinned: true,
     served: state?.served ?? 0,
@@ -178,7 +207,7 @@ export async function status(tabId) {
 }
 
 async function stateOf(tabId) {
-  const stored = await api.storage.session.get(KEY(tabId));
+  const stored = await session().get(KEY(tabId));
   return stored[KEY(tabId)] ?? null;
 }
 
@@ -189,8 +218,17 @@ async function stateOf(tabId) {
  * `failRequest`. A paused request that is never answered hangs the page
  * forever, so the catch-all at the bottom continues rather than logging and
  * returning — a bug in this file must not be able to freeze the tab.
+ *
+ * The answers go out on the live session WITHOUT `send()`'s guards. `send()`
+ * refuses everything while the user's Stop is on — which made every paused
+ * request on a pinned or intercepted tab hang the moment Stop was pressed,
+ * freezing the very page the person had stopped the agent to look at. Stop
+ * halts the agent; answering the browser is not the agent acting.
  */
 export async function onRequestPaused(tabId, params) {
+  const answer = (method, extra = {}) =>
+    sendOnLiveSession(tabId, method, { requestId: params.requestId, ...extra });
+
   // Rules first, then the pinned HAR, then pass-through.
   //
   // That order is what lets a flow be pinned for determinism AND still force one
@@ -202,12 +240,11 @@ export async function onRequestPaused(tabId, params) {
       if (rule.delayMs) await new Promise((resolve) => setTimeout(resolve, rule.delayMs));
 
       if (rule.abort) {
-        await send(tabId, 'Fetch.failRequest', { requestId: params.requestId, errorReason: rule.abort });
+        await answer('Fetch.failRequest', { errorReason: rule.abort });
         return;
       }
       if (rule.status != null) {
-        await send(tabId, 'Fetch.fulfillRequest', {
-          requestId: params.requestId,
+        await answer('Fetch.fulfillRequest', {
           responseCode: rule.status,
           responseHeaders: [
             ...rule.headers,
@@ -226,44 +263,79 @@ export async function onRequestPaused(tabId, params) {
     // A broken rule must not hang the tab; fall through to the normal paths.
   }
 
-  const state = await stateOf(tabId);
-  if (!state) {
-    // Not pinned (any more). Let it through; Fetch may still be enabled for a
-    // moment while the disable command is in flight.
-    await send(tabId, 'Fetch.continueRequest', { requestId: params.requestId }).catch(() => {});
-    return;
-  }
-
+  // Decide under the tab's lock — including the queue shift, persisted at
+  // once, so a parallel request for the same operation gets the NEXT response.
   const key = matchKey(params.request?.method, params.request?.url);
-  const queue = state.index[key];
-
-  try {
+  const decision = await exclusive(tabId, async () => {
+    const state = await stateOf(tabId);
+    if (!state) return null;
+    const queue = state.index[key];
+    let chosen;
     if (queue?.length) {
       // Shift so a repeated call gets the SECOND recorded response, which is
       // how a paged list or a poll replays correctly.
-      const response = queue.length > 1 ? queue.shift() : queue[0];
-      await send(tabId, 'Fetch.fulfillRequest', {
-        requestId: params.requestId,
-        responseCode: response.status,
-        responseHeaders: [
-          ...response.headers,
-          { name: 'x-g9-pinned', value: '1' },
-        ],
-        body: toBase64(response.text),
-      });
-      state.served += 1;
-    } else if (state.strict) {
-      await send(tabId, 'Fetch.failRequest', { requestId: params.requestId, errorReason: 'BlockedByClient' });
-      state.failed += 1;
+      const shifted = queue.length > 1;
+      chosen = { kind: 'fulfill', response: shifted ? queue.shift() : queue[0], shifted, pinAt: state.at };
+      if (shifted) await session().set({ [KEY(tabId)]: state });
     } else {
-      await send(tabId, 'Fetch.continueRequest', { requestId: params.requestId });
-      state.passed += 1;
+      chosen = { kind: state.strict ? 'fail' : 'continue' };
     }
-  } catch {
-    await send(tabId, 'Fetch.continueRequest', { requestId: params.requestId }).catch(() => {});
+    return chosen;
+  }).catch(() => null);
+
+  if (!decision) {
+    // Not pinned (any more). Let it through; Fetch may still be enabled for a
+    // moment while the disable command is in flight.
+    await answer('Fetch.continueRequest').catch(() => {});
+    return;
   }
 
-  await api.storage.session.set({ [KEY(tabId)]: state });
+  // Answer outside the lock; count only what actually happened.
+  let outcome = null;
+  try {
+    if (decision.kind === 'fulfill') {
+      await answer('Fetch.fulfillRequest', {
+        responseCode: decision.response.status,
+        responseHeaders: [
+          ...decision.response.headers,
+          { name: 'x-g9-pinned', value: '1' },
+        ],
+        body: toBase64(decision.response.text),
+      });
+      outcome = 'served';
+    } else if (decision.kind === 'fail') {
+      await answer('Fetch.failRequest', { errorReason: 'BlockedByClient' });
+      outcome = 'failed';
+    } else {
+      await answer('Fetch.continueRequest');
+      outcome = 'passed';
+    }
+  } catch {
+    outcome = await answer('Fetch.continueRequest').then(() => 'passed', () => null);
+  }
+
+  if (!outcome && decision.kind === 'fulfill' && decision.shifted) {
+    // Neither answer was taken: the request is gone (the page cancelled it, or
+    // the tab navigated away). Nothing was served, so the recorded response goes
+    // back to the FRONT of its queue — the next request for the same operation
+    // gets it, as it would have without the cancelled one. Only for the same pin:
+    // a re-pin has a queue of its own.
+    await exclusive(tabId, async () => {
+      const state = await stateOf(tabId);
+      if (!state || state.at !== decision.pinAt) return;
+      state.index[key] = [decision.response, ...(state.index[key] ?? [])];
+      await session().set({ [KEY(tabId)]: state });
+    }).catch(() => {});
+  }
+
+  if (outcome) {
+    await exclusive(tabId, async () => {
+      const state = await stateOf(tabId);
+      if (!state) return; // unpinned meanwhile: nothing to count into
+      state[outcome] += 1;
+      await session().set({ [KEY(tabId)]: state });
+    }).catch(() => {});
+  }
 }
 
 function toBase64(text) {

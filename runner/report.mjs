@@ -131,7 +131,7 @@ function junit(run) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <testsuites name="G9" tests="${cases.length}" failures="${failures}" errors="${errors}" time="${((run.durationMs ?? 0) / 1000).toFixed(3)}">
   <testsuite name="${esc(run.suite ?? 'g9')}" tests="${cases.length}" failures="${failures}" errors="${errors}" timestamp="${new Date(run.startedAt).toISOString()}">
-${cases.join('\n')}
+${properties(run)}${cases.join('\n')}
   </testsuite>
 </testsuites>
 `;
@@ -191,6 +191,7 @@ function html(run) {
 </style></head><body>
 <h1>گزارش تست — ${escHtml(run.suite ?? 'همهٔ سناریوها')}</h1>
 <p class="meta">${new Date(run.startedAt).toLocaleString('fa-IR')} · محیط <b>${escHtml(run.environment ?? 'default')}</b> · ${Math.round((run.durationMs ?? 0) / 100) / 10} ثانیه${run.pinned ? ' · <b>شبکه ثابت‌شده</b>' : ''}</p>
+${runFacts(run)}
 <div class="summary">${Object.entries(counts).map(([verdict, n]) =>
   `<span class="pill" style="border-color:${(VERDICT_STYLE[verdict] ?? VERDICT_STYLE.ERROR).colour}">${(VERDICT_STYLE[verdict] ?? VERDICT_STYLE.ERROR).fa}: <b>${n}</b></span>`).join('')}</div>
 ${rows}
@@ -198,6 +199,47 @@ ${rows}
 الزاماً باگ نیست، ولی هیچ‌وقت هم هیچ نیست.</footer>
 </body></html>
 `;
+}
+
+// ------------------------------------------------------------- run facts (v2)
+
+/**
+ * What ran the flows, and with which random seed. A report that cannot say
+ * which browser build produced it cannot be compared with the next one, and a
+ * humanized run that failed can only be replayed with identical motion if its
+ * seed was written down.
+ */
+function engineLabel(run) {
+  const e = run.engine;
+  if (!e) return null;
+  const mode = e.kind === 'extension' ? 'extension' : (e.headless === false ? 'headed' : 'headless');
+  const parts = [e.browser ?? e.kind ?? 'browser', e.version ?? ''].filter(Boolean).join(' ');
+  const extra = [mode, e.profile ? `profile ${e.profile}` : null, e.engineId ?? null].filter(Boolean).join(', ');
+  return `${parts} (${extra})`;
+}
+
+function properties(run) {
+  const props = [];
+  const add = (name, value) => {
+    if (value != null && value !== '') props.push(`      <property name="${esc(name)}" value="${esc(value)}"/>`);
+  };
+  add('g9.engine', engineLabel(run));
+  add('g9.daemon.version', run.daemon?.version);
+  add('g9.humanize.level', run.humanize ? (run.humanize.level ?? 'default') : null);
+  add('g9.humanize.seed', run.humanize?.seed);
+  add('g9.environment', run.environment);
+  return props.length ? `    <properties>\n${props.join('\n')}\n    </properties>\n` : '';
+}
+
+function runFacts(run) {
+  const bits = [];
+  const engine = engineLabel(run);
+  if (engine) bits.push(`موتور <b dir="ltr">${escHtml(engine)}</b>`);
+  if (run.humanize?.seed != null) {
+    bits.push(`seed حرکت <code dir="ltr">${escHtml(run.humanize.seed)}</code>${run.humanize.level ? ` (${escHtml(run.humanize.level)})` : ''}`);
+  }
+  if (run.daemon?.version) bits.push(`G9 <span dir="ltr">v${escHtml(run.daemon.version)}</span>`);
+  return bits.length ? `<p class="meta">${bits.join(' · ')}</p>` : '';
 }
 
 // ------------------------------------------------------------- QA suite link

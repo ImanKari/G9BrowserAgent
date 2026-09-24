@@ -1,0 +1,29 @@
+{
+  "name": "g9-browser-agent",
+  "version": "2.0.3",
+  "private": true,
+  "description": "G9 v2: a local daemon (g9d) that lets any number of AI agents drive two browser engines — the extension in your own browser, and real Chrome/Edge it launches — through one MCP shim. Zero dependencies outside desktop/.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "g9d": "daemon/g9d.mjs",
+    "g9-mcp": "mcp/shim.mjs",
+    "g9": "runner/g9.mjs"
+  },
+  "scripts": {
+    "test": "node setup/unittest.mjs && node setup/selftest.mjs && node setup/extensiontest.mjs",
+    "test:unit": "node setup/unittest.mjs",
+    "test:self": "node setup/selftest.mjs",
+    "test:ext": "node setup/extensiontest.mjs",
+    "test:engine2": "node setup/engine2-livetest.mjs",
+    "test:live": "node setup/isolated-livetest.mjs",
+    "test:stealth": "node setup/stealthtest.mjs",
+    "bench": "node setup/bench.mjs",
+    "matrix": "node setup/matrix.mjs",
+    "endurance": "node setup/endurance.mjs",
+    "daemon": "node daemon/g9d.mjs --foreground",
+    "shim": "node mcp/shim.mjs"
+  }
+}

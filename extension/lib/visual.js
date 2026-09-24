@@ -10,7 +10,7 @@
  *    what `mode: "layout"` compares, and it is the level that matters most in
  *    practice: it goes blind to colour, font smoothing and copy changes, and
  *    stays sharp on things that moved, got clipped, or acquired an overlay.
- * 3. **Full PNG** — the bytes, kept in IndexedDB as an attachment so a human
+ * 3. **Full PNG** — the bytes, kept in the blob store as an attachment so a human
  *    can look at expected/actual/diff. Never compared directly; images are for
  *    people.
  *
@@ -26,6 +26,8 @@
  * precisely when a mask is most needed.
  */
 
+import { platform } from './platform.js';
+
 const FINGERPRINT_SIZE = 32;
 const STRUCTURE_SIZE = 64;
 
@@ -34,28 +36,16 @@ const CELL_DELTA = 0.12;
 /** Gradient magnitude above which a structure cell is considered an edge. */
 const EDGE_THRESHOLD = 0.08;
 
-function requireCanvas() {
-  if (typeof createImageBitmap !== 'function' || typeof OffscreenCanvas !== 'function') {
-    throw new Error('This Chromium build does not expose OffscreenCanvas/createImageBitmap to extension workers.');
-  }
-}
-
-function base64ToBytes(dataBase64) {
-  const binary = atob(dataBase64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
-}
-
+/**
+ * Decode through the platform: OffscreenCanvas in the extension worker, the
+ * engine's hidden utility page in the daemon (Node has no image decoder and v2
+ * has no dependencies). The image is STRETCHED to size×size — that is how the
+ * v1 fingerprints were computed, and every stored baseline depends on it.
+ */
 async function lumaGrid(dataBase64, mime, size) {
-  requireCanvas();
-  const bitmap = await createImageBitmap(new Blob([base64ToBytes(dataBase64)], { type: mime }));
-  const source = { width: bitmap.width, height: bitmap.height };
-  const canvas = new OffscreenCanvas(size, size);
-  const context = canvas.getContext('2d', { willReadFrequently: true });
-  context.drawImage(bitmap, 0, 0, size, size);
-  bitmap.close?.();
-  const rgba = context.getImageData(0, 0, size, size).data;
+  const decoded = await platform.image.decode(dataBase64, mime, { width: size, height: size });
+  const rgba = decoded.rgba;
+  const source = { width: decoded.sourceWidth ?? null, height: decoded.sourceHeight ?? null };
   const values = new Array(size * size);
   for (let i = 0, p = 0; i < rgba.length; i += 4, p++) {
     values[p] = Math.round((rgba[i] * 0.2126) + (rgba[i + 1] * 0.7152) + (rgba[i + 2] * 0.0722));
@@ -195,39 +185,51 @@ export function compareVisual(baseline, current, { mode = 'layout', masks = [], 
  * not a comparison — nothing decides anything from this image.
  */
 export async function diffImage(currentBase64, comparison, { mime = 'image/png' } = {}) {
-  requireCanvas();
   if (!comparison?.changedCells?.length) return null;
-  const bitmap = await createImageBitmap(new Blob([base64ToBytes(currentBase64)], { type: mime }));
-  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-  const context = canvas.getContext('2d');
-  context.drawImage(bitmap, 0, 0);
-  bitmap.close?.();
+  const { width, height, rgba } = await platform.image.decode(currentBase64, mime);
+  const out = new Uint8ClampedArray(rgba);
 
-  context.fillStyle = 'rgba(255,255,255,0.55)';
-  context.fillRect(0, 0, canvas.width, canvas.height);
+  // Wash the whole image towards white so the painted cells stand out. Same
+  // colours as the canvas version this replaced: white at 0.55, then a red fill
+  // at 0.45 with a darker 1px outline per changed cell.
+  blend(out, 0, 0, width, height, width, [255, 255, 255], 0.55);
 
   const size = STRUCTURE_SIZE;
-  const cellW = canvas.width / size;
-  const cellH = canvas.height / size;
-  context.fillStyle = 'rgba(220,38,38,0.45)';
-  context.strokeStyle = 'rgba(153,27,27,0.9)';
-  context.lineWidth = 1;
+  const cellW = width / size;
+  const cellH = height / size;
   for (const index of comparison.changedCells) {
-    const x = (index % size) * cellW;
-    const y = Math.floor(index / size) * cellH;
-    context.fillRect(x, y, cellW, cellH);
-    context.strokeRect(x + 0.5, y + 0.5, cellW - 1, cellH - 1);
+    const x0 = Math.round((index % size) * cellW);
+    const y0 = Math.round(Math.floor(index / size) * cellH);
+    const x1 = Math.max(x0 + 1, Math.round(((index % size) + 1) * cellW));
+    const y1 = Math.max(y0 + 1, Math.round((Math.floor(index / size) + 1) * cellH));
+    blend(out, x0, y0, x1, y1, width, [220, 38, 38], 0.45);
+    // Outline, inside the cell.
+    blend(out, x0, y0, x1, y0 + 1, width, [153, 27, 27], 0.9);
+    blend(out, x0, y1 - 1, x1, y1, width, [153, 27, 27], 0.9);
+    blend(out, x0, y0, x0 + 1, y1, width, [153, 27, 27], 0.9);
+    blend(out, x1 - 1, y0, x1, y1, width, [153, 27, 27], 0.9);
   }
 
-  const blob = await canvas.convertToBlob({ type: 'image/png' });
-  const buffer = await blob.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  const CHUNK = 0x8000;
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  return platform.image.encodePng({ width, height, rgba: out });
+}
+
+/** Source-over blend of one colour into a rectangle of an RGBA buffer, in place. */
+function blend(rgba, x0, y0, x1, y1, width, [r, g, b], alpha) {
+  const height = rgba.length / 4 / width;
+  const xs = Math.max(0, x0);
+  const ys = Math.max(0, y0);
+  const xe = Math.min(width, x1);
+  const ye = Math.min(height, y1);
+  const keep = 1 - alpha;
+  for (let y = ys; y < ye; y++) {
+    for (let x = xs; x < xe; x++) {
+      const i = ((y * width) + x) * 4;
+      rgba[i] = (rgba[i] * keep) + (r * alpha);
+      rgba[i + 1] = (rgba[i + 1] * keep) + (g * alpha);
+      rgba[i + 2] = (rgba[i + 2] * keep) + (b * alpha);
+      rgba[i + 3] = 255;
+    }
   }
-  return btoa(binary);
 }
 
 /** Everything a baseline needs, captured once. */

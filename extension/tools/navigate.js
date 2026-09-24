@@ -6,10 +6,21 @@
  * and return *why* they finished, so the agent can reason about it.
  */
 
-import { send, evaluate } from '../lib/cdp.js';
+import { send, COMMAND_TIMEOUT_MS } from '../lib/cdp.js';
 import { clearRefs } from '../lib/refs.js';
-import { clearBuffers } from './observe.js';
-import { network } from './observe.js';
+import { inWorld } from '../lib/world.js';
+import { levelFor, perform } from '../lib/humanize.js';
+import { createRng, planGap } from '../humanize/index.js';
+import { clearBuffers, network } from './observe.js';
+
+/**
+ * Every page read here runs in G9's isolated world (lib/world.js). The idle
+ * watcher below is the case that made this matter: it used to hang a
+ * MutationObserver and a `window.__g9Idle` object off the page's own window,
+ * where the page — and anything fingerprinting it — could see both. In the
+ * isolated world it observes the same DOM and is invisible to the page.
+ */
+const evaluate = (tabId, expression) => inWorld(tabId, expression);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -32,22 +43,84 @@ async function resetPageState(tabId) {
   await clearBuffers(tabId);
 }
 
-export async function navigate(tabId, { url, waitUntil = 'load', timeoutMs = 30_000 } = {}) {
+/**
+ * The post-load human idle (plan §6.4): a person looks at a page that has just
+ * loaded before they act on it, and an action at millisecond 0 after
+ * `load` is one of the cheapest automation signals there is. At the `human`
+ * and `stealth` levels the navigation returns only after a pause drawn from
+ * the profile (`gaps.afterNavigationMs`, seeded like every other humanized
+ * decision); at `off` it returns immediately, exactly as v1 did.
+ *
+ * The pause is a planGap() plan run through lib/humanize.js perform(), which
+ * waits until the plan's `durationMs` (trailing pauses included, F3) in
+ * slices and checks Stop between them — a pause sends no input. This used to
+ * be a second copy of that wait loop here, because perform() returned at the
+ * last step's start and a pause-only plan took no time at all. A Stop during
+ * the idle ends the idle only — the navigation itself has already happened.
+ */
+async function humanIdle(tabId, opts) {
+  const { level, profile, seed } = await levelFor(tabId, opts);
+  if (level === 'off') return null;
+  const plan = planGap(createRng(seed), profile, { after: 'navigation' });
+  if (!(plan.durationMs > 0)) return null;
+  const started = Date.now();
+  try {
+    await perform(tabId, plan, { track: false });
+  } catch (err) {
+    if (err?.halted) return { humanIdleMs: Math.min(plan.durationMs, Date.now() - started), humanIdleInterrupted: true, seed };
+    throw err;
+  }
+  return { humanIdleMs: plan.durationMs, seed };
+}
+
+/** Idle only after a load that actually settled; after a timeout there is nothing to look at yet. */
+async function settleLikeAPerson(tabId, settled, opts) {
+  if (settled.timedOut) return {};
+  return (await humanIdle(tabId, opts)) ?? {};
+}
+
+/**
+ * The budget of the navigation COMMAND itself: the call's own deadline, never less than an ordinary
+ * command's.
+ *
+ * `Page.navigate` answers when the navigation commits — once the server's response headers have
+ * arrived (measured: an 8 s and a 25 s header delay returned after 8.0 s and 25.0 s). Its duration
+ * is the server's time to first byte, not the browser's. It used to get the generic 20 s budget
+ * meant for stuck commands: a goto with timeoutMs 45000–90000 to a server that took 25 s failed at
+ * 20 s as "stuck rather than slow — the browser never answered" (live round 3: 4/59 public pages,
+ * and a cold staging server), while `timeoutMs` only bounded the load wait that came after.
+ * `timeoutMs` is now the deadline of the whole goto: the command gets it, the load wait gets what
+ * is left.
+ */
+export function navigationBudget(timeoutMs) {
+  return Math.max(Number(timeoutMs) > 0 ? Number(timeoutMs) : 0, COMMAND_TIMEOUT_MS);
+}
+
+/** What is left of a `timeoutMs` deadline that started at `started` (at least 1 s, to read the state). */
+const remainingOf = (started, timeoutMs) => Math.max(1_000, timeoutMs - (Date.now() - started));
+
+export async function navigate(tabId, opts = {}) {
+  const { url, waitUntil = 'load', timeoutMs = 30_000 } = opts;
   await resetPageState(tabId);
-  const result = await send(tabId, 'Page.navigate', { url });
+  const started = Date.now();
+  const result = await send(tabId, 'Page.navigate', { url }, { timeoutMs: navigationBudget(timeoutMs) });
   if (result.errorText) throw new Error(`Navigation to ${url} failed: ${result.errorText}`);
-  const settled = await waitForLoad(tabId, { waitUntil, timeoutMs });
-  return { url: await currentUrl(tabId), ...settled };
+  const settled = await waitForLoad(tabId, { waitUntil, timeoutMs: remainingOf(started, timeoutMs) });
+  const idle = await settleLikeAPerson(tabId, settled, opts);
+  return { url: await currentUrl(tabId), ...settled, ...idle };
 }
 
-export async function reload(tabId, { hard = false, waitUntil = 'load', timeoutMs = 30_000 } = {}) {
+export async function reload(tabId, opts = {}) {
+  const { hard = false, waitUntil = 'load', timeoutMs = 30_000 } = opts;
   await resetPageState(tabId);
-  await send(tabId, 'Page.reload', { ignoreCache: hard });
-  const settled = await waitForLoad(tabId, { waitUntil, timeoutMs });
-  return { url: await currentUrl(tabId), hard, ...settled };
+  const started = Date.now();
+  await send(tabId, 'Page.reload', { ignoreCache: hard }, { timeoutMs: navigationBudget(timeoutMs) });
+  const settled = await waitForLoad(tabId, { waitUntil, timeoutMs: remainingOf(started, timeoutMs) });
+  const idle = await settleLikeAPerson(tabId, settled, opts);
+  return { url: await currentUrl(tabId), hard, ...settled, ...idle };
 }
 
-export async function history(tabId, { delta = -1 } = {}) {
+export async function history(tabId, { delta = -1, ...opts } = {}) {
   const { currentIndex, entries } = await send(tabId, 'Page.getNavigationHistory');
   const target = currentIndex + delta;
   if (target < 0 || target >= entries.length) {
@@ -55,9 +128,11 @@ export async function history(tabId, { delta = -1 } = {}) {
   }
   // Only discard refs and evidence once a destination is known to exist.
   await resetPageState(tabId);
-  await send(tabId, 'Page.navigateToHistoryEntry', { entryId: entries[target].id });
-  await waitForLoad(tabId, { waitUntil: 'load', timeoutMs: 15_000 });
-  return { url: await currentUrl(tabId), movedTo: entries[target].url };
+  const started = Date.now();
+  await send(tabId, 'Page.navigateToHistoryEntry', { entryId: entries[target].id }, { timeoutMs: navigationBudget(15_000) });
+  const settled = await waitForLoad(tabId, { waitUntil: 'load', timeoutMs: remainingOf(started, 15_000) });
+  const idle = await settleLikeAPerson(tabId, settled, opts);
+  return { url: await currentUrl(tabId), movedTo: entries[target].url, ...idle };
 }
 
 /**

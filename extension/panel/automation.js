@@ -31,6 +31,64 @@
 import { el, cmd, node, row, toast, showPanelError, ago, view } from './ui.js';
 
 let recording = false;
+/** A start or stop is on its way to the service worker. */
+let recBusy = false;
+/** The last recStatus answer, so a busy repaint keeps the same text. */
+let lastRecStatus = { recording: false };
+let lastRecElsewhere = [];
+let lastRecHalted = false;
+
+/**
+ * What the Record controls show (F8). Pure; exported for the unit test.
+ *
+ * `startRecording` refuses a tab that is already recording (tools/record.js: a
+ * second start used to replace the session, leak the first one's scripts into
+ * every later page of the tab and lose its steps). So while THIS tab records,
+ * the Record button is disabled and says why, and "Stop and save" is the
+ * action; while a start or stop is on its way, neither can be pressed again —
+ * a double click was exactly a second start. Another tab recording does not
+ * block this one (sessions are per tab), but it is named, because the panel
+ * otherwise shows nothing about it.
+ */
+export function recordControls(status = {}, { busy = false, elsewhere = [], halted = false } = {}) {
+  const on = !!status?.recording;
+  const name = status?.name ? `"${status.name}"` : 'a flow';
+  let why = '';
+  if (on && halted) {
+    // Stop blocks agents, not the person's own save (sw.js recStop runs as the person).
+    why = `Agents are stopped; this tab is still recording ${name}. Stop and save works while Stop is on.`;
+  } else if (on) {
+    why = `This tab is already recording ${name}. Stop and save it before starting another — ` +
+      'a second start on the same tab is refused.';
+  } else if (halted) {
+    why = 'Agents are stopped. Press Resume to record.';
+  } else if (busy) {
+    why = 'Starting…';
+  }
+  const others = (Array.isArray(elsewhere) ? elsewhere : []).filter((r) => r && r.tabId != null);
+  const note = others.length
+    ? ` Also recording in another tab: ${others.map((r) => `${r.name ? `"${r.name}"` : 'a flow'} (tab ${r.tabId})`).join(', ')}.`
+    : '';
+  return {
+    startDisabled: on || busy || halted,
+    startTitle: on || halted ? why : busy ? 'Starting…' : 'Record what you do in this tab',
+    stopHidden: !on,
+    stopDisabled: busy,
+    why: (why + note).trim(),
+  };
+}
+
+function paintRecordControls() {
+  const c = recordControls(lastRecStatus, { busy: recBusy, elsewhere: lastRecElsewhere, halted: lastRecHalted });
+  el.recToggle.disabled = c.startDisabled;
+  el.recToggle.title = c.startTitle;
+  el.recToggle.setAttribute?.('aria-disabled', String(c.startDisabled));
+  el.recStop.hidden = c.stopHidden;
+  el.recStop.disabled = c.stopDisabled;
+  el.recWhy.textContent = c.why;
+  el.recWhy.hidden = !c.why;
+}
+
 /** Flow ids whose detail row is expanded. */
 const expanded = new Set();
 /**
@@ -90,13 +148,15 @@ export async function refresh() {
     res = await cmd({ cmd: 'recStatus' });
   } catch (err) {
     el.recCount.textContent = 'refresh failed';
-    return showPanelError('Automation refresh failed: ' + (err?.message ?? err));
+    return showPanelError('Automation refresh failed: ' + (err?.message ?? err), { source: 'refresh' });
   }
-  if (!res?.ok) return showPanelError(res?.error ?? 'Automation refresh failed.');
+  if (!res?.ok) return showPanelError(res?.error ?? 'Automation refresh failed.', { source: 'refresh' });
 
   recording = !!res.status?.recording;
-  el.recToggle.textContent = recording ? '■ Stop and save' : '● Start recording';
-  el.recToggle.classList.toggle('stop', recording);
+  lastRecStatus = res.status ?? { recording: false };
+  lastRecElsewhere = Array.isArray(res.elsewhere) ? res.elsewhere : [];
+  lastRecHalted = res.halted === true;
+  paintRecordControls();
   el.recLive.hidden = !recording;
   if (recording) {
     const st = res.status;
@@ -619,7 +679,8 @@ async function pull() {
   const res = await cmd({ cmd: 'flowPull' }).catch((err) => ({ ok: false, error: String(err) }));
   if (!res?.ok) return showPanelError(res?.error ?? 'Pull failed.');
   toast(`${res.imported} flow(s) pulled from the repo`);
-  for (const p of res.problems ?? []) showPanelError(p);
+  // Every problem, not just the last: each one is a flow that did not come over.
+  if (res.problems?.length) showPanelError(res.problems.join('\n'));
   syncStatus();
   refresh();
 }
@@ -632,20 +693,35 @@ async function push(ids) {
       ? `${res.changed} file(s) written — commit them on a branch off dev`
       : `${res.written} flow(s) already up to date`,
   );
-  for (const p of res.problems ?? []) showPanelError(p);
+  const lines = [...(res.problems ?? []), ...(res.notes ?? [])];
+  if (lines.length) showPanelError(lines.join('\n'));
   syncStatus();
 }
 
 // -------------------------------------------------------------------- wiring
 
 export function wire() {
-  el.recToggle.addEventListener('click', async () => {
-    const wasRecording = recording;
-    const res = await cmd({ cmd: wasRecording ? 'recStop' : 'recStart' });
-    if (!res?.ok) return showPanelError(res?.error ?? 'Recording command failed.');
-    toast(wasRecording ? `Saved "${res.name}" — ${res.steps} steps` : 'Recording — go and use the page');
-    refresh();
-  });
+  // Two buttons, not one toggle (F8): Record is disabled, with the reason
+  // shown, while this tab records; Stop and save is the action then.
+  const recordCommand = async (which) => {
+    if (recBusy) return;
+    if (which === 'recStart' && recording) return; // disabled, but never trust a stale button
+    recBusy = true;
+    paintRecordControls();
+    try {
+      const res = await cmd({ cmd: which });
+      if (!res?.ok) return showPanelError(res?.error ?? 'Recording command failed.');
+      toast(which === 'recStop' ? `Saved "${res.name}" — ${res.steps} steps` : 'Recording — go and use the page');
+    } catch (err) {
+      showPanelError(`Recording command failed: ${err?.message ?? err}`);
+    } finally {
+      recBusy = false;
+      paintRecordControls();
+      refresh();
+    }
+  };
+  el.recToggle.addEventListener('click', () => recordCommand('recStart'));
+  el.recStop.addEventListener('click', () => recordCommand('recStop'));
 
   el.suiteBtn.addEventListener('click', runAll);
   el.syncPull.addEventListener('click', pull);

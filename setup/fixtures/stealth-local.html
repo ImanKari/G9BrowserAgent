@@ -1,0 +1,1031 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stealth self-test - local detector</title>
+<!--
+  The local half of the stealth self-test (V2_IMPLEMENTATION_PLAN §6.6, setup/stealthtest.mjs).
+
+  This page is a detector written against G9 itself: it looks for what G9 controls and could leak
+  (a global or DOM helper in the main world, the Runtime-domain console side channel, main-world
+  DOM calls made by someone other than the page, untrusted or teleported input, a locale/timezone/
+  Accept-Language story that does not hang together, a screen that does not contain its window)
+  and records the environment facts a public detector would score (webdriver, headless user agent,
+  WebGL renderer, plugins, permissions).
+
+  Rules this page keeps so that its own presence cannot be mistaken for a leak:
+  * It declares NO global of its own: everything lives in one IIFE, so any own property that
+    appears on `window` after the first script ran was put there by someone else.
+  * It keeps the original DOM methods before wrapping them, and uses only those itself, so a call
+    through a wrapped method was made by code that is not this page.
+  * It never dispatches a synthetic event, so any isTrusted:false event came from outside.
+  * Its element ids start with "sl-" and contain no "g9", so a DOM scan for "g9" finds only G9.
+
+  The verdict is written, base64-encoded JSON, into #sl-result[data-json] a few times a second;
+  #sl-result[data-ready="1"] says the asynchronous environment probes have finished. The harness
+  reads it with browser_inspect what:"dom" (the DOM domain only, no script in any world).
+
+  Query parameters: echo=<url of the harness's header echo server> (for Accept-Language and
+  Client Hints as the server sees them), expect=<json {locale,timezone}> (what G9 was told to set),
+  probe=<ms> (how often the Runtime probe runs; default 500), xframe=<url> (embed that page — this
+  one with role=frame from another SITE, so it is an out-of-process frame G9 meets as a child
+  session), popup=<url> (what the "Open popup" button opens with window.open), role=frame|popup
+  (this document is such a child: it runs the probes and posts them to its parent/opener instead
+  of being a test page; life=<ms> is how long a popup lives before it closes itself).
+
+  Measured with it (Edge 153, 2026-09-22): an out-of-process frame does NOT follow the timezone and
+  locale overrides G9 sends to the page session (top Europe/Berlin de-DE, frame = the host's zone
+  and en-US/de); sent to the frame's own session before it runs, they do. And a page's
+  window.open() never completes while the browser session auto-attaches with
+  waitForDebuggerOnStart:false (see stealthtest.mjs runPopupTest).
+-->
+<script>
+(() => {
+  'use strict';
+  const T_START = performance.now();
+
+  // ---- originals, taken before anything is wrapped --------------------------------------------
+  const D = Document.prototype;
+  const E = Element.prototype;
+  const own = {
+    getById: D.getElementById,
+    qsaDoc: D.querySelectorAll,
+    getNames: Object.getOwnPropertyNames,
+    fnToString: Function.prototype.toString,
+    define: Object.defineProperty,
+    debug: console.debug,
+    rect: E.getBoundingClientRect,
+    getAttributeNames: E.getAttributeNames,
+    hasFocus: D.hasFocus,
+    createElement: D.createElement,
+    setInterval: window.setInterval,
+    setTimeout: window.setTimeout,
+    now: performance.now.bind(performance),
+  };
+  const byId = (id) => own.getById.call(document, id);
+  const allElements = () => own.qsaDoc.call(document, '*');
+
+  const S = {
+    version: 1,
+    tStart: T_START,
+    tLoad: null,
+    baselineGlobals: own.getNames(window),
+    events: [],
+    eventsDropped: 0,
+    listenerStacks: [],
+    mainWorldCalls: [],
+    runtimeProbe: { runs: 0, hits: 0, firstHitAt: null, variants: {} },
+    userActivationAtLoad: null,
+    env: {},
+    envErrors: [],
+    envDone: false,
+    seq: 0,
+  };
+  const baseline = new Set(S.baselineGlobals);
+
+  // ---- main-world DOM calls made by someone other than this page ------------------------------
+  // Isolated worlds (where G9 reads the page) have their own wrappers of these prototypes, so a
+  // call from there never reaches the functions below. A call from the MAIN world that is not
+  // this page's own is what a "main world execution" detector looks for.
+  const HOOKS = [
+    [D, 'querySelector'], [D, 'querySelectorAll'], [D, 'getElementById'], [D, 'getElementsByClassName'],
+    [D, 'getElementsByTagName'], [D, 'getElementsByName'], [D, 'evaluate'], [D, 'createTreeWalker'],
+    [D, 'elementFromPoint'], [D, 'elementsFromPoint'], [D, 'hasFocus'],
+    [E, 'querySelector'], [E, 'querySelectorAll'], [E, 'getBoundingClientRect'], [E, 'getClientRects'],
+    [E, 'scrollIntoView'], [E, 'scrollIntoViewIfNeeded'], [E, 'closest'], [E, 'matches'],
+    [HTMLElement.prototype, 'focus'], [HTMLElement.prototype, 'click'], [HTMLElement.prototype, 'blur'],
+    [EventTarget.prototype, 'dispatchEvent'],
+    [window, 'getComputedStyle'], [window, 'scrollBy'], [window, 'scrollTo'], [window, 'scroll'],
+  ];
+  for (const [obj, name] of HOOKS) {
+    const orig = obj[name];
+    if (typeof orig !== 'function') continue;
+    const wrapped = {
+      [name](...args) {
+        if (S.mainWorldCalls.length < 40) {
+          let stack = '';
+          try { stack = String(new Error().stack).split('\n').slice(2, 5).join(' | ').slice(0, 300); } catch { /* ignore */ }
+          S.mainWorldCalls.push({ fn: name, at: Math.round(own.now()), stack });
+        }
+        return orig.apply(this, args);
+      },
+    }[name];
+    try { own.define(obj, name, { value: wrapped, writable: true, configurable: true, enumerable: false }); } catch { /* ignore */ }
+  }
+
+  // ---- the Runtime-domain side channel --------------------------------------------------------
+  // With Runtime enabled, the inspector builds a description of every console argument, and pages
+  // can watch it do so through getters on what they log. Measured on Edge/Chrome 153:
+  // * the classic probe (an own `stack` getter on a logged Error) NO LONGER fires — V8 stopped
+  //   reading `stack` through the property — so it is kept only as a reported variant;
+  // * an own `name` getter on a logged Error runs ONCE without Runtime (Blink formats the message)
+  //   and TWICE with Runtime enabled (the inspector's error description reads it again). That
+  //   difference is the probe's verdict: more than one read per console call = a CDP client with
+  //   Runtime enabled is listening.
+  const PROBE_ROUNDS = 3;
+  function runtimeProbe() {
+    S.runtimeProbe.runs += 1;
+    let stackReads = 0;
+    const e = new Error('probe');
+    own.define(e, 'stack', { configurable: false, enumerable: false, get() { stackReads += 1; return ''; } });
+    own.debug.call(console, e);
+    let nameMax = 0;
+    for (let i = 0; i < PROBE_ROUNDS; i++) {
+      let nameReads = 0;
+      const n = new Error('probe');
+      own.define(n, 'name', { configurable: true, enumerable: false, get() { nameReads += 1; return 'Error'; } });
+      own.debug.call(console, n);
+      nameMax = Math.max(nameMax, nameReads);
+    }
+    const r = S.runtimeProbe;
+    r.nameReadsLast = nameMax;
+    r.nameReadsMax = Math.max(r.nameReadsMax || 0, nameMax);
+    const hit = stackReads > 0 || nameMax > 1;
+    if (stackReads > 0) r.variants.ownStack = (r.variants.ownStack || 0) + 1;
+    if (nameMax > 1) r.variants.nameGetterTwice = (r.variants.nameGetterTwice || 0) + 1;
+    if (hit) {
+      r.hits += 1;
+      r.lastHitAt = Math.round(own.now());
+      if (r.firstHitAt == null) r.firstHitAt = r.lastHitAt;
+    }
+  }
+  // probe=<ms>: how often the probe runs (default 500). The harness's tool sweep and the child
+  // documents below use a faster beat, so a tool that switches Runtime on for a moment is still seen.
+  const QS = new URLSearchParams(location.search);
+  const PROBE_MS = Math.min(2000, Math.max(20, Number(QS.get('probe')) || 500));
+  try { runtimeProbe(); } catch (err) { S.envErrors.push('runtimeProbe: ' + err.message); }
+  own.setInterval.call(window, () => { try { runtimeProbe(); } catch { /* ignore */ } }, PROBE_MS);
+
+  // ---- child documents: a cross-site frame and a popup ----------------------------------------
+  // role=frame: this document is the cross-site (out-of-process) iframe the top page embeds;
+  // role=popup: it is a tab the top page opened with window.open() after a trusted click. Neither
+  // is a tab G9 opened: G9 meets the frame as a CHILD session of the tab it drives (auto-attach)
+  // and the popup as a new target in the same browser context. Both must get the stealth treatment
+  // of the tab that led to them — no Runtime domain, nothing in the main world, webdriver false.
+  // A child runs the same probes and hooks as the top page and posts what it saw to the top page
+  // (parent / opener), which reports it; it never touches the top page otherwise.
+  const ROLE = QS.get('role');
+  if (ROLE === 'frame' || ROLE === 'popup') {
+    const target = ROLE === 'frame' ? window.parent : window.opener;
+    const report = (final) => {
+      const added = own.getNames(window).filter((k) => !baseline.has(k) && !(/^\d+$/.test(k) && Number(k) < window.frames.length));
+      const suspicious = added.filter((k) => {
+        let v;
+        try { v = window[k]; } catch { v = undefined; }
+        return /g9|__|binding|cdc_|\$cdc|playwright|puppeteer|selenium|webdriver|domAutomation|callPhantom|_phantom|emit/i.test(k) || (typeof v === 'function' && /\{\s*\[native code\]\s*\}\s*$/.test(own.fnToString.call(v)));
+      });
+      const o = Intl.DateTimeFormat().resolvedOptions();
+      const msg = {
+        slChild: ROLE, final: !!final, at: Math.round(own.now()), origin: location.origin, isTop: window === window.top,
+        runtimeProbe: { runs: S.runtimeProbe.runs, hits: S.runtimeProbe.hits, nameReadsMax: S.runtimeProbe.nameReadsMax || 0, variants: S.runtimeProbe.variants, firstHitAt: S.runtimeProbe.firstHitAt },
+        globalsAdded: added.slice(0, 20), suspicious: suspicious.slice(0, 20), mainWorldCalls: S.mainWorldCalls.slice(0, 10),
+        webdriver: navigator.webdriver, userAgent: navigator.userAgent, languages: Array.from(navigator.languages || []),
+        timeZone: o.timeZone, locale: o.locale, visibility: document.visibilityState, hasFocus: own.hasFocus.call(document),
+        outer: window.outerWidth + 'x' + window.outerHeight, inner: window.innerWidth + 'x' + window.innerHeight,
+      };
+      try { if (target && target !== window) target.postMessage(msg, '*'); } catch { /* the top page went away */ }
+    };
+    if (ROLE === 'frame') {
+      own.setInterval.call(window, () => report(false), 500);
+    } else {
+      // A popup lives LIFE_MS, reporting as it goes, then says goodbye and closes itself (a window
+      // opened by script may close itself), so the opener becomes the visible tab again.
+      const LIFE_MS = Math.min(10000, Math.max(1000, Number(QS.get('life')) || 3000));
+      const t = own.setInterval.call(window, () => report(false), 300);
+      own.setTimeout.call(window, () => { clearInterval(t); report(true); own.setTimeout.call(window, () => window.close(), 150); }, LIFE_MS);
+    }
+    return;
+  }
+
+  // ---- every input event the page sees ---------------------------------------------------------
+  const TYPES = ['pointerover', 'pointerenter', 'pointerout', 'pointerleave', 'pointermove', 'pointerrawupdate', 'pointerdown', 'pointerup',
+    'pointercancel', 'mouseover', 'mouseenter', 'mouseout', 'mouseleave', 'mousemove', 'mousedown', 'mouseup', 'click',
+    'dblclick', 'auxclick', 'contextmenu', 'wheel', 'keydown', 'keypress', 'keyup', 'beforeinput', 'input', 'change',
+    'focus', 'blur', 'focusin', 'focusout', 'scroll', 'select', 'touchstart'];
+  const STACK_TYPES = new Set(['focus', 'blur', 'focusin', 'focusout', 'click', 'input', 'change', 'scroll', 'select',
+    'keydown', 'mousedown', 'pointerdown', 'wheel', 'beforeinput']);
+  const MAX_EVENTS = 6000;
+  const idOf = (t) => {
+    if (!t) return null;
+    if (t === window) return 'window';
+    if (t === document) return 'document';
+    return t.id || (t.tagName ? t.tagName.toLowerCase() : String(t.nodeName || '?'));
+  };
+  function onEvent(e) {
+    if (STACK_TYPES.has(e.type)) {
+      // A trusted event from the browser runs this listener with nothing below it. A handler run
+      // because some OTHER script called el.focus()/click()/dispatchEvent shows that caller here.
+      try {
+        const lines = String(new Error().stack).split('\n').slice(2).filter((l) => l.trim());
+        if (lines.length && S.listenerStacks.length < 30) S.listenerStacks.push({ type: e.type, frames: lines.slice(0, 3).join(' | ').slice(0, 300) });
+      } catch { /* ignore */ }
+    }
+    if (S.events.length >= MAX_EVENTS) { S.eventsDropped += 1; return; }
+    // t: the event's own timeStamp (when the browser created the input); hd: when this handler ran.
+    // They differ when input is queued in the renderer, and only `t` says what the hand did.
+    // (Not `h`: pointer events record their height as r.h below.)
+    const r = { ty: e.type, t: Math.round(e.timeStamp * 10) / 10, hd: Math.round(own.now() * 10) / 10, tr: e.isTrusted, id: idOf(e.target) };
+    if ('clientX' in e) {
+      r.cx = e.clientX; r.cy = e.clientY; r.sx = e.screenX; r.sy = e.screenY;
+      r.mx = e.movementX; r.my = e.movementY; r.b = e.buttons; r.bt = e.button; r.d = e.detail;
+    }
+    if ('pointerType' in e) {
+      r.pt = e.pointerType; r.pr = e.pressure; r.pid = e.pointerId; r.w = e.width; r.h = e.height;
+      if (e.type === 'pointermove' && typeof e.getCoalescedEvents === 'function') {
+        try { r.co = e.getCoalescedEvents().length; } catch { /* ignore */ }
+      }
+    }
+    if ('key' in e) { r.k = e.key; r.c = e.code; r.loc = e.location; r.rep = e.repeat; r.sh = e.shiftKey; r.kc = e.keyCode; }
+    if ('deltaY' in e) { r.dx = e.deltaX; r.dy = e.deltaY; r.dm = e.deltaMode; }
+    if ('inputType' in e) r.it = e.inputType;
+    if (e.type === 'scroll') r.scy = Math.round(window.scrollY);
+    S.events.push(r);
+  }
+  // pointerenter/mouseenter/…leave do not bubble, and Chromium does not run window CAPTURE
+  // listeners for them either (measured: none arrived), so they are taken on the elements below.
+  const BOUNDARY = new Set(['pointerenter', 'pointerleave', 'mouseenter', 'mouseleave']);
+  for (const type of TYPES) if (!BOUNDARY.has(type)) window.addEventListener(type, onEvent, { capture: true, passive: true });
+  // What G9's own tools might make the page notice: a viewport resize (a full-page screenshot done by
+  // resizing), a visibility flip, the window losing focus.
+  S.sideEffects = [];
+  const sideEffect = (e) => {
+    // After the harness clicked "Open popup", visibility and blur changes are the popup's doing (a
+    // new tab in front), not a tool's: they are kept apart (popup: true) and reported with the popup.
+    const popup = S.popupClickedAt != null && e.timeStamp >= S.popupClickedAt;
+    if (S.sideEffects.length < 40) S.sideEffects.push({ ty: e.type, t: Math.round(e.timeStamp), inner: window.innerWidth + 'x' + window.innerHeight, vis: document.visibilityState, scy: Math.round(window.scrollY), ...(popup ? { popup: true } : {}) });
+  };
+  for (const type of ['resize', 'visibilitychange', 'pagehide', 'pageshow', 'freeze', 'resume']) (type === 'visibilitychange' || type === 'freeze' || type === 'resume' ? document : window).addEventListener(type, sideEffect, { capture: true });
+  window.addEventListener('blur', (e) => { if (e.target === window) sideEffect(e); }, { capture: true });
+
+  // ---- helpers ---------------------------------------------------------------------------------
+  const median = (a) => {
+    if (!a.length) return null;
+    const s = [...a].sort((x, y) => x - y);
+    const m = s.length >> 1;
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  };
+  const mean = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
+  const sd = (a) => {
+    const m = mean(a);
+    return a.length > 1 ? Math.sqrt(a.reduce((x, y) => x + (y - m) ** 2, 0) / (a.length - 1)) : null;
+  };
+  const round = (v, n = 1) => (v == null || !Number.isFinite(v) ? v : Math.round(v * 10 ** n) / 10 ** n);
+  const isNative = (fn) => {
+    try { return /\{\s*\[native code\]\s*\}\s*$/.test(own.fnToString.call(fn)); } catch { return false; }
+  };
+  const langOf = (tag) => { try { return new Intl.Locale(tag).language; } catch { return null; } };
+  const regionOf = (tag) => {
+    try { const l = new Intl.Locale(tag); return l.region || l.maximize().region || null; } catch { return null; }
+  };
+  const zonesOf = (region) => {
+    try {
+      const l = new Intl.Locale('und-' + region);
+      const z = typeof l.getTimeZones === 'function' ? l.getTimeZones() : l.timeZones;
+      return Array.isArray(z) ? z : null;
+    } catch { return null; }
+  };
+  const canonZone = (z) => { try { return new Intl.DateTimeFormat('en-US', { timeZone: z }).resolvedOptions().timeZone; } catch { return z; } };
+  const withTimeout = (p, ms, fallback) => Promise.race([p, new Promise((r) => own.setTimeout.call(window, () => r(fallback), ms))]);
+  const params = QS;
+  let expect = {};
+  try { expect = JSON.parse(params.get('expect') || '{}') || {}; } catch { expect = {}; }
+
+  // ---- environment probes ---------------------------------------------------------------------
+  function syncEnv() {
+    const n = navigator;
+    const env = S.env;
+    env.userAgent = n.userAgent;
+    env.appVersion = n.appVersion;
+    env.platform = n.platform;
+    env.vendor = n.vendor;
+    env.webdriver = n.webdriver;
+    const wd = Object.getOwnPropertyDescriptor(Navigator.prototype, 'webdriver');
+    env.webdriverDescriptor = wd ? { onPrototype: true, getterNative: !!(wd.get && isNative(wd.get)) } : { onPrototype: false };
+    env.webdriverOwn = Object.prototype.hasOwnProperty.call(n, 'webdriver');
+    env.language = n.language;
+    env.languages = Array.from(n.languages || []);
+    env.hardwareConcurrency = n.hardwareConcurrency;
+    env.deviceMemory = n.deviceMemory;
+    env.maxTouchPoints = n.maxTouchPoints;
+    env.cookieEnabled = n.cookieEnabled;
+    env.doNotTrack = n.doNotTrack;
+    env.pdfViewerEnabled = n.pdfViewerEnabled;
+    env.plugins = { length: n.plugins.length, isPluginArray: n.plugins instanceof PluginArray, names: Array.from(n.plugins).map((p) => p.name) };
+    env.mimeTypes = { length: n.mimeTypes.length, isMimeTypeArray: n.mimeTypes instanceof MimeTypeArray };
+    env.connection = n.connection ? { rtt: n.connection.rtt, downlink: n.connection.downlink, effectiveType: n.connection.effectiveType } : null;
+    env.uaData = n.userAgentData ? { brands: n.userAgentData.brands, mobile: n.userAgentData.mobile, platform: n.userAgentData.platform } : null;
+    env.chrome = {
+      type: typeof window.chrome,
+      keys: window.chrome ? Object.keys(window.chrome).sort() : [],
+      runtime: window.chrome ? typeof window.chrome.runtime : 'n/a',
+      loadTimesNative: !!(window.chrome && typeof window.chrome.loadTimes === 'function' && isNative(window.chrome.loadTimes)),
+      csiNative: !!(window.chrome && typeof window.chrome.csi === 'function' && isNative(window.chrome.csi)),
+    };
+    const dtf = Intl.DateTimeFormat().resolvedOptions();
+    env.intl = {
+      locale: dtf.locale,
+      timeZone: dtf.timeZone,
+      numberLocale: new Intl.NumberFormat().resolvedOptions().locale,
+      collatorLocale: new Intl.Collator().resolvedOptions().locale,
+      offsetMin: new Date().getTimezoneOffset(),
+      dateString: new Date(Date.UTC(2026, 0, 15, 12)).toString(),
+    };
+    env.screen = {
+      width: screen.width, height: screen.height, availWidth: screen.availWidth, availHeight: screen.availHeight,
+      availLeft: screen.availLeft, availTop: screen.availTop, colorDepth: screen.colorDepth, pixelDepth: screen.pixelDepth,
+      isExtended: screen.isExtended, orientation: screen.orientation ? screen.orientation.type : null,
+    };
+    env.window = geometry();
+  }
+
+  function geometry() {
+    return {
+      outerWidth: window.outerWidth, outerHeight: window.outerHeight, innerWidth: window.innerWidth, innerHeight: window.innerHeight,
+      screenX: window.screenX, screenY: window.screenY, devicePixelRatio: window.devicePixelRatio,
+      at: Math.round(own.now()),
+    };
+  }
+
+  function syncEnvRest() {
+    const env = S.env;
+    const n = navigator;
+    env.media = {
+      pointerFine: matchMedia('(pointer: fine)').matches,
+      hoverHover: matchMedia('(hover: hover)').matches,
+      anyPointerCoarse: matchMedia('(any-pointer: coarse)').matches,
+      displayModeBrowser: matchMedia('(display-mode: browser)').matches,
+      prefersDark: matchMedia('(prefers-color-scheme: dark)').matches,
+    };
+    env.notificationPermission = typeof Notification !== 'undefined' ? Notification.permission : 'n/a';
+    env.historyLength = history.length;
+    env.hasBattery = typeof n.getBattery === 'function';
+    env.documentElementAttributes = own.getAttributeNames.call(document.documentElement);
+    // WebGL, as a detector reads it.
+    try {
+      const c = own.createElement.call(document, 'canvas');
+      const gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+      if (gl) {
+        const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+        env.webgl = {
+          vendor: gl.getParameter(gl.VENDOR),
+          renderer: gl.getParameter(gl.RENDERER),
+          unmaskedVendor: dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : null,
+          unmaskedRenderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : null,
+        };
+      } else env.webgl = null;
+    } catch (err) { env.webgl = { error: String(err.message) }; }
+  }
+
+  async function asyncEnv() {
+    const env = S.env;
+    const n = navigator;
+    const tasks = [];
+    tasks.push((async () => {
+      try {
+        const st = await withTimeout(n.permissions.query({ name: 'notifications' }), 3000, null);
+        env.permissionNotifications = st ? st.state : 'timeout';
+      } catch (err) { env.permissionNotifications = 'error: ' + err.message; }
+    })());
+    tasks.push((async () => {
+      if (!n.userAgentData || !n.userAgentData.getHighEntropyValues) return;
+      try {
+        env.uaDataHigh = await withTimeout(n.userAgentData.getHighEntropyValues(['platformVersion', 'fullVersionList', 'architecture', 'bitness', 'model', 'uaFullVersion', 'wow64']), 3000, null);
+      } catch (err) { env.uaDataHigh = { error: err.message }; }
+    })());
+    tasks.push((async () => {
+      try {
+        const devs = await withTimeout(n.mediaDevices.enumerateDevices(), 3000, null);
+        env.mediaDevices = devs ? devs.reduce((acc, d) => { acc[d.kind] = (acc[d.kind] || 0) + 1; return acc; }, {}) : 'timeout';
+      } catch (err) { env.mediaDevices = 'error: ' + err.message; }
+    })());
+    tasks.push((async () => {
+      try {
+        let voices = speechSynthesis.getVoices();
+        if (!voices.length) {
+          await withTimeout(new Promise((r) => speechSynthesis.addEventListener('voiceschanged', r, { once: true })), 2000, null);
+          voices = speechSynthesis.getVoices();
+        }
+        env.voices = { count: voices.length, sample: voices.slice(0, 3).map((v) => v.name) };
+      } catch (err) { env.voices = { error: err.message }; }
+    })());
+    tasks.push((async () => {
+      // Encrypted Media: every Chrome and Edge a person installs plays Widevine (and Edge PlayReady).
+      // A browser launched with --disable-component-update has no Widevine (measured, Edge and
+      // Chrome 153): a known automation tell, and DRM video does not play.
+      const cfg = [{ initDataTypes: ['cenc'], videoCapabilities: [{ contentType: 'video/mp4; codecs="avc1.42E01E"' }] }];
+      env.eme = {};
+      for (const k of ['com.widevine.alpha', 'com.microsoft.playready.recommendation']) {
+        try { env.eme[k] = await withTimeout(n.requestMediaKeySystemAccess(k, cfg).then(() => true, () => false), 3000, null); } catch (err) { env.eme[k] = false; }
+      }
+    })());
+    tasks.push((async () => {
+      const echo = params.get('echo');
+      if (!echo) { env.echo = null; return; }
+      try {
+        const res = await withTimeout(fetch(echo, { cache: 'no-store', credentials: 'omit' }), 4000, null);
+        env.echo = res ? await res.json() : 'timeout';
+      } catch (err) { env.echo = { error: err.message }; }
+    })());
+    tasks.push((async () => {
+      // A dedicated worker has its own navigator and Intl: automation that patches only the window
+      // is caught by the difference. G9 patches nothing, so the two must agree.
+      try {
+        const code = `self.onmessage = () => {
+          let webgl = null;
+          try {
+            const c = new OffscreenCanvas(16, 16); const gl = c.getContext('webgl');
+            const dbg = gl && gl.getExtension('WEBGL_debug_renderer_info');
+            webgl = gl ? { vendor: dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : null, renderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : null } : null;
+          } catch (e) { webgl = { error: String(e.message) }; }
+          const o = Intl.DateTimeFormat().resolvedOptions();
+          // The console side channel, inside the worker: a CDP session attached to the worker with
+          // Runtime enabled reads the logged Error's name getter again (as in the window).
+          let nameReadsMax = 0;
+          for (let i = 0; i < 3; i++) {
+            let reads = 0;
+            const n = new Error('probe');
+            Object.defineProperty(n, 'name', { configurable: true, get() { reads += 1; return 'Error'; } });
+            console.debug(n);
+            nameReadsMax = Math.max(nameReadsMax, reads);
+          }
+          postMessage({ nameReadsMax, userAgent: navigator.userAgent, language: navigator.language, languages: Array.from(navigator.languages || []),
+            hardwareConcurrency: navigator.hardwareConcurrency, deviceMemory: navigator.deviceMemory, platform: navigator.platform,
+            webdriver: navigator.webdriver, timeZone: o.timeZone, locale: o.locale, offsetMin: new Date().getTimezoneOffset(),
+            uaBrands: navigator.userAgentData ? navigator.userAgentData.brands : null, webgl });
+        };`;
+        const url = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+        const w = new Worker(url);
+        env.worker = await withTimeout(new Promise((resolve) => {
+          w.onmessage = (m) => resolve(m.data);
+          w.onerror = (ev) => resolve({ error: String(ev.message || 'worker error') });
+          w.postMessage(1);
+        }), 4000, { error: 'timeout' });
+        w.terminate();
+        URL.revokeObjectURL(url);
+      } catch (err) { env.worker = { error: err.message }; }
+    })());
+    await Promise.all(tasks);
+  }
+
+  // ---- checks ------------------------------------------------------------------------------------
+  // status: pass | fail | warn | info. cls says who could fix a failure:
+  //   g9        something G9 does or could do (a leak, a broken promise)
+  //   headless  inherent to headless Chromium (plan §6.4: run stealth-critical suites headed)
+  //   cdp       inherent to CDP input on this Chromium build
+  //   host      a fact of this machine (its timezone, its devices)
+  //   harness   caused by how the self-test launched the browser (off-screen window)
+  //   browser   the browser binary itself
+  const checks = [];
+  const check = (id, status, cls, value, detail) => checks.push({ id, status, cls, value, detail: detail || '' });
+
+  function envChecks() {
+    const env = S.env;
+    check('webdriver', env.webdriver === true ? 'fail' : (env.webdriver === false ? 'pass' : 'warn'), 'g9', env.webdriver,
+      env.webdriverDescriptor && env.webdriverDescriptor.getterNative === false ? 'navigator.webdriver getter is not native' : '');
+    check('webdriver-shape', env.webdriverOwn || (env.webdriverDescriptor && env.webdriverDescriptor.onPrototype && !env.webdriverDescriptor.getterNative) ? 'fail' : 'pass', 'g9',
+      env.webdriverDescriptor, 'own property on navigator or non-native getter = patched');
+    const headlessUa = /HeadlessChrome|Headless/i.test(env.userAgent || '');
+    check('ua-headless', headlessUa ? 'fail' : 'pass', 'headless', env.userAgent);
+    const brands = (env.uaData && env.uaData.brands || []).map((b) => b.brand + ' ' + b.version);
+    check('uadata-headless', brands.some((b) => /Headless/i.test(b)) ? 'fail' : 'pass', 'headless', brands.join(', '));
+    const echo = env.echo && typeof env.echo === 'object' && env.echo.headers ? env.echo.headers : null;
+    if (echo) {
+      check('ua-header-vs-navigator', echo['user-agent'] === env.userAgent ? 'pass' : 'fail', 'g9', echo['user-agent'],
+        echo['user-agent'] === env.userAgent ? '' : 'the User-Agent header differs from navigator.userAgent');
+      const chua = echo['sec-ch-ua'] || null;
+      if (chua && env.uaData) {
+        const headerBrands = Array.from(chua.matchAll(/"([^"]+)";v="(\d+)"/g)).map((m) => m[1] + ' ' + m[2]).sort();
+        const jsBrands = [...brands].sort();
+        const same = headerBrands.join('|') === jsBrands.join('|');
+        check('ch-ua-vs-uadata', same ? 'pass' : 'fail', 'g9', chua, same ? '' : 'Sec-CH-UA header brands differ from navigator.userAgentData.brands: ' + jsBrands.join(', '));
+      } else {
+        check('ch-ua-vs-uadata', 'info', 'browser', chua, 'no Sec-CH-UA header on the echo request');
+      }
+      const al = echo['accept-language'] || '';
+      const tags = al.split(',').map((s) => s.split(';')[0].trim()).filter(Boolean);
+      // Chromium adds a bare base language after a regional one it does not already list
+      // ("en-US" becomes "en-US,en;q=0.9"): a real browser does that too, so those extra base tags
+      // are not a mismatch. Anything else is.
+      const baseAdded = (t, i) => !env.languages.includes(t) && !t.includes('-') && tags.slice(0, i).some((p) => p.split('-')[0] === t);
+      const sameOrder = tags.filter((t, i) => !baseAdded(t, i)).join(',') === env.languages.join(',');
+      check('accept-language-vs-languages', tags[0] === env.languages[0] && sameOrder ? 'pass' : (tags[0] === env.languages[0] ? 'warn' : 'fail'), 'g9',
+        { header: al, languages: env.languages },
+        sameOrder ? '' : 'the Accept-Language header does not list the same languages as navigator.languages');
+    } else {
+      check('accept-language-vs-languages', 'warn', 'harness', env.echo, 'the header echo request failed; Accept-Language not compared');
+    }
+    check('languages', env.languages.length && env.languages[0] === env.language ? 'pass' : 'fail', 'g9',
+      { language: env.language, languages: env.languages }, 'navigator.languages[0] must equal navigator.language');
+    const intlLang = langOf(env.intl.locale);
+    const navLang = langOf(env.language);
+    check('intl-locale-vs-navigator', intlLang && navLang && intlLang === navLang ? 'pass' : 'fail', 'g9',
+      { intl: env.intl.locale, navigator: env.language },
+      intlLang === navLang ? '' : 'Intl formats in one language while navigator.language says another (a locale override that did not reach navigator/Accept-Language)');
+    const region = regionOf(env.language);
+    const zones = region ? zonesOf(region) : null;
+    const tz = canonZone(env.intl.timeZone);
+    const tzOk = !zones || zones.map(canonZone).includes(tz);
+    const g9SetBoth = !!(expect.locale && expect.timezone);
+    check('timezone-vs-locale-region', tzOk ? 'pass' : (g9SetBoth ? 'fail' : 'warn'), g9SetBoth ? 'g9' : 'host',
+      { locale: env.language, region, timeZone: env.intl.timeZone },
+      tzOk ? '' : 'the time zone is not one used in the locale\'s region' + (g9SetBoth ? '' : ' (both come from the host: G9 was not asked to set them)'));
+    if (expect.locale) {
+      check('expected-locale', langOf(expect.locale) === navLang && langOf(expect.locale) === intlLang ? 'pass' : 'fail', 'g9',
+        { expected: expect.locale, navigator: env.language, intl: env.intl.locale });
+    }
+    if (expect.timezone) {
+      check('expected-timezone', canonZone(expect.timezone) === tz ? 'pass' : 'fail', 'g9', { expected: expect.timezone, got: env.intl.timeZone });
+    }
+    const w = env.worker;
+    if (w && !w.error) {
+      const diffs = [];
+      if (w.userAgent !== env.userAgent) diffs.push('userAgent');
+      if (w.language !== env.language) diffs.push('language');
+      if ((w.languages || []).join(',') !== env.languages.join(',')) diffs.push('languages');
+      if (w.hardwareConcurrency !== env.hardwareConcurrency) diffs.push('hardwareConcurrency');
+      if (w.platform !== env.platform) diffs.push('platform');
+      // WorkerNavigator may not expose webdriver at all; only a boolean that disagrees is a mismatch.
+      if (typeof w.webdriver === 'boolean' && w.webdriver !== env.webdriver) diffs.push('webdriver');
+      if (canonZone(w.timeZone) !== tz) diffs.push('timeZone');
+      if (w.locale !== env.intl.locale) diffs.push('locale');
+      if (w.offsetMin !== env.intl.offsetMin) diffs.push('offset');
+      if (env.webgl && w.webgl && w.webgl.renderer && env.webgl.unmaskedRenderer && w.webgl.renderer !== env.webgl.unmaskedRenderer) diffs.push('webglRenderer');
+      check('worker-vs-window', diffs.length ? 'fail' : 'pass', 'g9', diffs.length ? { differs: diffs, worker: w } : { same: true, workerWebdriver: typeof w.webdriver === 'boolean' ? w.webdriver : 'not exposed' }, diffs.length ? 'a dedicated worker reports ' + diffs.join(', ') + ' differently from the window' : '');
+      check('worker-runtime-probe', typeof w.nameReadsMax !== 'number' ? 'info' : (w.nameReadsMax > 1 ? 'fail' : 'pass'), 'g9', { nameReadsMax: w.nameReadsMax },
+        w.nameReadsMax > 1 ? 'console.debug of an Error in a dedicated worker read its name getter more than once: a CDP session with Runtime enabled is attached to the worker' : '');
+    } else {
+      check('worker-vs-window', 'warn', 'harness', w, 'worker probe failed');
+    }
+    const s = env.screen;
+    const win = env.window;
+    const now = geometry();
+    env.windowNow = now;
+    const zeroAtLoad = win.outerWidth === 0 || win.outerHeight === 0;
+    const zeroNow = now.outerWidth === 0 || now.outerHeight === 0;
+    // Measured (Edge 153, headless and headed): a document loaded by Page.navigate while a CDP session
+    // is attached reads outerWidth/outerHeight/screenX/screenY = 0 from its first script until a few
+    // ms after `load`; the same page loaded with no session attached reads the real window. So a 0 at
+    // load is the attached debugger showing (cls cdp); a 0 that persists would be G9's own doing.
+    check('outer-size-at-load', zeroAtLoad ? 'fail' : 'pass', 'cdp', { atLoad: win.outerWidth + 'x' + win.outerHeight + ' @' + win.at + 'ms', screenXYAtLoad: [win.screenX, win.screenY] },
+      zeroAtLoad ? 'window.outerWidth/outerHeight read 0 at load (BotD-style "outer size 0" headless tell)' : '');
+    check('outer-size-now', zeroNow ? 'fail' : 'pass', 'g9', { now: now.outerWidth + 'x' + now.outerHeight, screenXYNow: [now.screenX, now.screenY] },
+      zeroNow ? 'window.outerWidth/outerHeight still read 0 after load' : '');
+    check('screen-not-800x600', s.width === 800 && s.height === 600 ? 'fail' : 'pass', 'g9', s.width + 'x' + s.height);
+    const inside = now.outerWidth <= s.width && now.outerHeight <= s.height;
+    check('window-inside-screen', inside ? 'pass' : 'fail', 'g9', { screen: s.width + 'x' + s.height, outer: now.outerWidth + 'x' + now.outerHeight });
+    const noChrome = now.outerWidth === now.innerWidth && now.outerHeight === now.innerHeight;
+    check('outer-equals-inner', noChrome ? 'fail' : 'pass', 'headless', { outer: now.outerWidth + 'x' + now.outerHeight, inner: now.innerWidth + 'x' + now.innerHeight },
+      noChrome ? 'no browser UI around the page (outer == inner): a headless tell' : '');
+    // A window larger than the work area covers the taskbar: a maximized window is the work area,
+    // and a window a person sized sits inside it.
+    const inWorkArea = now.outerWidth <= s.availWidth && now.outerHeight <= s.availHeight;
+    check('window-in-work-area', inWorkArea ? 'pass' : 'warn', 'g9', { outer: now.outerWidth + 'x' + now.outerHeight, avail: s.availWidth + 'x' + s.availHeight },
+      inWorkArea ? '' : 'the window is larger than the work area of the screen (it would cover the taskbar)');
+    const noTaskbar = s.availWidth === s.width && s.availHeight === s.height;
+    check('avail-equals-screen', noTaskbar ? 'warn' : 'pass', 'headless', { avail: s.availWidth + 'x' + s.availHeight, screen: s.width + 'x' + s.height },
+      noTaskbar ? 'the work area is the whole screen (no taskbar)' : '');
+    const offscreen = now.screenX < -10000 || now.screenY < -10000 || now.screenX > s.width + 10000;
+    check('window-position', offscreen ? 'warn' : 'pass', 'harness', { screenX: now.screenX, screenY: now.screenY },
+      offscreen ? 'the window is far off-screen (the self-test put it there so it cannot steal focus)' : '');
+    const gl = env.webgl || {};
+    const soft = /SwiftShader|llvmpipe|Software|Basic Render/i.test(String(gl.unmaskedRenderer) + ' ' + String(gl.renderer));
+    check('webgl-renderer', env.webgl == null ? 'fail' : (soft ? 'fail' : 'pass'), 'headless', { vendor: gl.unmaskedVendor, renderer: gl.unmaskedRenderer },
+      soft ? 'software GL renderer' : (env.webgl == null ? 'no WebGL context' : ''));
+    const map = { default: 'prompt', denied: 'denied', granted: 'granted' };
+    const consistent = map[env.notificationPermission] === env.permissionNotifications;
+    check('permissions-notifications', consistent ? 'pass' : 'fail', 'browser', { Notification: env.notificationPermission, query: env.permissionNotifications });
+    check('chrome-object', env.chrome.type === 'object' && env.chrome.loadTimesNative && env.chrome.csiNative ? 'pass' : 'fail', 'browser', env.chrome);
+    check('plugins', env.plugins.length > 0 && env.mimeTypes.length > 0 && env.plugins.isPluginArray ? 'pass' : 'fail', 'browser',
+      { plugins: env.plugins.length, mimeTypes: env.mimeTypes.length });
+    check('voices', env.voices && env.voices.count > 0 ? 'pass' : 'warn', 'headless', env.voices);
+    // Chrome and Edge play Widevine once their component is loaded; a Chromium-branded build
+    // (Chrome for Testing: brands "Chromium", "Not_A Brand") does not, with or without the switch
+    // (measured) — that one is the binary's, not G9's.
+    const branded = brands.some((b) => /Google Chrome|Microsoft Edge/.test(b));
+    if (env.eme) check('eme-widevine', env.eme['com.widevine.alpha'] ? 'pass' : 'fail', branded ? 'g9' : 'browser', env.eme,
+      env.eme['com.widevine.alpha'] ? '' : (branded ? 'no Widevine key system: DRM video will not play, and detectors know automation launches without it (--disable-component-update)' : 'no Widevine key system (a Chromium-branded build ships none)'));
+    const md = env.mediaDevices;
+    check('media-devices', md && typeof md === 'object' && Object.keys(md).length ? 'pass' : 'warn', 'host', md);
+    check('connection-rtt', env.connection && env.connection.rtt === 0 ? 'warn' : 'pass', 'headless', env.connection);
+    check('focus-visible', S.focusAtLoad && S.focusAtLoad.hasFocus && S.focusAtLoad.visibility === 'visible' ? 'pass' : 'fail', 'g9', S.focusAtLoad,
+      'G9 turns focus emulation on for every launched page');
+    check('user-activation-at-load', S.userActivationAtLoad && S.userActivationAtLoad.hasBeenActive ? 'fail' : 'pass', 'g9', S.userActivationAtLoad,
+      'no one has touched the page yet, so it must not have had a user gesture');
+    const attrs = (env.documentElementAttributes || []).filter((a) => !/^(lang)$/i.test(a));
+    check('html-attributes', attrs.length ? 'fail' : 'pass', 'g9', env.documentElementAttributes, attrs.length ? 'unexpected attributes on <html>' : '');
+  }
+
+  function leakChecks() {
+    const now = own.getNames(window);
+    // Index names ("0", "1" …) are the page's own child frames (window[0] is the first iframe's
+    // window), not globals anyone added.
+    const added = now.filter((k) => !baseline.has(k) && !(/^\d+$/.test(k) && Number(k) < window.frames.length));
+    const suspicious = [];
+    const other = [];
+    for (const k of added) {
+      let v;
+      try { v = window[k]; } catch { v = undefined; }
+      const nativeFn = typeof v === 'function' && isNative(v);
+      const entry = { name: k, type: typeof v, nativeFunction: nativeFn };
+      if (/g9|__|binding|cdc_|\$cdc|playwright|puppeteer|selenium|webdriver|domAutomation|callPhantom|_phantom|emit/i.test(k) || nativeFn) suspicious.push(entry);
+      else other.push(entry);
+    }
+    check('main-world-globals', suspicious.length ? 'fail' : (other.length ? 'warn' : 'pass'), 'g9', { suspicious, other },
+      suspicious.length ? 'globals added to the page\'s window after it started (G9 promises nothing in the main world)' : '');
+    const g9Nodes = [];
+    for (const el of allElements()) {
+      const id = String(el.id || '');
+      if (id.startsWith('sl-')) continue;
+      const names = own.getAttributeNames.call(el);
+      const blob = el.tagName + ' ' + id + ' ' + String(el.className && el.className.baseVal !== undefined ? el.className.baseVal : el.className) + ' ' + names.join(' ');
+      if (/g9|__/i.test(blob) || el.tagName.includes('-')) g9Nodes.push(blob.slice(0, 120));
+      if (g9Nodes.length > 10) break;
+    }
+    check('main-world-dom', g9Nodes.length ? 'fail' : 'pass', 'g9', g9Nodes, g9Nodes.length ? 'elements that are not the page\'s own' : '');
+    const probe = S.runtimeProbe;
+    check('runtime-console-probe', probe.hits ? 'fail' : 'pass', 'g9', { runs: probe.runs, hits: probe.hits, variants: probe.variants, nameReadsMax: probe.nameReadsMax, firstHitAt: probe.firstHitAt },
+      probe.hits ? 'console.debug of an Error read its getters more than a browser alone does: the Runtime domain is enabled (a CDP client is listening)' : '');
+    check('main-world-dom-calls', S.mainWorldCalls.length ? 'fail' : 'pass', 'g9', S.mainWorldCalls.slice(0, 10),
+      S.mainWorldCalls.length ? 'someone other than the page called DOM methods in the page\'s main world' : '');
+    const fx = (S.sideEffects || []).filter((x) => x.ty !== 'pageshow' && !x.popup);
+    check('tool-side-effects', fx.length ? 'fail' : 'pass', 'g9', fx.slice(0, 10),
+      fx.length ? 'the page saw a resize / visibility change / window blur that no person caused' : '');
+    check('listener-stacks', S.listenerStacks.length ? 'fail' : 'pass', 'g9', S.listenerStacks.slice(0, 8),
+      S.listenerStacks.length ? 'event handlers ran with a script caller below them (a scripted focus/click/dispatch), not from the browser' : '');
+  }
+
+  function behaviourChecks() {
+    const ev = S.events;
+    const summary = {};
+    const untrusted = ev.filter((e) => e.tr === false);
+    check('events-trusted', untrusted.length ? 'fail' : (ev.length ? 'pass' : 'info'), 'g9', { total: ev.length, untrusted: untrusted.length, untrustedTypes: [...new Set(untrusted.map((e) => e.ty))] });
+
+    const moves = ev.filter((e) => e.ty === 'mousemove');
+    summary.mousemoves = moves.length;
+    if (moves.length) {
+      const firstMove = moves[0];
+      summary.firstMoveAfterLoadMs = S.tLoad != null ? round(firstMove.t - S.tLoad, 0) : null;
+      const nonZero = moves.slice(1).filter((m) => m.mx !== 0 || m.my !== 0).length;
+      const ratio = moves.length > 1 ? nonZero / (moves.length - 1) : null;
+      let deltaMatch = 0;
+      let deltaTotal = 0;
+      for (let i = 1; i < moves.length; i++) {
+        if (moves[i].t - moves[i - 1].t > 200) continue;
+        deltaTotal += 1;
+        if (moves[i].mx === moves[i].cx - moves[i - 1].cx && moves[i].my === moves[i].cy - moves[i - 1].cy) deltaMatch += 1;
+      }
+      summary.movementNonZeroRatio = round(ratio, 3);
+      summary.movementEqualsDeltaRatio = deltaTotal ? round(deltaMatch / deltaTotal, 3) : null;
+      check('movementXY-nonzero', ratio == null ? 'info' : (ratio === 0 ? 'fail' : (ratio < 0.5 ? 'warn' : 'pass')), 'cdp',
+        { ratio: summary.movementNonZeroRatio, equalsDelta: summary.movementEqualsDeltaRatio, moves: moves.length });
+      const offsets = new Map();
+      for (const m of moves) { const key = (m.sx - m.cx) + ',' + (m.sy - m.cy); offsets.set(key, (offsets.get(key) || 0) + 1); }
+      // A person's mouse event: screenX - clientX = where the page's viewport sits on the screen =
+      // window.screenX plus the left frame; screenY - clientY = window.screenY plus the toolbar
+      // height. Both must lie within [window position, window position + (outer - inner)], and a
+      // window with visible UI puts the viewport clearly below its top edge.
+      const win = S.env.windowNow || S.env.window || {};
+      const offsetList = [...offsets.entries()].map(([k, n]) => ({ offset: k, n }));
+      summary.screenMinusClient = offsetList;
+      const [ox, oy] = (offsetList[0] ? offsetList[0].offset : '0,0').split(',').map(Number);
+      const uiW = (win.outerWidth || 0) - (win.innerWidth || 0);
+      const uiH = (win.outerHeight || 0) - (win.innerHeight || 0);
+      const plausible = offsetList.length === 1 &&
+        ox >= win.screenX - 2 && ox <= win.screenX + uiW + 2 &&
+        oy >= win.screenY - 2 && oy <= win.screenY + uiH + 2 &&
+        (uiH > 30 ? oy - win.screenY >= 20 : true);
+      check('screenXY-vs-window', plausible ? 'pass' : 'fail', 'cdp', { screenMinusClient: offsetList, windowScreenX: win.screenX, windowScreenY: win.screenY, outerMinusInner: [uiW, uiH] },
+        plausible ? '' : 'mouse event screenX/Y minus clientX/Y does not match where the window and its UI are');
+      // The cadence of the hand while it moves: every gap between consecutive mousemoves except the
+      // idle between two actions (> 250 ms). Plan §6.1 samples every 8-16 ms and Chromium delivers
+      // at most one mousemove per frame, so a person's mouse on a 60 Hz screen shows ~16-17 ms; a
+      // median far above that means each move lands in a bigger jump than a hand makes.
+      const intervals = [];
+      let zeroGaps = 0;
+      for (let i = 1; i < moves.length; i++) { const d = moves[i].t - moves[i - 1].t; if (d <= 0) zeroGaps += 1; else if (d <= 250) intervals.push(d); }
+      const pct = (a, p) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(p * s.length))]; };
+      summary.moveIntervalMs = { median: round(median(intervals)), p10: round(pct(intervals, 0.1)), p90: round(pct(intervals, 0.9)), max: intervals.length ? round(Math.max(...intervals)) : null, n: intervals.length, zeroGaps };
+      const mi = median(intervals);
+      check('move-interval', !intervals.length ? 'info' : (mi >= 4 && mi <= 30 ? 'pass' : 'warn'), 'g9', summary.moveIntervalMs, mi > 30 ? 'the pointer moves in bigger, slower jumps than a hand at 60 Hz (plan §6.1: a sample every 8-16 ms)' : '');
+      const pmoves = ev.filter((e) => e.ty === 'pointermove' && e.co != null);
+      summary.coalescedMin = pmoves.length ? Math.min(...pmoves.map((e) => e.co)) : null;
+      // How many raw moves each delivered pointermove stood for: a mouse polled faster than the
+      // screen refreshes shows 2+ often; one CDP event per frame shows 1.
+      summary.coalescedHistogram = pmoves.reduce((acc, e) => { const k = e.co >= 4 ? '4+' : String(e.co); acc[k] = (acc[k] || 0) + 1; return acc; }, {});
+      // pointerrawupdate: fired (secure contexts, with a listener) for every raw move before the
+      // per-frame coalescing — real mouse input has it.
+      const raw = ev.filter((e) => e.ty === 'pointerrawupdate').length;
+      summary.pointerRawUpdates = raw;
+      check('pointerrawupdate', !pmoves.length ? 'info' : (raw ? 'pass' : 'warn'), 'cdp', { pointerrawupdate: raw, pointermove: ev.filter((e) => e.ty === 'pointermove').length, secureContext: window.isSecureContext },
+        raw || !pmoves.length ? '' : 'pointer moves arrived without any pointerrawupdate');
+      const zeroCo = pmoves.filter((e) => e.co === 0).length;
+      check('coalesced-events', pmoves.length ? (zeroCo ? 'fail' : 'pass') : 'info', 'cdp', { pointermoves: pmoves.length, withZeroCoalesced: zeroCo });
+    } else {
+      check('movementXY-nonzero', 'info', 'cdp', null, 'no mouse moves seen');
+    }
+
+    // The click on #sl-btn: its whole approach, in order.
+    const clickIdx = ev.findIndex((e) => e.ty === 'click' && e.id === 'sl-btn');
+    if (clickIdx >= 0) {
+      const click = ev[clickIdx];
+      let downIdx = -1;
+      for (let i = clickIdx; i >= 0; i--) if (ev[i].ty === 'mousedown' && ev[i].id === 'sl-btn') { downIdx = i; break; }
+      let upIdx = -1;
+      for (let i = clickIdx; i >= 0; i--) if (ev[i].ty === 'mouseup' && ev[i].id === 'sl-btn') { upIdx = i; break; }
+      let overIdx = -1;
+      for (let i = downIdx; i >= 0; i--) if (ev[i].ty === 'pointerover' && ev[i].id === 'sl-btn') { overIdx = i; break; }
+      const seq = [];
+      for (let i = Math.max(0, overIdx); i <= clickIdx; i++) {
+        const e = ev[i];
+        if (e.id !== 'sl-btn' && !/enter/.test(e.ty)) continue;
+        if (!['pointerover', 'pointerenter', 'mouseover', 'mouseenter', 'pointermove', 'mousemove', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click', 'focus', 'focusin'].includes(e.ty)) continue;
+        const name = /move/.test(e.ty) ? 'move' : e.ty;
+        if (seq[seq.length - 1] !== name) seq.push(name);
+      }
+      summary.clickSequence = seq.join(' > ');
+      const order = ['pointerover', 'pointerenter', 'mouseover', 'mouseenter', 'move', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+      const pos = order.map((n) => seq.indexOf(n));
+      const ordered = pos.every((p, i) => p >= 0 && (i === 0 || p > pos[i - 1]));
+      check('click-sequence', ordered ? 'pass' : 'fail', 'g9', summary.clickSequence, ordered ? '' : 'expected ' + order.join(' > '));
+      const down = ev[downIdx];
+      const up = ev[upIdx];
+      const pd = ev.slice(0, downIdx + 1).reverse().find((e) => e.ty === 'pointerdown' && e.id === 'sl-btn');
+      summary.pressMs = down && up ? round(up.t - down.t) : null;
+      // The same press as the page's handlers experienced it: when a renderer queues input, the
+      // handler gap and the timeStamp gap differ, and which one is short says where the hold went.
+      summary.pressHandlerMs = down && up && down.hd != null && up.hd != null ? round(up.hd - down.hd) : null;
+      const pu = ev.slice(downIdx, clickIdx + 1).find((e) => e.ty === 'pointerup' && e.id === 'sl-btn');
+      summary.pointerPressMs = pd && pu ? round(pu.t - pd.t) : null;
+      check('press-duration', summary.pressMs != null && summary.pressMs >= 30 && summary.pressMs <= 400 ? 'pass' : 'fail', 'g9',
+        { timeStampMs: summary.pressMs, handlerMs: summary.pressHandlerMs, pointerMs: summary.pointerPressMs, downQueuedMs: down && down.hd != null ? round(down.hd - down.t) : null, upQueuedMs: up && up.hd != null ? round(up.hd - up.t) : null },
+        'mousedown to mouseup (event timeStamps, ms); plan §6.1 holds 60-140 ms');
+      // The approach: moves since the previous non-move action.
+      let startIdx = 0;
+      for (let i = downIdx - 1; i >= 0; i--) {
+        if (['mouseup', 'keyup', 'wheel', 'click'].includes(ev[i].ty)) { startIdx = i + 1; break; }
+      }
+      const approach = ev.slice(startIdx, downIdx).filter((e) => e.ty === 'mousemove');
+      summary.movesBeforeClick = approach.length;
+      check('moves-before-click', approach.length >= 5 ? 'pass' : 'fail', 'g9', approach.length, 'mousemove events on the way to the button');
+      if (approach.length) {
+        // Dwell = arrival to press. "Arrival" is the last move more than 3 px from where the button
+        // went down: plan §6.1 allows a 1-3 px settle drift during the dwell, which may come late.
+        const arrival = [...approach].reverse().find((m) => Math.hypot(m.cx - down.cx, m.cy - down.cy) > 3) ?? approach[0];
+        summary.dwellMs = round(down.t - arrival.t);
+        summary.lastMoveToPressMs = round(down.t - approach[approach.length - 1].t);
+        let len = 0;
+        for (let i = 1; i < approach.length; i++) len += Math.hypot(approach[i].cx - approach[i - 1].cx, approach[i].cy - approach[i - 1].cy);
+        const direct = Math.hypot(approach[approach.length - 1].cx - approach[0].cx, approach[approach.length - 1].cy - approach[0].cy);
+        summary.pathStraightness = direct > 20 ? round(len / direct, 3) : null;
+        let maxDev = 0;
+        const a = approach[0];
+        const b = approach[approach.length - 1];
+        for (const p of approach) {
+          const dev = direct ? Math.abs((b.cy - a.cy) * p.cx - (b.cx - a.cx) * p.cy + b.cx * a.cy - b.cy * a.cx) / direct : 0;
+          maxDev = Math.max(maxDev, dev);
+        }
+        summary.pathMaxDeviationPx = round(maxDev);
+        check('hover-dwell', summary.dwellMs >= 20 ? 'pass' : 'fail', 'g9', summary.dwellMs, 'last move to mousedown, ms');
+        check('path-curved', summary.pathStraightness == null ? 'info' : (summary.pathStraightness > 1.005 || maxDev > 3 ? 'pass' : 'fail'), 'g9',
+          { straightness: summary.pathStraightness, maxDeviationPx: summary.pathMaxDeviationPx });
+      }
+      summary.pointerdownPressure = pd ? pd.pr : null;
+      const idleMoves = ev.filter((e) => e.ty === 'pointermove' && e.b === 0);
+      const badIdlePressure = idleMoves.filter((e) => e.pr !== 0).length;
+      check('pointer-pressure', pd && pd.pr === 0.5 && !badIdlePressure ? 'pass' : 'fail', 'g9', { down: pd ? pd.pr : null, idleMovesWithPressure: badIdlePressure },
+        'a mouse with a button down reports pressure 0.5; CDP mouse events carry pressure = their `force` (default 0)');
+      check('click-detail', click.d === 1 && (!pd || pd.pt === 'mouse') ? 'pass' : 'fail', 'g9', { detail: click.d, pointerType: pd ? pd.pt : null, pointerId: pd ? pd.pid : null });
+    } else {
+      check('click-sequence', 'info', 'g9', null, 'no click on #sl-btn seen');
+    }
+
+    const boundary = {};
+    for (const e of ev) {
+      if (!/enter|leave|over$|out$/.test(e.ty) || !/^sl-/.test(String(e.id))) continue;
+      const k = e.id + ':' + e.ty;
+      boundary[k] = (boundary[k] || 0) + 1;
+    }
+    summary.boundaryEvents = boundary;
+    // Where every press and click actually landed (a humanized click aimed at a moving target lands
+    // on whatever is there when the pointer arrives).
+    summary.clicksOn = ev.filter((e) => e.ty === 'click').reduce((acc, e) => { acc[e.id] = (acc[e.id] || 0) + 1; return acc; }, {});
+    summary.mousedownsOn = ev.filter((e) => e.ty === 'mousedown').map((e) => e.id + '@' + e.cx + ',' + e.cy);
+    summary.scrollYs = ev.filter((e) => e.ty === 'scroll').map((e) => e.scy).filter((v, i, a) => i === 0 || v !== a[i - 1]).slice(-40);
+    const hoverEnter = ev.find((e) => e.ty === 'mouseenter' && e.id === 'sl-hover');
+    const hoverOver = ev.find((e) => e.ty === 'mouseover' && e.id === 'sl-hover');
+    check('hover-target', hoverEnter && hoverOver ? 'pass' : (hoverOver || hoverEnter ? 'fail' : 'info'), 'g9', { mouseover: !!hoverOver, mouseenter: !!hoverEnter });
+
+    const keys = ev.filter((e) => e.ty === 'keydown' && e.id === 'sl-text');
+    if (keys.length) {
+      const ups = ev.filter((e) => e.ty === 'keyup' && e.id === 'sl-text');
+      const intervals = [];
+      for (let i = 1; i < keys.length; i++) intervals.push(keys[i].t - keys[i - 1].t);
+      const holds = [];
+      for (const k of keys) {
+        const u = ups.find((x) => x.c === k.c && x.t >= k.t);
+        if (u) holds.push(u.t - k.t);
+      }
+      const m = median(intervals);
+      const cv = intervals.length > 2 ? sd(intervals) / mean(intervals) : null;
+      summary.keys = { keydowns: keys.length, intervalMedianMs: round(m), intervalMinMs: round(Math.min(...intervals)), intervalMaxMs: round(Math.max(...intervals)), intervalCv: round(cv, 3), holdMedianMs: round(median(holds)), holdMinMs: round(Math.min(...holds)) };
+      check('key-intervals', m != null && m >= 50 && cv != null && cv >= 0.15 ? 'pass' : 'fail', 'g9', summary.keys, 'keydown to keydown; a script types at a fixed, fast rate');
+      check('key-holds', holds.length && median(holds) >= 15 ? 'pass' : 'fail', 'g9', { median: round(median(holds)), min: round(Math.min(...holds)) }, 'keydown to keyup');
+      const letters = keys.filter((k) => /^[a-zA-Z]$/.test(k.k));
+      const badCode = letters.filter((k) => k.c !== 'Key' + k.k.toUpperCase()).length;
+      const shifts = keys.filter((k) => k.k === 'Shift');
+      const upper = letters.filter((k) => /^[A-Z]$/.test(k.k));
+      const upperWithShift = upper.filter((k) => k.sh).length;
+      check('key-codes', !badCode && upperWithShift === upper.length && shifts.every((s) => s.loc === 1 || s.loc === 2) ? 'pass' : 'fail', 'g9',
+        { letters: letters.length, badCode, uppercase: upper.length, uppercaseWithShift: upperWithShift, shiftLocations: shifts.map((s) => s.loc) });
+      const inputs = ev.filter((e) => e.ty === 'input' && e.id === 'sl-text');
+      const keypress = ev.filter((e) => e.ty === 'keypress' && e.id === 'sl-text');
+      summary.keys.inputs = inputs.length;
+      summary.keys.keypresses = keypress.length;
+      summary.keys.inputTypes = [...new Set(inputs.map((i) => i.it))];
+      check('key-input-events', inputs.length && keypress.length ? 'pass' : 'fail', 'g9', { inputs: inputs.length, keypresses: keypress.length, types: summary.keys.inputTypes });
+    }
+
+    const wheels = ev.filter((e) => e.ty === 'wheel');
+    if (wheels.length) {
+      const ints = [];
+      for (let i = 1; i < wheels.length; i++) ints.push(wheels[i].t - wheels[i - 1].t);
+      summary.wheel = { count: wheels.length, deltaY: [...new Set(wheels.map((w) => w.dy))].slice(0, 6), deltaMode: [...new Set(wheels.map((w) => w.dm))], intervalMedianMs: round(median(ints)), intervalMinMs: ints.length ? round(Math.min(...ints)) : null };
+      check('wheel', wheels.every((w) => w.tr) && median(ints.length ? ints : [100]) >= 15 ? 'pass' : 'fail', 'g9', summary.wheel);
+    } else {
+      check('wheel', 'info', 'g9', null, 'no wheel events seen');
+    }
+    // A scroll no wheel, key or press preceded is a programmatic scroll (scrollIntoView, scrollBy):
+    // a person's page only moves when they turn the wheel, press a key or drag the bar.
+    const inputs = ev.filter((e) => e.ty === 'wheel' || e.ty === 'keydown' || e.ty === 'mousedown').map((e) => e.t);
+    const lonely = ev.filter((e) => e.ty === 'scroll' && !inputs.some((t) => t <= e.t && e.t - t < 1500));
+    summary.scrollsWithoutInput = lonely.map((e) => ({ t: e.t, y: e.scy }));
+    check('scroll-without-input', lonely.length ? 'fail' : 'pass', 'g9', summary.scrollsWithoutInput.slice(0, 6),
+      lonely.length ? 'the page scrolled with no wheel, key or press before it (a programmatic scroll)' : '');
+    const change = ev.find((e) => e.ty === 'change' && e.id === 'sl-sel');
+    check('select-change', change ? (change.tr ? 'pass' : 'fail') : 'info', 'g9', change ? { trusted: change.tr, value: byId('sl-sel').value } : null);
+    return summary;
+  }
+
+  // What the cross-site frame and the popup reported about themselves (see "child documents").
+  function childChecks() {
+    const top = S.env;
+    const judge = (name, r, expected) => {
+      if (!r) {
+        if (expected) check(name + '-reported', 'warn', 'harness', null, expected);
+        return;
+      }
+      const p = r.runtimeProbe || {};
+      check(name + '-runtime-probe', p.hits ? 'fail' : (p.runs ? 'pass' : 'info'), 'g9', { runs: p.runs, hits: p.hits, nameReadsMax: p.nameReadsMax, firstHitAt: p.firstHitAt },
+        p.hits ? 'console.debug of an Error read its getters more than a browser alone does, in the ' + name + ': the Runtime domain is enabled on its session' : '');
+      check(name + '-main-world', (r.suspicious || []).length || (r.mainWorldCalls || []).length ? 'fail' : 'pass', 'g9',
+        { suspicious: r.suspicious, otherGlobals: (r.globalsAdded || []).filter((k) => !(r.suspicious || []).includes(k)), mainWorldCalls: r.mainWorldCalls },
+        (r.suspicious || []).length || (r.mainWorldCalls || []).length ? 'globals or main-world DOM calls in the ' + name + ' that are not its own' : '');
+      check(name + '-webdriver', r.webdriver === true ? 'fail' : 'pass', 'g9', r.webdriver);
+      const diffs = [];
+      if (top.userAgent && r.userAgent !== top.userAgent) diffs.push('userAgent');
+      if (top.languages && (r.languages || []).join(',') !== top.languages.join(',')) diffs.push('languages');
+      if (top.intl && r.timeZone !== top.intl.timeZone) diffs.push('timeZone');
+      if (top.intl && r.locale !== top.intl.locale) diffs.push('locale');
+      check(name + '-vs-top', diffs.length ? 'fail' : 'pass', 'g9', diffs.length ? { differs: diffs, child: { userAgent: r.userAgent, languages: r.languages, timeZone: r.timeZone, locale: r.locale } } : { same: true, origin: r.origin },
+        diffs.length ? 'the ' + name + ' reports ' + diffs.join(', ') + ' differently from the top page' : '');
+    };
+    if (QS.get('xframe')) judge('oopif', S.frameReport, 'the cross-site frame never reported (not loaded, or blocked)');
+    if (S.popupClickedAt != null) {
+      judge('popup', S.popupReport, S.popupOpenError ? 'window.open failed: ' + S.popupOpenError : 'the popup never reported (blocked, or its script never ran)');
+      check('popup-lifecycle', 'info', 'harness', {
+        opened: S.popupOpened, reports: S.popupReports, final: !!(S.popupReport && S.popupReport.final), popupVisibility: S.popupReport ? S.popupReport.visibility : null,
+        openerSideEffects: (S.sideEffects || []).filter((x) => x.popup).slice(0, 10), openerVisibilityNow: document.visibilityState,
+      });
+    }
+  }
+
+  function publish() {
+    checks.length = 0;
+    let summary = {};
+    try { envChecks(); } catch (err) { S.envErrors.push('envChecks: ' + err.message); }
+    try { leakChecks(); } catch (err) { S.envErrors.push('leakChecks: ' + err.message); }
+    try { summary = behaviourChecks(); } catch (err) { S.envErrors.push('behaviourChecks: ' + err.message); }
+    try { childChecks(); } catch (err) { S.envErrors.push('childChecks: ' + err.message); }
+    S.seq += 1;
+    const out = {
+      sideEffects: (S.sideEffects || []).slice(0, 40),
+      version: S.version,
+      timeOrigin: performance.timeOrigin,
+      seq: S.seq,
+      ready: S.envDone,
+      at: Math.round(own.now()),
+      checks,
+      behaviour: summary,
+      env: S.env,
+      counts: { events: S.events.length, eventsDropped: S.eventsDropped, mainWorldCalls: S.mainWorldCalls.length, listenerStacks: S.listenerStacks.length },
+      tail: S.events.slice(-60),
+      children: { frame: S.frameReport || null, popup: S.popupReport || null, popupClicked: S.popupClickedAt != null },
+      errors: S.envErrors.slice(0, 10),
+    };
+    const json = JSON.stringify(out);
+    const b64 = btoa(unescape(encodeURIComponent(json)));
+    const el = byId('sl-result');
+    if (el) {
+      el.setAttribute('data-json', b64);
+      el.setAttribute('data-seq', String(S.seq));
+      if (S.envDone) el.setAttribute('data-ready', '1');
+      el.textContent = 'seq ' + S.seq + ': ' + checks.filter((c) => c.status === 'fail').map((c) => c.id).join(', ');
+    }
+    // Every discrete event (no moves, no boundary events), compact, in its own element so the main
+    // verdict stays well under the DOM read's size cap: [type, timeStamp, handlerTime, target, x, y,
+    // scrollY, key]. With `timeOrigin` the harness puts these on the same clock as its tool calls.
+    const dg = byId('sl-digest');
+    if (dg) {
+      const rows = S.events.filter((e) => DIGEST_TYPES.has(e.ty)).slice(-900)
+        .map((e) => [e.ty, e.t, e.hd, e.id, e.cx ?? null, e.cy ?? null, e.scy ?? null, e.k ?? null]);
+      dg.setAttribute('data-json', btoa(unescape(encodeURIComponent(JSON.stringify({ seq: S.seq, timeOrigin: performance.timeOrigin, rows })))));
+      dg.setAttribute('data-seq', String(S.seq));
+    }
+  }
+  const DIGEST_TYPES = new Set(['wheel', 'scroll', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'click', 'keydown', 'keyup', 'focus', 'blur', 'input', 'change']);
+
+  S.popupReports = 0;
+  let xframeEl = null;
+  let popupWin = null;
+  window.addEventListener('message', (e) => {
+    const d = e.data;
+    if (!d || typeof d !== 'object' || (d.slChild !== 'frame' && d.slChild !== 'popup')) return;
+    if (d.slChild === 'frame' && xframeEl && e.source === xframeEl.contentWindow) S.frameReport = d;
+    else if (d.slChild === 'popup' && popupWin && e.source === popupWin) { S.popupReport = d; S.popupReports += 1; }
+  });
+  document.addEventListener('DOMContentLoaded', () => {
+    // xframe=<url>: a cross-site iframe at the very end of the page (below everything the input
+    // tests use, so it changes no layout they measure and no pointer path crosses it).
+    const xf = QS.get('xframe');
+    if (xf) {
+      xframeEl = own.createElement.call(document, 'iframe');
+      xframeEl.id = 'sl-xframe';
+      xframeEl.title = 'Cross-site frame';
+      xframeEl.width = '320';
+      xframeEl.height = '120';
+      xframeEl.src = xf;
+      document.body.appendChild(xframeEl);
+    }
+    byId('sl-pop').addEventListener('click', (e) => {
+      const url = QS.get('popup');
+      if (!url) { S.popupOpenError = 'no popup= URL'; return; }
+      S.popupClickedAt = e.timeStamp;
+      try {
+        popupWin = window.open(url);
+        S.popupOpened = !!popupWin;
+        if (!popupWin) S.popupOpenError = 'window.open returned null (blocked)';
+      } catch (err) { S.popupOpenError = String(err.message); }
+    });
+    for (const id of ['sl-hover', 'sl-btn', 'sl-btn2', 'sl-text', 'sl-sel', 'sl-pd']) {
+      const el = byId(id);
+      for (const type of BOUNDARY) el.addEventListener(type, onEvent, { passive: true });
+    }
+    // A control that many real pages have (drag libraries, canvas apps, some UI kits, anti-bot
+    // scripts): the page cancels pointerdown. Per the Pointer Events spec the browser then fires no
+    // compatibility mousedown/mouseup — but pointerdown, pointerup and click still arrive, so a click
+    // here IS delivered. A tool that only watches for mousedown would call it lost.
+    byId('sl-pd').addEventListener('pointerdown', (e) => { e.preventDefault(); });
+    const counter = byId('sl-count');
+    byId('sl-btn').addEventListener('click', () => { counter.textContent = String(Number(counter.textContent) + 1); });
+    const counter2 = byId('sl-count2');
+    byId('sl-btn2').addEventListener('click', () => { counter2.textContent = String(Number(counter2.textContent) + 1); });
+  });
+  window.addEventListener('load', async () => {
+    S.tLoad = own.now();
+    S.focusAtLoad = { hasFocus: own.hasFocus.call(document), visibility: document.visibilityState };
+    S.userActivationAtLoad = navigator.userActivation ? { hasBeenActive: navigator.userActivation.hasBeenActive, isActive: navigator.userActivation.isActive } : null;
+    try { syncEnv(); syncEnvRest(); } catch (err) { S.envErrors.push('syncEnv: ' + err.message); }
+    try { await asyncEnv(); } catch (err) { S.envErrors.push('asyncEnv: ' + err.message); }
+    S.envDone = true;
+    publish();
+    own.setInterval.call(window, publish, 300);
+  });
+})();
+</script>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 24px; color: #222; }
+  .row { display: flex; gap: 16px; align-items: center; margin: 14px 0; }
+  #sl-hover { padding: 18px 28px; }
+  #sl-btn { padding: 10px 22px; }
+  #sl-text { width: 260px; padding: 6px; }
+  #sl-spacer { height: 2200px; background: linear-gradient(#f6f6f6, #e8e8e8); margin-top: 24px; }
+  #sl-btn2 { margin-top: 700px; margin-left: 40px; padding: 10px 22px; }
+  #sl-result { font: 12px/1.4 monospace; color: #555; margin-top: 12px; max-width: 900px; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+  <h1>Stealth self-test</h1>
+  <p>This page records what it can see of the browser and of the input it receives. Nothing here is sent anywhere.</p>
+  <div class="row"><button id="sl-hover" type="button">Hover target</button></div>
+  <div class="row"><button id="sl-btn" type="button">Click me</button> <span>clicked <span id="sl-count">0</span> times</span></div>
+  <div class="row"><label for="sl-text">Name</label> <input id="sl-text" type="text" autocomplete="off"></div>
+  <div class="row"><label for="sl-sel">Choice</label>
+    <select id="sl-sel"><option value="one">One</option><option value="two">Two</option><option value="three">Three</option></select></div>
+  <div class="row"><button id="sl-pd" type="button">Press area</button> <span>(this page cancels pointerdown here)</span> <button id="sl-pop" type="button">Open popup</button></div>
+  <div id="sl-result" data-seq="0">collecting…</div>
+  <div id="sl-digest" data-seq="0" hidden></div>
+  <div id="sl-spacer"><button id="sl-btn2" type="button">Lower button</button> <span>clicked <span id="sl-count2">0</span> times</span></div>
+  <p>End of page.</p>
+</body>
+</html>

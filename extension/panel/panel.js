@@ -1,58 +1,111 @@
 /**
  * Side panel bootstrap.
  *
- * Owns three things and nothing else: which tab body is on screen, the polling
- * loop, and the message listener that wakes the views when the service worker
- * says something changed. Each view module owns its own rendering and wiring.
+ * Owns four things and nothing else: the version on screen, which tab body is
+ * showing, the polling loop, and the message listener that wakes the views
+ * when the service worker says something changed. Each view module owns its
+ * own rendering and wiring.
  *
  * ## Why the panel is split
  *
  * Connecting an agent, recording a regression flow, and filing a defect share
- * nothing but the browser. They were one 657-line file; v1.7.0 roughly doubles
+ * nothing but the browser. They were one 657-line file; v1.7.0 roughly doubled
  * the automation half, and splitting after that growth is strictly more
  * expensive than splitting before it.
  */
 
-import { api, el, view, showPanelError } from './ui.js';
+import { api, el, view, showPanelError, wireErrors, setTitle, VERSION, PRODUCT } from './ui.js';
 import * as session from './session.js';
 import * as automation from './automation.js';
 import * as issues from './issues.js';
+import * as about from './about.js';
 
-let firstRefresh = true;
+// The version first, before anything can fail: it is what a person looks for
+// right after reloading the extension, and the title is all the detached
+// window shows while it sits behind the page under test.
+setTitle(null);
+el.versionBadge.textContent = `v${VERSION}`;
+el.versionBadge.title = `${PRODUCT} v${VERSION} — about this version`;
 
-el.tabs.addEventListener('click', (ev) => {
-  const btn = ev.target.closest('button[data-tab]');
-  if (!btn) return;
-  view.active = btn.dataset.tab;
-  for (const b of el.tabs.querySelectorAll('button')) {
-    b.setAttribute('aria-selected', String(b.dataset.tab === view.active));
+const TAB_NAMES = [...el.tabs.querySelectorAll('button[data-tab]')].map((b) => b.dataset.tab);
+
+function select(name, { focus = false } = {}) {
+  if (!TAB_NAMES.includes(name)) return;
+  view.active = name;
+  for (const b of el.tabs.querySelectorAll('button[data-tab]')) {
+    const on = b.dataset.tab === name;
+    b.setAttribute('aria-selected', String(on));
+    // Roving tabindex: Tab reaches the strip once, the arrows move within it.
+    b.tabIndex = on ? 0 : -1;
+    if (on && focus) b.focus();
   }
   for (const body of document.querySelectorAll('.tabbody')) {
-    body.hidden = body.dataset.body !== view.active;
+    body.hidden = body.dataset.body !== name;
   }
-  if (view.active === 'automation') {
+  if (name === 'session') session.refresh();
+  if (name === 'automation') {
     automation.refresh();
     automation.syncStatus();
   }
-  if (view.active === 'issues') issues.refresh();
+  if (name === 'issues') issues.refresh();
+  if (name === 'about') about.refresh({ force: true });
+}
+
+el.tabs.addEventListener('click', (ev) => {
+  const btn = ev.target.closest('button[data-tab]');
+  if (btn) select(btn.dataset.tab);
 });
 
+el.tabs.addEventListener('keydown', (ev) => {
+  const i = TAB_NAMES.indexOf(view.active);
+  const next = {
+    ArrowRight: TAB_NAMES[(i + 1) % TAB_NAMES.length],
+    ArrowLeft: TAB_NAMES[(i - 1 + TAB_NAMES.length) % TAB_NAMES.length],
+    Home: TAB_NAMES[0],
+    End: TAB_NAMES[TAB_NAMES.length - 1],
+  }[ev.key];
+  if (!next) return;
+  ev.preventDefault();
+  select(next, { focus: true });
+});
+
+el.versionBadge.addEventListener('click', () => select('about', { focus: true }));
+
+wireErrors();
 session.wire();
 automation.wire();
 issues.wire();
+about.wire();
 
 api.runtime.onMessage.addListener((msg) => {
   if (!msg?.__g9) return;
-  if (msg.type === 'state' || msg.type === 'activity') session.refresh();
-  else if (msg.type === 'dialog') showPanelError(`Page opened a ${msg.dialogType}: ${msg.message}`);
-  else if (msg.type === 'detached') showPanelError('Debugger detached from the attached tab.');
+  switch (msg.type) {
+    case 'state':
+    case 'activity':
+    case 'agents':
+      session.refresh();
+      break;
+    case 'reconnecting':
+      session.noteRetry(msg);
+      break;
+    case 'dialog':
+      showPanelError(`Page opened a ${msg.dialogType}: ${msg.message}`);
+      break;
+    case 'detached':
+      showPanelError('Debugger detached from the attached tab.');
+      break;
+    default:
+      break;
+  }
 });
 
 setInterval(() => {
   session.refresh();
   automation.refresh();
   issues.refresh();
+  about.refresh();
 }, 2500);
 
-session.refresh({ nudge: firstRefresh });
-firstRefresh = false;
+// The first read nudges the worker: someone just opened the panel, so a
+// connection waiting out a long backoff is retried now instead.
+session.refresh({ nudge: true });

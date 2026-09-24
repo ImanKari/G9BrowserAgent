@@ -1,0 +1,62 @@
+{
+  "about": "Public detector and fingerprint pages for setup/stealthtest.mjs (V2_IMPLEMENTATION_PLAN §6.6). Each page is opened in the launched engine, given a humanized scroll, pointer moves and one click on a harmless spot, then screenshotted; `extractor` names the function in stealthtest.mjs that reads its verdict. These pages change without notice: an extractor that finds none of its fields is a WARN (fix the extractor), a detected verdict is a FAIL. `click` is a point in CSS pixels chosen on an empty part of the page (x/y may be fractions of the viewport). `settleMs` is how long the page needs to finish its own tests before anyone touches it; `afterMs` is the wait after the interaction.",
+  "pages": [
+    {
+      "name": "sannysoft",
+      "url": "https://bot.sannysoft.com/",
+      "extractor": "sannysoft",
+      "settleMs": 4000,
+      "afterMs": 2500,
+      "click": { "x": 0.93, "y": 0.35 },
+      "inspect": ["table"],
+      "screenshot": "fullpage"
+    },
+    {
+      "name": "creepjs",
+      "url": "https://abrahamjuliot.github.io/creepjs/",
+      "extractor": "creepjs",
+      "settleMs": 12000,
+      "afterMs": 4000,
+      "click": { "x": 0.97, "y": 0.5 },
+      "screenshot": "viewport"
+    },
+    {
+      "name": "browserscan",
+      "url": "https://www.browserscan.net/bot-detection",
+      "extractor": "browserscan",
+      "settleMs": 8000,
+      "afterMs": 3000,
+      "click": { "x": 0.97, "y": 0.6 },
+      "screenshot": "viewport"
+    },
+    {
+      "name": "pixelscan",
+      "url": "https://pixelscan.net/fingerprint-check",
+      "extractor": "pixelscan",
+      "settleMs": 12000,
+      "afterMs": 4000,
+      "click": { "x": 0.97, "y": 0.6 },
+      "screenshot": "viewport"
+    },
+    {
+      "name": "fingerprint-bot-detection",
+      "url": "https://fingerprint.com/products/bot-detection/",
+      "extractor": "fingerprint",
+      "settleMs": 9000,
+      "afterMs": 4000,
+      "click": { "x": 0.97, "y": 0.55 },
+      "screenshot": "viewport"
+    },
+    {
+      "name": "rebrowser",
+      "url": "https://bot-detector.rebrowser.net/",
+      "extractor": "rebrowser",
+      "optional": true,
+      "settleMs": 6000,
+      "afterMs": 3000,
+      "click": { "x": 0.97, "y": 0.6 },
+      "inspect": ["table"],
+      "screenshot": "fullpage"
+    }
+  ]
+}

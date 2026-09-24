@@ -3,8 +3,12 @@
  * visual baselines, and maintainable Playwright export.
  */
 
-import { send, evaluate, callOnNode } from '../lib/cdp.js';
+import { send } from '../lib/cdp.js';
 import { resolveRef } from '../lib/refs.js';
+// Every page read in this file runs in G9's isolated world: the locator engine
+// (window.__g9loc) lives there, invisible to the page, and a page that
+// redefines getComputedStyle or innerText cannot bend what an assertion reads.
+import { inWorld, callInWorld } from '../lib/world.js';
 import { LOCATOR_SOURCE } from '../lib/locators.js';
 import { getRecording, saveRecording, putAttachment } from '../lib/store.js';
 import { screenshot } from './capture.js';
@@ -160,7 +164,7 @@ export async function suggestAssertions(tabId, id) {
   const existing = new Set((recording.steps ?? []).filter((step) => step.type === 'assert').map((step) => step.assertion));
   const suggestions = [];
 
-  const url = await evaluate(tabId, 'location.href').catch(() => null);
+  const url = await inWorld(tabId, 'location.href').catch(() => null);
   if (url && !existing.has('url')) {
     let pathOnly = url;
     try { pathOnly = new URL(url).pathname; } catch { /* keep the whole thing */ }
@@ -249,10 +253,12 @@ export async function updateRecording(id, patch = {}) {
 }
 
 async function describeTarget(tabId, { ref, selector }) {
-  await send(tabId, 'Runtime.evaluate', { expression: LOCATOR_SOURCE, returnByValue: true });
   let backendNodeId;
+  let sessionId = null;
   if (ref) {
-    backendNodeId = (await resolveRef(tabId, ref)).backendNodeId;
+    const node = await resolveRef(tabId, ref);
+    backendNodeId = node.backendNodeId;
+    sessionId = node.sessionId ?? null;
   } else if (selector) {
     const { root } = await send(tabId, 'DOM.getDocument', { depth: 0 });
     const found = await send(tabId, 'DOM.querySelector', { nodeId: root.nodeId, selector });
@@ -262,10 +268,15 @@ async function describeTarget(tabId, { ref, selector }) {
   } else {
     throw new Error('This assertion needs ref or selector.');
   }
-  const target = await callOnNode(
+  // The locator engine goes into the world of the frame process that owns the
+  // node: a cross-origin frame has its own.
+  await inWorld(tabId, LOCATOR_SOURCE, { sessionId });
+  const target = await callInWorld(
     tabId,
     backendNodeId,
     `function () { return window.__g9loc && window.__g9loc.describe(this); }`,
+    [],
+    sessionId,
   );
   if (!target) throw new Error('Could not build durable locators for the assertion target.');
   return target;
@@ -275,12 +286,12 @@ export async function executeAssertion(tabId, rawStep, variables = {}) {
   const step = substitute(rawStep, variables);
   switch (step.assertion) {
     case 'url': {
-      const actual = await evaluate(tabId, 'location.href');
+      const actual = await inWorld(tabId, 'location.href');
       compareText(actual, step.expected ?? step.contains, step.operator ?? (step.contains != null ? 'contains' : 'exact'), 'URL');
       return { assertion: 'url', actual };
     }
     case 'text': {
-      const actual = await evaluate(tabId, 'document.body ? document.body.innerText : ""');
+      const actual = await inWorld(tabId, 'document.body ? document.body.innerText : ""');
       const expected = step.expected ?? step.contains ?? '';
       const operator = step.absent ? 'absent' : (step.operator ?? 'contains');
       compareText(actual, expected, operator, 'page text');
@@ -454,8 +465,8 @@ async function executeElementAssertion(tabId, step) {
   const deadline = Date.now() + 3000;
   let resolved;
   while (Date.now() < deadline) {
-    await send(tabId, 'Runtime.evaluate', { expression: LOCATOR_SOURCE, returnByValue: true }).catch(() => {});
-    resolved = await evaluate(
+    await inWorld(tabId, LOCATOR_SOURCE).catch(() => {});
+    resolved = await inWorld(
       tabId,
       `(() => {
         const result = window.__g9loc && window.__g9loc.resolve(` + JSON.stringify(step.target) +

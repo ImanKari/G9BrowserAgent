@@ -1,79 +1,189 @@
-# `g9` — the unattended runner
+# `g9` — the unattended runner (v2)
 
-Replays recorded flows with **no agent and no QA present**, and returns a
-standard exit code plus a report directory. This is the piece that turns "we
-recorded a test" into "it runs every night".
-
-**Documentation audited against v1.7.21 on 2026-09-12.** Browser runs still need a connected
-extension and an execution environment suitable for their interactions. Scheduling the CLI does
-not launch/configure a browser or guarantee background input delivery. See the
-[current implementation limits](../AIGuide.md#8-known-gaps-and-deliberate-omissions).
+The runner replays recorded flows with **no agent and no QA present**. It returns a standard exit
+code and writes a report directory. This is the piece that turns "we recorded a test" into "it runs
+every night".
 
 ```powershell
 node runner/g9.mjs list
 node runner/g9.mjs run suite:smoke --env test1 --report ./g9-artifacts
-node runner/g9.mjs calibrate rec_abc123          # once per flow
-node runner/g9.mjs approve  rec_abc123           # after a human reviewed the run
-node runner/g9.mjs spec     rec_abc123 --out flows/task.create.json
-node runner/g9.mjs ab       rec_abc123 --a https://released.example --b https://candidate.example
+node runner/g9.mjs run tag:checkout --headed --browser edge --profile qa-checkout
+node runner/g9.mjs calibrate flow_login          # once per flow
+node runner/g9.mjs approve  flow_login --by alice --note "new banner is expected"
+node runner/g9.mjs spec     flow_login --out QA/Flows/web/auth/login.flow.json
+node runner/g9.mjs ab       flow_login --a https://released.example --b https://candidate.example
+node runner/g9.mjs help
 ```
+
+On a machine with only the desktop app installed there is no `node`. Run the same file with the
+app itself: `G9.exe` with `ELECTRON_RUN_AS_NODE=1` and `resources\runner\g9.mjs` (see
+[Scheduling](#scheduling)).
+
+## Where it runs: a launched browser, by default
+
+`--engine launched` (the default) runs every flow in a browser that the G9 daemon **launches**: real
+Edge, Chrome or Chrome for Testing, headless by default (the daemon setting `headless`) or headed
+with `--headed`, with its own profile under
+`G9_HOME\profiles`. It never touches the person's own browser. A headless launched browser has no
+window, so a minimised or covered window, or someone working in their own browser, does not affect
+it. That is the reason Engine 2 exists (V2 plan §2.1, D3). By the same design a locked session
+should not affect it either — and disconnecting RDP puts the session in exactly that state (see
+docs/INSTALL.md, "Unattended machines"). **That was not measured.** A logged-off user runs nothing,
+because every G9 process lives in the user's session.
+
+The engine is **held** for the run (`browser_engine action:"acquire"`, or `lease:true` on the launch)
+and released at the end; the daemon stops an engine that was launched for a run once the last run
+holding it has released it and no agent owns a tab in it. Two overlapping runs on one profile
+therefore share one browser safely: neither stops it under the other.
+
+| Engine option | Meaning |
+|---|---|
+| `--engine launched\|extension` | where to run (default `launched`) |
+| `--browser auto\|edge\|chrome\|cft` | `auto` = the pinned Chrome for Testing if it is installed, else Edge, else Chrome. Name the browser for stealth suites, since detectors flag CfT's brand (`docs/STEALTH.md`). |
+| `--headless` / `--headed` | window mode of an engine this run launches (default: the daemon setting `headless`, which is `true`) |
+| `--profile <name>` | the launched engine's profile (default `automation`). Sign in to your sites in it once, with the desktop app or `browser_engine action:"warm"`; its cookies persist between runs. |
+| `--humanize off\|human\|stealth\|<profile>` | input style (default: the engine's setting, normally `human`). A calibrated profile name works too (`docs/HUMANIZE.md`). |
+| `--humanize-seed <n>` | reproduce a run's exact pointer and keyboard motion |
+| `--stealth off\|human\|stealth` | stealth level of an engine this run launches (default: the daemon setting, `off`) |
+| `--keep-engine` | leave an engine this run launched running afterwards |
+| `--port <n>` | the G9 daemon's port. It is passed to the shim as `G9_PORT`; without it the shim uses `G9_PORT` from the environment, else 8765. |
+
+**Engine reuse.** An engine already running on the same `--profile` is reused, because a profile can
+be open in only one browser at a time. If it does not match the run's `--headed`/`--headless` or
+`--browser`, the run stops and says so; stop that engine or use another profile. If another client is
+launching the same profile at that moment, the runner waits for that launch (up to 2 minutes) and
+reuses it. Otherwise it launches an engine, named `g9 runner`, holding it with a lease; at the end
+it releases the lease, and the daemon stops that engine once no other run holds it and no agent owns
+a tab in it. With `--keep-engine` it keeps running. (Against a daemon without leases, the runner
+stops what it launched itself.)
+
+**Each flow gets a fresh tab:**
+1. the tab opens on `about:blank`;
+2. a pinned HAR, if any, is applied;
+3. the tab goes to the flow's start URL. The whole goto has 110 s, which covers a cold server's first
+   byte;
+4. the flow replays;
+5. the tab closes.
+
+`--engine extension` is the v1 behaviour. Flows come from the extension's own store and replay on
+the tab that the person's browser has current. It needs the v2 extension connected, and it shares
+that browser (its tabs, focus and window state) with the person, so it is not the mode to schedule.
+
+## Flows come from the repository
+
+For launched runs, the flow library on disk is the source of truth:
+- Every `*.flow.json` FlowSpec under the project's `flowsDir` is validated, then imported into the
+  launched engine's store before it runs. `flowsDir` comes from `g9.project.json` and defaults to
+  `QA/Flows`; `agripad/` and `suites/` are excluded.
+- A file that is not valid JSON or not a valid FlowSpec stops the run and names the file. A file
+  whose `target.kind` names another platform than `web` is skipped before validation.
+- Re-importing never erases what the store learned about a flow: its **known world**, run history and
+  flakiness stay, so the surprise detector works across nightly runs.
+
+`g9.project.json` is found by walking up from the working directory, the way git finds `.git`, or
+you can name it with `--project <file>`.
+
+Without a `g9.project.json` (or with an empty library), the runner falls back to the recordings the
+browser stores hold (`browser_recording action:"list"`). A recording that only exists in the person's
+browser is copied into the launched engine by the daemon when it replays.
+
+**Targets:**
+- `<flowId>` or the flow's name;
+- `suite:<name>`: a query in `QA/Flows/suites/<name>.json`;
+- `tag:<name>`;
+- `all` (the default).
+
+A bare name that is no flow's id or name is tried as a suite name (the desktop's Schedule form sends
+one); on `--platform agripad` only ids and names match. A selection that matches nothing is an error
+that lists the known flows, never an empty PASS.
+
+## Run options
+
+| Option | Meaning |
+|---|---|
+| `--env <name>` | environment label recorded in the report (default: the project's `defaultEnvironment`) |
+| `--data <file.json>` | variables substituted into `{{placeholders}}` |
+| `--report <dir>` | where the reports go (default `./g9-artifacts`) |
+| `--timing recorded\|adaptive\|fast` | replay pacing (default `recorded`) |
+| `--signature lite\|full\|off` | how much of the page's behaviour is fingerprinted for the known world (default `lite`) |
+| `--seed` | seed the known world when a flow has none yet |
+| `--no-compare` | skip the known-world comparison (produces a reference run) |
+| `--pin <file.har>` / `--strict-pin` | serve the network from a HAR; strict fails any request the HAR does not contain |
+| `--project <file>` | the project adapter |
+| `--platform web\|agripad` | `agripad` drives a real device over adb (below) |
+| `--device <serial>`, `--device-port <n>` | AgriPad only: which device, and its automation port (default 8799; on this path `--port` is still read as the device port when `--device-port` is not given, as in v1) |
+| `--token <token>` | AgriPad only: the device's automation token, when the device requires one (shown on the device under Admin Diagnostics → QA Automation) |
+| `--fail-on warning\|surprise\|failure` | the lowest verdict that makes the exit code non-zero (default `surprise`) |
+| `--quiet` | only the closing lines: the summary, the humanize seed and where the reports are |
 
 ## It speaks MCP, on purpose
 
-For browser flows, the runner spawns `bridge/src/server.js` and talks to it over stdio — the same
-interface an agent uses, the same tools, the same boundaries. It can do nothing
-an agent could not do, so pinned mode, the Stop button and cookie scoping still
-apply to a scheduled run. There is no private back door into the extension, and
-there should never be one.
+The runner spawns `mcp/shim.mjs`, the same shim an AI agent's client launches. The shim talks to
+the one G9 daemon on this machine and starts it if needed. So the runner can do nothing an agent
+could not do: ownership, the Stop button (side panel or desktop app) and every refusal apply to a
+scheduled run exactly as they do to an agent. If Stop is engaged when the run starts, it exits 4 with
+"Stop is engaged". There is no private back door, and there should never be one. (`--platform
+agripad` is the exception: it talks to a device over adb and never contacts the daemon, so Stop does
+not reach it.)
 
-The runner also has an AgriPad adapter (`drivers/agripad.mjs`) selected with `--platform agripad`.
-It uses adb and the device's automation endpoint rather than browser tabs. A working browser flow
-does not imply that adapter/device is configured, and device results are labeled `gray-box`.
+**The v1 "port rule" is gone.** v1 needed a second browser profile with its own extension copy,
+because the extension talked to exactly one bridge. In v2, any number of agents, runners and the
+desktop app share one daemon, and each tab has one owner at a time. `--port` only says where that
+daemon listens.
 
-## The port rule — read this before scheduling anything
+## Scheduling
 
-The extension connects to **exactly one** bridge at a time. Without an explicit port, bridges can
-discover an available port in 8765–8775; `--port` pins the runner's port. A second free port does
-not connect the extension automatically. Select the intended bridge in the panel, or use a separate
-profile/extension instance. If the editor owns a pinned port, the runner cannot own that same port.
+**G9's scheduler.** The desktop app's **Schedule** view (or the daemon's `schedule.*` admin ops) runs
+`runner/g9.mjs run <target> …` as a child process, daily at a local time or every N minutes:
+- The child is started with the daemon's own executable, so on an installed machine it is `G9.exe`,
+  with no Node needed.
+- Every engine option in the form becomes an explicit flag, except a browser left at "auto": no
+  `--browser` is passed, so that entry follows the daemon's `defaultBrowser` setting.
+- Each run is filed under `G9_HOME\runs\<runId>\`, with the reports in `report\`.
+- An entry may name its project (`project`: the path of a `g9.project.json`). Otherwise the daemon's
+  default project is passed as `--project`, and the run starts in that project's folder.
+- A run missed while the daemon was down runs once when it comes back.
+- It only fires while the daemon runs, so turn on "Start G9 when I sign in" (`docs/INSTALL.md`,
+  "Unattended machines").
 
-So the unattended arrangement is a **second browser profile** with its own copy
-of the extension carrying `dev-bridge.json`, which is precisely what
-`setup/isolated-livetest.mjs` builds. Point the runner at that port:
+The desktop suite ran a desktop-shaped schedule entry through the packaged `G9.exe`, with no Node on
+the PATH: 3 of 3 runs passed (2026-09-22).
+
+**Windows Task Scheduler** works as well. Set the task's "Start in" folder to the folder that holds
+`g9.project.json`, or pass `--project <file>`: the runner looks for the project upwards from its
+working directory, and a task starts in `System32` by default. From a repository checkout:
 
 ```powershell
-node runner/g9.mjs run suite:smoke --port 8790
+node G:\path\to\g9-browser-agent\runner\g9.mjs run suite:nightly --report D:\qa\nightly --quiet
 ```
 
-An everyday profile is convenient for one-off runs, but scheduled interaction shares its tabs,
-logins, focus and bridge ownership with the user. A dedicated browser/profile and coordinated
-bridge port make those dependencies explicit; the CLI does not provision them for you.
+On an installed machine, wrap the command in `cmd` so the environment variable is set (there is no
+space before `&&`):
 
-Background reads and screenshots can work, and headless background typing succeeded in the latest
-targeted audit. This does not certify minimized/occluded windows or a locked desktop. The current
-generic input witness also has an unresolved defect. Verify action outcomes and test the actual
-scheduled environment before relying on unattended interaction. The isolated harness uses headless
-mode and Node.js 22+; it is not evidence for every headed state.
+```
+cmd.exe /d /c "set ELECTRON_RUN_AS_NODE=1&& "%LOCALAPPDATA%\Programs\G9\G9.exe" "%LOCALAPPDATA%\Programs\G9\resources\runner\g9.mjs" run suite:nightly --report D:\qa\nightly --quiet"
+```
 
-Named browser sessions are tab aliases, not separate login contexts. Same-origin normal tabs in one
-profile share cookies/localStorage. Separate accounts need an appropriate isolation arrangement.
+That form was run against the built `win-unpacked` copy with `help`, and it exited 0. Task Scheduler
+itself was not exercised. For stealth-critical suites, run headed Edge on a dedicated desktop that
+nobody minimises (`docs/STEALTH.md`).
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
-| 0 | everything passed (warnings allowed) |
-| 1 | **product** failure — an assertion or oracle failed |
-| 2 | **automation** failure — the test broke, not the product |
-| 3 | a confirmed **surprise** — the flow did something it has never done |
-| 4 | the runner could not run at all |
+| 0 | everything passed (warnings allowed, unless `--fail-on warning`) |
+| 1 | **product** failure: an assertion or oracle failed (`FAIL_PRODUCT`), or a flow could not complete (`ERROR`) |
+| 2 | **automation** failure: the test broke, not the product (`FAIL_AUTOMATION`) |
+| 3 | a confirmed **surprise**: the flow did something it has never done. With `--fail-on warning`, `PASS_WITH_WARNING` also gives 3. |
+| 4 | the runner could not run at all (no daemon, no engine, no flows, bad arguments, Stop engaged) |
 
-`--fail-on failure` keeps the gate where a normal suite would put it while you
-learn to trust the surprise detector; `--fail-on surprise` (the default) treats
-an unexplained change as a reason to look.
+The worst verdict wins, in that order: 1 before 2 before 3. `--fail-on failure` ignores surprises,
+which keeps the gate where a normal suite would put it while you learn to trust the surprise
+detector. `--fail-on surprise` (the default) treats an unexplained change as a reason to look.
 
-Separating 1 from 2 is the whole point of the classification. A pipeline that
-reports a rotted locator as a product regression teaches people to ignore it.
+Separating 1 from 2 is the whole point of the classification. A pipeline that reports a rotted
+locator as a product regression teaches people to ignore it.
 
 ## Reports
 
@@ -81,26 +191,47 @@ Four files, because four audiences read them:
 
 | File | For |
 |---|---|
-| `run.json` | machines — the complete record, including every surprise |
-| `junit.xml` | CI — surprises appear as their own test cases, not a footnote |
-| `report.html` | a QA, by double-clicking. Self-contained, no CDN |
-| `qa-automation-status.json` | the manual QA suite: `{ "TC-06-01": { "status": "PASS", … } }` |
+| `run.json` | machines: the complete record, including every surprise, the daemon version, the engine (id, browser, version, headless, profile, stealth, humanize, and whether this run launched it) and the humanize seed |
+| `junit.xml` | CI: surprises appear as their own test cases; engine, daemon version and seed as `<properties>` |
+| `report.html` | a QA, by double-clicking. It is self-contained, with no CDN, and shows the engine and the seed. |
+| `qa-automation-status.json` | the manual QA suite: `{ "format": "g9/qa-automation-status", "version": 1, "at", "environment", "cases": { "TC-06-01": { "status": "PASS", "flowId", "flowName", "at", "durationMs" } } }` — the worst verdict wins when two flows cover one case |
 
-That last file is the cheap, high-value one: it is what lets an existing manual
-test suite show which scenarios are already covered automatically, so a tester
-knows what they can skip today.
+Each launched-engine replay also leaves an evidence run under `G9_HOME\runs\<runId>\` (screencast
+frames, the pointer track, `engine.json`, and `result.json` with the verdict, steps and warnings).
+The flow's `evidence` field in `run.json` refers to it.
+
+A humanized run is reproducible: the line after the summary prints the seed, and `--humanize-seed <n>` replays
+the same pointer paths and typing rhythm.
+
+## Other commands
+
+| Command | What it does |
+|---|---|
+| `list` | the flows in the repository library and in each browser store |
+| `calibrate <flowId>` | replays the flow twice on one build and marks what differs as volatile noise, so it never counts as a surprise. Run it once per flow. |
+| `approve <flowId> [--by <name>] [--note <text>]` | folds the last run into the flow's approved known world (default `--by runner`). The desktop's Approvals view does the same with your Windows user name. |
+| `spec <flowId> [--out <file>]` | exports a canonical, Git-diffable FlowSpec (to stdout without `--out`) |
+| `ab <flowId> --a <url> --b <url> [--timing <mode>] [--report <dir>]` | runs the flow against two builds and diffs their full signatures. It reports differences, not verdicts: a shipped feature and a regression look the same. It exits 0 unless a side failed to run (2), and writes `ab.json` with `--report`. |
 
 ## Pinning the backend
 
 ```powershell
-# once, against the real server
-node runner/g9.mjs run rec_abc --report ./art        # (record a HAR from the panel or the agent)
+# once, against the real server (record a HAR from the panel or an agent)
 # thereafter
-node runner/g9.mjs run rec_abc --pin har/task-create.har --strict-pin
+node runner/g9.mjs run flow_task_create --pin har/task-create.har --strict-pin
 ```
 
-HAR pinning serves stored responses for matching requests. Matching uses method, origin/path and
-query keys, ignores query values and request bodies, and consumes duplicate entries in order.
-Without `--strict-pin`, unmatched requests still reach the live server. Stored bodies are bounded.
-Use this comparison to narrow a diagnosis; it does not prove a fully frozen backend or attribute
-every remaining difference to the client.
+HAR pinning serves stored responses for requests that match:
+- matching uses the method, origin and path, and the query keys; it ignores query values and request
+  bodies;
+- duplicate entries are consumed in order;
+- without `--strict-pin`, unmatched requests still reach the live server.
+
+Use the comparison to narrow a diagnosis; it does not prove a fully frozen backend.
+
+## AgriPad devices
+
+`--platform agripad` drives a real device over adb through `drivers/agripad.mjs` instead of a
+browser. Flows come from `QA/Flows/agripad/**`; choose the device with `--device <serial>` and its
+port with `--device-port <n>` (default 8799). It shares the flow format, the verdicts and the
+reports, and its results are labelled `gray-box`.

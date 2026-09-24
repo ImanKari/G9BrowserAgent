@@ -1,0 +1,19 @@
+{
+  "$comment": "Pinned Chrome for Testing for Engine 2. Written by \"node engine/cft.js pin\" (trust on first use: sha256/size computed from the first download, transfer checked against Google storage x-goog-hash MD5). engine/cft.js ensure() refuses any zip that does not match. See engine/README.md.",
+  "chrome-for-testing": {
+    "channel": "Stable",
+    "version": "153.0.8010.52",
+    "revision": "1681091",
+    "pinnedAt": "2026-09-21T18:13:49.740Z",
+    "trust": "trust-on-first-use: sha256 and size computed by engine/cft.js pin from the first download; the transfer was checked against the MD5 in Google storage's x-goog-hash header",
+    "source": "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json",
+    "downloads": {
+      "win64": {
+        "url": "https://storage.googleapis.com/chrome-for-testing-public/153.0.8010.52/win64/chrome-win64.zip",
+        "size": 205149043,
+        "sha256": "df4854428c509fcf2f790ac448bca3f994151bcff22008236fa7c4587294fbe1",
+        "serverMd5": "zpBayjQjVXGHNOpRyiRcpw=="
+      }
+    }
+  }
+}

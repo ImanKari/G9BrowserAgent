@@ -25,12 +25,26 @@
  * `testid` and now matches on `xpath` still passes, and is one refactor from
  * not passing. Replay collects those as warnings, so a recording tells you it
  * is rotting before the morning it breaks.
+ *
+ * ## Input level and seed (v2)
+ *
+ * A replay runs every step at one input level (`humanize`: the call's
+ * argument, else the recording's own `humanize`, else the engine default) and
+ * from one RUN seed. Step n acts with the seed `<runSeed>:s<n>`, so the run's
+ * whole motion is reproduced by passing the reported `humanizeSeed` back. A
+ * failure that only happens with one particular pointer path is then a
+ * failure you can watch again.
  */
 
-import { send, evaluate, callOnNode } from '../lib/cdp.js';
+import { send } from '../lib/cdp.js';
+// Every page read and every piece of bookkeeping replay leaves in the page
+// (the resolved target, the settle box, the event proofs) lives in G9's
+// isolated world: the page never sees __g9target or __g9ReplayProof.
+import { inWorld, callInWorld } from '../lib/world.js';
+import { levelFor, nextSeed } from '../lib/humanize.js';
 import { LOCATOR_SOURCE } from '../lib/locators.js';
 import { getRecording, saveRecording } from '../lib/store.js';
-import { saveRefs, getRefs, clearRefs } from '../lib/refs.js';
+import { withPrivateRefs } from '../lib/refs.js';
 import * as interact from './interact.js';
 import * as nav from './navigate.js';
 import { setReplaying } from './record.js';
@@ -90,10 +104,24 @@ const SIGNATURE_MODES = {
 export async function replay(tabId, {
   id, timing = 'recorded', stopOnFailure = true, dryRun = false, variables = {},
   signature: signatureMode = 'lite', compare = true, seedKnownWorld = false,
-  includeSignature = false,
+  includeSignature = false, humanize, seed,
 } = {}) {
   const recording = await getRecording(id);
   if (!recording) throw new Error(`No recording with id "${id}". Call browser_recording action:"list" to see them.`);
+
+  // Resolved once, up front: an unknown profile name fails before step 1, not
+  // halfway through a flow.
+  const humanizeArg = humanize ?? recording.humanize ?? undefined;
+  const runSeed = seed ?? nextSeed(tabId);
+  const hz = await levelFor(tabId, { humanize: humanizeArg, seed: runSeed });
+  // The resolved profile itself travels to every step, so a calibrated profile
+  // chosen by name is the one each action uses.
+  const input = { humanize: hz.profile, level: hz.level, runSeed };
+  // The run's motion starts from a point fixed by its seed (interact.homePointer): the same seed
+  // then reproduces the same paths, whatever the previous run on this tab left behind. Reported
+  // as pointerStart; a tab that cannot take input yet (hidden) leaves it to step 1 to say so.
+  let pointerStart = null;
+  if (!dryRun && hz.level !== 'off') pointerStart = await interact.homePointer(tabId, hz, runSeed).catch(() => null);
 
   const mode = TIMING[timing] ?? TIMING.adaptive;
   const evidence = SIGNATURE_MODES[signatureMode] ?? SIGNATURE_MODES.lite;
@@ -153,7 +181,9 @@ export async function replay(tabId, {
     });
 
     try {
-      const outcome = dryRun ? await probe(tabId, step) : await runStep(tabId, step, mode);
+      const outcome = dryRun ? await probe(tabId, step) : await runStep(tabId, step, mode, {
+        ...input, seed: `${runSeed}:s${i + 1}`,
+      });
       const record = { step: i + 1, id: stepId, type: step.type, ok: true, ms: Date.now() - stepStarted, ...outcome };
       results.push(record);
 
@@ -200,6 +230,27 @@ export async function replay(tabId, {
     await setReplaying(tabId, false);
   }
 
+  // ---- let the page finish reacting to the last step ------------------------
+  // Each step's evidence is read right after it. A page that logs an error and fires a failing
+  // request a few ms after the LAST step (a save that reports back) had those recorded or not
+  // depending on who won the race, so identical runs differed: surprises 3, 3, 2, 3, 3, 3 over six
+  // replays of one flow (desktop render check, round 3), and the known world and the Approvals list
+  // changed with them. Wait (bounded) until the page is quiet, then give the last step what arrived.
+  let settledAfterLastStep = null;
+  if (!dryRun && signatureMode !== 'off' && results.length && (evidence.console || evidence.network)) {
+    const readActivity = async () => {
+      const [log, net, pending] = await Promise.all([
+        evidence.console ? observe.consoleLog(tabId, { limit: 0 }).catch(() => null) : null,
+        evidence.network ? observe.network(tabId, { limit: 0 }).catch(() => null) : null,
+        evidence.network ? observe.network(tabId, { status: 'pending', limit: 0 }).catch(() => null) : null,
+      ]);
+      return { consoleSeq: log?.lastSeq ?? 0, requests: net?.total ?? 0, pending: pending?.returned ?? 0 };
+    };
+    const quiet = await awaitQuiet(readActivity);
+    const late = await attachLateEvidence(tabId, results.at(-1), { evidence, watermark });
+    settledAfterLastStep = { ...quiet, lateConsole: late.console, lateRequests: late.network };
+  }
+
   const failed = results.filter((r) => !r.ok);
   const summary = {
     id: recording.id,
@@ -212,8 +263,14 @@ export async function replay(tabId, {
     failed: failed.length,
     durationMs: Date.now() - started,
     warnings,
+    humanize: hz.level === 'off'
+      ? { level: 'off' }
+      : { level: hz.level, profile: hz.name, ...(hz.raisedFrom ? { raisedFrom: hz.raisedFrom, stealthLevel: hz.stealthLevel } : {}) },
+    humanizeSeed: runSeed,
+    ...(pointerStart ? { pointerStart } : {}),
     dataParameters: Object.keys(data),
     steps: results.map(publicStep),
+    ...(settledAfterLastStep ? { settledAfterLastStep } : {}),
   };
 
   // ---- settle the evidence ------------------------------------------------
@@ -295,6 +352,8 @@ export async function replay(tabId, {
       failed: summary.failed,
       durationMs: summary.durationMs,
       verdict: summary.verdict,
+      humanize: hz.level,
+      humanizeSeed: runSeed,
       surprises: classified.filter((s) => s.effectiveSeverity !== 'info').length,
     };
     const runHistory = [...(recording.runHistory ?? []), run].slice(-20);
@@ -307,16 +366,19 @@ export async function replay(tabId, {
     // comparison, and asking somebody to approve an empty baseline they have
     // not seen is theatre. `seedKnownWorld` makes that first merge explicit.
     const shouldSeed = seedKnownWorld && runSignature && !(recording.knownWorld?.runs);
+    // Read again before writing: an approval made WHILE this run was going would otherwise be
+    // undone by the copy read at the start (the flow would still be reported as approved).
+    const current = (await getRecording(id)) ?? recording;
 
     await saveRecording({
-      ...recording,
+      ...current,
       lastRun: run,
       runHistory,
-      lastSignature: runSignature ?? recording.lastSignature ?? null,
+      lastSignature: runSignature ?? current.lastSignature ?? null,
       knownWorld: shouldSeed
         ? { ...mergeKnownWorld(emptyKnownWorld(runSignature), runSignature), approvedAt: Date.now(), approvedBy: 'seed' }
-        : recording.knownWorld ?? null,
-      surpriseHistory: [...(recording.surpriseHistory ?? []), classified.map((s) => ({ key: s.key, kind: s.kind }))].slice(-5),
+        : current.knownWorld ?? null,
+      surpriseHistory: [...(current.surpriseHistory ?? []), classified.map((s) => ({ key: s.key, kind: s.kind }))].slice(-5),
       flaky: {
         detected: passRuns > 0 && failRuns > 0,
         sampleSize: recent.length,
@@ -339,8 +401,8 @@ export async function replay(tabId, {
  * not slowly blind the suite, because it only ever excludes things that were
  * proven unstable rather than things somebody found annoying.
  */
-export async function calibrate(tabId, { id, timing = 'recorded', variables = {} } = {}) {
-  const options = { id, timing, variables, signature: 'full', compare: false, stopOnFailure: true, includeSignature: true };
+export async function calibrate(tabId, { id, timing = 'recorded', variables = {}, humanize } = {}) {
+  const options = { id, timing, variables, signature: 'full', compare: false, stopOnFailure: true, includeSignature: true, humanize };
 
   const first = await replay(tabId, options);
   if (first.failed) {
@@ -376,11 +438,22 @@ export async function calibrate(tabId, { id, timing = 'recorded', variables = {}
  * Deliberately a separate, explicit action. Everything else in this file is
  * allowed to observe; only a person is allowed to say "that is normal now".
  */
-export async function approveKnownWorld(id, { by = 'operator', note = null } = {}) {
+export async function approveKnownWorld(id, { by = 'operator', note = null, expectLastRunAt = null } = {}) {
   const recording = await getRecording(id);
   if (!recording) throw new Error(`No recording with id "${id}".`);
   if (!recording.lastSignature) {
     throw new Error('There is no recorded signature to approve. Replay the flow once, then approve that run.');
+  }
+  // What is approved is the run the person REVIEWED. A replay that finished between the review and
+  // the press replaced lastSignature, and its surprises — a real regression among them — went into
+  // the known world unseen (desktop review, 2026-09-22). Checked here, next to the write, because
+  // a check in the caller leaves a gap between the read and the merge.
+  if (expectLastRunAt != null && Number(recording.lastRun?.at ?? 0) !== Number(expectLastRunAt)) {
+    throw new Error(
+      `A newer run of "${recording.name ?? id}" arrived after the one you reviewed (${new Date(Number(expectLastRunAt)).toISOString()} → ` +
+        `${recording.lastRun?.at ? new Date(Number(recording.lastRun.at)).toISOString() : 'none'}), so nothing was approved. ` +
+        'Review that run and approve it instead.',
+    );
   }
   const merged = mergeKnownWorld(recording.knownWorld, recording.lastSignature);
   const knownWorld = { ...merged, approvedAt: Date.now(), approvedBy: by, approvalNote: note };
@@ -547,6 +620,51 @@ async function attachEvidence(tabId, record, { evidence, watermark, wantUi }) {
 }
 
 /**
+ * Wait until the page has gone QUIET: for `quietMs`, no new console entry, no new request and none
+ * still pending — bounded by `capMs`, so a page that never stops (polling, a long-lived request)
+ * costs at most that. `read()` → `{ consoleSeq, requests, pending }`. → `{ quiet, waitedMs }`.
+ */
+export async function awaitQuiet(read, { quietMs = 500, capMs = 2_000, everyMs = 100 } = {}) {
+  const started = Date.now();
+  let last = await read().catch(() => null);
+  let quietSince = last && !(last.pending > 0) ? Date.now() : Infinity;
+  while (Date.now() - started < capMs) {
+    await new Promise((r) => setTimeout(r, everyMs));
+    const now = await read().catch(() => null);
+    // `consoleSeq` and `requests` only grow, so a change in them is an EDGE: observing it at this
+    // poll means it already happened, and the quiet window may start from here. `pending` is a
+    // LEVEL, and a request finishing moves no counter at all — it was counted into `requests` when
+    // it STARTED, and completing only drops `pending` back to zero. Folding `pending > 0` into
+    // `changed` therefore opened the quiet window at the last moment a request was seen RUNNING
+    // instead of the first moment nothing was: whenever the poll slipped (a loaded box turns
+    // setTimeout(20) into 90 ms, measured), the window opened a whole interval before the request
+    // actually settled, and awaitQuiet could return before the late response — and its status —
+    // was readable. That is the exact race this function exists to close, so the level gates the
+    // clock: while anything is in flight there is no quiet start, only a first poll that sees none.
+    const changed = !now || !last || now.consoleSeq !== last.consoleSeq || now.requests !== last.requests;
+    if (changed) quietSince = Date.now();
+    if (!now || now.pending > 0) quietSince = Infinity;
+    else if (quietSince === Infinity) quietSince = Date.now();
+    last = now;
+    if (Date.now() - quietSince >= quietMs) return { quiet: true, waitedMs: Date.now() - started };
+  }
+  return { quiet: false, waitedMs: Date.now() - started };
+}
+
+/**
+ * Add to `record` (the last step's) the console entries and requests that arrived after its own
+ * evidence was read. Appends — never replaces what the step already had. → counts added.
+ */
+async function attachLateEvidence(tabId, record, { evidence, watermark }) {
+  if (!record) return { console: 0, network: 0 };
+  const late = {};
+  await attachEvidence(tabId, late, { evidence, watermark, wantUi: false });
+  if (late.console?.length) record.console = [...(record.console ?? []), ...late.console];
+  if (late.network?.length) record.network = [...(record.network ?? []), ...late.network];
+  return { console: late.console?.length ?? 0, network: late.network?.length ?? 0 };
+}
+
+/**
  * Give every request its FINAL status.
  *
  * One extra buffer read, after the run, patching by requestId. Requests that are still unfinished
@@ -592,7 +710,7 @@ function publicStep(record) {
 
 /** Make sure the locator engine is present — it may have been lost to a navigation. */
 async function ensureLocators(tabId) {
-  await send(tabId, 'Runtime.evaluate', { expression: LOCATOR_SOURCE, returnByValue: true }).catch(() => {});
+  await inWorld(tabId, LOCATOR_SOURCE).catch(() => {});
 }
 
 // -------------------------------------------------------------------- resolve
@@ -610,7 +728,7 @@ async function locate(tabId, step, { budgetMs }) {
 
   for (;;) {
     await ensureLocators(tabId);
-    last = await evaluate(
+    last = await inWorld(
       tabId,
       `(() => {
          const t = ${JSON.stringify(step.target)};
@@ -744,9 +862,12 @@ async function probe(tabId, step) {
 
 // ----------------------------------------------------------------- execution
 
-async function runStep(tabId, step, mode) {
+async function runStep(tabId, step, mode, input = {}) {
   const stepStart = Date.now();
   const budgetMs = Math.round((step.waitMs ?? 0) * mode.budget);
+  // Passed to every interaction of this step: its level and its seed.
+  const hz = input.humanize !== undefined ? { humanize: input.humanize, seed: input.seed } : { seed: input.seed };
+  const humanLevel = !!input.level && input.level !== 'off';
 
   if (step.type === 'assert') return assertWithin(tabId, step, budgetMs);
 
@@ -757,16 +878,36 @@ async function runStep(tabId, step, mode) {
   }
 
   if (step.type === 'scroll') {
-    await evaluate(tabId, `scrollTo(${Number(step.x) || 0}, ${Number(step.y) || 0})`);
-    return { to: { x: step.x, y: step.y } };
+    const to = { x: Number(step.x) || 0, y: Number(step.y) || 0 };
+    if (!humanLevel) {
+      await inWorld(tabId, `scrollTo(${to.x}, ${to.y})`, { idempotent: false });
+      return { to };
+    }
+    // A person scrolls to a resting place with the wheel. The wheel moves in
+    // WHOLE notches (snap), so the landing is reported rather than promised to the pixel — it used
+    // to send the exact offset, ending on a partial notch no wheel produces. A resting place within
+    // half a notch of where the page already is needs no wheel at all.
+    const at = await inWorld(tabId, '({ x: scrollX, y: scrollY })').catch(() => ({ x: 0, y: 0 }));
+    const dy = to.y - (at?.y ?? 0);
+    const dx = to.x - (at?.x ?? 0);
+    const HALF_NOTCH = 50;
+    let result = null;
+    if (Math.abs(dy) >= HALF_NOTCH) {
+      result = await interact.scroll(tabId, { direction: dy > 0 ? 'down' : 'up', amount: Math.abs(dy), snap: true, ...hz, seed: `${input.seed}:y` });
+    }
+    if (Math.abs(dx) >= HALF_NOTCH) {
+      result = await interact.scroll(tabId, { direction: dx > 0 ? 'right' : 'left', amount: Math.abs(dx), snap: true, ...hz, seed: `${input.seed}:x` });
+    }
+    return { to, landed: result?.position ?? at, via: 'wheel', ...(result ? { delivery: result.delivery } : {}) };
   }
 
   if (step.type === 'key' && !step.target) {
-    await interact.key(tabId, {
+    const pressed = await interact.key(tabId, {
       key: step.key,
       modifiers: interact.modifierMask(step.modifiers || []),
+      ...hz,
     });
-    return { pressed: step.key };
+    return { pressed: step.key, delivery: pressed?.delivery };
   }
 
   const found = await locate(tabId, step, { budgetMs });
@@ -788,23 +929,29 @@ async function runStep(tabId, step, mode) {
     case 'rightclick': {
       const eventName = step.type === 'rightclick' ? 'contextmenu' : step.type === 'double_click' ? 'dblclick' : 'click';
       await armEventProof(tabId, backendNodeId, eventName);
-      await withRefBypass(tabId, backendNodeId, (opts) =>
+      const clicked = await withRefBypass(tabId, backendNodeId, (opts) =>
         interact.click(tabId, {
           ...opts,
+          ...hz,
           clickCount: step.type === 'double_click' ? 2 : 1,
           button: step.type === 'rightclick' ? 'right' : 'left',
           modifiers: interact.modifierMask(step.modifiers || []),
         }),
-      );
-      await verifyEventProof(tabId, backendNodeId, eventName);
-      return common;
+      ).catch(async (err) => {
+        // The click failed (refused, not delivered): take the proof listener
+        // down rather than leave it waiting in the page for a click that never comes.
+        await dropEventProof(tabId, backendNodeId);
+        throw err;
+      });
+      const proof = await verifyEventProof(tabId, backendNodeId, eventName);
+      return { ...common, delivery: clicked?.delivery, ...(proof?.navigatedAway ? { navigatedAway: true } : {}) };
     }
 
     case 'type': {
-      await withRefBypass(tabId, backendNodeId, (opts) =>
-        interact.type(tabId, { ...opts, text: String(step.value ?? ''), clear: true }),
+      const typed = await withRefBypass(tabId, backendNodeId, (opts) =>
+        interact.type(tabId, { ...opts, ...hz, text: String(step.value ?? ''), clear: true }),
       );
-      const actual = await callOnNode(
+      const actual = await callInWorld(
         tabId,
         backendNodeId,
         `function () { return this.value != null ? String(this.value) : String(this.textContent || ''); }`,
@@ -812,22 +959,22 @@ async function runStep(tabId, step, mode) {
       if (actual !== String(step.value ?? '')) {
         throw new Error(`Typing was issued, but the field contains ${JSON.stringify(actual)} instead of ${JSON.stringify(String(step.value ?? ''))}.`);
       }
-      return { ...common, value: step.value };
+      return { ...common, value: step.value, delivery: typed?.delivery };
     }
 
     case 'select': {
       await withRefBypass(tabId, backendNodeId, (opts) =>
-        interact.select(tabId, { ...opts, values: step.values || step.texts || step.text || step.value }),
+        interact.select(tabId, { ...opts, ...hz, values: step.values || step.texts || step.text || step.value }),
       );
       return { ...common, selected: step.values || step.texts || step.text || step.value };
     }
 
     case 'check': {
-      const now = await callOnNode(tabId, backendNodeId, `function () { return !!this.checked; }`);
+      const now = await callInWorld(tabId, backendNodeId, `function () { return !!this.checked; }`);
       if (now !== step.checked) {
-        await withRefBypass(tabId, backendNodeId, (opts) => interact.click(tabId, opts));
+        await withRefBypass(tabId, backendNodeId, (opts) => interact.click(tabId, { ...opts, ...hz }));
       }
-      const after = await callOnNode(tabId, backendNodeId, `function () { return !!this.checked; }`);
+      const after = await callInWorld(tabId, backendNodeId, `function () { return !!this.checked; }`);
       if (after !== step.checked) {
         throw new Error(`Checkbox action was issued, but checked is ${after}; expected ${step.checked}.`);
       }
@@ -835,14 +982,27 @@ async function runStep(tabId, step, mode) {
     }
 
     case 'key': {
-      await send(tabId, 'DOM.focus', { backendNodeId });
-      const focused = await callOnNode(tabId, backendNodeId, `function () { return document.activeElement === this; }`);
+      const isFocused = () => callInWorld(
+        tabId,
+        backendNodeId,
+        `function () { return this.ownerDocument.activeElement === this; }`,
+      );
+      if (input.level === 'stealth') {
+        // No DOM.focus at this level: focus is earned by clicking the target.
+        if (!(await isFocused())) {
+          await withRefBypass(tabId, backendNodeId, (opts) => interact.click(tabId, { ...opts, ...hz, seed: `${input.seed}:focus` }));
+        }
+      } else {
+        await send(tabId, 'DOM.focus', { backendNodeId });
+      }
+      const focused = await isFocused();
       if (!focused) throw new Error('Could not focus the recorded key target; the key was not sent to another element by guesswork.');
-      await interact.key(tabId, {
+      const pressed = await interact.key(tabId, {
         key: step.key,
         modifiers: interact.modifierMask(step.modifiers || []),
+        ...hz,
       });
-      return { ...common, pressed: step.key, targetFocused: true };
+      return { ...common, pressed: step.key, targetFocused: true, delivery: pressed?.delivery };
     }
 
     case 'upload':
@@ -858,7 +1018,7 @@ async function runStep(tabId, step, mode) {
       await withRefsBypass(tabId, {
         __replay_from: { backendNodeId, role: 'element', name: 'replay drag source' },
         __replay_to: { backendNodeId: toBackendNodeId, role: 'element', name: 'replay drag target' },
-      }, (url) => interact.drag(tabId, { from: '__replay_from', to: '__replay_to', url }));
+      }, (url) => interact.drag(tabId, { from: '__replay_from', to: '__replay_to', url, ...hz }));
       return { ...common, dragTo: to.describe, executed: true };
     }
 
@@ -874,64 +1034,79 @@ async function runStep(tabId, step, mode) {
  * of the call. One translation point, and interact.js keeps a single contract.
  */
 async function withRefBypass(tabId, backendNodeId, run) {
-  const previous = await getRefs(tabId);
-  const url = await evaluate(tabId, 'location.href').catch(() => null);
-
-  await saveRefs(tabId, {
+  const url = await inWorld(tabId, 'location.href').catch(() => null);
+  // Reserved refs live apart from the agents' snapshot table (lib/refs.js withPrivateRefs): swapping
+  // the whole table in and out threw away any snapshot another agent took during the step.
+  return withPrivateRefs(tabId, {
     url,
     entries: [['__replay', { backendNodeId, role: 'element', name: 'replay target' }]],
-  });
-  try {
-    return await run({ ref: '__replay', url });
-  } finally {
-    if (previous) {
-      await saveRefs(tabId, {
-        url: previous.url,
-        entries: Object.entries(previous.map),
-      });
-    } else await clearRefs(tabId);
-  }
+  }, () => run({ ref: '__replay', url }));
 }
 
 async function withRefsBypass(tabId, refs, run) {
-  const previous = await getRefs(tabId);
-  const url = await evaluate(tabId, 'location.href').catch(() => null);
-  await saveRefs(tabId, { url, entries: Object.entries(refs) });
-  try {
-    return await run(url);
-  } finally {
-    if (previous) {
-      await saveRefs(tabId, { url: previous.url, entries: Object.entries(previous.map) });
-    } else await clearRefs(tabId);
-  }
+  const url = await inWorld(tabId, 'location.href').catch(() => null);
+  return withPrivateRefs(tabId, { url, entries: Object.entries(refs) }, () => run(url));
 }
 
 async function armEventProof(tabId, backendNodeId, eventName) {
-  await callOnNode(
+  // The proof is an expando on the node's wrapper IN G9'S WORLD and a
+  // listener on the node's own window there: the page sees neither, and both
+  // still observe the page's real events.
+  await callInWorld(
     tabId,
     backendNodeId,
     `function (eventName) {
+       const previous = this.__g9ReplayProof;
+       if (previous && previous.detach) previous.detach();
        const proof = { target: this, eventName, seen: false, trusted: false };
        this.__g9ReplayProof = proof;
-       window.addEventListener(eventName, function verify(e) {
+       const view = this.ownerDocument.defaultView || window;
+       // NOT { once: true }: a once-listener is consumed by the FIRST event of
+       // this type anywhere in the window — the page's own synthetic click on
+       // another element, say — and the real one for the target then arrives
+       // with nobody listening (the same trap select() in interact.js records).
+       // Filter by target, stop at the first trusted hit, detach explicitly.
+       const verify = (e) => {
          const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
          if (e.target === proof.target || proof.target.contains(e.target) || path.includes(proof.target)) {
            proof.seen = true;
-           proof.trusted = e.isTrusted === true;
+           proof.trusted = proof.trusted || e.isTrusted === true;
+           if (proof.trusted) proof.detach();
          }
-       }, { capture: true, once: true });
+       };
+       proof.detach = () => view.removeEventListener(eventName, verify, true);
+       view.addEventListener(eventName, verify, { capture: true });
      }`,
     [eventName],
   );
 }
 
+/** Remove an armed proof without reading it. Best effort: the node may be gone. */
+function dropEventProof(tabId, backendNodeId) {
+  return callInWorld(
+    tabId,
+    backendNodeId,
+    `function () {
+       const p = this.__g9ReplayProof;
+       if (p && p.detach) p.detach();
+       delete this.__g9ReplayProof;
+     }`,
+  ).catch(() => {});
+}
+
 async function verifyEventProof(tabId, backendNodeId, eventName) {
   // Read the proof from the target node, not the top window. A same-origin
   // iframe has its own Window realm even though its element is controllable.
-  const proof = await callOnNode(
+  const proof = await callInWorld(
     tabId,
     backendNodeId,
-    `function () { const p = this.__g9ReplayProof; return p && ({ seen: p.seen, trusted: p.trusted }); }`,
+    `function () {
+       const p = this.__g9ReplayProof;
+       if (!p) return p;
+       if (p.detach) p.detach();
+       delete this.__g9ReplayProof;
+       return { seen: p.seen, trusted: p.trusted };
+     }`,
   ).catch((err) => ({ unreadable: String(err?.message ?? err) }));
 
   if (proof?.seen && proof?.trusted) return;
@@ -945,7 +1120,7 @@ async function verifyEventProof(tabId, backendNodeId, eventName) {
   // non-deterministically, because a slow server left the old document alive
   // long enough to answer.
   if (proof?.unreadable) {
-    const navigated = await evaluate(tabId, 'document.readyState').catch(() => null);
+    const navigated = await inWorld(tabId, 'document.readyState').catch(() => null);
     if (navigated !== null) {
       return { navigatedAway: true, note: `The ${eventName} started a navigation, which replaced the page.` };
     }
@@ -957,13 +1132,16 @@ async function verifyEventProof(tabId, backendNodeId, eventName) {
   throw new Error(`The ${eventName} command was issued, but the recorded target did not observe the expected trusted event.`);
 }
 
-/** backendNodeId of whatever `locate` stored in window.__g9target. */
+/** backendNodeId of whatever `locate` stored in window.__g9target (G9's world). */
 async function resolvedNodeId(tabId) {
-  const { result } = await send(tabId, 'Runtime.evaluate', { expression: 'window.__g9target' });
+  const result = await inWorld(tabId, 'window.__g9target', { returnByValue: false }).catch(() => null);
   if (!result?.objectId) throw new Error('Lost the resolved element before acting on it — the page changed mid-step.');
-  const { node } = await send(tabId, 'DOM.describeNode', { objectId: result.objectId });
-  await send(tabId, 'Runtime.releaseObject', { objectId: result.objectId }).catch(() => {});
-  return node.backendNodeId;
+  try {
+    const { node } = await send(tabId, 'DOM.describeNode', { objectId: result.objectId });
+    return node.backendNodeId;
+  } finally {
+    await send(tabId, 'Runtime.releaseObject', { objectId: result.objectId }).catch(() => {});
+  }
 }
 
 function describeStep(step) {

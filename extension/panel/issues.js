@@ -22,9 +22,9 @@ export async function refresh() {
     res = await cmd({ cmd: 'issueList' });
   } catch (err) {
     el.issueUsage.textContent = 'refresh failed';
-    return showPanelError('Issue refresh failed: ' + (err?.message ?? err));
+    return showPanelError('Issue refresh failed: ' + (err?.message ?? err), { source: 'refresh' });
   }
-  if (!res?.ok) return showPanelError(res?.error ?? 'Issue refresh failed.');
+  if (!res?.ok) return showPanelError(res?.error ?? 'Issue refresh failed.', { source: 'refresh' });
 
   const list = res.issues ?? [];
   el.issueUsage.textContent = res.usage?.attachments

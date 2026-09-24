@@ -30,14 +30,35 @@
  * iframes and open Shadow DOM were never the problem — they already worked.
  */
 
+import { platform } from './platform.js';
 import { send } from './cdp.js';
 
-const api = globalThis.browser ?? globalThis.chrome;
+const session = () => platform.storage.session;
 
 const KEY = (tabId) => `frames:${tabId}`;
 
 /** Deep enough for any real embed; a bound so a frame bomb cannot spin forever. */
 const MAX_FRAMES = 30;
+
+/**
+ * One tab's frame table changes one event at a time.
+ *
+ * A page with several cross-origin embeds attaches them in one burst, and each
+ * `onAttached` is a read-modify-write of the same key: unserialised, the last
+ * writer won and the others' frames vanished from the table — the embed was on
+ * screen and the snapshot had no nodes for it. Storage only inside; the CDP
+ * call for the frame's own children goes out after the lock is released.
+ */
+const chains = new Map();
+function exclusive(tabId, fn) {
+  const run = (chains.get(tabId) ?? Promise.resolve()).then(fn, fn);
+  const tail = run.catch(() => {});
+  chains.set(tabId, tail);
+  tail.then(() => {
+    if (chains.get(tabId) === tail) chains.delete(tabId);
+  });
+  return run;
+}
 
 /**
  * Start attaching to cross-origin children of this tab.
@@ -51,8 +72,10 @@ export async function watch(tabId) {
     waitForDebuggerOnStart: false,
     flatten: true,
   });
-  const existing = await stateOf(tabId);
-  if (!existing) await api.storage.session.set({ [KEY(tabId)]: { sessions: {}, at: Date.now() } });
+  await exclusive(tabId, async () => {
+    const existing = await stateOf(tabId);
+    if (!existing) await session().set({ [KEY(tabId)]: { sessions: {}, at: Date.now() } });
+  });
   return { watching: true };
 }
 
@@ -68,16 +91,19 @@ export async function onAttached(tabId, params) {
   const info = params?.targetInfo;
   if (!info || info.type !== 'iframe') return;
 
-  const state = (await stateOf(tabId)) ?? { sessions: {}, at: Date.now() };
-  if (Object.keys(state.sessions).length >= MAX_FRAMES) return;
-
-  state.sessions[params.sessionId] = {
-    sessionId: params.sessionId,
-    targetId: info.targetId,
-    url: info.url ?? '',
-    at: Date.now(),
-  };
-  await api.storage.session.set({ [KEY(tabId)]: state });
+  const added = await exclusive(tabId, async () => {
+    const state = (await stateOf(tabId)) ?? { sessions: {}, at: Date.now() };
+    if (Object.keys(state.sessions).length >= MAX_FRAMES) return false;
+    state.sessions[params.sessionId] = {
+      sessionId: params.sessionId,
+      targetId: info.targetId,
+      url: info.url ?? '',
+      at: Date.now(),
+    };
+    await session().set({ [KEY(tabId)]: state });
+    return true;
+  });
+  if (!added) return;
 
   // Not recursive: this frame's own children need their own call, or an iframe
   // nested inside this one stays invisible for exactly the original reason.
@@ -90,10 +116,12 @@ export async function onAttached(tabId, params) {
 
 /** Forget a child target that went away. */
 export async function onDetached(tabId, params) {
-  const state = await stateOf(tabId);
-  if (!state?.sessions?.[params?.sessionId]) return;
-  delete state.sessions[params.sessionId];
-  await api.storage.session.set({ [KEY(tabId)]: state });
+  await exclusive(tabId, async () => {
+    const state = await stateOf(tabId);
+    if (!state?.sessions?.[params?.sessionId]) return;
+    delete state.sessions[params.sessionId];
+    await session().set({ [KEY(tabId)]: state });
+  });
 }
 
 /**
@@ -117,10 +145,10 @@ export async function list(tabId) {
 }
 
 export async function clear(tabId) {
-  await api.storage.session.remove(KEY(tabId));
+  await exclusive(tabId, () => session().remove(KEY(tabId)));
 }
 
 async function stateOf(tabId) {
-  const stored = await api.storage.session.get(KEY(tabId));
+  const stored = await session().get(KEY(tabId));
   return stored[KEY(tabId)] ?? null;
 }

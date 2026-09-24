@@ -1,27 +1,39 @@
 /**
- * A minimal MCP stdio client, for driving the bridge with no agent present.
+ * A minimal MCP stdio client, for driving G9 with no agent present.
  *
- * The bridge already speaks MCP, and an agent is just one kind of MCP client.
- * So the runner is another one — the same interface, the same tools, the same
- * safety boundaries. Nothing here reaches into the extension directly, which is
- * what keeps the runner honest: it can only do what an agent could do.
+ * The runner is just another MCP client: it spawns `mcp/shim.mjs` — the same
+ * shim an AI agent's client launches — and the shim connects to the one daemon
+ * on this machine (starting it if needed). Same interface, same tools, same
+ * rules: ownership, the Stop button and every refusal apply to a scheduled run
+ * exactly as to an agent. Nothing here reaches into an engine directly, which
+ * is what keeps the runner honest: it can only do what an agent could do.
  *
- * Line-delimited JSON-RPC, matching `bridge/src/mcp.js`. Zero dependencies, on
- * purpose: this repo's whole premise is that a tool with this much access does
- * not carry a supply chain.
+ * v2: the v1 "port rule" is gone. There is one daemon per machine and any
+ * number of clients; `G9_PORT` only says which port that daemon is on.
+ *
+ * Line-delimited JSON-RPC, matching mcp/mcp.js. Zero dependencies.
  */
 
 import { spawn } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { VERSION } from '../lib/version.mjs';
+
+export const SHIM = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'mcp', 'shim.mjs');
 
 export class McpClient {
   /**
-   * @param {string} serverPath  absolute path to bridge/src/server.js
-   * @param {object} env         extra environment (G9_PORT, G9_TOKEN, …)
+   * @param {object} [opts]
+   * @param {string} [opts.shimPath]  defaults to mcp/shim.mjs of this checkout
+   * @param {object} [opts.env]       extra environment (G9_PORT, G9_HOME, …)
+   * @param {string} [opts.name]      clientInfo.name — how the daemon names this agent
    */
-  constructor(serverPath, env = {}) {
-    this.child = spawn(process.execPath, [serverPath], {
+  constructor({ shimPath = SHIM, env = {}, name = 'g9-runner' } = {}) {
+    this.name = name;
+    this.child = spawn(process.execPath, [shimPath], {
       env: { ...process.env, ...env },
       stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
     });
     this.pending = new Map();
     this.nextId = 1;
@@ -33,19 +45,20 @@ export class McpClient {
     this.child.stdout.on('data', (chunk) => this.#ingest(chunk));
     this.child.stderr.setEncoding('utf8');
     this.child.stderr.on('data', (chunk) => {
-      // The bridge writes diagnostics to stderr — port conflicts, extension
-      // connect/disconnect. Kept so a failure can quote the real reason rather
-      // than "the tool call failed".
+      // The shim writes diagnostics to stderr (daemon start, port holder).
+      // Kept so a failure can quote the real reason rather than "the call failed".
       this.stderr.push(chunk);
       if (this.stderr.length > 200) this.stderr.shift();
     });
     this.child.on('exit', () => {
       this.closed = true;
       for (const [, entry] of this.pending) {
-        entry.reject(new Error(`The bridge exited. stderr:\n${this.stderr.join('').slice(-1200)}`));
+        clearTimeout(entry.timer);
+        entry.reject(new Error(`The G9 MCP shim exited. stderr:\n${this.stderr.join('').slice(-1200)}`));
       }
       this.pending.clear();
     });
+    this.child.stdin.on('error', () => {}); // a shim that died leaves an EPIPE; the exit handler reports it
   }
 
   #ingest(chunk) {
@@ -70,7 +83,7 @@ export class McpClient {
   }
 
   request(method, params = {}, timeoutMs = 180_000) {
-    if (this.closed) return Promise.reject(new Error('The bridge is no longer running.'));
+    if (this.closed) return Promise.reject(new Error('The G9 MCP shim is no longer running.'));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -83,6 +96,7 @@ export class McpClient {
   }
 
   notify(method, params = {}) {
+    if (this.closed) return;
     this.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`);
   }
 
@@ -90,7 +104,7 @@ export class McpClient {
     const response = await this.request('initialize', {
       protocolVersion: '2025-06-18',
       capabilities: {},
-      clientInfo: { name: 'g9-runner', version: '1.0.0' },
+      clientInfo: { name: this.name, version: VERSION },
     }, 20_000);
     this.notify('notifications/initialized');
     return response.result;
@@ -99,10 +113,9 @@ export class McpClient {
   /**
    * Call a tool and return its parsed payload.
    *
-   * The bridge returns tool failures as `isError` results rather than JSON-RPC
-   * errors, deliberately — the caller needs the message to adapt. The runner
-   * turns that into a thrown Error carrying the same text, because at this
-   * layer a failed tool call IS the failure.
+   * Tool failures come back as `isError` results rather than JSON-RPC errors,
+   * deliberately — the caller needs the message to adapt. At this layer a failed
+   * tool call IS the failure, so it becomes a thrown Error carrying that text.
    */
   async call(name, args = {}, timeoutMs = 180_000) {
     const response = await this.request('tools/call', { name, arguments: args }, timeoutMs);
@@ -123,6 +136,8 @@ export class McpClient {
 
   close() {
     try { this.child.stdin.end(); } catch { /* already gone */ }
-    try { this.child.kill(); } catch { /* already gone */ }
+    // Give the shim a moment to close its daemon socket cleanly (so the daemon
+    // releases this run's claims at once), then make sure it is gone.
+    setTimeout(() => { try { this.child.kill(); } catch { /* already gone */ } }, 300).unref?.();
   }
 }

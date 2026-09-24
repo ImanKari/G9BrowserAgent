@@ -31,9 +31,32 @@
  * a count would otherwise silently test only the first request.
  */
 
-const api = globalThis.browser ?? globalThis.chrome;
+import { platform } from '../lib/platform.js';
+
+const session = () => platform.storage.session;
 
 const KEY = (tabId) => `netrules:${tabId}`;
+
+/**
+ * One tab's rule state changes one step at a time.
+ *
+ * `pick` is read-modify-write (it counts the hit), and paused requests arrive
+ * in parallel: two requests matching a `times: 1` rule both read `fired: 0`
+ * and BOTH failed — so "the first save fails, the retry succeeds" failed the
+ * retry too. And a `pick` that read the rules just before `clear_intercept`
+ * wrote them back afterwards, resurrecting rules the agent had cleared. No CDP
+ * traffic ever runs inside this, only storage, so it cannot stall a request.
+ */
+const chains = new Map();
+function exclusive(tabId, fn) {
+  const run = (chains.get(tabId) ?? Promise.resolve()).then(fn, fn);
+  const tail = run.catch(() => {});
+  chains.set(tabId, tail);
+  tail.then(() => {
+    if (chains.get(tabId) === tail) chains.delete(tabId);
+  });
+  return run;
+}
 
 /** More than this and the rule set is a mock server, which is not what this is. */
 const MAX_RULES = 40;
@@ -133,7 +156,7 @@ export function normaliseRules(rules) {
 
 export async function setRules(tabId, rules) {
   const normalised = normaliseRules(rules);
-  await api.storage.session.set({ [KEY(tabId)]: { rules: normalised, at: Date.now() } });
+  await exclusive(tabId, () => session().set({ [KEY(tabId)]: { rules: normalised, at: Date.now() } }));
   return {
     intercepting: true,
     rules: normalised.map(summarise),
@@ -141,8 +164,11 @@ export async function setRules(tabId, rules) {
 }
 
 export async function clearRules(tabId) {
-  const state = await rulesOf(tabId);
-  await api.storage.session.remove(KEY(tabId));
+  const state = await exclusive(tabId, async () => {
+    const current = await rulesOf(tabId);
+    await session().remove(KEY(tabId));
+    return current;
+  });
   return {
     cleared: true,
     rules: (state?.rules ?? []).map(summarise),
@@ -156,7 +182,7 @@ export async function rulesStatus(tabId) {
 }
 
 export async function rulesOf(tabId) {
-  const stored = await api.storage.session.get(KEY(tabId));
+  const stored = await session().get(KEY(tabId));
   return stored[KEY(tabId)] ?? null;
 }
 
@@ -168,23 +194,25 @@ export async function rulesOf(tabId) {
  * rather than removed, so `status` can still show that they fired and how often
  * — a rule that silently disappears after use makes a report unreadable.
  */
-export async function pick(tabId, method, url) {
-  const state = await rulesOf(tabId);
-  if (!state?.rules?.length) return null;
+export function pick(tabId, method, url) {
+  return exclusive(tabId, async () => {
+    const state = await rulesOf(tabId);
+    if (!state?.rules?.length) return null;
 
-  const upper = String(method ?? '').toUpperCase();
-  const target = String(url ?? '');
+    const upper = String(method ?? '').toUpperCase();
+    const target = String(url ?? '');
 
-  for (const rule of state.rules) {
-    if (rule.times != null && rule.fired >= rule.times) continue;
-    if (rule.method && rule.method !== upper) continue;
-    if (!target.includes(rule.match)) continue;
+    for (const rule of state.rules) {
+      if (rule.times != null && rule.fired >= rule.times) continue;
+      if (rule.method && rule.method !== upper) continue;
+      if (!target.includes(rule.match)) continue;
 
-    rule.fired += 1;
-    await api.storage.session.set({ [KEY(tabId)]: state });
-    return rule;
-  }
-  return null;
+      rule.fired += 1;
+      await session().set({ [KEY(tabId)]: state });
+      return rule;
+    }
+    return null;
+  });
 }
 
 function summarise(rule) {

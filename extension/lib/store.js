@@ -2,20 +2,20 @@
  * Durable storage for recordings and issues.
  *
  * Everything else in this extension is deliberately ephemeral — §4.1 puts live
- * state in `chrome.storage.session` precisely so that page data never touches
- * disk. This file is the exception, and the exception is the point: a recorded
- * test that vanishes when the browser closes is not a test, and a bug report
- * that vanishes is worse than not filing one.
+ * state in session storage precisely so that page data never touches disk.
+ * This file is the exception, and the exception is the point: a recorded test
+ * that vanishes when the browser closes is not a test, and a bug report that
+ * vanishes is worse than not filing one.
  *
  * ## Two stores, on purpose
  *
- * - `chrome.storage.local` holds the structured records: recordings, steps,
+ * - `platform.storage.local` holds the structured records: recordings, steps,
  *   issue metadata. They are small, they are JSON, and they need to be listed
  *   and searched cheaply.
- * - **IndexedDB** holds attachment bytes. Screenshots and tab video are the
- *   only things here that get large, and `storage.local` is a JSON key-value
- *   store — putting megabytes of base64 in it means every read of any key
- *   deserialises them. IndexedDB stores Blobs natively and reads one by id.
+ * - `platform.blobs` holds attachment bytes (IndexedDB in the extension, files
+ *   under G9_HOME/store/blobs in the daemon). Screenshots and tab video are the
+ *   only things here that get large, and a JSON key-value store would
+ *   deserialise megabytes of base64 on every read of any key.
  *
  * The split is what keeps `listIssues()` fast on an issue with a 20MB video
  * attached: the video is never touched until someone asks for it.
@@ -27,12 +27,9 @@
  * index array updated from two contexts loses entries the same way.
  */
 
+import { platform } from './platform.js';
 import { serialize } from './state.js';
 
-const api = globalThis.browser ?? globalThis.chrome;
-
-const DB_NAME = 'g9-attachments';
-const DB_VERSION = 2;
 const BLOB_STORE = 'blobs';
 const FRAME_STORE = 'video-frames';
 
@@ -43,6 +40,8 @@ const ISSUE_INDEX = 'g9:issues';
 const recordingKey = (id) => `g9:recording:${id}`;
 const issueKey = (id) => `g9:issue:${id}`;
 
+const local = () => platform.storage.local;
+
 /** Short, sortable, human-quotable. Long enough not to collide in a lifetime. */
 function newId(prefix) {
   const stamp = Date.now().toString(36);
@@ -50,73 +49,43 @@ function newId(prefix) {
   return `${prefix}_${stamp}${rand}`;
 }
 
-// ------------------------------------------------------------------ IndexedDB
+// ----------------------------------------------------------------- base64
 
-let dbPromise = null;
-
-function openDb() {
-  if (dbPromise) return dbPromise;
-  dbPromise = new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(BLOB_STORE)) {
-        const store = db.createObjectStore(BLOB_STORE, { keyPath: 'id' });
-        // Deleting an issue must be able to find its attachments without
-        // scanning every blob in the database.
-        store.createIndex('owner', 'owner', { unique: false });
-      }
-      if (!db.objectStoreNames.contains(FRAME_STORE)) {
-        const frames = db.createObjectStore(FRAME_STORE, { keyPath: 'id' });
-        frames.createIndex('session', 'sessionId', { unique: false });
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  }).catch((err) => {
-    // Never cache a rejected promise: a transient failure would otherwise make
-    // attachments permanently unavailable for the life of the worker.
-    dbPromise = null;
-    throw err;
-  });
-  return dbPromise;
+/**
+ * Base64 without FileReader, so the same code runs in the worker and in Node.
+ * Chunked: String.fromCharCode with a few hundred thousand arguments overflows
+ * the call stack, and a video attachment reaches that easily.
+ */
+export function bytesToBase64(bytes) {
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
 }
 
-function tx(mode, fn) {
-  return openDb().then(
-    (db) =>
-      new Promise((resolve, reject) => {
-        const transaction = db.transaction(BLOB_STORE, mode);
-        const store = transaction.objectStore(BLOB_STORE);
-        let result;
-        try {
-          result = fn(store);
-        } catch (err) {
-          reject(err);
-          return;
-        }
-        transaction.oncomplete = () => resolve(result && result.__req ? result.__req.result : result);
-        transaction.onerror = () => reject(transaction.error);
-        transaction.onabort = () => reject(transaction.error);
-      }),
-  );
+export function base64ToBytes(b64) {
+  const binary = atob(b64);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
 }
 
-/** Wrap an IDBRequest so tx() resolves with its result once the tx commits. */
-const req = (r) => ({ __req: r });
+/** A stored `blob` field may come back as a Blob (IndexedDB) or bytes (a file-backed store). */
+async function bytesOf(blob) {
+  if (blob == null) return new Uint8Array(0);
+  if (blob instanceof Uint8Array) return blob;
+  if (blob instanceof ArrayBuffer) return new Uint8Array(blob);
+  if (ArrayBuffer.isView(blob)) return new Uint8Array(blob.buffer, blob.byteOffset, blob.byteLength);
+  if (typeof blob.arrayBuffer === 'function') return new Uint8Array(await blob.arrayBuffer());
+  throw new Error('Stored attachment bytes are in an unknown format.');
+}
 
-function frameTx(mode, fn) {
-  return openDb().then(
-    (db) => new Promise((resolve, reject) => {
-      const transaction = db.transaction(FRAME_STORE, mode);
-      const store = transaction.objectStore(FRAME_STORE);
-      let result;
-      try { result = fn(store); } catch (err) { reject(err); return; }
-      transaction.oncomplete = () => resolve(result && result.__req ? result.__req.result : result);
-      transaction.onerror = () => reject(transaction.error);
-      transaction.onabort = () => reject(transaction.error);
-    }),
-  );
+function sizeOf(blob) {
+  if (blob == null) return 0;
+  if (typeof blob.size === 'number') return blob.size;
+  return blob.byteLength ?? blob.length ?? 0;
 }
 
 // ---------------------------------------------------------------- attachments
@@ -130,108 +99,97 @@ function frameTx(mode, fn) {
  */
 export async function putAttachment({ owner, name, mime, bytes, kind = 'file', meta = {} }) {
   const id = newId('att');
-  const blob = bytes instanceof Blob ? bytes : new Blob([bytes], { type: mime || 'application/octet-stream' });
-  await tx('readwrite', (store) =>
-    req(
-      store.put({
-        id,
-        owner,
-        name: name || id,
-        mime: mime || blob.type || 'application/octet-stream',
-        kind,
-        size: blob.size,
-        at: Date.now(),
-        meta,
-        blob,
-      }),
-    ),
-  );
-  return { id, owner, name: name || id, mime: mime || blob.type, kind, size: blob.size, meta };
+  const type = mime || (typeof Blob !== 'undefined' && bytes instanceof Blob ? bytes.type : '') || 'application/octet-stream';
+  const blob = typeof Blob !== 'undefined' && bytes instanceof Blob ? bytes : new Blob([bytes ?? new Uint8Array(0)], { type });
+  const size = sizeOf(blob);
+  await platform.blobs.put(BLOB_STORE, {
+    id,
+    owner,
+    name: name || id,
+    mime: type,
+    kind,
+    size,
+    at: Date.now(),
+    meta,
+    blob,
+  });
+  return { id, owner, name: name || id, mime: type, kind, size, meta };
 }
 
 /** Metadata for an owner's attachments — never the bytes. */
 export async function listAttachments(owner) {
-  const rows = await tx('readonly', (store) => req(store.index('owner').getAll(owner)));
+  const rows = await platform.blobs.byIndex(BLOB_STORE, 'owner', owner);
   return (rows || []).map(({ blob, ...meta }) => meta);
 }
 
 /** One attachment, bytes included. Base64 so it can cross the WebSocket. */
 export async function getAttachment(id, { includeBytes = true } = {}) {
-  const row = await tx('readonly', (store) => req(store.get(id)));
+  const row = await platform.blobs.get(BLOB_STORE, id);
   if (!row) return null;
   const { blob, ...meta } = row;
   if (!includeBytes) return meta;
-  return { ...meta, dataBase64: await blobToBase64(blob) };
+  return { ...meta, dataBase64: bytesToBase64(await bytesOf(blob)) };
 }
 
 export async function deleteAttachment(id) {
-  await tx('readwrite', (store) => req(store.delete(id)));
+  await platform.blobs.delete(BLOB_STORE, id);
   return { deleted: id };
 }
 
-async function deleteAttachmentsOf(owner) {
-  const rows = await tx('readonly', (store) => req(store.index('owner').getAllKeys(owner)));
-  if (!rows || !rows.length) return 0;
-  await tx('readwrite', (store) => {
-    for (const key of rows) store.delete(key);
-    return rows.length;
-  });
-  return rows.length;
-}
-
-function blobToBase64(blob) {
-  return blob.arrayBuffer().then((buf) => {
-    const bytes = new Uint8Array(buf);
-    let binary = '';
-    // Chunked: String.fromCharCode with a few hundred thousand arguments
-    // overflows the call stack, and a video attachment reaches that easily.
-    const CHUNK = 0x8000;
-    for (let i = 0; i < bytes.length; i += CHUNK) {
-      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
-    }
-    return btoa(binary);
-  });
+function deleteAttachmentsOf(owner) {
+  return platform.blobs.deleteByIndex(BLOB_STORE, 'owner', owner);
 }
 
 // ---------------------------------------------------------- video frame spool
 
-/** One screencast frame in IndexedDB; session storage holds metadata only. */
-export async function putVideoFrame({ sessionId, seq, at, dataBase64 }) {
+/**
+ * One screencast frame in the blob store; session storage holds metadata only.
+ *
+ * `pointer` is the cursor sampled at frame time ({ x, y, buttons }) so every
+ * viewer can draw it (decision D9: the cursor lives in the evidence, never in
+ * the page). Any other `meta` rides along untouched.
+ */
+export async function putVideoFrame({ sessionId, seq, at, dataBase64, pointer = null, meta = null }) {
   const bytes = base64ToBytes(dataBase64);
   const blob = new Blob([bytes], { type: 'image/jpeg' });
-  await frameTx('readwrite', (store) => req(store.put({
+  const size = sizeOf(blob);
+  await platform.blobs.put(FRAME_STORE, {
     id: `${sessionId}:${String(seq).padStart(6, '0')}`,
     sessionId,
     seq,
     at,
-    size: blob.size,
+    size,
+    ...(pointer ? { pointer } : {}),
+    ...(meta ? { meta } : {}),
     blob,
-  })));
-  return blob.size;
+  });
+  return size;
 }
 
 export async function listVideoFrames(sessionId) {
-  const rows = await frameTx('readonly', (store) => req(store.index('session').getAll(sessionId)));
+  const rows = await platform.blobs.byIndex(FRAME_STORE, 'sessionId', sessionId);
   const sorted = (rows ?? []).sort((a, b) => a.seq - b.seq);
   const out = [];
-  for (const row of sorted) out.push({ at: row.at, data: await blobToBase64(row.blob), size: row.size });
+  for (const row of sorted) {
+    out.push({
+      at: row.at,
+      data: bytesToBase64(await bytesOf(row.blob)),
+      size: row.size,
+      ...(row.pointer ? { pointer: row.pointer } : {}),
+      ...(row.meta ? { meta: row.meta } : {}),
+    });
+  }
   return out;
 }
 
-export async function deleteVideoFrames(sessionId) {
-  const keys = await frameTx('readonly', (store) => req(store.index('session').getAllKeys(sessionId)));
-  if (!keys?.length) return 0;
-  await frameTx('readwrite', (store) => {
-    for (const key of keys) store.delete(key);
-    return keys.length;
-  });
-  return keys.length;
+export function deleteVideoFrames(sessionId) {
+  return platform.blobs.deleteByIndex(FRAME_STORE, 'sessionId', sessionId);
 }
 
 // ------------------------------------------------------------------- indices
 
 async function readIndex(key) {
-  const stored = await api.storage.local.get(key);
+  const stored = await local().get(key);
   return stored[key] ?? [];
 }
 
@@ -240,7 +198,7 @@ function upsertIndex(key, entry) {
   return serialize(async () => {
     const list = await readIndex(key);
     const next = [entry, ...list.filter((e) => e.id !== entry.id)];
-    await api.storage.local.set({ [key]: next });
+    await local().set({ [key]: next });
     return next;
   });
 }
@@ -248,7 +206,7 @@ function upsertIndex(key, entry) {
 function removeFromIndex(key, id) {
   return serialize(async () => {
     const list = await readIndex(key);
-    await api.storage.local.set({ [key]: list.filter((e) => e.id !== id) });
+    await local().set({ [key]: list.filter((e) => e.id !== id) });
   });
 }
 
@@ -268,7 +226,7 @@ export async function saveRecording(recording) {
     updatedAt: Date.now(),
     createdAt: recording.createdAt ?? Date.now(),
   };
-  await api.storage.local.set({ [recordingKey(id)]: record });
+  await local().set({ [recordingKey(id)]: record });
   const steps = record.steps ?? [];
   await upsertIndex(RECORDING_INDEX, {
     id,
@@ -301,12 +259,12 @@ export function listRecordings() {
 }
 
 export async function getRecording(id) {
-  const stored = await api.storage.local.get(recordingKey(id));
+  const stored = await local().get(recordingKey(id));
   return stored[recordingKey(id)] ?? null;
 }
 
 export async function deleteRecording(id) {
-  await api.storage.local.remove(recordingKey(id));
+  await local().remove(recordingKey(id));
   await removeFromIndex(RECORDING_INDEX, id);
   const attachments = await deleteAttachmentsOf(id);
   return { deleted: id, attachmentsRemoved: attachments };
@@ -322,7 +280,7 @@ export async function saveIssue(issue) {
     updatedAt: Date.now(),
     createdAt: issue.createdAt ?? Date.now(),
   };
-  await api.storage.local.set({ [issueKey(id)]: record });
+  await local().set({ [issueKey(id)]: record });
   await upsertIndex(ISSUE_INDEX, {
     id,
     title: record.title ?? '(untitled)',
@@ -340,14 +298,14 @@ export function listIssues() {
 }
 
 export async function getIssue(id, { withAttachments = true } = {}) {
-  const stored = await api.storage.local.get(issueKey(id));
+  const stored = await local().get(issueKey(id));
   const issue = stored[issueKey(id)] ?? null;
   if (!issue) return null;
   return withAttachments ? { ...issue, attachments: await listAttachments(id) } : issue;
 }
 
 export async function deleteIssue(id) {
-  await api.storage.local.remove(issueKey(id));
+  await local().remove(issueKey(id));
   await removeFromIndex(ISSUE_INDEX, id);
   const attachments = await deleteAttachmentsOf(id);
   return { deleted: id, attachmentsRemoved: attachments };
@@ -448,37 +406,31 @@ export async function importBundle(bundle, { mode = 'merge' } = {}) {
   return { mode, recordings, issues, attachments };
 }
 
-function base64ToBytes(b64) {
-  const binary = atob(b64);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
-  return out;
-}
-
 /**
  * Rough usage, for the panel and for telling the user when to prune.
  *
- * A cursor rather than `getAll()`. This runs on every issue-list refresh — the
- * side panel polls it every 2.5s while its Issues tab is open — and `getAll()`
- * structured-clones every attachment record, Blob handles included, to add up a
- * `size` field. Walking the cursor reads the same numbers and never
- * materialises the rows.
+ * `platform.blobs.stats()` walks a cursor rather than materialising rows: this
+ * runs on every issue-list refresh — the side panel polls it every 2.5s while
+ * its Issues tab is open — and reading every attachment record, Blob handles
+ * included, to add up a `size` field is the wrong price. A blob store without
+ * `stats` (it is optional) falls back to per-owner metadata, which is slower
+ * and still never touches the bytes.
  */
 export async function usage() {
   const [recordings, issues] = await Promise.all([listRecordings(), listIssues()]);
 
-  const totals = await tx('readonly', (store) => {
-    const acc = { count: 0, bytes: 0 };
-    const request = store.openCursor();
-    request.onsuccess = () => {
-      const cursor = request.result;
-      if (!cursor) return;
-      acc.count += 1;
-      acc.bytes += cursor.value?.size || 0;
-      cursor.continue();
-    };
-    return acc;
-  });
+  let totals = typeof platform.blobs.stats === 'function'
+    ? await platform.blobs.stats(BLOB_STORE).catch(() => null)
+    : null;
+  if (!totals) {
+    totals = { count: 0, bytes: 0 };
+    for (const owner of [...recordings, ...issues].map((e) => e.id)) {
+      for (const meta of await listAttachments(owner)) {
+        totals.count += 1;
+        totals.bytes += meta.size || 0;
+      }
+    }
+  }
 
   return {
     recordings: recordings.length,

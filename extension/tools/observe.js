@@ -2,23 +2,24 @@
  * Console and network capture.
  *
  * These are *event-driven*, not request/response: CDP pushes console messages
- * and network events as they happen. We buffer them in chrome.storage.session
+ * and network events as they happen. We buffer them in session storage
  * so a service-worker restart does not lose the log the agent is about to ask
  * for. Buffers are ring buffers with hard caps — an app that logs in a render
  * loop must not be able to exhaust storage.
  *
  * Both buffers are read-modify-write against a single storage key, driven by
- * chrome.debugger events that arrive in bursts (one page load fires dozens of
+ * debugger events that arrive in bursts (one page load fires dozens of
  * Network events in the same tick). They therefore run through the shared
  * `serialize()` chain in lib/state.js — without it, interleaved writers drop
  * requests and console lines, and the agent is handed a log that looks complete
  * but is not.
  */
 
+import { platform } from '../lib/platform.js';
 import { send } from '../lib/cdp.js';
 import { serialize } from '../lib/state.js';
 
-const api = globalThis.browser ?? globalThis.chrome;
+const session = () => platform.storage.session;
 
 const MAX_CONSOLE = 500;
 const MAX_NETWORK = 400;
@@ -29,7 +30,7 @@ const MAX_BODY_BYTES = 512 * 1024;
  *
  * Truncating only on read is not enough: the untruncated text still had to fit
  * in storage first, so a page logging megabyte strings could reach the
- * chrome.storage.session quota and take capture down with it.
+ * session storage quota and take capture down with it.
  */
 const MAX_ENTRY_CHARS = 4_000;
 
@@ -38,7 +39,7 @@ const NETWORK_KEY = (tabId) => `network:${tabId}`;
 
 // ---------------------------------------------------------------- ingestion
 
-/** Called by sw.js for every chrome.debugger event. */
+/** Called by tools/events.js for every CDP event of an attached tab. */
 export async function ingest(tabId, method, params) {
   switch (method) {
     case 'Runtime.consoleAPICalled':
@@ -130,7 +131,7 @@ export async function ingest(tabId, method, params) {
  * session.
  */
 export async function clearBuffers(tabId) {
-  await api.storage.session.remove([CONSOLE_KEY(tabId), NETWORK_KEY(tabId)]);
+  await session().remove([CONSOLE_KEY(tabId), NETWORK_KEY(tabId)]);
 }
 
 /**
@@ -154,15 +155,15 @@ export async function clearBuffers(tabId) {
 export async function pruneToLoader(tabId, loaderId) {
   await serialize(async () => {
     const key = NETWORK_KEY(tabId);
-    const stored = await api.storage.session.get(key);
+    const stored = await session().get(key);
     const map = stored[key] ?? {};
     const kept = {};
     for (const [id, record] of Object.entries(map)) {
       if (record.loaderId === loaderId) kept[id] = record;
     }
-    await api.storage.session.set({ [key]: kept });
+    await session().set({ [key]: kept });
   });
-  await api.storage.session.remove(CONSOLE_KEY(tabId));
+  await session().remove(CONSOLE_KEY(tabId));
 }
 
 // ------------------------------------------------------------------ console
@@ -170,7 +171,7 @@ export async function pruneToLoader(tabId, loaderId) {
 function pushConsole(tabId, entry) {
   return serialize(async () => {
     const key = CONSOLE_KEY(tabId);
-    const stored = await api.storage.session.get(key);
+    const stored = await session().get(key);
     const list = stored[key] ?? [];
     list.push({
       ...entry,
@@ -180,7 +181,7 @@ function pushConsole(tabId, entry) {
     if (list.length > MAX_CONSOLE) list.splice(0, list.length - MAX_CONSOLE);
 
     try {
-      await api.storage.session.set({ [key]: list });
+      await session().set({ [key]: list });
     } catch {
       // Quota reached. Keep the newest quarter and say so in the data the agent
       // actually reads — failing silently here would leave it believing the log
@@ -193,7 +194,7 @@ function pushConsole(tabId, entry) {
         at: Date.now() / 1000,
         seq: (kept[kept.length - 1]?.seq ?? 0) + 1,
       });
-      await api.storage.session.set({ [key]: kept });
+      await session().set({ [key]: kept });
     }
   });
 }
@@ -202,11 +203,11 @@ export async function consoleLog(tabId, { level, limit = 100, since, contains, c
   const key = CONSOLE_KEY(tabId);
 
   if (clear) {
-    await api.storage.session.remove(key);
+    await session().remove(key);
     return { cleared: true };
   }
 
-  const stored = await api.storage.session.get(key);
+  const stored = await session().get(key);
   let list = stored[key] ?? [];
 
   if (level) {
@@ -226,7 +227,21 @@ export async function consoleLog(tabId, { level, limit = 100, since, contains, c
     return acc;
   }, {});
 
+  // At the stealth level the Runtime domain is never enabled (rule R4), so the
+  // page's own console.* calls and uncaught exceptions are not captured. Say so
+  // in the result: an empty log that looks complete is the one answer that
+  // would send someone looking in the wrong place. Browser-side Log entries
+  // (network errors, interventions, violations) still arrive and are returned.
+  const stealth = platform.settings.stealthFor(tabId) === 'stealth';
+
   return {
+    ...(stealth
+      ? {
+          unavailable: 'Runtime domain disabled by stealth level',
+          note: 'Page console.* output and uncaught exceptions are not captured at the stealth level. ' +
+            'Browser-side log entries (network errors, interventions, violations) below are still complete.',
+        }
+      : {}),
     total: (stored[key] ?? []).length,
     counts,
     returned: Math.min(list.length, limit),
@@ -260,7 +275,7 @@ export async function consoleLog(tabId, { level, limit = 100, since, contains, c
 function upsertRequest(tabId, requestId, patch, { create = false } = {}) {
   return serialize(async () => {
     const key = NETWORK_KEY(tabId);
-    const stored = await api.storage.session.get(key);
+    const stored = await session().get(key);
     const map = stored[key] ?? {};
 
     if (!map[requestId] && !create) return;
@@ -269,12 +284,12 @@ function upsertRequest(tabId, requestId, patch, { create = false } = {}) {
     trimOldest(map, MAX_NETWORK);
 
     try {
-      await api.storage.session.set({ [key]: map });
+      await session().set({ [key]: map });
     } catch {
       // Quota reached — usually a page carrying very large header sets. Keep
       // the newest quarter so capture keeps working instead of dying silently.
       trimOldest(map, Math.floor(MAX_NETWORK / 4));
-      await api.storage.session.set({ [key]: map });
+      await session().set({ [key]: map });
     }
   });
 }
@@ -293,11 +308,11 @@ export async function network(tabId, { filter, status, method, limit = 50, clear
   const key = NETWORK_KEY(tabId);
 
   if (clear) {
-    await api.storage.session.remove(key);
+    await session().remove(key);
     return { cleared: true };
   }
 
-  const stored = await api.storage.session.get(key);
+  const stored = await session().get(key);
   let list = Object.values(stored[key] ?? {});
 
   if (filter) {
@@ -332,7 +347,7 @@ export async function network(tabId, { filter, status, method, limit = 50, clear
 /** Full detail for one request, including the response body. */
 export async function networkDetail(tabId, { requestId, includeBody = true }) {
   const key = NETWORK_KEY(tabId);
-  const stored = await api.storage.session.get(key);
+  const stored = await session().get(key);
   const record = (stored[key] ?? {})[requestId];
   if (!record) {
     throw new Error(`Unknown requestId "${requestId}". Call browser_network first to list requests.`);
@@ -378,7 +393,7 @@ const MAX_HAR_BODY_BYTES = 8 * 1024 * 1024;
 /** Standards-shaped HAR 1.2 export from the captured request buffer. */
 export async function har(tabId, { filter, includeBody = false } = {}) {
   const key = NETWORK_KEY(tabId);
-  const stored = await api.storage.session.get(key);
+  const stored = await session().get(key);
   let records = Object.values(stored[key] ?? {});
   if (filter) {
     const needle = filter.toLowerCase();
@@ -440,7 +455,7 @@ export async function har(tabId, { filter, includeBody = false } = {}) {
   return {
     log: {
       version: '1.2',
-      creator: { name: 'G9 Browser Agent', version: 'runtime' },
+      creator: { name: 'G9 Browser Agent', version: platform.runtime.version() },
       pages: [],
       entries,
     },

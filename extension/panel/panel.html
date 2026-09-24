@@ -3,6 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- The version is appended at runtime from the manifest (ui.js titleFor),
+       so the detached window's title bar always names the build it runs. -->
   <title>G9 Browser Agent</title>
   <link rel="stylesheet" href="panel.css" />
 </head>
@@ -10,70 +12,133 @@
   <header class="hd">
     <div class="brand">
       <img src="icon48.png" alt="" width="20" height="20" />
-      <span>G9 Browser Agent</span>
+      <span class="name">G9 Browser Agent</span>
+      <button id="versionBadge" class="ver" type="button" title="About this version">v</button>
     </div>
-    <button id="popout" class="popout" title="Open this panel in its own window — more room for a long report, and it stays put while the page under test scrolls">↗</button>
-    <button id="stop" class="stop" title="Immediately block all agent actions">Stop</button>
+    <button id="detachPanel" class="popout" type="button"
+            title="Open this panel in its own window — more room for a long report, and it stays put while the page under test scrolls"
+            aria-label="Open this panel in its own window">↗</button>
+    <button id="stop" class="stop" type="button" aria-pressed="false"
+            title="Immediately block every agent action, in this browser and in the daemon">Stop</button>
   </header>
 
-  <p class="panelerr" id="panelError" hidden></p>
+  <p class="panelerr" id="panelError" role="alert" hidden></p>
 
-  <!-- Three jobs, three places. Recording a flow and filing a bug have nothing
-       to do with each other, and stacking them under the connection settings
-       buried both. -->
-  <nav class="tabs" id="tabs" role="tablist">
-    <button data-tab="session" role="tab" aria-selected="true">Session</button>
-    <button data-tab="automation" role="tab" aria-selected="false">Automation</button>
-    <button data-tab="issues" role="tab" aria-selected="false">Issues</button>
+  <!-- Shown once after an update, until dismissed. -->
+  <div class="updnote" id="updateNote" role="status" hidden>
+    <span id="updateText"></span>
+    <button class="link" id="updateWhatsNew" type="button">what's new</button>
+    <button class="link" id="updateDismiss" type="button" aria-label="Dismiss the update notice">✕</button>
+  </div>
+
+  <!-- One job per tab. Recording a flow, filing a bug and checking which build
+       is running have nothing to do with each other, and stacking them under
+       the connection settings buried all of them. -->
+  <nav class="tabs" id="tabs" role="tablist" aria-label="Panel sections">
+    <button type="button" data-tab="session" id="tab-session" role="tab" aria-controls="body-session" aria-selected="true">Session</button>
+    <button type="button" data-tab="automation" id="tab-automation" role="tab" aria-controls="body-automation" aria-selected="false" tabindex="-1">Automation</button>
+    <button type="button" data-tab="issues" id="tab-issues" role="tab" aria-controls="body-issues" aria-selected="false" tabindex="-1">Issues</button>
+    <button type="button" data-tab="about" id="tab-about" role="tab" aria-controls="body-about" aria-selected="false" tabindex="-1">About</button>
   </nav>
 
   <!-- ============================================================ SESSION -->
-  <div class="tabbody" data-body="session">
-    <section class="card" id="bridgeCard">
+  <div class="tabbody" data-body="session" id="body-session" role="tabpanel" aria-labelledby="tab-session">
+
+    <!-- The daemon: connection, who is connected through it, what it runs. -->
+    <section class="card" id="daemonCard" aria-labelledby="daemonLabel">
       <div class="row">
-        <span class="dot" id="bridgeDot"></span>
-        <strong id="bridgeLabel">Connecting…</strong>
-        <button class="link" id="bridgeToggle" type="button">settings</button>
+        <span class="dot" id="daemonDot" aria-hidden="true"></span>
+        <strong id="daemonLabel" aria-live="polite">Connecting…</strong>
+        <span class="pill" id="daemonPill" hidden></span>
+        <button class="link push" id="daemonToggle" type="button" aria-expanded="false" aria-controls="daemonSettings">settings</button>
       </div>
-      <p class="muted" id="bridgeHint">Waiting for the local bridge.</p>
-      <div class="settings" id="bridgeSettings" hidden>
-        <!-- Discovery first, manual entry second. Typing a port number was
-             never the thing anyone wanted to do; it was the only thing on
-             offer when two editor windows fought over 8765. -->
+      <p class="muted" id="daemonHint">Waiting for the local G9 daemon.</p>
+      <p class="warn" id="daemonWarn" hidden></p>
+      <div class="btnrow" id="daemonRetryRow" hidden>
+        <button id="reconnectBtn" class="ghost sm" type="button">Reconnect now</button>
+        <!-- Not a live region: it counts down every second, and a screen
+             reader would read out every tick. The status line above is live. -->
+        <span class="muted sm grow-text" id="retryNote"></span>
+      </div>
+      <div class="settings" id="daemonSettings" hidden>
+        <label>Host <input id="host" value="127.0.0.1" spellcheck="false" autocomplete="off" /></label>
+        <label>Port <input id="port" value="8765" inputmode="numeric" autocomplete="off" /></label>
+        <p class="muted sm">One daemon per machine, on 127.0.0.1:8765. Change the port only if you set <code>G9_PORT</code>.</p>
+        <button id="saveDaemon" class="primary sm" type="button">Save &amp; reconnect</button>
+      </div>
+
+      <div class="subblock" id="agentsBlock" hidden>
         <div class="row spread">
-          <span class="muted sm">Bridges running on this machine</span>
-          <button class="link" id="discoverBtn" type="button">find bridges</button>
+          <span class="label">Agents</span>
+          <span class="muted sm" id="agentCount"></span>
         </div>
-        <ul class="minilist" id="bridgeList" hidden></ul>
-        <label>Host <input id="host" value="127.0.0.1" spellcheck="false" /></label>
-        <label>Port <input id="port" value="8765" inputmode="numeric" /></label>
-        <label>Token <input id="token" placeholder="(optional)" spellcheck="false" /></label>
-        <button id="saveBridge" class="primary sm">Save &amp; reconnect</button>
+        <ul class="minilist" id="agentList"></ul>
+        <p class="muted sm" id="agentEmpty" hidden>No agent is connected. Open your AI client — its G9 tools connect through the daemon.</p>
+      </div>
+
+      <div class="subblock" id="enginesBlock" hidden>
+        <div class="row spread">
+          <span class="label">Engines</span>
+          <button class="link" id="enginesRefresh" type="button">refresh</button>
+        </div>
+        <ul class="minilist" id="engineList"></ul>
       </div>
     </section>
 
-    <section class="card">
+    <!-- The tab the agent acts on, and what can be done with it. -->
+    <section class="card" id="tabCard">
       <div class="row spread">
-        <strong>What the agent may touch</strong>
-        <div class="modes" id="modes">
-          <button data-mode="workspace" title="Agent works on this project's own sites, automatically">Workspace</button>
-          <button data-mode="pinned" title="Agent is locked to one tab">Pinned</button>
-          <button data-mode="follow" title="Agent follows whichever tab is active">Follow</button>
-          <button data-mode="multi" title="Agent may switch and open tabs">Multi</button>
-        </div>
+        <strong>Current tab</strong>
+        <span class="muted sm" id="attachedCount"></span>
       </div>
-
-      <div class="wsbox" id="workspaceBox" hidden></div>
 
       <div id="attached" class="attached empty">
         <p class="muted">No tab attached yet.</p>
       </div>
 
       <div class="btnrow">
-        <button id="attachActive" class="primary">Attach &amp; Pin current tab</button>
-        <button id="detach" class="ghost" hidden>Detach</button>
+        <button id="attachActive" class="primary" type="button"
+                title="Attach the tab you are looking at and make it the one the agent acts on">Attach current tab</button>
+        <button id="detach" class="ghost" type="button" hidden
+                title="Release every tab this browser has attached">Detach all</button>
       </div>
-      <p class="warn" id="modeWarn" hidden></p>
+
+      <label class="switch" for="autoAttach">
+        <input type="checkbox" id="autoAttach" role="switch" />
+        <span class="track" aria-hidden="true"></span>
+        <span class="txt"><b>Auto-attach</b> <span class="muted">every tab you open or load, so agents never have to ask.</span></span>
+      </label>
+
+      <div class="tabacts">
+        <div class="tabact">
+          <button id="popoutTab" class="ghost sm" type="button">⧉ Pop out tab</button>
+          <p class="muted sm">Opens the page in its own window, in front, without reloading it. It keeps rendering while it is on screen. Do not minimise it. If another window will cover it completely, turn the WindowOcclusionEnabled policy off first.</p>
+        </div>
+        <div class="tabact">
+          <button id="handoffTab" class="ghost sm" type="button">⇢ Send to background</button>
+          <p class="muted sm">Continues in a browser G9 launches; the page reloads there with its cookies and storage.</p>
+        </div>
+      </div>
+      <div class="result" id="tabResult" role="status" hidden></div>
+    </section>
+
+    <!-- How the agent's pointer and keyboard look to the page. -->
+    <section class="card">
+      <fieldset class="inputmode" id="inputModeGroup">
+        <legend>Input</legend>
+        <label class="opt">
+          <input type="radio" name="inputMode" value="off" />
+          <span><b>Direct</b> <span class="muted">Instant, exact input as in v1, unless the agent asks for human input. Fastest; easiest for a bot detector to spot.</span></span>
+        </label>
+        <label class="opt">
+          <input type="radio" name="inputMode" value="human" />
+          <span><b>Human</b> <span class="muted">Curved mouse paths, natural clicks and typing rhythm. The default; an agent can still ask for direct input.</span></span>
+        </label>
+        <label class="opt">
+          <input type="radio" name="inputMode" value="stealth" />
+          <span><b>Stealth</b> <span class="muted">Human input with no scripted shortcuts, and page console capture off. Always used: an agent cannot ask for less. Slowest. In your own browser this is about input only: while G9 is attached the browser shows its debugging bar, which pages can notice. Use a launched browser for pages that must not.</span></span>
+        </label>
+      </fieldset>
     </section>
 
     <!-- Named sessions: hidden until one exists, because it is meaningless
@@ -89,11 +154,11 @@
     <section class="card">
       <div class="row spread">
         <strong>Connect your agent</strong>
-        <button class="link" id="copyGuide" type="button">copy guide</button>
+        <button class="link" id="copyGuide" type="button">copy config</button>
       </div>
       <p class="muted">
-        Point any MCP client at the bridge. Most clients read
-        <code>setup/mcp.json</code> — copy it into your client config.
+        G9 Desktop registers your AI clients for you. For a manual setup, add this
+        to your MCP client's config — the shim starts the daemon when it needs it.
       </p>
       <pre class="snippet" id="snippet"></pre>
     </section>
@@ -103,14 +168,14 @@
         <strong>Activity</strong>
         <button class="link" id="clearLog" type="button">clear</button>
       </div>
-      <ul class="log" id="log">
+      <ul class="log" id="log" aria-label="Agent activity">
         <li class="muted pad">Nothing yet. Agent actions will appear here in real time.</li>
       </ul>
     </section>
   </div>
 
   <!-- ========================================================= AUTOMATION -->
-  <div class="tabbody" data-body="automation" hidden>
+  <div class="tabbody" data-body="automation" id="body-automation" role="tabpanel" aria-labelledby="tab-automation" hidden>
     <section class="card">
       <strong>Record a flow</strong>
       <p class="muted">
@@ -119,8 +184,10 @@
         the element again, so the flow still replays after a redeploy.
       </p>
       <div class="btnrow">
-        <button id="recToggle" class="primary">● Start recording</button>
+        <button id="recToggle" class="primary" type="button">● Start recording</button>
+        <button id="recStop" class="primary stop" type="button" hidden>■ Stop and save</button>
       </div>
+      <p class="muted sm" id="recWhy" role="status" hidden></p>
       <p class="reclive" id="recLive" hidden></p>
     </section>
 
@@ -136,7 +203,7 @@
     <section class="card" id="suiteCard" hidden>
       <div class="row spread">
         <strong>Run everything</strong>
-        <button id="suiteBtn" class="primary sm">▶ Full test</button>
+        <button id="suiteBtn" class="primary sm" type="button">▶ Full test</button>
       </div>
       <p class="muted" id="suiteProgress">
         Runs every saved flow in order, skipping any tagged <code>@manual</code>.
@@ -150,14 +217,14 @@
       </div>
       <p class="muted" id="syncLine">Flows in this browser live only in this browser until you push them.</p>
       <div class="btnrow">
-        <button id="syncPull" class="ghost sm">↓ Pull from repo</button>
-        <button id="syncPush" class="ghost sm">↑ Push all to repo</button>
+        <button id="syncPull" class="ghost sm" type="button">↓ Pull from repo</button>
+        <button id="syncPush" class="ghost sm" type="button">↑ Push all to repo</button>
       </div>
     </section>
   </div>
 
   <!-- ============================================================= ISSUES -->
-  <div class="tabbody" data-body="issues" hidden>
+  <div class="tabbody" data-body="issues" id="body-issues" role="tabpanel" aria-labelledby="tab-issues" hidden>
 
     <!-- list view -->
     <div id="issueListView">
@@ -169,7 +236,7 @@
           screen. You add detail afterwards.
         </p>
         <div class="btnrow">
-          <button id="issueNew" class="primary">⚑ New issue</button>
+          <button id="issueNew" class="primary" type="button">⚑ New issue</button>
         </div>
       </section>
 
@@ -190,21 +257,21 @@
           <button class="link" id="issueBack" type="button">← all issues</button>
           <span class="muted sm" id="issueSaved"></span>
         </div>
-        <input id="dTitle" class="bigfield" placeholder="Short summary of the problem" spellcheck="false" />
-        <textarea id="dBody" rows="5" placeholder="What you did, what you expected, what happened instead."></textarea>
+        <input id="dTitle" class="bigfield" placeholder="Short summary of the problem" spellcheck="false" aria-label="Issue title" />
+        <textarea id="dBody" rows="5" placeholder="What you did, what you expected, what happened instead." aria-label="Issue description"></textarea>
         <div class="row">
-          <select id="dSeverity" title="Severity">
+          <select id="dSeverity" title="Severity" aria-label="Severity">
             <option value="blocker">Blocker</option>
             <option value="major">Major</option>
             <option value="normal">Normal</option>
             <option value="minor">Minor</option>
           </select>
-          <select id="dStatus" title="Status">
+          <select id="dStatus" title="Status" aria-label="Status">
             <option value="open">Open</option>
             <option value="filed">Filed</option>
             <option value="closed">Closed</option>
           </select>
-          <input id="dFiledAs" placeholder="PROJ-1234" spellcheck="false" title="Tracker key once filed" />
+          <input id="dFiledAs" placeholder="PROJ-1234" spellcheck="false" title="Tracker key once filed" aria-label="Tracker key once filed" />
         </div>
       </section>
 
@@ -214,11 +281,11 @@
           <span class="muted sm" id="dAttCount"></span>
         </div>
         <div class="btnrow wrap">
-          <button id="dShot" class="ghost sm">📷 Screenshot</button>
-          <button id="dShotFull" class="ghost sm">🖼 Full page</button>
-          <button id="dVideo" class="ghost sm">● Record tab</button>
-          <button id="dFile" class="ghost sm">📎 Attach file</button>
-          <button id="dRecapture" class="ghost sm">↻ Re-capture context</button>
+          <button id="dShot" class="ghost sm" type="button">📷 Screenshot</button>
+          <button id="dShotFull" class="ghost sm" type="button">🖼 Full page</button>
+          <button id="dVideo" class="ghost sm" type="button">● Record tab</button>
+          <button id="dFile" class="ghost sm" type="button">📎 Attach file</button>
+          <button id="dRecapture" class="ghost sm" type="button">↻ Re-capture context</button>
         </div>
         <input type="file" id="dFileInput" hidden multiple />
         <ul class="attgrid" id="dAttachments"></ul>
@@ -231,13 +298,53 @@
 
       <section class="card">
         <div class="btnrow">
-          <button id="dDelete" class="ghost danger">Delete this issue</button>
+          <button id="dDelete" class="ghost danger" type="button">Delete this issue</button>
         </div>
       </section>
     </div>
   </div>
 
-  <div id="toast" class="toast" hidden></div>
+  <!-- ============================================================== ABOUT -->
+  <div class="tabbody" data-body="about" id="body-about" role="tabpanel" aria-labelledby="tab-about" hidden>
+    <section class="card hero">
+      <img src="icon128.png" alt="" width="44" height="44" />
+      <div class="herotext">
+        <div class="heroname">G9 Browser Agent</div>
+        <div class="herover" id="aboutVersion">v</div>
+        <div class="muted" id="aboutUpdated"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <dl class="facts">
+        <dt>Extension</dt><dd id="aboutExt">…</dd>
+        <dt>Previous</dt><dd id="aboutPrev">…</dd>
+        <dt>Updated</dt><dd id="aboutWhen">…</dd>
+        <dt>Browser</dt><dd id="aboutBrowser">…</dd>
+        <dt>Daemon</dt><dd id="aboutDaemon">…</dd>
+        <dt>Connection</dt><dd id="aboutConn">…</dd>
+        <dt>Engine id</dt><dd id="aboutEngine">…</dd>
+        <dt>Extension id</dt><dd id="aboutExtId">…</dd>
+      </dl>
+      <p class="warn" id="aboutSkew" hidden></p>
+      <div class="btnrow">
+        <button id="aboutCopy" class="ghost sm" type="button">Copy details</button>
+        <button id="aboutWelcome" class="ghost sm" type="button">What's new in v2</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <strong>Two engines, one tool layer</strong>
+      <p class="muted">
+        This extension is Engine 1: agents drive the tabs of this browser. Engine 2 is a
+        browser the daemon launches in the background — for unattended runs and for tabs
+        you send there. Both run the same tools, and the daemon keeps each tab to one agent
+        at a time.
+      </p>
+    </section>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
   <script src="panel.js" type="module"></script>
 </body>

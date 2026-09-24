@@ -1,0 +1,334 @@
+{
+  "description": "Minimal representative fixture for setup/extensiontest.mjs (EXT-16): the shape of the long web flow QA/Flows/web/tasks/tasks-browse-and-open.flow.json — browse the task list, search and filter it, open one task, read its history, go back — with a check after every meaningful move, each allowed to wait.",
+  "folder": "tasks",
+  "format": "g9/flowspec",
+  "id": "web.tasks.browse-and-open",
+  "name": "Tasks — browse the list and open a task",
+  "risk": "normal",
+  "schemaVersion": 1,
+  "sensitivity": {
+    "durationP95Factor": 1.6,
+    "surprise": "warn",
+    "visual": "layout"
+  },
+  "startUrl": "https://app.example.test/tasks",
+  "steps": [
+    {
+      "action": "navigate",
+      "id": "s01",
+      "url": "https://app.example.test/tasks",
+      "waitBudgetMs": 15000
+    },
+    {
+      "action": "assert",
+      "id": "s02",
+      "oracle": {
+        "contains": "/tasks",
+        "kind": "url"
+      },
+      "waitBudgetMs": 10000
+    },
+    {
+      "action": "assert",
+      "id": "s03",
+      "oracle": {
+        "contains": "/api/tasks",
+        "kind": "network",
+        "method": "GET",
+        "minCount": 1,
+        "status": 200
+      },
+      "waitBudgetMs": 15000
+    },
+    {
+      "action": "assert",
+      "id": "s04",
+      "oracle": {
+        "kind": "visible"
+      },
+      "target": {
+        "fingerprint": {
+          "name": "Tasks",
+          "role": "list"
+        },
+        "locators": [
+          {
+            "attr": "data-testid",
+            "kind": "testid",
+            "value": "task-list"
+          },
+          {
+            "kind": "role",
+            "name": "Tasks",
+            "role": "list"
+          }
+        ]
+      },
+      "waitBudgetMs": 10000
+    },
+    {
+      "action": "click",
+      "id": "s05",
+      "target": {
+        "fingerprint": {
+          "name": "Search tasks",
+          "role": "searchbox"
+        },
+        "locators": [
+          {
+            "attr": "data-testid",
+            "kind": "testid",
+            "value": "task-search"
+          },
+          {
+            "kind": "label",
+            "value": "Search tasks"
+          }
+        ]
+      },
+      "waitBudgetMs": 5000
+    },
+    {
+      "action": "type",
+      "id": "s06",
+      "target": {
+        "fingerprint": {
+          "name": "Search tasks",
+          "role": "searchbox"
+        },
+        "locators": [
+          {
+            "attr": "data-testid",
+            "kind": "testid",
+            "value": "task-search"
+          },
+          {
+            "kind": "label",
+            "value": "Search tasks"
+          }
+        ]
+      },
+      "value": "inspection",
+      "waitBudgetMs": 5000
+    },
+    {
+      "action": "key",
+      "id": "s07",
+      "key": "Enter",
+      "target": {
+        "fingerprint": {
+          "name": "Search tasks",
+          "role": "searchbox"
+        },
+        "locators": [
+          {
+            "attr": "data-testid",
+            "kind": "testid",
+            "value": "task-search"
+          }
+        ]
+      },
+      "waitBudgetMs": 2000
+    },
+    {
+      "action": "assert",
+      "id": "s08",
+      "oracle": {
+        "contains": "Pump inspection",
+        "kind": "text"
+      },
+      "waitBudgetMs": 8000
+    },
+    {
+      "action": "click",
+      "id": "s09",
+      "target": {
+        "fingerprint": {
+          "name": "Open",
+          "role": "button"
+        },
+        "locators": [
+          {
+            "kind": "role",
+            "name": "Open",
+            "role": "button"
+          },
+          {
+            "kind": "text",
+            "value": "Open"
+          }
+        ]
+      },
+      "waitBudgetMs": 5000
+    },
+    {
+      "action": "assert",
+      "id": "s10",
+      "oracle": {
+        "contains": "/api/tasks?status=open",
+        "kind": "network",
+        "method": "GET",
+        "minCount": 1,
+        "status": 200
+      },
+      "waitBudgetMs": 10000
+    },
+    {
+      "action": "scroll",
+      "id": "s11",
+      "scrollTo": {
+        "x": 0,
+        "y": 600
+      },
+      "waitBudgetMs": 2000
+    },
+    {
+      "action": "click",
+      "id": "s12",
+      "target": {
+        "fingerprint": {
+          "name": "Pump inspection",
+          "role": "link"
+        },
+        "locators": [
+          {
+            "kind": "role",
+            "name": "Pump inspection",
+            "role": "link"
+          },
+          {
+            "kind": "text",
+            "value": "Pump inspection"
+          }
+        ]
+      },
+      "waitBudgetMs": 5000
+    },
+    {
+      "action": "assert",
+      "id": "s13",
+      "oracle": {
+        "contains": "/tasks/",
+        "kind": "url"
+      },
+      "waitBudgetMs": 10000
+    },
+    {
+      "action": "assert",
+      "id": "s14",
+      "oracle": {
+        "kind": "visible"
+      },
+      "target": {
+        "fingerprint": {
+          "name": "Pump inspection",
+          "role": "heading"
+        },
+        "locators": [
+          {
+            "kind": "role",
+            "name": "Pump inspection",
+            "role": "heading"
+          }
+        ]
+      },
+      "waitBudgetMs": 10000
+    },
+    {
+      "action": "click",
+      "id": "s15",
+      "target": {
+        "fingerprint": {
+          "name": "History",
+          "role": "tab"
+        },
+        "locators": [
+          {
+            "attr": "data-testid",
+            "kind": "testid",
+            "value": "task-tab-history"
+          },
+          {
+            "kind": "role",
+            "name": "History",
+            "role": "tab"
+          }
+        ]
+      },
+      "waitBudgetMs": 5000
+    },
+    {
+      "action": "assert",
+      "id": "s16",
+      "oracle": {
+        "kind": "visible"
+      },
+      "target": {
+        "fingerprint": {
+          "name": "History",
+          "role": "table"
+        },
+        "locators": [
+          {
+            "attr": "data-testid",
+            "kind": "testid",
+            "value": "task-history"
+          }
+        ]
+      },
+      "waitBudgetMs": 8000
+    },
+    {
+      "action": "click",
+      "id": "s17",
+      "target": {
+        "fingerprint": {
+          "name": "Back to tasks",
+          "role": "link"
+        },
+        "locators": [
+          {
+            "kind": "role",
+            "name": "Back to tasks",
+            "role": "link"
+          },
+          {
+            "kind": "text",
+            "value": "Back to tasks"
+          }
+        ]
+      },
+      "waitBudgetMs": 5000
+    },
+    {
+      "action": "assert",
+      "id": "s18",
+      "oracle": {
+        "contains": "/tasks",
+        "kind": "url"
+      },
+      "waitBudgetMs": 10000
+    },
+    {
+      "action": "assert",
+      "id": "s19",
+      "oracle": {
+        "absent": true,
+        "kind": "console",
+        "level": [
+          "error"
+        ]
+      },
+      "waitBudgetMs": 3000
+    }
+  ],
+  "suite": "full",
+  "tags": [
+    "regression",
+    "tasks"
+  ],
+  "target": {
+    "adapter": "chromium-cdp",
+    "kind": "web"
+  }
+}

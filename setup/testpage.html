@@ -200,9 +200,265 @@
   -->
   <section id="crossOriginSection">
     <h2>Cross-origin iframe</h2>
-    <iframe id="crossFrame" title="Cross-origin payment frame" src="http://localhost:5199/crossframe.html"
+    <iframe id="crossFrame" title="Cross-origin payment frame"
             width="420" height="230" style="border:1px solid #bbb"></iframe>
+    <script>
+      // The frame's origin is the OTHER loopback name on the SAME port, so the
+      // page works on any port serve.mjs is started on (engine2-livetest picks
+      // a random one) and stays cross-origin: 127.0.0.1 ↔ localhost.
+      (() => {
+        const other = location.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
+        document.getElementById('crossFrame').src =
+          location.protocol + '//' + other + ':' + (location.port || '80') + '/crossframe.html';
+      })();
+    </script>
   </section>
+
+  <!--
+    Engine 2 lab — fixtures for setup/engine2-livetest.mjs. Clean on purpose:
+    every control is labelled and named, nothing logs or fails on load, so the
+    six seeded defects above stay the only findings. The page records what it
+    RECEIVED (window.e2log, window.e2moves, …) so the suite can check a tool's
+    report against the page's own observation. Names never start with "__g9":
+    the suite asserts that no such name appears in this main world.
+  -->
+  <section id="e2lab" aria-label="Engine 2 lab">
+    <h2>Engine 2 lab</h2>
+    <div class="row">
+      <button id="e2Btn" type="button">Lab button</button>
+      <button id="e2Hover" type="button">Hover target</button>
+      <span id="e2HoverOut">not hovered</span>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <label>Lab text <input id="e2Text" autocomplete="off" /></label>
+      <label>Cookie value <input id="e2CookieValue" autocomplete="off" /></label>
+      <button id="e2SetCookie" type="button">Set cookie</button>
+      <span id="e2CookieOut">no cookie</span>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <label>Lab upload <input id="e2File" type="file" multiple /></label>
+      <span id="e2FileOut">no file</span>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="e2Counter" type="button">Fetch counter</button>
+      <span id="e2CounterOut">none</span>
+      <button id="e2Unrecorded" type="button">Fetch unrecorded</button>
+      <span id="e2UnrecordedOut">none</span>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="e2Alert" type="button">Open alert()</button>
+      <button id="e2Prompt" type="button">Open prompt()</button>
+      <span id="e2DialogOut">no dialog</span>
+      <button id="e2Probe" type="button">Probe runtime</button>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <a id="e2DlData" href="/download/e2-data.bin">Download data file</a>
+      <a id="e2DlPdf" href="/download/e2-report.pdf">Download report</a>
+      <a id="e2DlEmpty" href="/download/e2-empty.txt">Download empty file</a>
+      <a id="e2DlSlow" href="/download/e2-slow.bin?ms=1500">Download slow file</a>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="e2Popup" type="button">Open popup</button>
+      <a id="e2NewTab" href="/?newtab=1" target="_blank">Open in a new tab</a>
+      <a id="e2DlPopup" href="/download/e2-popup.bin" target="_blank">Download in a new tab</a>
+    </div>
+    <div id="e2Track" style="position:relative; height:56px; margin-top:12px; border:1px dashed var(--line); border-radius:8px">
+      <button id="e2Handle" type="button" style="position:absolute; left:8px; top:10px">Drag handle</button>
+      <button id="e2Drop" type="button" style="position:absolute; right:8px; top:10px">Drop zone</button>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="e2Dnd" type="button" draggable="true">HTML5 draggable</button>
+      <button id="e2DndZone" type="button">HTML5 drop zone</button>
+      <span id="e2DndOut">not dropped</span>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="e2Cancel" type="button">Cancelled pointerdown</button>
+      <span id="e2CancelOut">not clicked</span>
+    </div>
+    <div id="e2RunTrack" style="position:relative; height:56px; margin-top:12px; border:1px dashed var(--line); border-radius:8px">
+      <button id="e2Run" type="button" style="position:absolute; left:8px; top:10px">Runaway button</button>
+    </div>
+    <div id="e2Spacer" style="height:1400px" aria-hidden="true"></div>
+    <p id="e2Bottom">Bottom of the lab. <button id="e2BottomBtn" type="button">Bottom button</button></p>
+  </section>
+
+  <script>
+    (() => {
+      // What this document saw WHILE IT LOADED: a timezone or locale override
+      // that lands after the first script ran is invisible to a later read,
+      // and a detector reads at load.
+      const ro = Intl.DateTimeFormat().resolvedOptions();
+      window.e2boot = { tz: ro.timeZone, locale: ro.locale, language: navigator.language, focus: document.hasFocus() };
+      const $ = (id) => document.getElementById(id);
+      const log = window.e2log = [];
+      const moves = window.e2moves = [];
+      const now = () => performance.now();
+      const push = (e) => {
+        log.push({
+          type: e.type, t: now(), trusted: e.isTrusted, target: (e.target && e.target.id) || null,
+          x: e.clientX, y: e.clientY, button: e.button, buttons: e.buttons, detail: e.detail,
+          key: e.key, code: e.code, location: e.location, deltaY: e.deltaY, shift: e.shiftKey, ctrl: e.ctrlKey,
+        });
+        if (log.length > 20000) log.splice(0, 10000);
+      };
+      document.addEventListener('mousemove', (e) => {
+        moves.push({ t: now(), x: e.clientX, y: e.clientY, trusted: e.isTrusted, buttons: e.buttons });
+        if (moves.length > 40000) moves.splice(0, 20000);
+      }, true);
+      for (const type of ['mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu', 'keydown', 'keyup', 'wheel',
+        'input', 'change', 'dragstart', 'drop']) {
+        document.addEventListener(type, push, true);
+      }
+      window.addEventListener('scroll', () => {
+        log.push({ type: 'scroll', t: now(), trusted: true, target: null, sx: Math.round(scrollX), sy: Math.round(scrollY) });
+      });
+      // Pointer presses and releases with their pressure (a mouse with a
+      // button held reports 0.5, released 0).
+      const ptr = window.e2ptr = [];
+      for (const type of ['pointerdown', 'pointerup']) {
+        document.addEventListener(type, (e) => {
+          ptr.push({ type: e.type, t: now(), trusted: e.isTrusted, target: (e.target && e.target.id) || null,
+            pressure: e.pressure, pointerType: e.pointerType, buttons: e.buttons, x: e.clientX, y: e.clientY });
+          if (ptr.length > 5000) ptr.splice(0, 2500);
+        }, true);
+      }
+      // Viewport resizes the page can see (a capture beyond the viewport resizes it).
+      const resizes = window.e2resizes = [];
+      window.addEventListener('resize', () => resizes.push({ t: now(), w: innerWidth, h: innerHeight }));
+      $('e2Btn').addEventListener('contextmenu', (e) => e.preventDefault());
+      // The field's length as an attribute, so a read-only DOM inspection can follow typing.
+      $('e2Text').addEventListener('input', (e) => e.target.setAttribute('data-len', String(e.target.value.length)));
+      $('e2Hover').addEventListener('mouseover', (e) => {
+        $('e2HoverOut').textContent = e.isTrusted ? 'hovered (trusted)' : 'hovered (untrusted)';
+      });
+
+      $('e2SetCookie').addEventListener('click', () => {
+        const v = $('e2CookieValue').value;
+        document.cookie = 'e2who=' + encodeURIComponent(v) + '; path=/; SameSite=Lax';
+        $('e2CookieOut').textContent = 'cookie ' + v;
+      });
+
+      window.e2upload = null;
+      $('e2File').addEventListener('change', async (e) => {
+        const files = [...e.target.files];
+        window.e2upload = await Promise.all(files.map(async (f) => ({ name: f.name, size: f.size, text: await f.text() })));
+        $('e2FileOut').textContent = files.map((f) => f.name).join(', ');
+      });
+
+      window.e2counter = null;
+      $('e2Counter').addEventListener('click', async () => {
+        try {
+          const r = await fetch('/e2/counter', { cache: 'no-store' });
+          const j = await r.json();
+          window.e2counter = { n: j.n, pinned: r.headers.get('x-g9-pinned') === '1' };
+          $('e2CounterOut').textContent = 'n=' + j.n;
+        } catch (err) {
+          window.e2counter = { error: String(err && err.message || err) };
+          $('e2CounterOut').textContent = 'failed';
+        }
+      });
+      window.e2unrecorded = null;
+      $('e2Unrecorded').addEventListener('click', async () => {
+        try {
+          const r = await fetch('/e2/unrecorded', { cache: 'no-store' });
+          window.e2unrecorded = { ok: r.ok, status: r.status };
+          $('e2UnrecordedOut').textContent = 'status ' + r.status;
+        } catch (err) {
+          window.e2unrecorded = { error: String(err && err.message || err) };
+          $('e2UnrecordedOut').textContent = 'failed';
+        }
+      });
+
+      $('e2Alert').addEventListener('click', () => {
+        alert('E2 lab alert');
+        $('e2DialogOut').textContent = 'alert closed';
+      });
+      $('e2Prompt').addEventListener('click', () => {
+        const v = prompt('E2 lab prompt', 'default answer');
+        $('e2DialogOut').textContent = 'prompt returned ' + JSON.stringify(v);
+      });
+
+      // A known page-side signal of the Runtime domain being enabled: while it
+      // is, logging an Error makes the inspector read its "stack". Reported by
+      // the suite as a measurement, not relied on.
+      window.e2probe = null;
+      $('e2Probe').addEventListener('click', () => {
+        let hit = false;
+        const err = new Error('e2 probe');
+        Object.defineProperty(err, 'stack', { configurable: false, enumerable: false, get() { hit = true; return ''; } });
+        console.debug(err);
+        window.e2probe = hit;
+      });
+
+      // Pointer-driven drag (mousedown → moves → mouseup), like most JS drag libraries.
+      window.e2drag = null;
+      let drag = null;
+      $('e2Handle').addEventListener('mousedown', (e) => {
+        drag = { moves: 0, trusted: e.isTrusted, startX: e.clientX, startY: e.clientY };
+      });
+      document.addEventListener('mousemove', (e) => {
+        if (!drag || !(e.buttons & 1)) return;
+        drag.moves += 1;
+        drag.trusted = drag.trusted && e.isTrusted;
+      });
+      document.addEventListener('mouseup', (e) => {
+        if (!drag) return;
+        const r = $('e2Drop').getBoundingClientRect();
+        const inZone = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+        window.e2drag = { ...drag, trusted: drag.trusted && e.isTrusted, inZone, endX: e.clientX, endY: e.clientY };
+        if (inZone) $('e2Drop').textContent = 'Dropped here';
+        drag = null;
+      });
+
+      // A page that cancels pointerdown (drag libraries, canvas apps, UI kits
+      // do): the Pointer Events spec then suppresses mousedown/mouseup, while
+      // pointerdown, pointerup and click still arrive.
+      window.e2cancel = { clicks: 0, trusted: null };
+      $('e2Cancel').addEventListener('pointerdown', (e) => e.preventDefault());
+      $('e2Cancel').addEventListener('click', (e) => {
+        window.e2cancel = { clicks: window.e2cancel.clicks + 1, trusted: e.isTrusted };
+        $('e2CancelOut').textContent = 'clicked ' + window.e2cancel.clicks;
+      });
+
+      // A button that moves away ONCE as a (trusted) pointer arrives over it,
+      // so a press aimed at it lands on the track underneath. e2runReset()
+      // puts it back and re-arms it. It reacts to a MOVE over it, not to
+      // pointerover: a scroll that slides it under a resting pointer fires
+      // boundary events (no pointermove), and moved it before G9 even aimed.
+      window.e2run = { armed: true, moved: 0, clicks: 0 };
+      window.e2runReset = () => {
+        $('e2Run').style.left = '8px';
+        window.e2run = { armed: true, moved: 0, clicks: 0 };
+      };
+      $('e2Run').addEventListener('pointermove', (e) => {
+        if (!e.isTrusted || !window.e2run.armed) return;
+        window.e2run.armed = false;
+        window.e2run.moved += 1;
+        $('e2Run').style.left = '420px';
+      });
+      $('e2Run').addEventListener('click', () => { window.e2run.clicks += 1; });
+
+      window.e2bottom = 0;
+      $('e2BottomBtn').addEventListener('click', () => { window.e2bottom += 1; });
+
+      // A page-opened window (window.open from a click, as OAuth and "open in
+      // new window" flows do): it joins the opener's browser window as a tab.
+      window.e2popup = null;
+      $('e2Popup').addEventListener('click', () => {
+        window.e2popup = !!window.open(location.pathname + '?popup=1', '_blank');
+      });
+
+      // HTML5 drag and drop.
+      window.e2dnd = null;
+      $('e2Dnd').addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', 'e2'); });
+      $('e2DndZone').addEventListener('dragover', (e) => e.preventDefault());
+      $('e2DndZone').addEventListener('drop', (e) => {
+        e.preventDefault();
+        window.e2dnd = { dropped: true, trusted: e.isTrusted, data: e.dataTransfer.getData('text/plain') };
+        $('e2DndOut').textContent = 'dropped';
+      });
+    })();
+  </script>
 
 </body>
 </html>

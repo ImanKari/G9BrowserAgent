@@ -1,185 +1,543 @@
 /**
- * The Session view: is the bridge connected, which tabs may the agent touch,
- * and what has it actually done.
+ * The Session view: is the daemon connected, who is connected through it,
+ * which tab is the agent on, how does its input look, and what has it done.
  *
- * This is the trust surface. Everything here answers one of those three
- * questions, and the Stop button must work even when the bridge is wedged.
+ * This is the trust surface. Everything here answers one of those questions,
+ * and the Stop button must work even when the daemon is wedged.
+ *
+ * ## What v2 took out, and why nothing replaced it
+ *
+ * The four modes and the workspace allowlist are gone (plan D6): attaching a
+ * tab gives agents that tab, fully, and Auto-attach does it for every tab. The
+ * modes were a product boundary on a local, trusted deployment; the operational
+ * safeguards — Stop and the activity log — stay, because they are how a person
+ * stays in charge of what is running in their own browser.
+ *
+ * Bridge discovery is gone too. There is one daemon per machine on one port,
+ * and a list with one entry in it is a question nobody needs to answer.
+ *
+ * Every command used here is in ARCHITECTURE_V2 §13; setup/unit/panel.test.mjs
+ * checks that, so a renamed command fails a test instead of a button.
  */
 
-import { api, el, cmd, node, toast, showPanelError, view } from './ui.js';
+import { api, el, cmd, node, toast, showPanelError, view, setTitle, VERSION } from './ui.js';
+import { renderUpdateNote, noteDaemon } from './about.js';
 
-/** Bridges found by the last discovery scan, for the picker. */
-let discovered = [];
+const DEFAULT_PORT = 8765;
+/** How stale the tab list may get before a render asks again. */
+const TABS_TTL_MS = 5_000;
+/** Daemon info (engines) changes rarely; a person can press "refresh". */
+const INFO_TTL_MS = 10_000;
+const INPUT_LEVELS = ['off', 'human', 'stealth'];
+const INPUT_NAMES = { off: 'Direct', human: 'Human', stealth: 'Stealth' };
 
-const MODE_HELP = {
-  workspace:
-    'Workspace: the agent works on this project’s own sites automatically. Everything else — your ' +
-    'email, your tickets — stays invisible to it.',
-  pinned: '',
-  follow: 'Follow mode: the agent acts on whatever tab is focused. Switching tabs mid-task will redirect it.',
-  multi: 'Multi-tab mode: the agent may open, close, and switch tabs on its own.',
-};
+/** `listTabs` rows (§4.1 shape), for titles and window states that state alone does not carry. */
+const tabRows = { at: 0, rows: [], pending: null, fromStatus: false };
+/** Last `status` from getState, so a late tab list can repaint without another round trip. */
+let lastStatus = null;
+/** When the transport's next reconnect attempt is due, from its 'reconnecting' broadcast. */
+let retryDueAt = null;
+let retryTicker = null;
+let infoAt = 0;
+let infoPending = null;
+let wasConnected = null;
+/** The pushed agents list as last rendered, and whether `info`'s copy is older. See chooseAgents(). */
+const agentsMemo = { key: null, infoStale: false };
+/** What each button-bearing list last painted. See changed(). */
+const painted = new Map();
+/** Buttons whose command is in flight, so a double click is not a second handoff. */
+const busy = { popout: false, handoff: false, input: false, auto: false };
 
-export async function refresh({ nudge = false } = {}) {
+let refreshing = null;
+let again = false;
+
+/**
+ * Coalesced: every setState in the worker broadcasts 'state', and a burst of
+ * those must not become a burst of round trips. One in flight, one queued.
+ */
+export function refresh({ nudge = false } = {}) {
+  if (refreshing) {
+    again = true;
+    return refreshing;
+  }
+  refreshing = pull({ nudge }).finally(() => {
+    refreshing = null;
+    if (again) {
+      again = false;
+      refresh();
+    }
+  });
+  return refreshing;
+}
+
+async function pull({ nudge }) {
   let res;
   try {
     res = await cmd({ cmd: 'getState', nudge });
   } catch (err) {
-    showPanelError(nudge ? null : `Panel could not reach the extension: ${err?.message ?? err}`);
+    // The very first read races the worker waking up; a failure there is not news.
+    showPanelError(nudge ? null : `Panel could not reach the extension: ${err?.message ?? err}`, { source: 'refresh' });
     return;
   }
 
-  if (!res?.ok) return showPanelError(res?.error ?? 'The extension returned no state.');
+  if (!res?.ok) return showPanelError(res?.error ?? 'The extension returned no state.', { source: 'refresh' });
 
   try {
-    render(res.state, res.status);
-    showPanelError(null);
+    render(res.state ?? {}, res.status ?? null);
+    // Clears only what a refresh reported — see ui.js showPanelError.
+    showPanelError(null, { source: 'refresh' });
   } catch (err) {
-    showPanelError(`Panel failed to render: ${err?.message ?? err}`);
+    showPanelError(`Panel failed to render: ${err?.message ?? err}`, { source: 'refresh' });
   }
 }
 
 function render(state, status) {
   view.state = state;
-
-  const connected = state.bridge.connected;
-  el.bridgeDot.className = `dot ${connected ? 'on' : 'off'}`;
-  el.bridgeLabel.textContent = connected ? 'Bridge connected' : 'Bridge offline';
-  el.bridgeHint.textContent = connected
-    ? `ws://${state.bridge.host}:${state.bridge.port}${state.project?.found ? ` — ${projectName(state)}` : ''} — your agent can call tools now.`
-    : state.bridge.lastError
-      ? `${state.bridge.lastError}. Start it with: node bridge/src/server.js`
-      : 'Start the bridge, or let your MCP client launch it automatically.';
-
-  if (document.activeElement !== el.host) el.host.value = state.bridge.host;
-  if (document.activeElement !== el.port) el.port.value = state.bridge.port;
-  if (document.activeElement !== el.token) el.token.value = state.bridge.token ?? '';
-
+  lastStatus = status;
+  noteStatusRows(status);
+  setTitle(state);
+  renderStop(state);
+  renderDaemon(state);
+  renderAgents(state);
+  renderEngines(state);
+  renderCurrent(state, status);
+  renderInput(state);
+  renderSessions(state, status);
   el.snippet.textContent = buildSnippet(state);
-  renderWorkspace(state);
-
-  const a = status?.attached;
-  if (a) {
-    el.attached.className = 'attached live';
-    el.attached.innerHTML = '';
-    el.attached.append(
-      node('div', 'title', a.title || '(untitled)'),
-      node('div', 'url', a.url),
-      statsRow(status.health ?? {}),
-    );
-    el.attachActive.textContent = 'Re-attach current tab';
-    el.detach.hidden = false;
-  } else {
-    el.attached.className = 'attached empty';
-    el.attached.innerHTML = `<p class="muted">${emptyTargetHint(state)}</p>`;
-    el.attachActive.textContent = 'Attach & Pin current tab';
-    el.detach.hidden = true;
-  }
-
-  renderSessions(status?.sessions ?? []);
-
-  for (const b of el.modes.querySelectorAll('button')) {
-    b.setAttribute('aria-pressed', String(b.dataset.mode === state.mode));
-  }
-  el.modeWarn.textContent = MODE_HELP[state.mode] ?? '';
-  el.modeWarn.hidden = !MODE_HELP[state.mode];
-
-  el.stop.textContent = state.halted ? 'Resume' : 'Stop';
-  el.stop.classList.toggle('armed', state.halted);
-
   renderLog(state.activity);
+  renderUpdateNote(state);
+  maybeFetchInfo(state);
+}
+
+// ------------------------------------------------------------------ the daemon
+
+function renderDaemon(state) {
+  const b = state.bridge ?? {};
+  const address = `${hostForUrl(b.host || '127.0.0.1')}:${b.port || DEFAULT_PORT}`;
+  const connected = !!b.connected;
+  const daemonVersion = b.daemonVersion ?? view.daemon?.version ?? null;
+
+  let dot = 'off';
+  let label;
+  let hint;
+  if (connected) {
+    dot = 'on';
+    label = 'Daemon connected';
+    hint =
+      `ws://${address}/g9` +
+      (b.engineId ? ` · this browser is ${b.engineId}` : '') +
+      (state.project?.found && state.project.path ? ` · ${projectName(state.project.path)}` : '') +
+      ' — agents can use this browser now.';
+  } else if (b.problem) {
+    dot = 'warn';
+    label = /v1 bridge/i.test(b.problem) ? 'Port taken by a v1 bridge' : 'Daemon refused this extension';
+    hint = b.problem;
+  } else if (b.lastError) {
+    label = /v1 bridge/i.test(b.lastError) ? 'Port taken by a v1 bridge' : 'Daemon offline';
+    // The transport's own short reasons get the fix appended; its long ones
+    // (a v1 bridge on the port, a server that never answered) already carry it.
+    hint = /^(daemon not reachable|closed \(\d+\))/i.test(b.lastError)
+      ? `${capitalise(b.lastError)}. Your AI client starts the daemon when it connects; G9 Desktop keeps it running.`
+      : b.lastError;
+  } else {
+    dot = 'warn';
+    label = 'Connecting…';
+    hint = `Looking for the G9 daemon on ${address}.`;
+  }
+
+  el.daemonDot.className = `dot ${dot}`;
+  // The label is a live region and this runs every 2.5s: rewriting the same
+  // words would have a screen reader announce "Daemon connected" forever.
+  setText(el.daemonLabel, label);
+  setText(el.daemonHint, hint);
+
+  el.daemonPill.hidden = !(connected && daemonVersion);
+  el.daemonPill.textContent = daemonVersion ? `g9d v${daemonVersion}` : '';
+
+  // Version skew bit this project once already (v1.7.13): two halves that each
+  // report a version and never compare them. Here they are compared, visibly.
+  const skew = connected && daemonVersion && VERSION && daemonVersion !== VERSION;
+  el.daemonWarn.hidden = !skew;
+  if (skew) {
+    el.daemonWarn.textContent =
+      `The daemon is v${daemonVersion} and this extension is v${VERSION}. Update the older one — ` +
+      'G9 Desktop updates both.';
+  }
+
+  el.daemonRetryRow.hidden = connected;
+  el.reconnectBtn.textContent = b.problem ? 'Try again' : 'Reconnect now';
+  if (connected) retryDueAt = null;
+  paintRetry();
+
+  if (document.activeElement !== el.host) el.host.value = b.host || '127.0.0.1';
+  if (document.activeElement !== el.port) el.port.value = String(b.port || DEFAULT_PORT);
+}
+
+/** From the transport's 'reconnecting' broadcast: when the next attempt is due. */
+export function noteRetry(msg) {
+  if (!Number.isFinite(msg?.in)) return;
+  retryDueAt = (Number.isFinite(msg.at) ? msg.at : Date.now()) + msg.in;
+  paintRetry();
+  if (!retryTicker) retryTicker = setInterval(paintRetry, 1000);
+}
+
+function paintRetry() {
+  const due = retryDueAt && !view.state?.bridge?.connected ? retryDueAt - Date.now() : null;
+  el.retryNote.textContent = due != null && due > 0 ? `next try in ${Math.ceil(due / 1000)}s` : '';
+  if ((due == null || due <= 0) && retryTicker) {
+    clearInterval(retryTicker);
+    retryTicker = null;
+  }
 }
 
 /**
- * What Workspace mode is actually allowing, in the panel rather than in an error.
- *
- * A QA whose tab is being refused needs to see the allowlist, not discover it
- * by reading an agent's complaint. And the "no allowlist" case has to be loud:
- * the mode is selected, it looks active, and it is silently behaving as Pinned.
+ * Who is connected through the daemon, and which of this browser's tabs each
+ * one owns. The daemon pushes the list (`{type:'agents'}`) and the worker keeps
+ * the last one in state; tab ids in it are this browser's own.
  */
-function renderWorkspace(state) {
-  const box = el.workspaceBox;
-  if (!box) return;
-  const domains = state.project?.workspaceDomains ?? [];
+function renderAgents(state) {
+  const connected = !!state.bridge?.connected;
+  el.agentsBlock.hidden = !connected;
+  if (!connected) return;
 
-  if (state.mode !== 'workspace') {
-    box.hidden = true;
-    return;
-  }
-  box.hidden = false;
-  box.innerHTML = '';
+  const agents = chooseAgents(state.agents, view.daemon?.agents, agentsMemo);
+  el.agentCount.textContent = agents.length ? `${agents.length} connected` : '';
+  el.agentEmpty.hidden = agents.length > 0;
 
-  if (!domains.length) {
-    box.className = 'wsbox warn';
-    box.append(
-      node('div', 'nm', 'No project allowlist — behaving as Pinned'),
+  const needed = agents.flatMap(ownedTabs);
+  if (needed.length) ensureTabRows(needed);
+  const model = {
+    cur: state.currentTabId ?? null,
+    agents: agents.map((a) => [a.id, a.name, !!a.halted, ownedTabs(a).map((t) => [t, rowFor(t)?.title, rowFor(t)?.url])]),
+  };
+  if (!changed('agents', model)) return;
+  el.agentList.replaceChildren();
+
+  for (const a of agents) {
+    const owned = ownedTabs(a);
+
+    const li = document.createElement('li');
+    if (a.halted) li.classList.add('halted');
+    const who = node('div', 'who');
+    who.append(
+      node('div', 'nm', `${a.name || 'agent'}${a.id ? ` · ${a.id}` : ''}${a.halted ? ' · halted' : ''}`),
       node(
         'div',
         'sub',
-        state.project?.found
-          ? `${state.project.path} has no "workspaceDomains". Add the sites of the app under test, then press Reconnect.`
-          : 'The bridge found no g9.project.json. Create one in the repo under test (copy g9.project.example.json), then press Reconnect.',
+        owned.length
+          ? `owns ${owned.length} tab${owned.length === 1 ? '' : 's'} in this browser`
+          : 'owns no tab in this browser',
       ),
     );
-    for (const problem of state.project?.problems ?? []) box.append(node('div', 'sub', `· ${problem}`));
-    return;
+    if (owned.length) {
+      const chips = node('div', 'tabchips');
+      for (const tabId of owned) {
+        const r = rowFor(tabId);
+        const chip = node('button', `tabchip${tabId === state.currentTabId ? ' cur' : ''}`, r?.title || r?.url || `tab ${tabId}`);
+        chip.type = 'button';
+        chip.title = `${r?.url || `tab ${tabId}`} — show this tab`;
+        chip.addEventListener('click', () => showTab(tabId));
+        chips.append(chip);
+      }
+      who.append(chips);
+    }
+    li.append(who);
+    el.agentList.append(li);
   }
-
-  box.className = 'wsbox';
-  box.append(node('div', 'nm', `Workspace: ${domains.length} site${domains.length === 1 ? '' : 's'}`));
-  const list = node('div', 'chips');
-  for (const d of domains) list.append(node('span', 'chip', d));
-  box.append(list, node('div', 'sub', 'Tabs on these sites are driven automatically. Everything else is invisible to the agent.'));
 }
 
-function emptyTargetHint(state) {
-  if (state.mode !== 'workspace') return 'No tab attached yet.';
-  const domains = state.project?.workspaceDomains ?? [];
-  return domains.length
-    ? 'No workspace tab is open. Open the app under test and it attaches itself.'
-    : 'No tab attached yet, and no workspace allowlist to attach one automatically.';
+/**
+ * Repaint a list only when what it shows changed. These lists hold buttons,
+ * and rebuilding them on every 2.5s poll threw away the keyboard focus of
+ * whoever was on one (and had a screen reader read the list out again).
+ */
+function changed(name, model) {
+  const key = JSON.stringify(model);
+  if (painted.get(name) === key) return false;
+  painted.set(name, key);
+  return true;
 }
 
-/** Named sessions, so a two-tab flow is visible rather than implied. */
-function renderSessions(sessions) {
-  const box = el.sessionList;
-  if (!box) return;
-  el.sessionCard.hidden = sessions.length === 0;
-  box.innerHTML = '';
-  for (const s of sessions) {
+/**
+ * Which agents list to show: the one the daemon pushed, or its `info` answer.
+ *
+ * The daemon pushes the list on every change; until its first push arrives
+ * (state starts at []), the `info` answer — same shape, same tab ids — fills in.
+ * But an EMPTY push is news too: the last agent left. Falling back to an `info`
+ * answer fetched before that showed departed agents, still owning tabs, for up
+ * to INFO_TTL_MS. So once the pushed list changes, the info copy counts as
+ * stale until the next info answer arrives (which clears `memo.infoStale`).
+ */
+export function chooseAgents(pushedList, infoList, memo) {
+  const pushed = Array.isArray(pushedList) ? pushedList : [];
+  const key = JSON.stringify(pushed);
+  if (memo.key !== null && key !== memo.key) memo.infoStale = true;
+  memo.key = key;
+  if (pushed.length) return pushed;
+  return !memo.infoStale && Array.isArray(infoList) ? infoList : [];
+}
+
+function ownedTabs(agent) {
+  const list = agent?.owned ?? agent?.tabs ?? [];
+  return (Array.isArray(list) ? list : [])
+    .map((t) => (t && typeof t === 'object' ? (t.tabId ?? t.id) : t))
+    .filter((t) => Number.isFinite(t));
+}
+
+/** Engines come from `daemonInfo` — every browser the daemon drives, this one included. */
+function renderEngines(state) {
+  const engines = Array.isArray(view.daemon?.engines) ? view.daemon.engines : [];
+  el.enginesBlock.hidden = !state.bridge?.connected || engines.length === 0;
+  el.engineList.replaceChildren();
+  for (const e of engines) {
+    const self = !!e.engineId && e.engineId === state.bridge?.engineId;
     const li = document.createElement('li');
+    if (self) li.classList.add('self');
+    const tabs = Array.isArray(e.tabs) ? e.tabs.length : Number.isFinite(e.tabs) ? e.tabs : null;
+    const kind = e.kind === 'launched' ? (e.headless === false ? 'launched, headed' : 'launched, headless') : (e.kind ?? null);
     const who = node('div', 'who');
     who.append(
-      node('div', 'nm', `${s.session}${s.active ? ' · on screen' : ''}`),
-      node('div', 'sub', s.alive ? (s.url ?? `tab ${s.tabId}`) : 'tab is gone'),
+      node('div', 'nm', `${e.engineId ?? e.id ?? 'engine'}${self ? ' · this browser' : ''}`),
+      node(
+        'div',
+        'sub',
+        [
+          engineBrowser(e),
+          kind,
+          e.profile ? `profile ${e.profile}` : null,
+          tabs != null ? `${tabs} tab${tabs === 1 ? '' : 's'}` : null,
+          e.pid ? `pid ${e.pid}` : null,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+      ),
     );
-    const acts = node('div', 'acts');
-    if (s.alive) {
-      const focus = node('button', '', 'Show');
-      focus.title = 'A browser only delivers clicks to the tab it is showing.';
-      focus.addEventListener('click', async () => {
-        await cmd({ cmd: 'listTabs' });
-        await api.tabs.update(s.tabId, { active: true });
-        refresh();
-      });
-      acts.append(focus);
-    }
-    const end = node('button', 'danger', '✕');
-    end.title = 'Forget this session. The tab stays open.';
-    end.addEventListener('click', async () => {
-      await cmd({ cmd: 'sessionEnd', name: s.session });
-      refresh();
-    });
-    acts.append(end);
-    li.append(who, acts);
-    box.append(li);
+    // The daemon compares versions itself and says so; shown where it applies.
+    if (e.versionMismatch) who.append(node('p', 'warn', e.versionMismatch));
+    li.append(who);
+    el.engineList.append(li);
   }
 }
 
-function projectName(state) {
-  const path = state.project?.path ?? '';
-  const parts = path.split('/');
-  return parts[parts.length - 2] ?? 'project';
+function engineBrowser(e) {
+  const b = e.browser;
+  if (!b) return e.version ? `v${e.version}` : null;
+  if (typeof b === 'string') return /^Mozilla\//.test(b) ? uaBrand(b) : (BROWSER_NAMES[b] ?? b);
+  const name = b.name ?? BROWSER_NAMES[b.kind] ?? b.kind;
+  return [name, b.version ?? e.version].filter(Boolean).join(' ') || null;
+}
+
+const BROWSER_NAMES = { edge: 'Edge', chrome: 'Chrome', cft: 'Chrome for Testing' };
+
+function uaBrand(ua) {
+  const edge = /Edg\/(\d+)/.exec(ua);
+  if (edge) return `Edge ${edge[1]}`;
+  const chrome = /Chrome\/(\d+)/.exec(ua);
+  return chrome ? `Chrome ${chrome[1]}` : null;
+}
+
+/**
+ * Ask the daemon (through the worker) for its version, agents and engines —
+ * on connect, then at most every INFO_TTL_MS while someone is looking.
+ */
+function maybeFetchInfo(state, { force = false } = {}) {
+  const connected = !!state.bridge?.connected;
+  if (!connected) {
+    wasConnected = false;
+    agentsMemo.key = null;
+    agentsMemo.infoStale = false;
+    if (view.daemon) {
+      view.daemon = null;
+      noteDaemon();
+    }
+    return;
+  }
+  const justConnected = wasConnected !== true;
+  wasConnected = true;
+  if (infoPending) return;
+  if (!force && !justConnected) {
+    if (Date.now() - infoAt < INFO_TTL_MS) return;
+    if (view.active !== 'session' && view.active !== 'about') return;
+  }
+  infoPending = cmd({ cmd: 'daemonInfo' })
+    .then((res) => {
+      view.daemon = res?.ok ? (res.daemon ?? null) : null;
+      agentsMemo.infoStale = false;
+    })
+    .catch(() => {
+      view.daemon = null;
+    })
+    .finally(() => {
+      infoAt = Date.now();
+      infoPending = null;
+      if (view.state) {
+        renderEngines(view.state);
+        renderDaemon(view.state);
+        renderAgents(view.state);
+      }
+      noteDaemon();
+    });
+}
+
+// ------------------------------------------------------------ the current tab
+
+function renderCurrent(state, status) {
+  const cur = currentFrom(state, status);
+  const attachedCount = Array.isArray(state.attachedTabs) ? state.attachedTabs.length : 0;
+  el.attachedCount.textContent = attachedCount ? `${attachedCount} attached` : '';
+
+  if (cur) {
+    // Solid green only for a tab G9 really holds; the dashed frame otherwise.
+    el.attached.className = cur.attached === false ? 'attached' : 'attached live';
+    const parts = [node('div', 'title', cur.title || '(untitled)'), node('div', 'url', cur.url || `tab ${cur.tabId}`)];
+    // A minimised window stops rendering, and input sent to it resolves and
+    // delivers nothing (plan §2.1); a tab that is not its window's active tab
+    // is hidden the same way. The worker says so in `status.warnings`, and it
+    // is shown here, where it is broken, rather than in a tooltip nobody reads.
+    const warnings = Array.isArray(status?.warnings) ? status.warnings : [];
+    for (const w of warnings) parts.push(node('p', 'warn', w));
+    if (!warnings.length && cur.windowState === 'minimized') {
+      parts.push(
+        node('p', 'warn', 'Its window is minimised — the browser stops delivering input to it. Restore the window.'),
+      );
+    }
+    // With nothing attached, the tab a call would act on is simply the one on
+    // screen. Its console and network are not being recorded yet, so "0 errors"
+    // would be a claim, not a count: say what is true instead.
+    if (cur.attached === false) {
+      parts.push(
+        node(
+          'p',
+          'muted sm',
+          'Not attached yet — an agent attaches it on its first action; console and network are recorded from then on.',
+        ),
+      );
+    } else if (cur.health) {
+      parts.push(statsRow(cur.health));
+    }
+    el.attached.replaceChildren(...parts);
+  } else {
+    el.attached.className = 'attached empty';
+    el.attached.replaceChildren(
+      node(
+        'p',
+        'muted',
+        state.autoAttach
+          ? 'No tab yet — open or reload a page and it attaches itself.'
+          : 'No tab attached yet. Open the page to test and press Attach.',
+      ),
+    );
+  }
+  // Only when there is something to detach: the current tab may just be the
+  // one on screen, which nothing holds yet.
+  el.detach.hidden = !(attachedCount || cur?.attached === true);
+
+  const connected = !!state.bridge?.connected;
+  el.popoutTab.disabled = busy.popout;
+  el.popoutTab.title = cur
+    ? `Move "${cur.title || cur.url || `tab ${cur.tabId}`}" into its own window`
+    : 'Move the current tab into its own window';
+  el.handoffTab.disabled = busy.handoff || !connected;
+  el.handoffTab.title = connected
+    ? 'Continue the current tab in a browser the daemon launches in the background'
+    : 'Needs the G9 daemon, which is not connected';
+
+  if (!busy.auto) el.autoAttach.checked = !!state.autoAttach;
+}
+
+/**
+ * The tab agents act on by default. `status` (the worker's own orientation
+ * answer) is preferred because it carries page health; the tab list fills in
+ * when the status has no page to describe.
+ */
+function currentFrom(state, status) {
+  const s = status ?? {};
+  const c = s.current ?? s.attached ?? s.target ?? null;
+  if (c && typeof c === 'object' && (c.url != null || c.title != null)) {
+    const tabId = c.tabId ?? c.id ?? state.currentTabId ?? null;
+    if (tabId != null) ensureTabRows([tabId]);
+    return {
+      tabId,
+      title: c.title,
+      url: c.url,
+      windowState: c.windowState ?? rowFor(tabId)?.windowState,
+      attached: attachedFlag(state, tabId),
+      health: s.health ?? c.health ?? null,
+    };
+  }
+  if (state.currentTabId == null) return null;
+  ensureTabRows([state.currentTabId]);
+  const r = rowFor(state.currentTabId);
+  return {
+    tabId: state.currentTabId,
+    title: r?.title ?? `Tab ${state.currentTabId}`,
+    url: r?.url ?? '',
+    windowState: r?.windowState,
+    attached: attachedFlag(state, state.currentTabId),
+    health: null,
+  };
+}
+
+/**
+ * Is this tab attached? The worker's own list first, then the tab row's
+ * `attached`; `null` when neither says (the panel then claims nothing).
+ */
+function attachedFlag(state, tabId) {
+  if (tabId == null) return null;
+  if (Array.isArray(state.attachedTabs) && state.attachedTabs.includes(tabId)) return true;
+  const r = rowFor(tabId);
+  if (typeof r?.attached === 'boolean') return r.attached;
+  return Array.isArray(state.attachedTabs) ? false : null;
+}
+
+/**
+ * Take the tab rows `status` already carries (the first 25), so the common
+ * case costs no extra round trip. Returns nothing; rowFor() reads the result.
+ */
+function noteStatusRows(status) {
+  const rows = status?.tabs?.rows;
+  if (!Array.isArray(rows)) return;
+  const byId = new Map(tabRows.rows.map((r) => [r.tabId ?? r.id, r]));
+  for (const r of rows) byId.set(r.tabId ?? r.id, r);
+  tabRows.rows = [...byId.values()];
+  tabRows.fromStatus = true;
+}
+
+/**
+ * Fetch the full tab list — only when a tab the panel must name is missing
+ * from what it has, and not more often than TABS_TTL_MS.
+ */
+function ensureTabRows(needed = []) {
+  if (tabRows.pending || Date.now() - tabRows.at < TABS_TTL_MS) return;
+  if (tabRows.fromStatus && needed.every((id) => rowFor(id))) return;
+  tabRows.pending = cmd({ cmd: 'listTabs' })
+    .then((res) => {
+      if (res?.ok && Array.isArray(res.tabs)) tabRows.rows = res.tabs;
+    })
+    .catch(() => {})
+    .finally(() => {
+      tabRows.at = Date.now();
+      tabRows.pending = null;
+      if (view.state) {
+        renderAgents(view.state);
+        renderCurrent(view.state, lastStatus);
+        renderSessions(view.state, lastStatus);
+      }
+    });
+}
+
+function rowFor(tabId) {
+  if (tabId == null) return null;
+  return tabRows.rows.find((r) => (r.tabId ?? r.id) === tabId) ?? null;
+}
+
+async function showTab(tabId) {
+  try {
+    const tab = await api.tabs.update(tabId, { active: true });
+    if (tab?.windowId != null) await api.windows.update(tab.windowId, { focused: true }).catch(() => {});
+  } catch (err) {
+    showPanelError(`Could not show tab ${tabId}: ${err?.message ?? err}`);
+  }
 }
 
 function statsRow(h) {
@@ -196,7 +554,130 @@ function statsRow(h) {
     item('requests', h.networkRequests ?? 0),
     item('failed', h.failedRequests ?? 0, 'stat-err'),
   );
+  // Stealth never enables the Runtime domain, so page console capture is off —
+  // "0 errors" there would be a claim, not a count.
+  if (h.console) {
+    const note = node('span', 'muted', 'console not captured');
+    note.title = String(h.console);
+    wrap.append(note);
+  }
   return wrap;
+}
+
+/** A result that has to outlive a toast: where the tab went, and what did not go with it. */
+function showResult(kind, title, lines = []) {
+  el.tabResult.className = `result ${kind}`;
+  el.tabResult.replaceChildren(node('div', 'nm', title), ...lines.filter(Boolean).map((l) => node('div', 'sub', l)));
+  el.tabResult.hidden = false;
+}
+
+function listText(value) {
+  if (value == null) return null;
+  if (Array.isArray(value)) return value.length ? value.map(listText).join(', ') : null;
+  if (typeof value === 'object') {
+    const bits = Object.entries(value)
+      .filter(([, v]) => v !== false && v != null)
+      .map(([k, v]) => (v === true ? k : `${k}: ${Array.isArray(v) ? v.length : v}`));
+    return bits.length ? bits.join(', ') : null;
+  }
+  return String(value);
+}
+
+// ------------------------------------------------------------------ input level
+
+function renderInput(state) {
+  if (busy.input) return;
+  const level = INPUT_LEVELS.includes(state.inputMode) ? state.inputMode : 'human';
+  for (const r of document.querySelectorAll('input[name="inputMode"]')) r.checked = r.value === level;
+}
+
+// --------------------------------------------------------------- named sessions
+
+/** Named sessions, so a two-tab flow is visible rather than implied. */
+function renderSessions(state, status) {
+  const sessions = sessionsFrom(state, status);
+  el.sessionCard.hidden = sessions.length === 0;
+  if (!changed('sessions', sessions)) return;
+  el.sessionList.replaceChildren();
+  for (const s of sessions) {
+    const li = document.createElement('li');
+    const who = node('div', 'who');
+    who.append(
+      node('div', 'nm', `${s.session}${s.active ? ' · on screen' : ''}`),
+      node('div', 'sub', s.alive ? (s.url || `tab ${s.tabId}`) : 'tab is gone'),
+    );
+    const acts = node('div', 'acts');
+    if (s.alive) {
+      const focus = node('button', '', 'Show');
+      focus.type = 'button';
+      focus.title = 'A browser only delivers clicks to the tab it is showing.';
+      focus.addEventListener('click', async () => {
+        await showTab(s.tabId);
+        refresh();
+      });
+      acts.append(focus);
+    }
+    const end = node('button', 'danger', '✕');
+    end.type = 'button';
+    end.title = 'Forget this session. The tab stays open.';
+    end.setAttribute('aria-label', `Forget the session "${s.session}"`);
+    end.addEventListener('click', async () => {
+      const res = await cmd({ cmd: 'sessionEnd', name: s.session }).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
+      if (!res?.ok) showPanelError(res?.error ?? `Could not forget the session "${s.session}".`);
+      refresh();
+    });
+    acts.append(end);
+    li.append(who, acts);
+    el.sessionList.append(li);
+  }
+}
+
+function sessionsFrom(state, status) {
+  if (Array.isArray(status?.sessions)) return status.sessions;
+  const map = state.sessions && typeof state.sessions === 'object' ? state.sessions : {};
+  const names = Object.keys(map);
+  const idOf = (v) => (v && typeof v === 'object' ? (v.tabId ?? v.id) : v);
+  if (names.length) ensureTabRows(names.map((n) => idOf(map[n])));
+  return names.map((name) => {
+    const tabId = idOf(map[name]);
+    const r = rowFor(tabId);
+    return {
+      session: name,
+      tabId,
+      // Before the first tab list arrives, "gone" would be a guess.
+      alive: !!r || tabRows.at === 0,
+      active: !!r?.active,
+      url: r?.url ?? null,
+    };
+  });
+}
+
+// ------------------------------------------------------------------- the rest
+
+/**
+ * What the Stop/Resume toast says. `daemonInformed` false: the daemon was not connected, so it was
+ * NOT told yet — "Agents stopped" promised more than happened (agents on launched engines kept
+ * running until the next reconnect). An older worker that does not report it (undefined) keeps
+ * the old words.
+ */
+export function stopToast(wasHalted, daemonInformed, bridge = {}) {
+  if (daemonInformed !== false) return wasHalted ? 'Agents resumed' : 'Agents stopped';
+  if (wasHalted) return 'Resumed in this browser only; the G9 daemon is not connected and may still be stopped';
+  const stuck = bridge?.problem || /superseded|another connection/i.test(String(bridge?.lastError ?? ''));
+  return 'Stopped in this browser. The G9 daemon is not connected; it will be told when it connects' +
+    (stuck ? ' — press Reconnect' : '');
+}
+
+function renderStop(state) {
+  const halted = !!state.halted;
+  el.stop.textContent = halted ? 'Resume' : 'Stop';
+  el.stop.classList.toggle('armed', halted);
+  el.stop.setAttribute('aria-pressed', String(halted));
+  el.stop.title = halted
+    ? 'Agents are stopped. Resume lets them act again.'
+    : state.bridge?.connected
+      ? 'Immediately block every agent action, in this browser and in the daemon'
+      : 'Immediately block every agent action in this browser; the daemon is told when it connects';
 }
 
 function renderLog(activity = []) {
@@ -204,7 +685,7 @@ function renderLog(activity = []) {
     el.log.innerHTML = '<li class="muted pad">Nothing yet. Agent actions will appear here in real time.</li>';
     return;
   }
-  el.log.innerHTML = '';
+  el.log.replaceChildren();
   for (const e of activity.slice(0, 120)) {
     const li = document.createElement('li');
     if (!e.ok) li.classList.add('bad');
@@ -218,124 +699,187 @@ function renderLog(activity = []) {
   }
 }
 
+/**
+ * The MCP config for a manual setup. The daemon reports where its code lives
+ * in the welcome, so this is a path that works, not a placeholder that fails
+ * with "Cannot find module". G9 Desktop writes the same entry for you.
+ */
 function buildSnippet(state) {
-  const config = JSON.stringify(
-    {
-      mcpServers: {
-        'g9-browser': {
-          command: 'node',
-          args: [state.bridge.serverPath ?? 'REPLACE_WITH_ABSOLUTE_PATH/bridge/src/server.js'],
-          env: { G9_HOST: state.bridge.host, G9_PORT: String(state.bridge.port) },
-        },
-      },
-    },
-    null,
-    2,
-  );
-  if (state.bridge.serverPath) return config;
+  const root = state.bridge?.repoRoot ? String(state.bridge.repoRoot).replace(/\\/g, '/').replace(/\/+$/, '') : null;
+  const port = Number(state.bridge?.port) || DEFAULT_PORT;
+  const server = {
+    command: 'node',
+    args: [root ? `${root}/mcp/shim.mjs` : 'REPLACE_WITH_ABSOLUTE_PATH/mcp/shim.mjs'],
+  };
+  if (port !== DEFAULT_PORT) server.env = { G9_PORT: String(port) };
+  const config = JSON.stringify({ mcpServers: { 'g9-browser': server } }, null, 2);
+  if (root) return config;
   return [
-    '// The bridge has never connected, so the real path is unknown.',
-    '// Run  node bridge/src/server.js  once and this fills itself in.',
+    '// The daemon has not connected yet, so the real path is unknown.',
+    '// It fills itself in once the daemon is running.',
     config,
   ].join('\n');
 }
 
-// ---------------------------------------------------------- bridge discovery
-
-/**
- * Find every bridge running on this machine and let the user pick one.
- *
- * This replaces the old workflow, which was: read "port in use" in an editor
- * log, guess which of your two windows won, edit a number in two places, and
- * reload. The scan is eleven requests to localhost and answers the question
- * directly — including the one fact that matters most, which is whether some
- * other browser is already holding that bridge.
- */
-async function discover() {
-  el.discoverBtn.disabled = true;
-  el.discoverBtn.textContent = 'scanning…';
-  try {
-    const res = await cmd({ cmd: 'discoverBridges' });
-    discovered = res?.ok ? res.bridges : [];
-    renderDiscovered();
-  } catch (err) {
-    showPanelError(`Could not scan for bridges: ${err?.message ?? err}`);
-  } finally {
-    el.discoverBtn.disabled = false;
-    el.discoverBtn.textContent = 'find bridges';
-  }
+function projectName(path) {
+  const parts = String(path).replace(/\\/g, '/').split('/').filter(Boolean);
+  return parts.length > 1 ? parts[parts.length - 2] : (parts[0] ?? 'project');
 }
 
-function renderDiscovered() {
-  const box = el.bridgeList;
-  box.innerHTML = '';
-  box.hidden = false;
+function capitalise(s) {
+  return s ? s[0].toUpperCase() + s.slice(1) : s;
+}
 
-  if (!discovered.length) {
-    box.append(
-      node(
-        'p',
-        'muted',
-        'No bridge is running on ports 8765–8775. Start your MCP client, or run: node bridge/src/server.js',
-      ),
-    );
-    return;
-  }
+/** Write text only when it changed (live regions announce every write). */
+function setText(target, text) {
+  if (target && target.textContent !== text) target.textContent = text;
+}
 
-  const currentPort = Number(el.port.value);
-  for (const b of discovered) {
-    const li = document.createElement('li');
-    const who = node('div', 'who');
-    who.append(
-      node('div', 'nm', `:${b.port}${b.project ? ` · ${b.project}` : ''}${b.port === currentPort ? ' · current' : ''}`),
-      node(
-        'div',
-        'sub',
-        [
-          b.version ? `v${b.version}` : null,
-          b.extensionConnected ? 'a browser is already on this one' : 'free',
-          b.projectPath ?? b.cwd,
-        ]
-          .filter(Boolean)
-          .join(' · '),
-      ),
-    );
-    const acts = node('div', 'acts');
-    const use = node('button', b.port === currentPort ? '' : 'primary sm', 'Use');
-    if (b.extensionConnected && b.port !== currentPort) {
-      use.title = 'Another browser is connected to this bridge. Connecting will displace it.';
+/** `::1` is bracketed in an address, as the transport does in the URL. */
+function hostForUrl(host) {
+  const h = String(host);
+  return h.includes(':') && !h.startsWith('[') ? `[${h}]` : h;
+}
+
+/**
+ * The daemon address a person typed, made into what the transport can dial.
+ *
+ * People paste what they have: `ws://127.0.0.1:18765/g9`, `localhost:18765`,
+ * a host with a trailing slash. Each of those used to be saved verbatim and
+ * retried for ever as "daemon not reachable on http://…". A port inside the
+ * host field wins over the port field — it is the more deliberate of the two.
+ * Pure, so the unit test can call it without a DOM.
+ */
+export function parseAddress(hostInput, portInput) {
+  let host = String(hostInput ?? '').trim().replace(/^[a-z][a-z0-9+.-]*:\/\//i, '');
+  host = host.replace(/\/.*$/, '');
+  let port = String(portInput ?? '').trim();
+  const bracketed = /^\[([^\]]+)\](?::(\d+))?$/.exec(host);
+  if (bracketed) {
+    host = bracketed[1];
+    if (bracketed[2]) port = bracketed[2];
+  } else {
+    const hostPort = /^([^:]+):(\d+)$/.exec(host);
+    if (hostPort) {
+      host = hostPort[1];
+      port = hostPort[2];
     }
-    use.addEventListener('click', async () => {
-      await cmd({ cmd: 'setBridge', host: b.host, port: b.port, token: el.token.value.trim() });
-      toast(`Connecting to bridge on :${b.port}…`);
-      box.hidden = true;
-      setTimeout(refresh, 400);
-    });
-    acts.append(use);
-    li.append(who, acts);
-    box.append(li);
   }
+  if (!host) host = '127.0.0.1';
+  if (/[\s/@?#[\]]/.test(host)) return { error: `"${String(hostInput).trim()}" is not a host name or address`, field: 'host' };
+  const n = Number(port);
+  if (!/^\d+$/.test(port) || n < 1 || n > 65535) {
+    return { error: 'The port must be a number from 1 to 65535', field: 'port' };
+  }
+  return { host, port: n };
 }
 
 // -------------------------------------------------------------------- wiring
 
 export function wire() {
   el.attachActive.addEventListener('click', async () => {
-    const res = await cmd({ cmd: 'attachActive' });
-    toast(res?.ok ? `Attached: ${res.tab.title || res.tab.url}` : (res?.error ?? 'Could not attach'));
+    el.attachActive.disabled = true;
+    const res = await cmd({ cmd: 'attachActive' }).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
+    el.attachActive.disabled = false;
+    const tab = res?.tab ?? res ?? {};
+    if (!res?.ok) {
+      showPanelError(res?.error ?? 'Could not attach the current tab.');
+    } else {
+      // Attach after a Stop is the person saying "carry on", and the worker
+      // resumes the agents (sw.js clearHalt). That is too big to happen quietly.
+      const name = tab.title || tab.url || `tab ${tab.tabId ?? tab.id}`;
+      toast(res.resumed ? `Attached ${name} — agents resumed` : `Attached: ${name}`);
+    }
     refresh();
   });
 
   el.detach.addEventListener('click', async () => {
-    const res = await cmd({ cmd: 'detach' });
-    toast(res?.warning ?? `Detached${res?.ms != null ? ` in ${res.ms}ms` : ''}`);
+    const res = await cmd({ cmd: 'detach' }).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
+    if (!res?.ok) showPanelError(res?.error ?? 'Could not detach.');
+    else toast(res.warning ?? `Detached${res.ms != null ? ` in ${res.ms}ms` : ''}`);
     refresh();
   });
 
-  el.modes.addEventListener('click', async (ev) => {
-    const btn = ev.target.closest('button[data-mode]');
-    if (!btn) return;
-    await cmd({ cmd: 'setMode', mode: btn.dataset.mode });
+  el.autoAttach.addEventListener('change', async () => {
+    const enabled = el.autoAttach.checked;
+    busy.auto = true;
+    const res = await cmd({ cmd: 'setAutoAttach', enabled }).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
+    busy.auto = false;
+    if (!res?.ok) {
+      el.autoAttach.checked = !enabled;
+      showPanelError(res?.error ?? 'Could not change Auto-attach.');
+    } else {
+      toast(enabled ? 'Auto-attach on — new and reloaded tabs attach themselves' : 'Auto-attach off');
+    }
+    refresh();
+  });
+
+  el.inputModeGroup.addEventListener('change', async (ev) => {
+    const input = ev.target.closest('input[name="inputMode"]');
+    if (!input) return;
+    const mode = input.value;
+    const previous = view.state?.inputMode ?? 'human';
+    busy.input = true;
+    const res = await cmd({ cmd: 'setInputMode', mode }).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
+    busy.input = false;
+    if (!res?.ok) {
+      for (const r of document.querySelectorAll('input[name="inputMode"]')) r.checked = r.value === previous;
+      showPanelError(res?.error ?? 'Could not change the input level.');
+    } else {
+      toast(`Input: ${INPUT_NAMES[mode] ?? mode}`);
+    }
+    refresh();
+  });
+
+  el.popoutTab.addEventListener('click', async () => {
+    const tabId = currentFrom(view.state ?? {}, lastStatus)?.tabId ?? undefined;
+    busy.popout = true;
+    el.popoutTab.disabled = true;
+    const res = await cmd({ cmd: 'popout', ...(tabId != null ? { tabId } : {}) }).catch((err) => ({
+      ok: false,
+      error: String(err?.message ?? err),
+    }));
+    busy.popout = false;
+    el.popoutTab.disabled = false;
+    if (!res?.ok) {
+      showResult('bad', 'Could not pop the tab out', [res?.error ?? 'No reason given.']);
+    } else {
+      showResult(res.visible === false ? 'bad' : 'good',
+        `Tab ${res.tabId ?? tabId ?? ''} is in its own window${res.windowId != null ? ` (${res.windowId})` : ''}`, [
+          res.note ?? 'It keeps rendering while that window is on screen. Do not minimise it.',
+        ]);
+      toast('Tab popped out');
+    }
+    refresh();
+  });
+
+  el.handoffTab.addEventListener('click', async () => {
+    const tabId = currentFrom(view.state ?? {}, lastStatus)?.tabId ?? undefined;
+    busy.handoff = true;
+    el.handoffTab.disabled = true;
+    const label = el.handoffTab.textContent;
+    el.handoffTab.textContent = 'Sending…';
+    showResult('', 'Sending the tab to a background browser…', [
+      'Starting it can take a few seconds the first time.',
+    ]);
+    const res = await cmd({ cmd: 'handoff', ...(tabId != null ? { tabId } : {}) }).catch((err) => ({
+      ok: false,
+      error: String(err?.message ?? err),
+    }));
+    busy.handoff = false;
+    el.handoffTab.textContent = label;
+    el.handoffTab.disabled = !view.state?.bridge?.connected;
+    if (!res?.ok) {
+      showResult('bad', 'Could not send the tab to the background', [res?.error ?? 'No reason given.']);
+    } else {
+      const r = res.result ?? {};
+      showResult('good', `Continuing in ${r.engineId ?? 'a launched browser'}${r.tabId != null ? ` as tab ${r.tabId}` : ''}`, [
+        r.url ?? null,
+        listText(r.transferred) ? `Carried over: ${listText(r.transferred)}` : null,
+        listText(r.notTransferred) ? `Left behind: ${listText(r.notTransferred)}` : 'In-page state that was never saved stays behind.',
+      ]);
+      toast('Sent to the background');
+    }
     refresh();
   });
 
@@ -349,39 +893,55 @@ export function wire() {
   // Inside that window the button hides itself: it is already popped out, and a
   // control that spawns a copy of what you are looking at is just confusing.
   if (new URLSearchParams(location.search).get('detached') === '1') {
-    el.popout.hidden = true;
+    el.detachPanel.hidden = true;
     document.body.classList.add('detached');
   } else {
-    el.popout.addEventListener('click', async () => {
-      const res = await cmd({ cmd: 'detachPanel' });
+    el.detachPanel.addEventListener('click', async () => {
+      const res = await cmd({ cmd: 'detachPanel' }).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
       if (!res?.ok) return showPanelError(res?.error ?? 'Could not open the panel window.');
       toast(res.reused ? 'Panel window focused' : 'Panel opened in its own window');
     });
   }
 
   el.stop.addEventListener('click', async () => {
-    const halted = view.state?.halted;
-    await cmd({ cmd: halted ? 'resume' : 'halt' });
-    toast(halted ? 'Agent resumed' : 'Agent stopped');
+    const halted = !!view.state?.halted;
+    const res = await cmd({ cmd: halted ? 'resume' : 'halt' }).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
+    if (!res?.ok) showPanelError(res?.error ?? (halted ? 'Could not resume.' : 'Could not stop the agents.'));
+    else toast(stopToast(halted, res.daemonInformed, view.state?.bridge));
     refresh();
   });
 
-  el.bridgeToggle.addEventListener('click', () => {
-    el.bridgeSettings.hidden = !el.bridgeSettings.hidden;
-    if (!el.bridgeSettings.hidden && !discovered.length) discover();
+  el.daemonToggle.addEventListener('click', () => {
+    el.daemonSettings.hidden = !el.daemonSettings.hidden;
+    el.daemonToggle.setAttribute('aria-expanded', String(!el.daemonSettings.hidden));
+    if (!el.daemonSettings.hidden) el.host.focus();
   });
 
-  el.discoverBtn.addEventListener('click', discover);
-
-  el.saveBridge.addEventListener('click', async () => {
-    await cmd({
-      cmd: 'setBridge',
-      host: el.host.value.trim() || '127.0.0.1',
-      port: Number(el.port.value) || 8765,
-      token: el.token.value.trim(),
-    });
-    el.bridgeSettings.hidden = true;
+  el.reconnectBtn.addEventListener('click', async () => {
+    retryDueAt = null;
+    paintRetry();
+    await cmd({ cmd: 'reconnect' }).catch(() => {});
     toast('Reconnecting…');
+    setTimeout(refresh, 400);
+  });
+
+  el.saveDaemon.addEventListener('click', async () => {
+    const parsed = parseAddress(el.host.value, el.port.value);
+    if (parsed.error) {
+      (parsed.field === 'port' ? el.port : el.host).focus();
+      return toast(parsed.error);
+    }
+    const { host, port } = parsed;
+    const res = await cmd({ cmd: 'setBridge', host, port }).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
+    if (!res?.ok) return showPanelError(res?.error ?? 'Could not save the daemon address.');
+    el.daemonSettings.hidden = true;
+    el.daemonToggle.setAttribute('aria-expanded', 'false');
+    toast(`Reconnecting to ${host}:${port}…`);
+    setTimeout(refresh, 400);
+  });
+
+  el.enginesRefresh.addEventListener('click', () => {
+    if (view.state) maybeFetchInfo(view.state, { force: true });
   });
 
   el.clearLog.addEventListener('click', async () => {
@@ -390,7 +950,11 @@ export function wire() {
   });
 
   el.copyGuide.addEventListener('click', async () => {
-    await navigator.clipboard.writeText(el.snippet.textContent);
-    toast(view.state?.bridge?.serverPath ? 'MCP config copied' : 'Copied — but the path is still a placeholder');
+    try {
+      await navigator.clipboard.writeText(el.snippet.textContent);
+      toast(view.state?.bridge?.repoRoot ? 'MCP config copied' : 'Copied — but the path is still a placeholder');
+    } catch (err) {
+      showPanelError(`Could not copy: ${err?.message ?? err}`);
+    }
   });
 }

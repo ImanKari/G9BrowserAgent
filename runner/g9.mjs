@@ -4,24 +4,29 @@
  *
  * ## What this is for
  *
- * The side panel can already replay a flow, and an agent can already drive one.
- * Neither is a thing you can put in Task Scheduler. This is: one command, a
- * standard exit code, and a report directory.
+ * The side panel can replay a flow, and an agent can drive one. Neither is a
+ * thing you can put in Task Scheduler. This is: one command, a standard exit
+ * code, and a report directory.
  *
- * It speaks MCP to a bridge it spawns itself — the same interface an agent uses.
- * That is deliberate. The runner can do nothing an agent could not do, so every
- * boundary the extension enforces (pinned mode, the Stop button, cookie scope)
- * still applies to an unattended run.
+ * It speaks MCP through `mcp/shim.mjs` — the same shim an agent uses — to the
+ * one G9 daemon on this machine. That is deliberate: the runner can do nothing
+ * an agent could not do, so ownership, the Stop button and every refusal apply
+ * to an unattended run exactly as to an agent.
  *
- * ## The port rule, which is the thing that actually bites
+ * ## v2: the port rule is gone
  *
- * The extension connects to exactly ONE bridge, on the port configured in its
- * side panel. If an editor's MCP client already holds 8765, this runner cannot
- * have it — and the extension is talking to that other bridge anyway. So the
- * unattended arrangement is a SECOND browser profile with its own copy of the
- * extension carrying `dev-bridge.json`, exactly as `setup/isolated-livetest.mjs`
- * builds one. `--port` selects that bridge. Running against the developer's own
- * browser is supported for convenience and is not the mode to schedule.
+ * v1 needed a second browser profile with its own extension copy, because the
+ * extension talked to exactly one bridge and an editor usually held it. In v2
+ * any number of clients share one daemon, and by default the runner does not
+ * touch the person's browser at all: `--engine launched` (the default) runs in a
+ * browser the daemon launches (headless unless `--headed`), with its own
+ * profile — unaffected by a minimised window, a locked screen or someone
+ * working in their own browser meanwhile. `--port` only says where the daemon is.
+ *
+ * Flows come from the repository: the FlowSpec files under the project's flow
+ * library (g9.project.json → flowsDir, default QA/Flows) are imported into the
+ * launched engine's store before they run — the repo is the source of truth, the
+ * store a cache of it (the known world and run history stay in the store).
  *
  * ## Exit codes
  *
@@ -29,27 +34,29 @@
  *   1  a product failure — an assertion or an oracle failed
  *   2  an automation failure — the test broke, not the product
  *   3  a confirmed surprise — the flow did something it has never done
- *   4  the runner could not run at all (no extension, no flows, bad arguments)
+ *   4  the runner could not run at all (no engine, no flows, bad arguments)
  *
  * Separating 1 from 2 is the point of the whole classification: a pipeline that
  * treats a rotted locator as a product regression trains people to ignore it.
  */
 
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import crypto from 'node:crypto';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { McpClient } from './mcp-client.mjs';
 import { writeReports } from './report.mjs';
-// The extension's own comparison logic, imported directly. It is a plain ES module with no browser
-// APIs, so the runner can reuse it rather than growing a second implementation that drifts.
+// The extension's own comparison and FlowSpec logic, imported directly. They are
+// plain ES modules with no browser APIs, so the runner reuses them rather than
+// growing a second implementation that drifts.
 import { calibrateVolatile } from '../extension/lib/signature.js';
-
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const SERVER = path.resolve(HERE, '..', 'bridge', 'src', 'server.js');
+import { validateFlowSpec } from '../extension/lib/flowspec.js';
 
 const EXIT = { OK: 0, PRODUCT: 1, AUTOMATION: 2, SURPRISE: 3, RUNNER: 4 };
 
 // ------------------------------------------------------------------- CLI
+
+/** Flags that never take a value, so `--headed suite:smoke` does not swallow the target. */
+const BOOLEAN_FLAGS = new Set(['seed', 'no-compare', 'strict-pin', 'quiet', 'headless', 'headed', 'help', 'keep-engine']);
 
 function parseArgs(argv) {
   const [command = 'help', ...rest] = argv;
@@ -57,7 +64,10 @@ function parseArgs(argv) {
   for (let i = 0; i < rest.length; i++) {
     const token = rest[i];
     if (!token.startsWith('--')) { options._.push(token); continue; }
-    const key = token.slice(2);
+    const eq = token.indexOf('=');
+    const key = eq > 2 ? token.slice(2, eq) : token.slice(2);
+    if (eq > 2) { options[key] = token.slice(eq + 1); continue; }
+    if (BOOLEAN_FLAGS.has(key)) { options[key] = true; continue; }
     const next = rest[i + 1];
     if (next === undefined || next.startsWith('--')) options[key] = true;
     else { options[key] = next; i++; }
@@ -68,7 +78,7 @@ function parseArgs(argv) {
 const HELP = `
 g9 — run recorded G9 flows without an agent
 
-  g9 list                              what flows exist
+  g9 list                              what flows exist (repository and browser stores)
   g9 run <target> [options]            replay one flow, a suite, a tag, or all
   g9 calibrate <flowId>                run twice on one build; mark what differs as noise
   g9 approve <flowId>                  fold the last run into the approved known world
@@ -76,12 +86,26 @@ g9 — run recorded G9 flows without an agent
   g9 ab <flowId> --a <url> --b <url>   run the same flow against two builds and diff them
 
 Targets for "run":
-  <flowId>            one recording, by id
-  suite:<name>        every recording in a suite
-  tag:<name>          every recording carrying a tag
+  <flowId>            one flow, by id (or name); a bare suite name also works
+  suite:<name>        every flow a suite selects (QA/Flows/suites/<name>.json)
+  tag:<name>          every flow carrying a tag
   all                 everything
 
-Options:
+Engine:
+  --engine <e>          launched (default): a browser the daemon launches, headless,
+                        own profile — unaffected by the desktop. extension: the tab
+                        the person's own browser has current (flows from its store).
+  --browser <b>         auto | edge | chrome | cft (default: the daemon's defaultBrowser setting)
+  --headless / --headed launched engine window mode (default: settings, normally headless)
+  --profile <name>      launched engine profile (default "automation"; warm it once
+                        with the desktop app or browser_engine action:"warm")
+  --humanize <level>    off | human | stealth | <calibrated profile>
+  --humanize-seed <n>   reproduce a run's exact motion (the report records every seed)
+  --stealth <level>     off | human | stealth (launched engine)
+  --keep-engine         leave an engine this run launched running afterwards
+  --port <n>            the G9 daemon's port (default: G9_PORT, else 8765)
+
+Run options:
   --env <name>          environment label recorded in the report
   --data <file.json>    variables substituted into {{placeholders}}
   --report <dir>        where to write run.json / junit.xml / report.html
@@ -91,11 +115,11 @@ Options:
   --strict-pin          fail requests the HAR does not contain
   --seed                seed the known world when a flow has none yet
   --no-compare          skip the known-world comparison (produces a reference run)
-  --port <n>            bridge port; must match the extension's side-panel port
-  --token <secret>      G9_TOKEN, if the bridge is configured with one
-  --project <file>      project adapter (default: ./g9.project.json if present)
+  --project <file>      project adapter (default: nearest g9.project.json upwards)
   --platform <name>     web (default) or agripad — agripad drives a real device over adb
   --device <serial>     which device, when adb sees more than one (agripad only)
+  --device-port <n>     the device automation port (agripad only; default 8799)
+  --token <t>           the device automation token, when the device requires one (agripad only)
   --fail-on <verdict>   lowest verdict that makes the exit code non-zero
                         (warning | surprise | failure — default: surprise)
   --quiet               only the summary line
@@ -109,29 +133,17 @@ Options for "ab":
 // ------------------------------------------------------------- project config
 
 /**
- * The one place a project may teach the runner about itself.
- *
- * The extension stays entirely generic; the knowledge lives here, in the
- * consumer's repo, as data. That boundary is the reason this tool can be used
- * on the next project without being untangled from this one first.
- */
-/**
  * Find and read `g9.project.json`.
  *
- * Why it searches upward instead of only looking in the working directory.
- *
- * The config lives at the repository root, but nobody runs the runner from
- * there reliably — QA runs it from the tool folder, CI runs it from a job
- * directory, an editor runs it from wherever the file being edited lives.
- * A cwd-only lookup silently returned `null` in every one of those cases, the
- * flows directory then fell back to a cwd-relative default, and the run failed
- * with "No AgriPad flows found under <a path that never existed>". The flows
- * were fine; only the search was wrong.
- *
- * So: walk up to the filesystem root, the way git finds `.git`, npm finds
- * `package.json`, and tsc finds `tsconfig.json`. Callers get `dir` back too,
- * because every relative path in the file must resolve against the file's own
- * location — resolving them against the cwd is the same bug wearing a hat.
+ * Why it searches upward instead of only looking in the working directory:
+ * the config lives at the repository root, but nobody runs the runner from
+ * there reliably — QA runs it from the tool folder, CI from a job directory, an
+ * editor from wherever the file being edited lives. A cwd-only lookup silently
+ * returned `null` in every one of those cases, the flows directory then fell
+ * back to a cwd-relative default, and the run failed with "No AgriPad flows
+ * found under <a path that never existed>". So: walk up to the filesystem root,
+ * the way git finds `.git`. Callers get `dir` back too, because every relative
+ * path in the file must resolve against the file's own location.
  */
 async function loadProject(file) {
   if (file) {
@@ -167,72 +179,437 @@ function flowsRoot(project) {
   return path.resolve(project?.dir ?? process.cwd(), configured);
 }
 
-// -------------------------------------------------------------------- run
-
-/**
- * Is some OTHER live bridge holding the extension?
- *
- * Reads the same registry the bridges write to. Best effort by design: a missing or malformed
- * registry means we simply fall back to the generic advice rather than failing the run twice.
- */
-async function occupiedByAnotherBridge() {
-  try {
-    const { list } = await import('../bridge/src/registry.js');
-    return list().find((entry) => entry.extensionConnected && entry.pid !== process.pid) ?? null;
-  } catch {
-    return null;
-  }
-}
+// ------------------------------------------------------------- connecting
 
 async function connect(options) {
   const env = {};
-  if (options.port) env.G9_PORT = String(options.port);
-  if (options.token) env.G9_TOKEN = String(options.token);
-
-  const client = new McpClient(SERVER, env);
-  await client.initialize();
-
-  const status = await client.call('browser_status', {}).catch((err) => ({ error: String(err.message ?? err) }));
-  if (status.error || status.connected === false || status.extension === 'disconnected') {
+  if (options.port && options.port !== true) env.G9_PORT = String(options.port);
+  const client = new McpClient({ env, name: 'g9-runner' });
+  try {
+    await client.initialize();
+  } catch (err) {
     client.close();
-
-    // Name the common cause instead of listing every possible one.
-    //
-    // A bridge owns its WebSocket port exclusively, so when an editor or MCP client is already
-    // running one, the extension is attached THERE and the bridge this run just started sits on a
-    // different port with nothing connected to it. That is by far the most frequent way this error
-    // appears, and the generic "is the browser running?" text sends people to check three things
-    // that are all fine. The registry knows exactly which bridge has the extension, so say so.
-    const holder = await occupiedByAnotherBridge();
-
-    throw new Error(
-      'The G9 extension is not connected to this bridge.\n' +
-      `  port:    ${options.port ?? 8765}\n` +
-      (holder
-        ? `\n  The extension is attached to a DIFFERENT bridge: port ${holder.port}, pid ${holder.pid}` +
-          `${holder.version ? `, v${holder.version}` : ''}.\n` +
-          '  One bridge owns the port at a time, so this run started its own and nothing joined it.\n' +
-          '  Either close the editor / MCP client that owns that bridge and run again, or give this\n' +
-          '  run its own browser profile with setup/isolated-livetest.mjs.\n'
-        : '  Check:   is the browser running, is the extension enabled, and does its side panel show this port?\n' +
-          '  For unattended runs, use a dedicated browser profile whose extension copy carries dev-bridge.json\n' +
-          '  (setup/isolated-livetest.mjs builds exactly that).\n') +
-      (status.error ? `  bridge:  ${status.error}\n` : ''),
-    );
+    throw new Error(`The G9 MCP shim did not start: ${err.message}`);
   }
-  if (status.halted) {
+
+  let status;
+  try {
+    status = await client.call('browser_status', {});
+  } catch (err) {
     client.close();
-    throw new Error('Stop is engaged in the side panel. Nothing will run until somebody presses Resume — by design.');
+    // The shim's message already names the cause (a v1 bridge on the port, a
+    // daemon that could not start) — pass it through rather than guess.
+    throw new Error(`G9 is not reachable.\n  ${String(err.message ?? err).replace(/^browser_status: /, '')}`);
+  }
+  if (status.halted?.global || status.halted?.mine) {
+    client.close();
+    throw new Error('Stop is engaged (side panel or desktop app). Nothing will run until somebody presses Resume — by design.');
   }
   return { client, status };
 }
+
+function engineChoice(options) {
+  const engine = options.engine === true || options.engine == null ? 'launched' : String(options.engine);
+  if (!['launched', 'extension'].includes(engine)) throw new Error(`--engine must be "launched" or "extension" (got "${engine}").`);
+  return engine;
+}
+
+/**
+ * The launched engine this run uses: an engine already running on the same
+ * profile is reused (a profile can be open in one browser at a time anyway);
+ * otherwise one is launched with the run's options.
+ *
+ * Either way the run HOLDS it (a lease: browser_engine action:"acquire", or
+ * launch lease:true) and RELEASES it at the end — it never stops it itself. The
+ * daemon stops an engine launched for a run once every run using it has let go
+ * and no agent owns a tab there. Two overlapping scheduled suites on one
+ * profile used to break each other: the run that launched the engine stopped it
+ * at its end, either between the other run's flows (every remaining flow failed
+ * with 'Unknown engine') or not at all, silently (daemon review, 2026-09-22).
+ */
+async function ensureLaunchedEngine(client, options) {
+  const profile = options.profile && options.profile !== true ? String(options.profile) : 'automation';
+  // Another client (an agent's first "open") may be launching this very profile
+  // right now; the daemon refuses a second launch of one profile, so wait for
+  // that one to come up and reuse it instead of failing the run.
+  const deadline = Date.now() + 120_000;
+  for (;;) {
+    try {
+      return await ensureLaunchedEngineOnce(client, options, profile);
+    } catch (err) {
+      // (or finished launching between our list and our launch: the next list finds it)
+      if ((err.listAgain !== true && !/being launched right now|is already in use by launched-/.test(String(err.message))) || Date.now() > deadline) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    }
+  }
+}
+
+async function ensureLaunchedEngineOnce(client, options, profile) {
+  const { engines = [] } = await client.call('browser_engine', { action: 'list' });
+  const running = engines.find((e) => e.kind === 'launched' && e.profile === profile);
+  if (running) {
+    const mismatch = [];
+    if (options.headed && running.headless) mismatch.push('it is headless but --headed was asked');
+    if (options.headless && running.headless === false) mismatch.push('it is headed but --headless was asked');
+    if (options.browser && options.browser !== true && options.browser !== 'auto' && running.browser !== options.browser) {
+      mismatch.push(`it is ${running.browser}, not ${options.browser}`);
+    }
+    if (mismatch.length) {
+      throw new Error(
+        `Launched engine ${running.engineId} already uses profile "${profile}" but ${mismatch.join(' and ')}. ` +
+          'Stop it (browser_engine action:"stop"), or run with another --profile.',
+      );
+    }
+    let leased = false;
+    try {
+      await client.call('browser_engine', { action: 'acquire', engineId: running.engineId });
+      leased = true;
+    } catch (err) {
+      // An engine that stopped between the list and the hold: the caller lists again.
+      if (/No launched engine|Unknown engine"/.test(String(err.message))) throw Object.assign(new Error(err.message), { listAgain: true });
+      if (!/Unknown engine action/.test(String(err.message))) throw err;
+    }
+    return { info: running, launchedHere: false, leased };
+  }
+  const launchArgs = { action: 'launch', profile };
+  if (options.browser && options.browser !== true) launchArgs.browser = String(options.browser);
+  if (options.headed) launchArgs.headless = false;
+  else if (options.headless) launchArgs.headless = true;
+  if (options.stealth && options.stealth !== true) launchArgs.stealth = String(options.stealth);
+  if (options.humanize && options.humanize !== true) launchArgs.humanize = String(options.humanize);
+  launchArgs.name = 'g9 runner';
+  // Held for this run; stopped by the daemon once every run holding it has released it — unless
+  // --keep-engine asked for it to stay.
+  launchArgs.lease = true;
+  launchArgs.stopWhenReleased = options['keep-engine'] !== true;
+  const info = await client.call('browser_engine', launchArgs, 240_000);
+  return { info, launchedHere: true, leased: !!info?.lease };
+}
+
+/**
+ * The end of a run's use of its engine: release the hold (the daemon stops the engine when it was
+ * launched for runs and nobody else holds it). A refused or failed release is LOGGED, never
+ * swallowed. Against a daemon without leases, the old rule: stop what this run launched.
+ */
+async function releaseEngine(client, launched, options) {
+  if (!launched?.info?.engineId) return;
+  const engineId = launched.info.engineId;
+  try {
+    if (launched.leased) {
+      const r = await client.call('browser_engine', { action: 'release', engineId });
+      if (r?.stopped) log(options, `engine: ${engineId} stopped (no other run holds it)`);
+      else if (r?.holders?.length) log(options, `engine: ${engineId} left running — still held by ${r.holders.join(', ')}`);
+    } else if (launched.launchedHere && options['keep-engine'] !== true) {
+      await client.call('browser_engine', { action: 'stop', engineId });
+    }
+  } catch (err) {
+    console.error(`g9: engine ${engineId} was not released: ${String(err.message ?? err)}`);
+  }
+}
+
+function engineRecord(info, launchedHere) {
+  if (!info) return null;
+  return {
+    engineId: info.engineId,
+    kind: info.kind ?? 'launched',
+    browser: info.browser ?? null,
+    version: info.version ?? null,
+    headless: info.headless ?? null,
+    profile: info.profile ?? null,
+    stealth: info.stealth ?? null,
+    humanize: info.humanize ?? null,
+    pid: info.pid ?? null,
+    launchedByRunner: launchedHere,
+  };
+}
+
+/** One humanize seed per run: recorded in the report so a failing run replays with identical motion. */
+function humanizeFor(options) {
+  const level = options.humanize && options.humanize !== true ? String(options.humanize) : null;
+  const raw = options['humanize-seed'];
+  const seed = raw != null && raw !== true
+    ? (Number.isFinite(Number(raw)) ? Number(raw) : String(raw))
+    : crypto.randomBytes(4).readUInt32BE(0);
+  return { level, seed };
+}
+
+// ------------------------------------------------------------- flows on disk
+
+/** Every web FlowSpec file under the flow library (agripad/ and suites/ excluded). */
+async function loadDiskFlows(project) {
+  if (!project) return [];
+  const root = flowsRoot(project);
+  const files = await collectJson(root);
+  const flows = [];
+  for (const file of files) {
+    const rel = path.relative(root, file).replace(/\\/g, '/');
+    if (rel.startsWith('agripad/') || rel.startsWith('suites/')) continue;
+    let spec;
+    try {
+      spec = JSON.parse(await readFile(file, 'utf8'));
+    } catch (err) {
+      throw new Error(`${file} is not valid JSON: ${err.message}`);
+    }
+    if (spec?.target?.kind && spec.target.kind !== 'web') continue;
+    const problems = validateFlowSpec(spec);
+    if (problems.length) throw new Error(`${rel} is not a valid FlowSpec:\n- ${problems.join('\n- ')}`);
+    flows.push({ ...spec, file: rel });
+  }
+  return flows;
+}
+
+/** The target grammar (id | name | suite:<n> | tag:<t> | all) over any list of flows. */
+async function selectFlows(flows, target, project, label) {
+  if (!target || target === 'all') {
+    if (!flows.length) throw new Error(`There are no flows ${label}.`);
+    return flows;
+  }
+  if (target.startsWith('suite:')) {
+    const name = target.slice(6);
+    // A suite is a query on both platforms or on neither — the same suite id
+    // must mean the same thing whichever engine runs it.
+    const suite = project ? await readSuite(flowsRoot(project), name) : null;
+    const chosen = suite ? applySelect(flows, suite.select ?? {}) : flows.filter((f) => f.suite === name);
+    return requireSelection(chosen, target, flows, suite);
+  }
+  if (target.startsWith('tag:')) {
+    const tag = target.slice(4);
+    return requireSelection(flows.filter((f) => (f.tags ?? []).includes(tag)), target, flows, null);
+  }
+  const byId = flows.filter((f) => f.id === target);
+  if (byId.length) return byId;
+  const byName = flows.filter((f) => f.name === target);
+  if (byName.length) return byName;
+  // A bare suite name ("smoke") — what the desktop's Schedule form sends: a
+  // flow id or name wins, then a suite of that name. Never an empty selection.
+  const suite = project ? await readSuite(flowsRoot(project), target) : null;
+  const bySuite = suite ? applySelect(flows, suite.select ?? {}) : flows.filter((f) => f.suite === target);
+  if (bySuite.length) return bySuite;
+  throw new Error(
+    `Nothing matched "${target}". Known flows ${label}:\n` +
+      (flows.map((f) => `  ${f.id}  ${f.name}${f.suite ? `  [suite:${f.suite}]` : ''}`).join('\n') || '  (none)'),
+  );
+}
+
+// -------------------------------------------------------------------- run
+
+async function commandRun({ options }) {
+  const target = options._[0] ?? 'all';
+  const project = await loadProject(options.project === true ? undefined : options.project);
+  const variables = options.data ? JSON.parse(await readFile(options.data, 'utf8')) : {};
+  const reportDir = path.resolve(options.report === true || !options.report ? './g9-artifacts' : options.report);
+
+  // Two platforms, one report. The browser path talks to the daemon through the
+  // shim; the AgriPad path talks to a device over `adb forward` and never
+  // touches a browser at all. They share the flow format, the verdicts and the
+  // artefacts — which is why FlowSpec carries `target.kind`.
+  if ((options.platform ?? 'web') === 'agripad') {
+    return commandRunAgriPad({ options, project, reportDir, target });
+  }
+
+  const engine = engineChoice(options);
+  const humanize = humanizeFor(options);
+  const { client, status } = await connect(options);
+  const run = {
+    format: 'g9/run',
+    version: 1,
+    startedAt: Date.now(),
+    environment: options.env ?? project?.defaultEnvironment ?? null,
+    suite: target,
+    pinned: false,
+    daemon: { version: status.daemon?.version ?? null, port: status.daemon?.port ?? null },
+    humanize,
+    engine: null,
+    flows: [],
+  };
+
+  let launched = null;
+  try {
+    const har = options.pin ? JSON.parse(await readFile(options.pin, 'utf8')) : null;
+    if (engine === 'launched') {
+      launched = await ensureLaunchedEngine(client, options);
+      run.engine = engineRecord(launched.info, launched.launchedHere);
+      log(options, `engine: ${run.engine.engineId} — ${run.engine.browser} ${run.engine.version ?? ''} ` +
+        `(${run.engine.headless ? 'headless' : 'headed'}, profile ${run.engine.profile}${launched.launchedHere ? ', launched for this run' : ', reused'})`);
+      const engine = {
+        id: launched.info.engineId,
+        // The engine went away mid-run (stopped by someone, crashed): get one again, once per loss,
+        // instead of failing every remaining flow with 'Unknown engine'.
+        again: async () => {
+          await releaseEngine(client, launched, options);
+          launched = await ensureLaunchedEngine(client, options);
+          engine.id = launched.info.engineId;
+          run.engine = { ...engineRecord(launched.info, launched.launchedHere), replaced: run.engine?.engineId ?? null };
+          log(options, `engine: continuing on ${engine.id}${launched.launchedHere ? ' (launched again)' : ' (reused)'}`);
+          return engine.id;
+        },
+      };
+      await runLaunched({ client, options, project, target, variables, har, run, engine, humanize });
+    } else {
+      const ext = (status.engines ?? []).find((e) => e.kind === 'extension');
+      if (!ext) {
+        throw new Error(
+          'No extension engine is connected, so --engine extension has nothing to run in. Open the browser with ' +
+            'the G9 extension (v2) enabled, or run with the default --engine launched.',
+        );
+      }
+      run.engine = { engineId: ext.engineId, kind: 'extension', browser: ext.browser ?? null, version: ext.version ?? null };
+      await runExtension({ client, options, project, target, variables, har, run, humanize });
+    }
+  } finally {
+    await releaseEngine(client, launched, options);
+    client.close();
+  }
+
+  run.durationMs = Date.now() - run.startedAt;
+  await writeReports(reportDir, run);
+
+  const code = exitCodeFor(run, options['fail-on'] ?? 'surprise');
+  summarize(run, reportDir, code);
+  return code;
+}
+
+/**
+ * Launched engine: flows from the repository, imported into the launched
+ * engine's store (their known world and history there are kept), each run in
+ * a fresh tab on its start URL, closed afterwards.
+ */
+async function runLaunched({ client, options, project, target, variables, har, run, engine, humanize }) {
+  const disk = await loadDiskFlows(project);
+  let flows;
+  let fromDisk = true;
+  if (disk.length) {
+    flows = await selectFlows(disk, target, project, `in ${flowsRoot(project)}`);
+  } else {
+    // No flow library (no g9.project.json, or an empty one): run what the
+    // stores hold. A recording that only exists in the person's browser is
+    // copied to the launched engine by the daemon when it replays.
+    fromDisk = false;
+    const { recordings = [] } = await client.call('browser_recording', { action: 'list' });
+    const unique = [...new Map(recordings.map((r) => [r.id, r])).values()];
+    flows = await selectFlows(unique, target, project, 'in the browser stores (no flow library found)');
+  }
+  log(options, `${flows.length} flow(s) to run${fromDisk ? ' from the repository' : ' from the browser stores'}\n`);
+
+  for (const flow of flows) {
+    const started = Date.now();
+    log(options, `▶ ${flow.name} (${flow.id})`);
+    let result;
+    let tabId = null;
+    try {
+      if (fromDisk) {
+        const { file, ...spec } = flow;
+        await client.call('browser_recording', { action: 'import_spec', spec, id: spec.id, engine: 'launched' });
+      }
+      let opened;
+      try {
+        opened = await client.call('browser_tabs', { action: 'open', url: 'about:blank', engine: engine.id });
+      } catch (err) {
+        if (!/Unknown engine|No launched engine|is stopping/.test(String(err.message)) || !engine.again) throw err;
+        log(options, `  engine ${engine.id} is gone (${String(err.message).split('\n')[0]})`);
+        await engine.again();
+        opened = await client.call('browser_tabs', { action: 'open', url: 'about:blank', engine: engine.id });
+      }
+      tabId = opened.tabId;
+      if (har) {
+        const pinned = await client.call('browser_network', { action: 'pin', har, strict: options['strict-pin'] === true, tabId });
+        run.pinned = true;
+        run.pinDetail ??= pinned;
+      }
+      const startUrl = flow.startUrl ?? null;
+      // timeoutMs is the whole goto's deadline (the server's first byte included — a cold staging server
+      // can take longer than the 30 s default); the call budget stays above it.
+      if (startUrl) await client.call('browser_navigate', { action: 'goto', url: startUrl, tabId, waitUntil: 'load', timeoutMs: 110_000 }, 140_000);
+      result = await client.call('browser_recording', {
+        action: 'replay',
+        id: flow.id,
+        tabId,
+        timing: options.timing ?? 'recorded',
+        signature: options.signature ?? 'lite',
+        compare: options['no-compare'] !== true,
+        seedKnownWorld: options.seed === true,
+        stopOnFailure: true,
+        variables,
+        ...(humanize.level ? { humanize: humanize.level } : {}),
+        seed: humanize.seed,
+      }, 1_900_000);
+    } catch (err) {
+      result = errorResult(flow, started, err);
+    } finally {
+      if (tabId != null) await client.call('browser_tabs', { action: 'close', tabId }).catch(() => {});
+    }
+    pushFlow(run, flow, result, options);
+  }
+}
+
+/** Extension engine: the v1 path — recordings in the person's browser, replayed on its current tab. */
+async function runExtension({ client, options, project, target, variables, har, run, humanize }) {
+  if (har) {
+    const pinned = await client.call('browser_network', { action: 'pin', har, strict: options['strict-pin'] === true });
+    run.pinned = true;
+    run.pinDetail = pinned;
+    log(options, `network pinned: ${pinned.operations} operations, ${pinned.responses} recorded responses`);
+  }
+  const { recordings = [] } = await client.call('browser_recording', { action: 'list', engine: 'extension' });
+  const flows = await selectFlows(recordings, target, project, 'in this browser profile');
+  log(options, `${flows.length} flow(s) to run\n`);
+
+  for (const entry of flows) {
+    const started = Date.now();
+    log(options, `▶ ${entry.name} (${entry.id})`);
+    let result;
+    try {
+      result = await client.call('browser_recording', {
+        action: 'replay',
+        id: entry.id,
+        engine: 'extension',
+        timing: options.timing ?? 'recorded',
+        signature: options.signature ?? 'lite',
+        compare: options['no-compare'] !== true,
+        seedKnownWorld: options.seed === true,
+        stopOnFailure: true,
+        variables,
+        ...(humanize.level ? { humanize: humanize.level } : {}),
+        seed: humanize.seed,
+      }, 1_900_000);
+    } catch (err) {
+      result = errorResult(entry, started, err);
+    }
+    pushFlow(run, entry, result, options);
+  }
+  if (run.pinned) await client.call('browser_network', { action: 'unpin' }).catch(() => {});
+}
+
+function errorResult(flow, started, err) {
+  return {
+    id: flow.id, name: flow.name, verdict: 'ERROR', total: 0, passed: 0, failed: 1,
+    durationMs: Date.now() - started, steps: [],
+    failureMessage: String(err.message ?? err),
+  };
+}
+
+function pushFlow(run, entry, result, options) {
+  const failing = (result.steps ?? []).find((step) => !step.ok);
+  run.flows.push({
+    ...result,
+    qaTestCaseIds: entry.qaTestCaseIds ?? [],
+    tags: entry.tags ?? [],
+    suite: entry.suite ?? null,
+    ...(entry.file ? { file: entry.file } : {}),
+    failureMessage: result.failureMessage ?? failing?.error ?? null,
+    detail: failing ? `step ${failing.step} (${failing.type}): ${failing.error}` : null,
+  });
+  log(options, `  ${verdictLine(result)}\n`);
+}
+
+// -------------------------------------------------------------- AgriPad
 
 /**
  * Run a suite against a real AgriPad device over the cable.
  *
  * ## Why this is a separate function and not a branch inside the browser path
  *
- * They share almost nothing operationally. There is no bridge, no extension, no tab, no HAR to
+ * They share almost nothing operationally. There is no daemon, no extension, no tab, no HAR to
  * pin, no console to read. What they DO share is the flow format, the five verdicts and the report
  * — and those are shared through data, not through a common code path. Threading a device through
  * the browser runner's plumbing would have meant `if (device)` in a dozen places, which is how a
@@ -240,9 +617,7 @@ async function connect(options) {
  *
  * ## Flows come from disk here, not from a browser profile
  *
- * The web path lists recordings out of `chrome.storage.local`. A device flow has no browser to
- * live in, so `QA/Flows/agripad/**` IS the library. That is also the direction the web path is
- * moving — the repo is the source of truth and the browser is a cache of it.
+ * A device flow has no browser to live in, so `QA/Flows/agripad/**` IS the library.
  */
 async function commandRunAgriPad({ options, project, reportDir, target }) {
   const { AgriPadDriver, listDevices } = await import('./drivers/agripad.mjs');
@@ -269,7 +644,9 @@ async function commandRunAgriPad({ options, project, reportDir, target }) {
 
   const driver = new AgriPadDriver({
     serial,
-    port: Number(options.port) || 8799,
+    // `--device-port` is the v2 name; `--port` is still honoured here because in
+    // v1 it meant the device port on this path.
+    port: Number(options['device-port'] ?? options.port) || 8799,
     token: options.token === true ? '' : (options.token ?? ''),
     log: (message) => log(options, `  ${message}`),
   });
@@ -350,12 +727,6 @@ async function commandRunAgriPad({ options, project, reportDir, target }) {
   return code;
 }
 
-/**
- * A device failure is a TEST failure only when the harness could not find the control.
- *
- * The same distinction the browser path makes, and for the same reason: a pipeline that reports a
- * renamed automation id as a product regression teaches people to ignore it.
- */
 /**
  * Which device failures are the harness's fault rather than the product's.
  *
@@ -464,8 +835,6 @@ async function readSuite(root, name) {
 /**
  * Refuse a run that selected nothing.
  *
- * Why this is an error and not "0 flows, PASS".
- *
  * An empty selection is indistinguishable, in every report this runner writes,
  * from a suite whose flows all passed: `failed` is 0, the verdict is PASS and
  * the exit code is 0. Wire that to a release gate and the gate is green forever
@@ -500,8 +869,11 @@ function requireSelection(chosen, target, all, suite) {
 
 function applySelect(flows, select) {
   let chosen = flows;
+  if (select.platform) chosen = chosen.filter((f) => (f.platform ?? f.target?.kind ?? 'web') === select.platform);
   if (select.folder) chosen = chosen.filter((f) => (f.folder ?? '').startsWith(select.folder));
+  if (select.suite) chosen = chosen.filter((f) => f.suite === select.suite);
   if (select.tags?.length) chosen = chosen.filter((f) => select.tags.every((t) => (f.tags ?? []).includes(t)));
+  if (select.anyTags?.length) chosen = chosen.filter((f) => select.anyTags.some((t) => (f.tags ?? []).includes(t)));
   if (select.excludeTags?.length) {
     chosen = chosen.filter((f) => !select.excludeTags.some((t) => (f.tags ?? []).includes(t)));
   }
@@ -519,133 +891,15 @@ async function collectJson(dir, out = []) {
   }
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) await collectJson(full, out);
-    else if (entry.name.endsWith('.flow.json')) out.push(full);
+    if (entry.isDirectory()) {
+      if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
+      await collectJson(full, out);
+    } else if (entry.name.endsWith('.flow.json')) out.push(full);
   }
   return out;
 }
 
-async function resolveFlows(client, target, project) {
-  const { recordings = [] } = await client.call('browser_recording', { action: 'list' });
-  if (!recordings.length) throw new Error('There are no recordings in this browser profile.');
-
-  if (!target || target === 'all') return recordings;
-  if (target.startsWith('suite:')) {
-    const name = target.slice(6);
-    // A suite is a query on both platforms or on neither. Before this, the device path read
-    // QA/Flows/suites/*.json and applied `select`, while the web path only matched a literal
-    // `suite` field on the recording — so the same suite id meant two different things
-    // depending on which platform ran it.
-    const suite = project ? await readSuite(flowsRoot(project), name) : null;
-    const chosen = suite
-      ? applySelect(recordings, suite.select ?? {})
-      : recordings.filter((r) => r.suite === name);
-    return requireSelection(chosen, target, recordings, suite);
-  }
-  if (target.startsWith('tag:')) {
-    const tag = target.slice(4);
-    return requireSelection(
-      recordings.filter((r) => (r.tags ?? []).includes(tag)), target, recordings, null,
-    );
-  }
-  const byId = recordings.filter((r) => r.id === target);
-  if (byId.length) return byId;
-  const byName = recordings.filter((r) => r.name === target);
-  if (byName.length) return byName;
-
-  throw new Error(
-    `Nothing matched "${target}". Known flows:\n` +
-      recordings.map((r) => `  ${r.id}  ${r.name}${r.suite ? `  [suite:${r.suite}]` : ''}`).join('\n'),
-  );
-}
-
-async function commandRun({ options }) {
-  const target = options._[0] ?? 'all';
-  const project = await loadProject(options.project === true ? undefined : options.project);
-  const variables = options.data ? JSON.parse(await readFile(options.data, 'utf8')) : {};
-  const reportDir = path.resolve(options.report === true || !options.report ? './g9-artifacts' : options.report);
-
-  // Two platforms, one report. The browser path talks to the extension through the bridge; the
-  // AgriPad path talks to a device over `adb forward` and never touches a browser at all. They
-  // share the flow format, the verdicts and the artefacts — which is the whole reason FlowSpec
-  // carries `target.kind` rather than assuming the web.
-  if ((options.platform ?? 'web') === 'agripad') {
-    return commandRunAgriPad({ options, project, reportDir, target });
-  }
-
-  const { client } = await connect(options);
-  const run = {
-    format: 'g9/run',
-    version: 1,
-    startedAt: Date.now(),
-    environment: options.env ?? project?.defaultEnvironment ?? null,
-    suite: target,
-    pinned: false,
-    flows: [],
-  };
-
-  try {
-    if (options.pin) {
-      const har = JSON.parse(await readFile(options.pin, 'utf8'));
-      const pinned = await client.call('browser_network', {
-        action: 'pin', har, strict: options['strict-pin'] === true,
-      });
-      run.pinned = true;
-      run.pinDetail = pinned;
-      log(options, `network pinned: ${pinned.operations} operations, ${pinned.responses} recorded responses`);
-    }
-
-    const flows = await resolveFlows(client, target, project);
-    log(options, `${flows.length} flow(s) to run\n`);
-
-    for (const entry of flows) {
-      const started = Date.now();
-      log(options, `▶ ${entry.name} (${entry.id})`);
-      let result;
-      try {
-        result = await client.call('browser_recording', {
-          action: 'replay',
-          id: entry.id,
-          timing: options.timing ?? 'recorded',
-          signature: options.signature ?? 'lite',
-          compare: options['no-compare'] !== true,
-          seedKnownWorld: options.seed === true,
-          stopOnFailure: true,
-          variables,
-        }, 600_000);
-      } catch (err) {
-        result = {
-          id: entry.id, name: entry.name, verdict: 'ERROR', total: 0, passed: 0, failed: 1,
-          durationMs: Date.now() - started, steps: [],
-          failureMessage: String(err.message ?? err),
-        };
-      }
-
-      const failing = (result.steps ?? []).find((step) => !step.ok);
-      run.flows.push({
-        ...result,
-        qaTestCaseIds: entry.qaTestCaseIds ?? [],
-        tags: entry.tags ?? [],
-        suite: entry.suite ?? null,
-        failureMessage: result.failureMessage ?? failing?.error ?? null,
-        detail: failing ? `step ${failing.step} (${failing.type}): ${failing.error}` : null,
-      });
-
-      log(options, `  ${verdictLine(result)}\n`);
-    }
-
-    if (run.pinned) await client.call('browser_network', { action: 'unpin' }).catch(() => {});
-  } finally {
-    client.close();
-  }
-
-  run.durationMs = Date.now() - run.startedAt;
-  await writeReports(reportDir, run);
-
-  const code = exitCodeFor(run, options['fail-on'] ?? 'surprise');
-  summarize(run, reportDir, code);
-  return code;
-}
+// ------------------------------------------------------------ verdicts, summary
 
 function verdictLine(result) {
   const bits = [`${result.verdict ?? 'ERROR'}`, `${result.passed ?? 0}/${result.total ?? 0} steps`];
@@ -655,6 +909,7 @@ function verdictLine(result) {
   }
   if (result.warnings?.length) bits.push(`${result.warnings.length} warning(s)`);
   if (result.knownWorld && !result.knownWorld.runs) bits.push('no known world — run with --seed once');
+  if (result.failureMessage && result.verdict === 'ERROR') bits.push(result.failureMessage.split('\n')[0].slice(0, 160));
   return bits.join(' · ');
 }
 
@@ -680,40 +935,86 @@ function summarize(run, reportDir, code) {
   const counts = run.flows.reduce((acc, f) => { acc[f.verdict] = (acc[f.verdict] ?? 0) + 1; return acc; }, {});
   const parts = Object.entries(counts).map(([verdict, n]) => `${verdict}=${n}`).join(' ');
   console.log(`\n${parts || 'nothing ran'}  ·  ${Math.round(run.durationMs / 100) / 10}s  ·  exit ${code}`);
+  if (run.humanize?.seed != null) console.log(`humanize seed: ${run.humanize.seed} (pass --humanize-seed ${run.humanize.seed} to reproduce the motion)`);
   console.log(`reports: ${reportDir}`);
 }
 
 // ------------------------------------------------------------ other commands
 
 async function commandList({ options }) {
+  const project = await loadProject(options.project === true ? undefined : options.project);
+  const disk = await loadDiskFlows(project).catch((err) => {
+    console.log(`flow library: ${err.message}`);
+    return [];
+  });
+  if (disk.length) {
+    console.log(`Repository (${flowsRoot(project)}):`);
+    for (const f of disk) console.log(`  ${[f.id, f.name, f.suite ? `suite:${f.suite}` : null, f.tags?.length ? f.tags.map((t) => `#${t}`).join(' ') : null, `${(f.steps ?? []).length} steps`].filter(Boolean).join('  ·  ')}`);
+    console.log('');
+  }
   const { client } = await connect(options);
   try {
-    const { recordings } = await client.call('browser_recording', { action: 'list' });
-    if (!recordings.length) { console.log('No recordings.'); return EXIT.OK; }
+    const { recordings = [], problems } = await client.call('browser_recording', { action: 'list' });
+    if (!recordings.length && !disk.length) { console.log('No flows.'); return EXIT.OK; }
+    if (recordings.length) console.log('Browser stores:');
     for (const r of recordings) {
-      const bits = [r.id, r.name];
+      const bits = [r.id, r.name, r.engine ? `[${r.engine}]` : null];
       if (r.suite) bits.push(`suite:${r.suite}`);
       if (r.tags?.length) bits.push(r.tags.map((t) => `#${t}`).join(' '));
       bits.push(`${r.stepCount} steps`);
       if (r.flaky?.detected) bits.push('FLAKY');
-      console.log(bits.join('  ·  '));
+      console.log(`  ${bits.filter(Boolean).join('  ·  ')}`);
     }
+    for (const p of problems ?? []) console.log(`  (store unavailable: ${p})`);
     return EXIT.OK;
   } finally { client.close(); }
+}
+
+/**
+ * A tab to run a flow in, for commands that need one. Launched: a fresh tab on
+ * the flow's start URL in the run's engine (the flow imported from the
+ * repository first, when it is there). Extension: the current tab.
+ */
+async function flowTab(client, options, id, { url = null } = {}) {
+  if (engineChoice(options) === 'extension') return { tabId: null, engine: null, close: async () => {} };
+  const launched = await ensureLaunchedEngine(client, options);
+  const project = await loadProject(options.project === true ? undefined : options.project).catch(() => null);
+  const disk = await loadDiskFlows(project).catch(() => []);
+  const spec = disk.find((f) => f.id === id);
+  if (spec) {
+    const { file, ...clean } = spec;
+    await client.call('browser_recording', { action: 'import_spec', spec: clean, id: clean.id, engine: 'launched' });
+  }
+  const start = url ?? spec?.startUrl ?? (await client.call('browser_recording', { action: 'get', id, engine: 'launched' }).catch(() => null))?.startUrl ?? 'about:blank';
+  const opened = await client.call('browser_tabs', { action: 'open', url: start, engine: launched.info.engineId });
+  return {
+    tabId: opened.tabId,
+    engine: launched,
+    close: async () => {
+      await client.call('browser_tabs', { action: 'close', tabId: opened.tabId }).catch(() => {});
+      await releaseEngine(client, launched, options);
+    },
+  };
 }
 
 async function commandCalibrate({ options }) {
   const id = requireTarget(options, 'calibrate');
   const { client } = await connect(options);
+  let tab = null;
   try {
+    tab = await flowTab(client, options, id);
     const result = await client.call('browser_recording', {
       action: 'calibrate', id, timing: options.timing ?? 'recorded',
-    }, 900_000);
+      ...(tab.tabId != null ? { tabId: tab.tabId } : {}),
+    }, 1_900_000);
     console.log(`${result.volatileKeys} volatile item(s) recorded.`);
     console.log(result.note);
     for (const key of result.volatile ?? []) console.log(`  · ${key}`);
     return EXIT.OK;
-  } finally { client.close(); }
+  } finally {
+    await tab?.close();
+    client.close();
+  }
 }
 
 async function commandApprove({ options }) {
@@ -721,10 +1022,10 @@ async function commandApprove({ options }) {
   const { client } = await connect(options);
   try {
     const result = await client.call('browser_recording', {
-      action: 'approve', id, by: options.by ?? 'runner', note: options.note === true ? null : options.note,
+      action: 'approve', id, engine: engineChoice(options), by: options.by ?? 'runner', note: options.note === true ? null : options.note,
     });
     console.log(
-      `Known world for ${id}: ${result.runs} approved run(s), ` +
+      `Known world for ${id} (${result.engine ?? engineChoice(options)} store): ${result.runs} approved run(s), ` +
       `${result.networkOperations} network operations, ${result.consoleSignatures} console signatures, ` +
       `${result.steps} steps, ${result.volatileKeys} volatile.`,
     );
@@ -767,17 +1068,25 @@ async function commandAb({ options }) {
   }
 
   const { client } = await connect(options);
+  const launched = engineChoice(options) === 'launched';
+  const store = launched ? 'launched' : 'extension';
   try {
     const runSide = async (label, url) => {
       log(options, `▶ ${label}: ${url}`);
-      await client.call('browser_navigate', { action: 'goto', url, waitUntil: 'load' });
-      const run = await client.call('browser_recording', {
-        action: 'replay', id, timing: options.timing ?? 'recorded',
-        signature: 'full', compare: false, stopOnFailure: false,
-      }, 600_000);
-      const signature = await client.call('browser_recording', { action: 'signature', id });
-      log(options, `  ${run.verdict} · ${run.passed}/${run.total} steps`);
-      return { run, signature };
+      const tab = launched ? await flowTab(client, options, id, { url }) : null;
+      try {
+        if (!launched) await client.call('browser_navigate', { action: 'goto', url, waitUntil: 'load' });
+        const run = await client.call('browser_recording', {
+          action: 'replay', id, timing: options.timing ?? 'recorded',
+          signature: 'full', compare: false, stopOnFailure: false,
+          ...(tab ? { tabId: tab.tabId } : { engine: 'extension' }),
+        }, 1_900_000);
+        const signature = await client.call('browser_recording', { action: 'signature', id, engine: store });
+        log(options, `  ${run.verdict} · ${run.passed}/${run.total} steps`);
+        return { run, signature };
+      } finally {
+        await tab?.close();
+      }
     };
 
     const a = await runSide('A (reference)', urlA);
@@ -802,10 +1111,8 @@ async function commandAb({ options }) {
       await writeFile(path.join(dir, 'ab.json'), `${JSON.stringify({
         flowId: id, a: { url: urlA, verdict: a.run.verdict }, b: { url: urlB, verdict: b.run.verdict },
         differences,
-      }, null, 2)}
-`, 'utf8');
-      console.log(`
-wrote ${path.join(dir, 'ab.json')}`);
+      }, null, 2)}\n`, 'utf8');
+      console.log(`\nwrote ${path.join(dir, 'ab.json')}`);
     }
 
     // A difference is information, not a failure. Only a side that could not run is an error.
@@ -821,7 +1128,9 @@ async function commandSpec({ options }) {
   const id = requireTarget(options, 'spec');
   const { client } = await connect(options);
   try {
-    const result = await client.call('browser_recording', { action: 'export_spec', id });
+    const args = { action: 'export_spec', id };
+    if (options.engine && options.engine !== true) args.engine = engineChoice(options);
+    const result = await client.call('browser_recording', args);
     if (options.out && options.out !== true) {
       await mkdir(path.dirname(path.resolve(options.out)), { recursive: true });
       await writeFile(path.resolve(options.out), result.json, 'utf8');
@@ -845,8 +1154,6 @@ function log(options, message) {
 
 // ------------------------------------------------------------------- entry
 
-const { command, options } = parseArgs(process.argv.slice(2));
-
 const COMMANDS = {
   run: commandRun,
   list: commandList,
@@ -856,21 +1163,24 @@ const COMMANDS = {
   ab: commandAb,
 };
 
-if (command === 'help' || options.help) {
-  console.log(HELP);
-  process.exit(EXIT.OK);
+async function main() {
+  const { command, options } = parseArgs(process.argv.slice(2));
+  if (command === 'help' || options.help) {
+    console.log(HELP);
+    return EXIT.OK;
+  }
+  const handler = COMMANDS[command];
+  if (!handler) {
+    console.error(`Unknown command "${command}".`);
+    console.log(HELP);
+    return EXIT.RUNNER;
+  }
+  try {
+    return await handler({ options });
+  } catch (err) {
+    console.error(`\n${err.message ?? err}`);
+    return EXIT.RUNNER;
+  }
 }
 
-const handler = COMMANDS[command];
-if (!handler) {
-  console.error(`Unknown command "${command}".`);
-  console.log(HELP);
-  process.exit(EXIT.RUNNER);
-}
-
-try {
-  process.exitCode = await handler({ options });
-} catch (err) {
-  console.error(`\n${err.message ?? err}`);
-  process.exitCode = EXIT.RUNNER;
-}
+process.exitCode = await main();

@@ -1,0 +1,81 @@
+# G9 desktop installer (V2 plan §P7.3, §8; ARCHITECTURE_V2 §11).
+# Build with `npm run build:win` (scripts/build-win.mjs), which draws the icon first and drops
+# `publish` when G9_UPDATE_URL is not set — see that script for why.
+
+appId: com.g9.browseragent
+productName: G9
+copyright: G9
+
+directories:
+  output: dist
+  buildResources: build
+
+# The Electron app itself: main process, preload, renderer. Tests and scripts stay out.
+files:
+  - main.mjs
+  - preload.cjs
+  - package.json
+  - lib/**
+  - renderer/**
+  - "!test/**"
+  - "!scripts/**"
+  - "!build/**"
+  - "!dist/**"
+
+# The product the app carries: the daemon, engines, MCP shim, runner and extension run from
+# resources/ under G9.exe with ELECTRON_RUN_AS_NODE=1, so a QA machine needs no Node.
+# Dev-only override files (dev-daemon.json / dev-bridge.json) must never ship.
+extraResources:
+  - from: ../extension
+    to: extension
+    filter: ["**/*", "!dev-*.json", "!**/*.test.*"]
+  - from: ../engine
+    to: engine
+    filter: ["**/*", "!**/*.test.*"]
+  - from: ../daemon
+    to: daemon
+    filter: ["**/*", "!**/*.test.*"]
+  - from: ../mcp
+    to: mcp
+    filter: ["**/*", "!**/*.test.*"]
+  - from: ../runner
+    to: runner
+    filter: ["**/*", "!**/*.test.*"]
+  - from: ../lib
+    to: lib
+    filter: ["**/*", "!**/*.test.*"]
+  - from: ../package.json
+    to: package.json
+
+asar: true
+npmRebuild: false
+electronLanguages:
+  - en-US
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  executableName: G9
+  icon: build/icon.png
+  requestedExecutionLevel: asInvoker
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: false
+  artifactName: G9-Setup-${version}.exe
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: G9
+  runAfterFinish: true
+  deleteAppDataOnUninstall: false
+  include: build/installer.nsh
+
+# electron-updater generic feed. The in-app URL always comes from Settings (autoUpdater.setFeedURL);
+# this block is what makes the build emit latest.yml for the update server.
+publish:
+  provider: generic
+  url: ${env.G9_UPDATE_URL}
+  channel: latest

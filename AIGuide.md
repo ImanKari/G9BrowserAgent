@@ -2,71 +2,173 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v1.7.21; documentation audited **2026-09-12**. Fourteen browser tools, Workspace scope, named tabs, flow-library sync, interception rules, cross-origin snapshot/input, regression memory and runner support are present. **Input delivery verification and download watching have confirmed unresolved defects** (§8). The bridge suite passed 26/26; the extension suite stopped on a missing external QA fixture (§7). Historical pass counts are not current certification.
+**Status:** v2.0.3, 2026-09-25. Two engines (the extension in the person's own browser, and real
+Edge/Chrome/Chrome for Testing that the daemon launches), one local daemon `g9d`, one MCP shim per
+agent, fifteen tools, a pure human-input library, three stealth levels, an Electron desktop shell and a
+per-user installer that is **not code-signed**. 2.0.3 changed only the popout (§9). On 2026-09-25,
+on 2.0.3: unit 621/621 in 10 suites, self-test 136/136, extension suite 78/78, desktop 14/14 files, the
+packaged build 7/7 (`G9-Setup-2.0.3.exe`), Engine 2 live test 366/0 and the isolated Engine 1 live test
+196/0 on Edge with the real popout. On 2026-09-24, on 2.0.2, the unit suite passed three times in a row.
+On 2026-09-23, on 2.0.1 (the final pass): daemon contract 15/15, render check 4/4 scenarios, the
+isolated Engine 1 live test 196/0 on Chrome, the background-state matrix exit 0, bench 0 failures at
+1/4/8/16 contexts, 10-minute endurance 93 iterations 0 failures, and the stealth matrix over 7
+configurations with the public detector pages. The measured numbers are in §7 and in the §9 entries
+for 2.0.1 and 2.0.2. What is still open is in §8; nothing there is fixed by being listed.
 **Created:** 2026-08-31
 
-**Reading order:** §§1–8c describe the current implementation. §9 preserves historical decisions and
-results; its older claims about hidden input, closed Shadow DOM, downloads and test coverage are
-superseded by the 2026-09-12 audit. Code comments and MCP instruction strings have not been corrected
-by this documentation-only change; do not treat those stale claims as proof that a defect is fixed.
-For planned implementation work, read [EXTENSION_FIX_BACKLOG.md](EXTENSION_FIX_BACKLOG.md). It
-separates reproduced defects, source findings and investigations; its open items are not shipped features.
+**Reading order:** §§1–8c describe v2.0.3 as built (v2.0.0, plus the review fixes and final pass of 2.0.1, the three
+flaky-test defects and the browser close budget of 2.0.2, and the popout fix of 2.0.3). §9 is history: entries dated before 2026-09-21
+describe v1 (a bridge, four control modes, a workspace allowlist) and are superseded wherever §§1–8
+say otherwise. The binding module contracts are [docs/ARCHITECTURE_V2.md](docs/ARCHITECTURE_V2.md)
+(signatures, message shapes, file locations) and [docs/DAEMON_PROTOCOL.md](docs/DAEMON_PROTOCOL.md)
+(the wire); the design and its reasons are [V2_IMPLEMENTATION_PLAN.md](V2_IMPLEMENTATION_PLAN.md).
+Where this file and ARCHITECTURE_V2 disagree about a signature, ARCHITECTURE_V2 wins and this file is
+wrong — fix it. Owner-facing guides: [docs/STEALTH.md](docs/STEALTH.md), [docs/HUMANIZE.md](docs/HUMANIZE.md),
+[engine/README.md](engine/README.md) (every launch switch and why), [desktop/README.md](desktop/README.md),
+[runner/README.md](runner/README.md). [EXTENSION_FIX_BACKLOG.md](EXTENSION_FIX_BACKLOG.md) is the v1
+backlog; the plan absorbed its items.
 
 ---
 
 ## 1. What this is
 
-An MV3 browser extension plus a zero-dependency Node bridge that gives an AI agent DevTools-level control over the user's **real, already-running** browser — real profile, real cookies, real logins.
+G9 lets any number of AI agents drive real Chromium browsers at DevTools depth through MCP, with
+human-like input and evidence a person can review afterwards. v2 has two engines behind one tool layer:
+
+- **Engine 1 — the extension.** An MV3 extension in the QA person's own Edge or Chrome: their profile,
+  cookies and logins. For authoring (recording), exploring and attended runs.
+- **Engine 2 — a launched browser.** A stock Edge, Chrome or Chrome for Testing (CfT) that the daemon
+  starts on a G9-owned profile and drives over `--remote-debugging-pipe`, headless by default. For
+  unattended runs, parallel agents and long flows. Headless, it has no window on the person's desktop,
+  so the states that stop a window rendering (minimized, covered, locked, another virtual desktop) do
+  not exist for it — a fact from Chromium's source (plan §2.1); a locked session was not measured (§8.2).
 
 ```
-  AI Agent  ──MCP (stdio JSON-RPC)──▶  Bridge  ──WebSocket──▶  Extension  ──CDP──▶  Tab
-                                      (Node)                  (Chrome/Edge)
+AI agent ──stdio MCP──▶ mcp/shim.mjs ──WS /g9──▶ daemon/g9d.mjs ──(in-process)──▶ Engine 2 runtime
+AI agent ──stdio MCP──▶ mcp/shim.mjs ──WS /g9──┘      │   ▲                          engine/manager.js
+runner/g9.mjs ────────▶ mcp/shim.mjs ──WS /g9──┘      │   │                          extension/tools/index.js (platform-cdp)
+desktop (Electron) ───────────────────WS /g9──────────┘   │                          ──pipe CDP──▶ Edge/Chrome/CfT
+                                                          │
+extension/sw.js (Engine 1) ───────────WS /g9──────────────┘   tools run INSIDE the extension (platform-extension)
 ```
 
-**Browser operations are independent of the site's framework.** The bridge also reads project
-configuration and synchronizes FlowSpec files, and the runner has a separate AgriPad device adapter.
-Those integrations do not put ASP.NET/React-specific behavior into the browser tools. Keep this repo
-separate from projects under test.
+- **One daemon per machine**, `g9d`, on `127.0.0.1:${G9_PORT:-8765}`. It owns engines, browser
+  contexts, tab handles, tab ownership, halts, evidence runs and the scheduler. Nobody has to start it:
+  the first MCP shim that finds no daemon spawns it (detached, hidden), and it exits after
+  `settings.idleExitMinutes` (default 60) with no client, no launched browser and no schedule.
+- **One shim per agent.** Every AI client launches `mcp/shim.mjs` (stdio MCP). The shim serves the
+  schemas and instructions and forwards calls verbatim, adding only `caller.name`.
+- **The same tool code in both engines.** `extension/tools/*.js` run inside the extension's service
+  worker over `chrome.debugger` (Engine 1) and inside the daemon over a CDP pipe (Engine 2). The
+  difference is one seam, `extension/lib/platform.js` (§4.6).
+- **The runner is an agent.** `runner/g9.mjs` speaks MCP through the same shim; ownership, Stop and
+  every refusal apply to it. The scheduler starts it as a child process.
+- **The desktop app is a client and an installer**, never an engine (§2.5).
+
+**Browser operations are independent of the site's framework.** Product knowledge lives as data in
+the project under test (`g9.project.json`, the FlowSpec library under its `flowsDir`); the runner has a
+separate AgriPad device adapter (`runner/drivers/agripad.mjs`, adb). None of that puts
+framework-specific behaviour into the browser tools. Keep this repo separate from projects under test.
 
 ---
 
-## 2. Why this architecture (the decision that shapes everything)
+## 2. Why this architecture (the decisions that shape everything)
 
-Three approaches were evaluated. The reasoning matters because it constrains every later choice.
+The plan fixes twelve decisions (D1–D12, [V2 plan §0](V2_IMPLEMENTATION_PLAN.md#0-the-decisions-in-one-page));
+ARCHITECTURE_V2 §0 records where the build deviated and three decisions taken during the build
+(D-a, D-b, D-c, see §4.8 and §4.10). The reasoning below is the part that constrains later choices.
 
-### Rejected: WebDriver / Selenium
+### 2.1 What v1 was, and what it could not do
 
-The project chose direct access to the user's existing profile over a WebDriver-managed session.
-This is an architecture decision, not evidence that Selenium/WebDriver tooling cannot inspect styles,
-capture network data or expose diagnostics. Earlier categorical capability claims were inaccurate.
+v1 was an MV3 extension with the `debugger` permission plus a zero-dependency Node bridge: one
+bridge, one extension, one agent. The extension was chosen over WebDriver/Playwright/Puppeteer
+because `chrome.debugger` reaches the person's **default** profile with no remote-debugging switch —
+Chrome 136+ ignores `--remote-debugging-port/-pipe` on the default user-data-dir, and a throwaway
+`--user-data-dir` has none of the person's logins. That reason still holds and is why Engine 1 exists.
 
-### Rejected: external CDP (Playwright / Puppeteer / chrome-devtools-mcp)
+What v1 could not do, and no extension can (plan §2.1, §2.2; Chromium source cited in plan Appendix A):
 
-External CDP requires a debugging endpoint exposed by the browser:
+- **Input to a page that is not visible.** A background tab is always hidden; a minimized window is
+  hidden; a covered window, a locked session or another virtual desktop is "occluded". Hidden or
+  occluded pages stop rendering and pointer input does not reach them. `--disable-backgrounding-occluded-windows`
+  and `--disable-features=CalculateNativeWinOcclusion` (policy `WindowOcclusionEnabled=0`) fix
+  occluded, never minimized — and an extension cannot set switches at all.
+- **The Browser domain, launch switches, relaunching, or avoiding the debugger infobar** (only a
+  policy install or `--silent-debugger-extension-api` removes it).
+- **More than one client.** One bridge per extension meant a second agent, a second editor window or
+  the runner fought over one port and one browser (v1's "port rule").
 
-- **Chrome 136+** ignores `--remote-debugging-port` and `--remote-debugging-pipe` on the **default profile**. The workaround — `--user-data-dir` pointing at a throwaway directory — produces a browser with none of the user's logins, which defeats the purpose.
-- Other existing-browser connection mechanisms depend on browser/version and client support. The earlier blanket claim that external clients cannot reach a real profile was too broad.
-- Some sites refuse sign-in when the browser reports as WebDriver-controlled.
+### 2.2 Two engines, one tool layer (D2, D3)
 
-### Chosen: MV3 extension with the `debugger` permission
+Engine 2 is a real browser process the daemon launches, headless (`--headless=new`: the full browser,
+no platform window, so none of the hidden states exist). Engine 1 stays for authoring. The tool
+modules were already pure CDP, so the only thing that differs between engines is the platform seam
+(§4.6), not the tools. A tab moves from Engine 1 to Engine 2 with `browser_tabs action:"handoff"`
+(cookies and storage travel, the page reloads; §6 daemon/handoff.js).
 
-`chrome.debugger` opens a restricted CDP channel to eligible tabs **on the default profile, with no
-remote-debugging flags or port**. Chrome and Edge share this extension API; compatibility still needs
-version-specific testing. See [Chrome's flag change](https://developer.chrome.com/blog/remote-debugging-port).
+### 2.3 Why no Chromium fork (D1)
 
-**CDP domains available to an extension:** `Accessibility`, `Audits`, `CacheStorage`, `Console`, `CSS`, `Database`, `Debugger`, `DOM`, `DOMDebugger`, `DOMSnapshot`, `Emulation`, `Fetch`, `IO`, `Input`, `Inspector`, `Log`, `Network`, `Overlay`, `Page`, `Performance`, `Profiler`, `Runtime`, `Storage`, `Target`, `Tracing`, `WebAudio`, `WebAuthn`.
+Everything v2 needs is reachable through launch switches, profile preferences, policies and full CDP
+over the pipe. A fork is a permanent build/rebase/sign/distribute cycle — Chrome ships a major every
+two weeks since 153 — and a result on a fork is not a result on the customer's browser. The one thing
+the plan forbade that stealth turned out to need (the `AutomationControlled` switch) was solved by a
+decision taken during the build (D-a, §4.8, because the owner requires stealth runs to be
+undetectable), not by a fork. Plan Appendix C describes a two-week fork spike if the owner wants the
+cost measured; it was not run.
 
-`Browser` and `HeapProfiler` are not in the [permitted-domain list](https://developer.chrome.com/docs/extensions/reference/api/debugger#restricted-domains).
-Access through an external CDP socket does not prove access through the extension transport.
+### 2.4 Why the extension stays (Engine 1)
 
-**Extension APIs used:** `chrome.tabs`, `chrome.windows`, `chrome.cookies` (including HttpOnly),
-`chrome.storage`, `chrome.alarms`, `chrome.sidePanel`. The manifest does **not** request `downloads`,
-`scripting`, `nativeMessaging`, `offscreen` or capture permissions.
+- It is the only way to act in the person's own signed-in browser: Chrome 136+ refuses remote
+  debugging on the default user-data-dir, and App-Bound Encryption (Chrome 127+) makes a person's
+  cookies undecryptable by any other binary or copied profile. Engine 2 therefore never reuses a
+  person's profile; it has its own (`G9_HOME/profiles/<name>`), warmed once by a person (`warm`).
+- Authoring happens where the person works: recording, exploring, filing issues from what is on screen.
+- It carries its costs knowingly: the debugger infobar (measured 2026-09-22 on headless Edge
+  153.0.4234.32: the viewport is 760/761 px instead of 808 px, and every cross-document load in the
+  browser — including tabs G9 never attached — sees two `resize` events 148–301 ms in), refused input
+  to hidden tabs (§4.3a), and the MV3 worker lifetime (§4.1). For stealth, Engine 1 applies the input
+  rules only (docs/STEALTH.md, "Engine 1 (the extension) and stealth").
 
-**Accepted costs:** the normal installation shows the browser's debugger banner; browser-internal
-page control is unavailable; opening DevTools on an attached tab can detach the extension; worker
-revival and reconnects require lifecycle management (§4). The manifest floor is Chromium 116, but
-flat child sessions used for cross-origin frames require 125+.
+### 2.5 Why Electron is the shell only (D4)
+
+Pages under test never load inside Electron's Chromium. Electron is not Chrome: its identity and
+fingerprint differ from the customer's browser and its Chromium lags. WebView2 was ruled out as an
+engine too (plan §2.4: needs an HWND and a UI thread, no headless mode, pauses rendering when not
+visible, does not run in non-interactive sessions, cannot use the person's Edge profile). So Electron
+hosts only G9's own screens, served from the private `g9app://app/` scheme: tray, Watch (the daemon's
+JPEG frames on a `<canvas>`, the cursor drawn from the pointer track), Runs, Approvals, Engines,
+Agents, Schedule, Settings, Setup. It also packages the product: `G9.exe` run with
+`ELECTRON_RUN_AS_NODE=1` executes the daemon, the shim and the runner, so a QA machine needs no Node.
+
+### 2.6 One daemon, many agents (D5), no modes (D6), local trust (D7)
+
+The daemon owns every engine and decides per **tab**, not per socket, who may act: the first mutating
+call claims a tab, reads are never refused, mutating calls on one tab are serialized (§4.10). The four
+v1 control modes, the workspace allowlist, cookie scoping and title withholding are removed by owner
+decision: attach means full access, because the deployment is local and trusted (§5).
+
+### 2.7 Facts the design rests on — and what v2 measured
+
+The plan's verified facts (§2 there, sources in its Appendix A) stand. v2 added these measurements, all
+on the owner's workstation on 2026-09-21/22 (Windows 11 Pro 10.0.26200, Edge 153.0.4234.32, Chrome
+153.0.8010.50–.53, CfT 153.0.8010.52), each now encoded in code with its reason:
+
+| Fact (measured) | Where it is handled |
+|---|---|
+| `--remote-debugging-pipe` itself makes `navigator.webdriver === true`, headless and headed; only `--disable-blink-features=AutomationControlled` clears it (`Emulation.setAutomationOverride` does not) | D-a, `engine/stealth.js`, `engine/launch.js` |
+| Headless reports an 800×600 screen inside a 1920×1080 window, and a screen with no work area (`availHeight === height`) | `--screen-info={W×H workAreaBottom=48}` + a maximized-size window, `launch.js headlessGeometry` |
+| Edge signs every NEW user-data-dir into the Windows account and turns sync on | `msImplicitSignin` disabled + `--disable-sync` on every launch; `profile.signInState` checked before launch (§9 v2.0.0 entry) |
+| Under browser-level auto-attach with `waitForDebuggerOnStart:false`, a `window.open()` popup is held until someone resumes it, and its opener wedges | every target held and resumed (§4.11) |
+| CfT 153.0.8010.52 renders at 10 fps (rAF every 100.5 ms) where Chrome/Edge run at 10.5 ms — re-confirmed 2026-09-23 with the firewall prompt answered (100.5 ms in 8/8 launches without the switch) | `--disable-frame-rate-limit` for CfT only (`launch.js KIND_SWITCHES`); 17.4 ms in 12/12 launches with it |
+| `--disable-component-update` removes the Widevine CDM from Edge and Chrome | switch omitted at stealth and for `warm` |
+| Mouse events to a hidden page are not delivered (often not even answered within 5 s); key events DO reach a hidden page's focused field (10/10) | input to hidden pages refused before dispatch (§4.3a) |
+| `--start-minimized` is not honoured by Edge/Chrome 153 (window state stays `normal`) | the matrix minimizes with `SW_SHOWMINNOACTIVE` |
+| A headed window parked at −32000,−32000 is occluded (hidden) unless `CalculateNativeWinOcclusion` is disabled; Engine 2 always disables it | `launch.js DISABLED_FEATURES` |
+| `Page.createIsolatedWorld` works with Runtime disabled and is idempotent per frame; `Runtime.addBinding` by `executionContextName` installs only while Runtime is enabled (by context id it works without) | `lib/world.js`, `tools/record.js` |
+| Headless Edge does not push `Target.targetInfoChanged` for `<title>` changes | `platform-cdp` re-reads url/title on `tabs.get`/`query` |
+| `Target.createTarget({newWindow:false})` is refused for the first page of a fresh browser context | `platform-cdp createTab` (F1) |
+| Headless Edge opens `edge://downloads-hub/` after a download unless `browser.show_hub_popup_on_download_start` is false (8/8 A/B runs) | profile preference set by `manager.js` |
+| A locale override per tab changes `Intl` only; `navigator.languages` and `Accept-Language` come from the profile's `intl.accept_languages`, and a UA-override approach left dedicated workers on the old language | launch locale written into the profile; a context locale in another language refused at stealth |
 
 ---
 
@@ -74,512 +176,832 @@ flat child sessions used for cross-origin frames require 125+.
 
 ```
 g9-browser-agent/
-├── extension/                    ALL browser logic lives here
-│   ├── manifest.json             MV3; permissions listed in §5
-│   ├── sw.js                     service worker — tool router, event ingestion
+├── package.json                  the ONE version (2.0.3) for the whole product; no dependencies; node >=22
+├── extension/                    Engine 1 (MV3), and the HOME of the shared tool code
+│   ├── manifest.json             2.0.3; minimum_chrome_version 125; permissions in §5
+│   ├── sw.js                     service worker: lifecycle, transport to g9d, panel commands; calls tools/index.js
 │   ├── lib/
-│   │   ├── state.js              storage-backed state (SW-restart safe)
-│   │   ├── cdp.js                chrome.debugger wrapper — single choke point
-│   │   ├── refs.js               element ref registry (eN -> backendNodeId)
-│   │   ├── frames.js             cross-origin child debugger sessions
-│   │   ├── workspace.js          workspace host matching
-│   │   ├── locators.js           MULTI-LOCATOR element identity (recorder core)
-│   │   ├── signature.js          journey signature · known world · SURPRISE detector (§8c)
-│   │   ├── flowspec.js           canonical, Git-diffable portable flow form (§8c)
-│   │   ├── visual.js             fingerprint + structure map + masks + diff image
-│   │   ├── store.js              recordings + issues; local for records, IDB for blobs/frames
-│   │   └── transport.js          WebSocket client, keepalive, backoff
-│   ├── tools/
-│   │   ├── tabs.js               tab list + TARGET RESOLUTION (safety boundary)
-│   │   ├── snapshot.js           a11y-tree perception, ref assignment
-│   │   ├── interact.js           trusted input events
-│   │   ├── inspect.js            DOM, computed styles, box, storage, cookies
-│   │   ├── observe.js            console + network capture (event-driven)
-│   │   ├── navigate.js           navigation + condition-based waiting
-│   │   ├── capture.js            screenshots
-│   │   ├── diagnose.js           health report + performance trace
-│   │   ├── emulate.js            device/network emulation, JS dialogs
-│   │   ├── record.js             session recording over a CDP binding
-│   │   ├── replay.js             replay engine + failure diagnosis
-│   │   ├── qa.js                 assertions (incl. aria), baselines, Playwright export
-│   │   ├── netpin.js             serve the network from a HAR (Fetch interception)
-│   │   ├── netrules.js           intercept/block/delay/fulfill rules
-│   │   ├── downloads.js          download tracking; currently blocked by Browser domain
-│   │   └── issues.js             defect capture, context, attachments
-│   └── panel/                    side panel — the trust surface
-│       ├── panel.html/.css/.js
-│       ├── session.js/ui.js      connection, scope, sessions and shared panel helpers
-│       ├── automation.js         flows, assertions, progress, calibration, library sync
-│       ├── issues.js             issue editor and attachments
-│       ├── welcome.html          shown once on install
-│       └── icon{16,48,128}.png   generated, not hand-drawn
-├── runner/                       the unattended CLI — no agent, no QA present
-│   ├── g9.mjs                    run · list · calibrate · approve · spec · ab; exit codes 0-4
-│   ├── mcp-client.mjs            minimal MCP stdio client (the runner is just another client)
-│   ├── report.mjs                run.json · junit.xml · report.html · qa-automation-status.json
-│   ├── drivers/agripad.mjs        separate device adapter through adb
-│   └── README.md
-├── bridge/
-│   ├── package.json              zero dependencies, type: module
-│   └── src/
-│       ├── server.js             entry point; wires MCP <-> WebSocket
-│       ├── mcp.js                minimal MCP server over stdio
-│       ├── ws-server.js          minimal RFC 6455 server
-│       ├── registry.js           bridge discovery and port selection
-│       ├── project.js            project adapter/configuration discovery
-│       ├── flows.js              filesystem FlowSpec library
-│       └── tools.js              tool SCHEMAS + agent INSTRUCTIONS
+│   │   ├── platform.js           THE SEAM: exports platform-extension or platform-cdp (rule R2)
+│   │   ├── platform-extension.js chrome.* implementation (debugger, tabs, cookies, storage, IndexedDB blobs, image, downloads)
+│   │   ├── platform-cdp.js       the same surface over CDP pipes to launched browsers (browser-safe, no node:)
+│   │   ├── cdp.js                the CDP choke point: send/evaluate/ensureDomain, halt check, timeouts, stealth domains
+│   │   ├── state.js              platform.storage-backed state, serialize() chain, activity log
+│   │   ├── store.js              recordings + issues (storage.local) and attachment bytes (platform.blobs)
+│   │   ├── refs.js               element refs (eN → backendNodeId, child sessionId)
+│   │   ├── frames.js             cross-origin child sessions (flat auto-attach, recursive)
+│   │   ├── world.js              G9's isolated world 'g9' — every internal evaluation runs here
+│   │   ├── pointer.js            per-tab pointer position + cursor track (never drawn in the page)
+│   │   ├── screencast.js         one Page.startScreencast per tab, shared by video and live watch
+│   │   ├── humanize.js           the dispatcher: humanize plans → Input.dispatch*, levelFor, hidden checks
+│   │   ├── locators.js           multi-locator element identity (recorder core, §8b)
+│   │   ├── signature.js          journey signature, known world, surprise detector (§8c)
+│   │   ├── flowspec.js           canonical, Git-diffable FlowSpec
+│   │   ├── visual.js             fingerprint + structure map + diff image (through platform.image)
+│   │   └── transport.js          WebSocket client to g9d (extension only)
+│   ├── humanize/                 PURE human-input library (no I/O, no timers, seeded): prng, profiles, profile,
+│   │                             plan, mouse, wheel, keys, calibrate, index
+│   ├── tools/                    18 modules behind the 15 tools; NO chrome.* / node: (rule R2)
+│   │   ├── index.js              TOOLS table + runTool pipeline + status() — shared by both engines
+│   │   ├── events.js             CDP event fan-out (console, network, recorder, dialogs, frames)
+│   │   ├── tabs.js               target resolution, listTabs, attach, popout, handoffExport, ensureFront
+│   │   ├── snapshot.js  interact.js  inspect.js  observe.js  navigate.js  capture.js  diagnose.js
+│   │   ├── emulate.js   record.js    replay.js   qa.js       netpin.js   netrules.js  downloads.js
+│   │   └── issues.js
+│   └── panel/                    side panel: Session (daemon, agents, input level, Stop, activity), Automation,
+│                                 Issues, About; welcome.html/.js (the version, on install and update)
+├── engine/                       Engine 2 (Node): find.js, cft.js, launch.js, pipe-cdp.js, profile.js,
+│                                 stealth.js, firewall.js, manager.js (EngineManager, owned by the daemon), versions.json,
+│                                 README.md
+├── daemon/                       g9d: g9d.mjs (CLI), daemon.js (composition), ws-server.js, registry.js,
+│                                 router.js, handoff.js, storage.js, evidence.js, scheduler.js, settings.js,
+│                                 paths.js, home-lock.js, project.js, flows.js, extension-update.js
+├── mcp/                          shim.mjs (what an AI client launches), mcp.js (stdio MCP), tools.js (schemas + INSTRUCTIONS)
+├── lib/                          version.mjs (reads package.json), ws-client.mjs, ws-codec.mjs (RFC 6455, shared)
+├── runner/                       g9.mjs (run · list · calibrate · approve · spec · ab; exit 0–4), mcp-client.mjs,
+│                                 report.mjs, drivers/agripad.mjs, README.md
+├── bridge/src/server.js          v1 entry point kept as a 9-line forwarder to mcp/shim.mjs (v1 MCP configs)
+├── desktop/                      Electron shell (the ONLY npm dependencies): main.mjs, preload.cjs, lib/, renderer/,
+│                                 test/, build/, scripts/, electron-builder.yml, dist/ (built installer)
+├── docs/                         ARCHITECTURE_V2.md, DAEMON_PROTOCOL.md, STEALTH.md, HUMANIZE.md, INSTALL.md (operators)
 ├── setup/
-│   ├── install.ps1               Node check, both non-browser tests, config generation
-│   ├── selftest.mjs              26 assertions, no browser needed
-│   ├── extensiontest.mjs         module/source checks; external QA fixture required
-│   ├── livetest.mjs              live CDP test, needs a real attached tab
-│   ├── isolated-livetest.mjs     temporary profile + extension/MCP/panel live run
-│   ├── serve.mjs                 static server for the test page
-│   ├── testpage.html             6 deliberate defects
-│   ├── postcard.html             1080² card, rendered and posted by the agent
-│   │                             served with /hang and /slow?ms= endpoints
-│   ├── mcp.example.json          committed template, placeholder path
-│   └── mcp.json                  generated by install.ps1 (gitignored)
-├── scripts/                     standalone MCP automations and their README
-├── g9.project.example.json      project adapter template
-├── README.md
-└── AIGuide.md                    this file
+│   ├── unittest.mjs + unit/      10 unit suites (§7), one child process each
+│   ├── selftest.mjs              real daemon + two real shims + a fake extension, no browser
+│   ├── extensiontest.mjs         extension modules through the real seam over a chrome stub
+│   ├── engine2-livetest.mjs      Engine 2 through the product path, real headless Edge
+│   ├── isolated-livetest.mjs     Engine 1: private daemon + temp profile + extension copy; runs livetest.mjs
+│   ├── livetest.mjs              the Engine 1 live checks (an MCP client)
+│   ├── stealthtest.mjs           stealth self-test / pre-suite gate (+ stealth-pages.json, fixtures/stealth-local.html)
+│   ├── matrix.mjs  bench.mjs  endurance.mjs   P8 background-state matrix, parallelism, endurance
+│   ├── serve.mjs  testpage.html  crossframe.html  birthday.html  postcard.html  fixtures/
+│   ├── install.ps1               install from a clone: Node 22 check, unit/self/extension tests, MCP config → mcp/shim.mjs
+│   └── mcp.example.json          committed template (mcp.json is generated, gitignored)
+├── scripts/                      standalone MCP automations and their README
+├── g9.project.example.json       project adapter template
+├── README.md  AIGuide.md  V2_IMPLEMENTATION_PLAN.md  EXTENSION_FIX_BACKLOG.md
 ```
 
-**Where does new code go?** Browser capability → `extension/tools/`. Schema/description → `bridge/src/tools.js`. The bridge itself should stay dumb (see §6).
+`G9_HOME` (default `%LOCALAPPDATA%\G9`, else `~/.g9`) holds `daemon.json`, `daemon.lock`, `settings.json`,
+`engine-versions.log`, `engines/cft-<version>/`, `engines/log/`, `engines/firewall-seen.json`, `profiles/<name>/`, `store/`,
+`runs/<runId>/`, `downloads/<contextId>/`, `extension/` (the desktop-managed unpacked copy) and `logs/`
+(ARCHITECTURE_V2 §9).
+
+**Where does new code go?** Browser capability → `extension/tools/` (and nothing platform-specific —
+extend `platform.*` instead). Schema/description → `mcp/tools.js`. Routing, ownership, evidence,
+scheduling → `daemon/`. Launching and profiles → `engine/`. Human motion → `extension/humanize/`
+(pure) and `extension/lib/humanize.js` (dispatch). The daemon stays "deliberately dumb" about pages:
+it never clicks or reads a page itself.
 
 ---
 
-## 4. The five constraints that shaped the code
+## 4. The constraints that shaped the code
 
 Every non-obvious decision traces back to one of these. Do not "simplify" past them.
 
-### 4.1 The MV3 service worker can be suspended
+### 4.1 The MV3 service worker can be suspended (Engine 1)
 
-**Consequence:** no module-level variable is ever a source of truth.
+**Consequence:** no module-level variable in the extension is a source of truth.
 
-- Transient state and page buffers live in `chrome.storage.session` and clear on browser close. Recordings/settings use `storage.local`; evidence and video frames use IndexedDB. Some subsystem caches remain module-local and must be rebuilt after revival.
-- Durable settings (host, port, mode) are mirrored to `chrome.storage.local`.
-- `transport.js` pings every **20s**. WebSocket traffic resets the idle timer; Chrome 116+ supports WS in service workers.
-- Active `chrome.debugger` sessions keep the worker alive from Chrome 118. A worker with no activity can still be suspended; it does not unconditionally die every 30 seconds while attached.
-- The code requests a 30s `chrome.alarms` heartbeat to revive a worker after an offline period. The 30s alarm minimum is supported from Chrome 120, later than the manifest's 116 floor. See the [lifecycle version notes](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle).
-- `bootstrap()` runs on module evaluation, not just on `onInstalled`, because a revived worker re-evaluates the module.
-- Core state and observation-buffer mutations are **serialized** through one promise chain,
-  exported from `state.js` as `serialize()`. Storage is a read-modify-write
-  against a single key from many independent async call sites; without
-  serialization, interleaved writes lose updates (see the v1.0.5 and v1.0.7
-  change-log entries). The chain covers `state.js` *and* `tools/observe.js` —
-  the latter is by far the highest-frequency writer, since one page load pushes
-  dozens of `Network.*` events into the same key. A function running inside
-  `serialize()` must never call another serialized function, or it deadlocks.
+- Transient state (refs, capture buffers, pointer position, per-tab tool state) lives in
+  `platform.storage.session` (`chrome.storage.session` in the extension: cleared when the browser
+  closes). Settings, recordings and issues use `storage.local`; attachment bytes and video frames use
+  `platform.blobs` (IndexedDB `g9-attachments`). In the daemon the same calls go to a file-backed
+  `storage.local`, an in-memory `storage.session` and file blobs (`daemon/storage.js`).
+- `transport.js` pings every **20 s**; an active WebSocket keeps the worker alive while messages flow.
+  A 30 s `chrome.alarms` heartbeat revives a worker after an offline period.
+- Every listener that must be able to wake the worker is registered synchronously at top level
+  (`sw.js`, and the `chrome.downloads` listeners in `platform-extension.js`).
+- State mutations go through one promise chain, `state.js serialize()`; `observe.js`, `store.js` and
+  `downloads.js` use it too. A function inside `serialize()` must never call another serialized
+  function, or it deadlocks (v1.0.5, v1.0.7).
+- **A restart must not cost agents their tabs (D-c).** The extension sends a random `instanceId`
+  (generated once, `storage.local`) and a `loadId` (`storage.session`: same across worker restarts, new
+  after an extension reload or browser restart) plus its open tabs in every hello. The daemon parks a
+  disconnected extension for `G9_ENGINE_RESUME_MS` (default 10 min) and gives the same engine id,
+  handles, claims and session names back (§4.10). It re-sends `watch` for watched tabs, because live
+  streams lived in the old worker. The pointer track (`pointer.js`) is worker memory and is lost on a
+  restart; the persisted position survives.
 
 ### 4.2 Agents are bad at CSS selectors
 
 **Consequence:** the ref system in `lib/refs.js`.
 
-`browser_snapshot` walks the accessibility tree, assigns `e1`, `e2`… to interactive nodes, and stores `ref -> backendNodeId` keyed by tab. Interaction tools accept refs.
+`browser_snapshot` walks the accessibility tree, assigns `e1`, `e2`… to interactive nodes, and stores
+`ref → {backendNodeId, sessionId?}` per tab. `resolveRef` rejects unknown refs and a URL change
+(hash ignored); navigation clears refs. A node inside a cross-origin frame carries its child
+`sessionId`, and `sessionForNode` looks it up from the table so no call site has to thread it.
 
-`resolveRef` rejects missing refs and non-hash URL changes, and navigation clears refs. However,
-`generation` is stored but not validated on interaction: each newer snapshot reuses `e1`, `e2`, etc.
-An old handle may silently resolve to a new node after another snapshot on the same URL. Use only
-the latest snapshot and treat generation enforcement as an unresolved defect (§8).
+**A ref names one element for good (EXT-03, fixed 2026-09-22).** v1 renumbered from `e1` on every
+snapshot, so an old ref could silently resolve to another element of a newer snapshot, another agent's
+included. Now a snapshot continues the page's numbering (`e1…e30`, then `e31…`), numbers are never
+reused on a page, and the last `KEEP_GENERATIONS` (4) snapshots EACH caller took of a page stay
+resolvable (`MAX_GENERATIONS`, 16, caps the table across callers). A ref from an older snapshot of your
+own, from another page (numbering and history start over when the URL changes) or for a removed element
+is refused with "take a fresh snapshot". Retention is per caller because reads are never queued: a
+second agent snapshotting every 100 ms used to evict the working agent's refs mid-action (live round 4).
+Replay's reserved refs live apart (`withPrivateRefs`).
 
-### 4.3 Synthetic events fail on real applications
+### 4.3 Synthetic events fail on real applications — and machine-timed ones are a tell
 
-**Consequence:** click/key/drag paths use CDP input dispatch. Some operations also use DOM APIs:
-focus/selection, upload assignment and the explicit programmatic scroll fallback.
+**Consequence:** all input is trusted CDP input (`Input.dispatchMouseEvent/KeyEvent`, `isTrusted ===
+true`, the browser's own hit test), at one of three input levels (`lib/humanize.js levelFor`):
 
-CDP input dispatch can deliver trusted events through the browser's input pipeline.
-`element.click()` and `dispatchEvent()` produce untrusted events, which some applications reject.
-Trusted delivery alone does not prove an action achieved its intended result or bypass every
-site-specific restriction.
+- `off` — v1's direct dispatch, event for event (one move, press, release; `scrollIntoView` first;
+  12 ms per typed character; a 12-move drag). Kept exactly so flows debugged against it behave the same.
+- `human` — curved, Fitts-timed paths from the pointer's last position to a sampled point inside the
+  element (never the exact centre), minimum-jerk timing, 8–16 ms sampling, hover dwell, a 60–140 ms
+  press hold, **pressure 0.5 while a button is down** (CDP's default 0 was a one-property tell in 50/50
+  runs), off-screen targets reached with **wheel notches**, per-key rhythm with the odd corrected typo
+  (never in password fields). Humanized pointer events go to the PAGE session in top-level
+  coordinates, even for a node in a cross-origin frame — the browser routes them, as it routes a real
+  mouse — so there is one pointer per tab. `off` keeps v1's routing through the frame's session.
+- `stealth` — `human` minus every shortcut a page can see: no `DOM.focus` (focus is earned by a
+  click), no programmatic scroll fallback (fail and say why), no `Input.insertText` unless
+  `fast:true`; `clear:true` uses only keys a person would press (select-all chord, Backspace, then End
+  and one Backspace per remaining character); `select` = a humanized click, Escape to close the native popup,
+  then keyboard selection.
 
-Specific care taken:
+Kept from v1, and still load-bearing:
 
-- `pointFor()` scrolls into view, then re-reads geometry, then falls back to `getBoundingClientRect` for transformed or zero-size elements.
-- `checkObscured()` uses `elementsFromPoint` — the **plural** form, deliberately — and, when something else would receive the click, names the covering element rather than failing vaguely. The singular `elementFromPoint` cannot see pseudo-elements: it reports the element that generated them, so a `::after` click-shield is indistinguishable from a harmless wrapper. It also treats an ancestor on top as an obstruction, not a pass: an event on an ancestor bubbles *away* from the target. A descendant on top is fine, because that bubbles *into* it. `<label>` is the one allowed exception. See the v1.0.9 change-log entry — this function had a false negative for eight versions.
-- Typing defaults to per-character key events. `fast: true` uses `Input.insertText`. Both are needed, and v1.0.15 measured the difference on a digit-only field: per-character typing of `12ab34` landed `1234` (the page rejected the letters, as it would for a human); `fast` let `cd` straight through. `insertText` is fine for React/Vue controlled inputs and wrong for masked, autocomplete, and key-filtered fields.
-- `clear: true` selects through `this.select()` rather than Ctrl+A, then deletes with a real key event, then VERIFIES the field is empty and throws if it is not. A key chord is blockable by the page; a selection is not an edit, so making it directly costs nothing. See the v1.0.15 entry.
-- Chords (Ctrl+S) must use `rawKeyDown` with no `text`, or the page receives a literal character instead of the shortcut.
-- `drag()` interpolates 12 intermediate moves; HTML5 DnD and most drag libraries ignore a single source→target jump.
-- Cross-origin node refs carry a child `sessionId`. Frame-aware input uses that session's coordinate space; the obsolete cross-target offset machinery was removed in v1.7.16. Do not restore it based on the old v1.4.0 account. Not all inspect/record/replay operations yet propagate child-session context (§8).
+- `checkObscured()` uses `elementsFromPoint` (plural, so `::after` shields are seen) and treats an
+  ancestor on top as an obstruction; `<label>` is the one exception. v2 first compares the point with
+  the element's own `getClientRects()`: an element that simply MOVED gets "no longer where G9 measured
+  it … nothing was pressed", not an overlay accusation (round-3 fix).
+- Typing defaults to per-character key events; `fast:true` uses `Input.insertText` (fine for
+  controlled inputs, wrong for masked/filtered fields — v1.0.15). `off`/`human` `clear:true` select
+  through the DOM, then delete with a real key, then **verify** the field is empty and throw if not.
+- Command chords use `rawKeyDown` without `text`; Shift alone gives `keyDown` with the shifted text.
+  Modifier keys carry `location` (1 left, 2 right).
+- Explicit `x`/`y` for a humanized pointer must be inside the viewport; outside it the call is refused
+  before anything is dispatched (scroll first, or act by ref).
+- `perform()` (the dispatcher) keeps an absolute schedule, but an interval that ends in a press,
+  release, key or wheel notch keeps at least **80 %** of its planned length, and overdue pointer moves
+  are merged instead. Without that, a slow transport (CfT: 35–54 ms per `mouseMoved`) collapsed 60–140
+  ms press holds to 1.9–8.1 ms (20/22 CfT runs, live round 2).
+- Scrolls return only once the page has stopped moving (a hover or click right after a scroll used to
+  aim at stale geometry), and a reach settles before aiming.
 
 ### 4.3a A dispatched event is not a delivered event
 
-**Consequence:** the input witness in `tools/interact.js`.
+**Consequence:** the input witness in `tools/interact.js` (v1's EXT-01 defect is fixed; the v1
+`ReferenceError` account in §9 is history).
 
-Historical headed runs reported input commands succeeding without a page event. That observation
-does not establish an immutable prohibition on all background input. In the 2026-09-12 isolated
-Edge 152.0.4191.66 headless audit, typing changed an input from `A` to `AB` while the tab still
-reported `visibilityState: "hidden"`. Minimized, occluded and locked-desktop cases were not tested.
+- **Armed first, in G9's world.** Before any input goes out, a trusted-events-only capture listener is
+  armed in the isolated world `g9` — ON the target element when there is one (`callInWorld`), so the
+  page can say *where* the event landed, else on the frame (and attached cross-origin frames, for keys).
+  If it cannot be armed, nothing is dispatched: "G9 does not act without a way to tell".
+- **Timed from the end of dispatch.** The page is armed with a 10-minute safety net; after dispatch
+  `settle()` re-times the verdict to `WITNESS_TIMEOUT_MS` (1.5 s) from that moment. v2.0's first
+  witness timed out from arming: an Engine 2 click whose dispatch took ~64 s on a throttled tab was
+  reported "not delivered" after 85 s although the page had it (live round 2, 3/3). If the safety net
+  does fire, the page answers `expired`, which reads as "cannot tell", never as "not delivered".
+- **Presses are witnessed by `pointerdown` OR `mousedown`**: a page that cancels `pointerdown` gets no
+  `mousedown` by the Pointer Events spec, and that delivered click used to be reported lost.
+- **An outcome outranks events:** typing verifies the field's value (`verify`).
 
-The intended witness installs a capture listener for trusted events, then checks its promise after
-dispatch. **The current implementation is broken:** `watchForInput()` puts `}, { sessionId })`
-inside the page's expression instead of routing its initial `Runtime.evaluate` through send options.
-On an ordinary page this throws `ReferenceError: sessionId is not defined`. The returned exception
-has no promise handle, so the checker returns `null`; `witnessed()` accepts `null` as "cannot tell"
-and returns the dispatch result. This was reproduced through the real extension transport.
+The delivery states, and how each reaches the agent:
 
-Until fixed, do not equate a successful `browser_interact` reply with verified delivery. Replay has
-additional outcome checks, but those do not repair the generic input witness. After fixing it,
-verify both delivery and the intended effect, without assuming a masked field must retain every
-character sent. Child-frame witnesses must run in the same realm as their events.
+| State | Meaning | Returned or thrown |
+|---|---|---|
+| `delivered` | the target (or, untargeted, the frame) received a trusted event of the expected kind, or the outcome was verified | result `delivery:"delivered"` |
+| `indeterminate` | no verdict (the document was replaced mid-action — usually the action took effect; a lost handle; the safety net) | result `delivery:"indeterminate"` + `deliveryNote`; the action is NOT repeated |
+| `missed` | the event reached the page at ANOTHER element (`hit` names it, with coordinates) | thrown; never retried — whatever that element does may have happened |
+| `not-delivered` | nothing reached the page; or the tab is HIDDEN and nothing was sent | thrown |
+| `partial` | the tab became hidden part-way: `sent`/`of` input events went out, the page's measured scroll delta is reported, an accepted event may still land later; a click whose button went down is `partial`, one with no press is `not-delivered` ("a click NOT made") | thrown |
 
-Reading and capture are separate from input. `Page.captureScreenshot` captured a valid image in the
-same audit with `hidden` and `hasFocus(): false`; the implementation does not use `captureVisibleTab`.
-The result does not guarantee fresh rendering in every lifecycle/window state. Video may have no
-frames, but headless is not categorically unsupported. See [README background behavior](README.md#background-tabs-focus-and-capture).
+`runTool` puts the state at the start of the error text — `[delivery: missed; hit <div#x>] …`,
+`[delivery: not-delivered; tab hidden] …`, `[delivery: partial; 3 of 12 input events sent; tab hidden] …`
+— because every relay keeps only the text; the daemon protocol also carries `delivery`, `hit`,
+`hidden` as fields (DAEMON_PROTOCOL §3/§4), and the shim's MCP error shows the tagged text.
+
+**Hidden pages.** Every input action first asks the page's `visibilityState` (one round trip, in G9's
+world). A hidden page gets nothing: pointer and wheel input measurably does not arrive; key events
+would (10/10 hidden pages, live round 3), and refusing them is G9's **policy** — nobody can see what
+they do, and a type's focus click would be lost. The message names the agent's own remedies:
+`browser_tabs action:"focus"`, `"popout"` (keep it un-minimized) or `"handoff"`. Reads keep working on
+hidden tabs; screenshots of a background or off-screen tab took 44–487 ms, but on a minimized window
+`Page.captureScreenshot` gave no answer within 5 s (matrix, live round 3). On a launched **headless** engine, a tab behind a page-opened tab is first
+brought to the front (`platform.tabs.ensureFront`); headed engines and the extension never rearrange
+windows, they report.
 
 ### 4.4 Tool definitions are re-sent on every request
 
-**Consequence:** 14 grouped tools, not ~50 flat ones.
+**Consequence:** 15 grouped tools, not ~50 flat ones: `browser_status`, `browser_engine` (new in v2),
+`browser_tabs`, `browser_snapshot`, `browser_interact`, `browser_navigate`, `browser_inspect`,
+`browser_console`, `browser_network`, `browser_diagnose`, `browser_screenshot`, `browser_emulate`,
+`browser_dialog`, `browser_recording`, `browser_issue`. Each takes an `action`/`what` discriminator;
+new capabilities become actions, not tools. `setup/selftest.mjs` asserts 15 (`tools/list`, and through
+the v1 forwarder). Token counts depend on the schemas, model and client; no benchmark is maintained.
 
-Each takes an `action` or `what` discriminator. Keeping related actions in fourteen tools limits
-definition overhead. Token counts depend on the current schemas, model and client; old comparisons
-with other MCP servers are not maintained benchmarks.
+### 4.5 The person must stay in charge: Stop, activity, ownership
 
-### 4.5 The user must be able to trust this
+v2 removed the modes that v1 treated as a safety boundary (D6). What remains is operational, and it
+must work everywhere a capability can be reached:
 
-**Consequence:** pinned mode, the activity log, and the Stop button are not decoration.
+1. **Stop is checked at every layer that can act.** Global halt (the panel's Stop, reported by the
+   extension; or the desktop's Stop) and per-agent halts live in the daemon registry. The daemon
+   refuses every tool except `browser_status` while halted (including tools it answers itself, such as
+   `browser_engine`); a call waiting in a tab queue is checked again at its turn; the halt is mirrored
+   into the extension (`{type:'halt'}`) and into launched engines, so in-flight Engine 2 work stops at
+   its next CDP command. Inside each engine `runTool` checks it at the router (tab management is not
+   CDP) **and** `cdp.send()` checks it; the dispatcher checks it between steps, so humanized typing
+   stops mid-word (measured: 37–94 ms after Stop, live round 3).
+2. **Only a person resumes.** Admin ops (`resume`, `resumeAgent`) are UI-only; an agent gets "Admin
+   operations are for the G9 desktop app" — and since 2026-09-22 the `ui` role itself is only accepted
+   from a NATIVE connection (no Origin header), so a browser extension cannot say hello as the
+   desktop and rewrite the settings the desktop's updater reads. A Stop pressed while the extension
+   was disconnected is re-asserted after the welcome; the extension now also tries to connect at once
+   when the Stop could not be sent (instead of waiting out a backoff of up to 60 s), and the panel
+   says "Stopped in this browser. The G9 daemon is not connected; it will be told when it connects"
+   rather than "Agents stopped".
+   Stop blocks AGENTS, not the person: the side panel's own Stop-and-save, issue screenshot and tab
+   video keep working while Stop is on (`lib/cdp.js asPerson` — reads, captures and clean-up on that
+   tab only, never input and never a navigation), and the panel shows the recording that is still
+   running instead of calling the tab "another tab".
+3. **Activity is logged once per call.** Every call is recorded (tool, tab, ok, detail, duration,
+   caller); the daemon reports agent calls itself and drops the engines' `relayed:true` echoes, so the
+   desktop and the panel show each call once and the side panel's own actions still appear (F7).
+4. **Ownership.** A tab another connected agent owns is refused to your mutating calls with the owner's
+   name; `claim force:true` takes it over and is logged as `takeover`. `browser_engine stop` refuses an
+   extension engine (G9 never closes the person's browser) and a launched engine where another agent
+   owns a tab or that another client holds with `acquire`, unless `force`.
 
-Without pinned mode, switching to your email mid-task hands the agent your inbox. `tools/tabs.js → resolveTarget()` is a **safety boundary**, not a convenience helper — it refuses rather than guessing, and in pinned mode it rejects `tabId` arguments that point elsewhere.
+Stop acts at guards and step boundaries; it cannot undo side effects. After Stop, G9 still ends and
+releases its own witness listener: `interact.js cleanupSend` sends that clean-up on the live session,
+bounded at 2 s, because taking G9's listener away is not acting on the page; only if that fails does
+it stay armed until its 10-minute safety net (§8). The general rule from v1
+still applies: a check that lives at one layer only has a way around it.
 
-But `resolveTarget()` only guards actions that happen *inside* a tab, and it is reached only by tools declaring `needsTab`. `browser_tabs` deliberately does not declare it — there is no target to resolve — which left the boundary open from the side (v1.0.7). Three rules close it, and all three belong together:
+### 4.6 The platform seam (rule R2)
 
-1. **`tools/tabs.js → requireTabControl()`** is the second half of the boundary (`requireMultiMode` remains an alias). Pinned/Follow refuse agent tab-management mutations. Workspace permits them within its host allowlist; Multi permits broader control. Explicit `"*"` allows all eligible hosts, whereas `[]` falls back to Pinned. Session names never grant extra access or create isolated cookie stores.
-2. **The halt check lives at the router**, in `sw.js → handleBridgeMessage()`, not only in `cdp.send()`. `chrome.tabs.*` is not CDP, so a check that low cannot see it. `browser_status` is the single exception (`allowWhenHalted: true`), because an agent that cannot ask *why* it is failing will guess.
-3. **Pinning does not clear `halted`.** `pinTab()` takes `{ clearHalt }`, passed only by the side panel's own commands. A stop is a user decision and only a user gesture lifts it.
+Nothing under `extension/tools/`, `extension/humanize/` or the shared parts of `extension/lib/` may
+reference `chrome.`, `browser.`, `globalThis.chrome`, `indexedDB`, `OffscreenCanvas`,
+`createImageBitmap`, `FileReader`, or import `node:` modules. Everything platform-specific goes through
+`extension/lib/platform.js`, which statically imports BOTH implementations and exports one:
+`platform-extension.js` (chrome.*, IndexedDB, OffscreenCanvas) when `chrome.debugger` exists, else
+`platform-cdp.js`. Allowed exceptions: `platform-extension.js`, `sw.js`, `lib/transport.js`,
+`panel/**`. No top-level `await` anywhere under `extension/` (service workers forbid it), and
+`platform-extension.js` must evaluate cleanly where `chrome` does not exist (the daemon imports it).
+Page-side code inside strings passed to `evaluate`/`callOnNode`/`inWorld` is not a violation.
+`setup/unit/seam.test.mjs` enforces the rule with a tokenizer-based source scan plus a Node smoke
+test; extending `platform.*` means changing both implementations and ARCHITECTURE_V2 §3.
 
-Stop acts at guards/step boundaries; it cannot undo side effects or cancel every already-dispatched
-operation. A visible target is operational advice, not a replacement for target-scope enforcement.
+### 4.7 Isolated worlds only (rule R4)
 
-The general shape: a permission check that lives at one layer only is a permission check with a way around it. Ask where else the same capability can be reached.
+Everything G9 evaluates for itself — the witness, the recorder and its binding, the locator engine,
+snapshot text extraction, `qa.js` reads, replay's element resolution, the navigation idle watcher,
+handoff storage reads, emulation reads — runs in the isolated world `g9` (`lib/world.js`), never in
+the page's main world. v1 left `__g9loc`, `__g9target`, `__g9rec` and the recorder binding on
+`window`, where any MutationObserver or bot detector could see them. Context ids restart per renderer
+process, so a cached id can point at a different context (even the main world) after a cross-process
+navigation: every evaluation carries a guard (`__g9world` token) instead of trusting the cache, with
+one transparent retry. `browser_console action:"evaluate"` is the one deliberate main-world call — the
+agent is asking about the page's own JavaScript. Measured after the whole live suites: no `__g9*` or
+binding names in the main world (Engine 1: 1233 own-property names unchanged after recording + replay;
+Engine 2: 0 names beyond a pristine window). The cursor is never drawn in the page either (D9).
+
+### 4.8 Stealth levels, and the Runtime rule
+
+A stealth level (`off` / `human` / `stealth`) is set per launched engine or browser context (D10); in
+the extension it is the panel's Input setting. `docs/STEALTH.md` is the owner's guide.
+
+- **Runtime is never enabled at `stealth`** (`cdp.js AUTO_ENABLE`, `engine/stealth.js
+  autoEnableDomains`), in page sessions and in child sessions. Enabling it makes the renderer serialise
+  console arguments, which a page can observe (a getter on a logged `Error` is read twice with Runtime
+  enabled — the probe the stealth self-test uses). Costs, stated in results: no page console capture
+  (`browser_console` says so; `Log` still gives browser-side entries), evaluation only through
+  isolated worlds, the recorder's binding added by context id.
+- **Decision D-a: the `AutomationControlled` switch at stealth only.** `launchArgsFor('stealth')`
+  = `['--disable-blink-features=AutomationControlled']`; `launchBrowser` refuses it in `extraArgs` at
+  `off`/`human` (those levels make no claim about the environment and say "navigator.webdriver is
+  true" in `launchWarnings`), and refuses `--enable-automation` always. Measured: webdriver `false` in
+  40/40 stealth runs (a native getter, not an own property) and `true` in 14/14 human controls (live
+  round 3).
+- **Environment at stealth** (Engine 2): headless screen with a work area; a warm persona profile
+  whose languages follow its locale; timezone/locale overrides applied to held targets before their
+  first script, including cross-site iframes and popups (§4.11); Widevine kept (no
+  `--disable-component-update`); a signed-in profile refused; a context locale in another language than
+  the profile refused; screenshots that would resize the viewport refused (a full page taller than the
+  viewport; elements are brought in with the wheel and clipped inside the viewport).
+- **Decision D-b: the stricter level wins.** The effective input level is the stricter of the
+  call's `humanize` (else the tab's default) and `platform.settings.stealthFor(tabId)`, order off <
+  human < stealth. In the extension `stealthFor` is `'stealth'` only when the panel says Stealth, else
+  `'off'` — so **only Stealth is a floor**: with the panel at Human or Direct an agent's
+  `humanize:"off"` gets direct input; with the panel at Stealth every action gets stealth input.
+  Results carry `humanize {level, profile, seed, raisedFrom?, stealthLevel?}` when a level was raised.
+- Consistency beats spoofing: G9 never overrides the UA, Client Hints, platform, plugins or WebGL.
+  What stays detectable (the HeadlessChrome UA, the Engine 1 infobar, …) is in §8.
+
+### 4.9 Humanize is pure and deterministic
+
+`extension/humanize/` decides WHAT a hand would do and WHEN, as a timed list of steps, from a seed:
+no I/O, no timers, no globals, no platform (R2 applies). `createRng` is mulberry32; every planner takes
+the RNG first. Every humanized result carries its `seed`; passing it back (`seed`, the runner's
+`--humanize-seed`) reproduces the identical plan FROM THE SAME POINTER POSITION and viewport — a
+plan's first step starts where the last action left the pointer on that tab, so a replay homes the
+pointer to a seed-derived point before step 1 and reports it as `pointerStart` (2026-09-22), and
+replay records `humanizeSeed`. Only
+`extension/lib/humanize.js` turns plans into `Input.dispatch*`, adding the three things a pure library
+cannot have: time (`performance.now()` against the plan's absolute `at`), Stop between steps, and the
+pointer track. So delivered timing is the plan plus transport latency, bounded by the 80 % rule
+(§4.3). Profile values live in `extension/humanize/profiles.js` (`off`, `human`, `stealth`), not in
+code paths; calibrated profiles are stored under `humanize:profile:<name>`. `setup/unit/humanize.test.mjs`
+checks determinism per seed, every distribution's bounds over 2000 random plans, no teleports, ≤ 1 px
+press/release drift and no typos in password fields.
+
+### 4.10 One daemon; handles and ownership are the daemon's
+
+- **Handles.** Tab ids an agent sees are daemon-wide integers. Engine 2 tabs are born with one
+  (`platform-cdp` `allocTabId` → registry). Engine 1 tabs are Chrome tab ids mapped `(engineId,
+  chromeTabId) ↔ handle`; the router rewrites every numeric `tabId`, `openerTabId` and `tabIds[]`, at
+  any depth, both ways (never inside data keys such as `value`, `har`, `spec`, `variables`). A handle of
+  another engine is refused before anything is sent.
+- **Resolution.** `args.tabId` → `args.session` → the caller's current tab → the default engine's
+  current tab. Every agent has its own current tab (set by open, attach, focus, handoff, session). A
+  default is never a tab another connected agent owns. Inside an engine, `tools/tabs.js resolveTarget`
+  follows ARCHITECTURE_V2 §4.1 and refuses rather than guesses.
+- **Ownership and queues.** First mutating call claims; reads (`isReadOnly`) are never refused and
+  never queued — and `browser_screenshot` is a read only for `area:"viewport"`: an element or
+  full-page capture scrolls or resizes the page, so it claims the tab and queues like any action
+  (2026-09-22). Mutating calls on one tab run one at a time in arrival order (`browser_dialog` is
+  exempt, it is how a queue stuck behind a dialog is freed); a disconnect releases claims; a dialog
+  fails every pending call on its tab at once, scoped to that tab. At a queued call's turn — and at
+  the moment it gets its maxParallel slot — liveness, the halt and ownership are checked again, so a
+  call queued behind a long one never runs for an agent that left or on a tab that changed hands.
+- **Parallelism.** `settings.maxParallel` (default 8) limits concurrent MUTATING Engine 2 calls; waits
+  (`navigate wait`, `wait_download`, `tabs wait`) hold no slot (a waiting agent used to block others:
+  7.6 s for a 67 ms click, live round 2).
+- **Identity across reconnects (D-c)**, as in §4.1. A hello that races the old socket supersedes it;
+  an extension closed as "superseded" does not reconnect by itself (two browsers sharing a copied
+  profile would otherwise displace each other in turn).
+
+### 4.11 Engine 2 holds every new target until it is prepared
+
+`platform-cdp` runs browser-level `Target.setAutoAttach({autoAttach:true, waitForDebuggerOnStart:true,
+flatten:true})`, and forces `waitForDebuggerOnStart:true` on the tool layer's page-level auto-attach
+too. Every target that attaches is resumed with `Runtime.runIfWaitingForDebugger` right after the
+daemon's `prepareTab`/`prepareChild` hooks have SENT their commands (bounded by `PREPARE_BUDGET_MS`,
+3 s); non-tabs are resumed at once; nothing is ever left paused. Why (all measured on Edge and Chrome
+153, live round 3):
+
+- With `waitForDebuggerOnStart:false` (the plan's original setting) Chromium still held a
+  `window.open()` popup until somebody resumed it, and the opener wedged: the click that opened it
+  never returned (raw probe: 15 s; product: failed after 21–25 s in 18/18 stealth runs and 7/7 Engine 2
+  runs), the popup stayed at `url ''`, and the opener's next goto timed out. Resuming held targets:
+  the click returns in 36–48 ms.
+- A tab the page opens must get its persona (timezone, locale) and the tool layer's domains before its
+  first document, or its first load's network is missed and its first script reads the host's time
+  zone. A held target answers nothing while held (`Network.enable` did not return in 8 s) but applies,
+  in order, every command sent before the resume — so the hooks SEND and never await.
+- A cross-site iframe runs in its own renderer: per-page `Emulation.setTimezoneOverride` does not reach
+  it (it reported the host's time zone and `de` under a de-DE/Europe/Berlin persona, 7/7 runs), so the overrides
+  go to the held child's own session. A cross-site popup starts in the opener's renderer (a second
+  locale override there is refused) and gets its locale again when its own document commits.
 
 ---
 
-## 5. Security model
+## 5. Security model: the local trust decision (D7)
 
-Read this before changing `ws-server.js`.
+**Owner decision (plan D6/D7, 2026-09-21): the deployment is local and trusted.** Attaching a tab gives
+full access to every tab, title, URL and cookie; there is no token, no pairing, no mode, no allowlist,
+no cookie scoping and no title withholding. v1's 2026-09-01 decision still applies: work whose purpose
+is defending against a malicious local extension, user or process (bridge impersonation, local secret
+theft, redaction, encrypted evidence, exact extension-id allowlists) is out of scope unless the
+deployment model changes. Do not re-propose it.
 
-**Project threat-model decision (2026-09-01): this is trusted-local QA tooling.**
-The localhost bridge, browser profile, installed extensions, and local users are
-inside the current deployment trust boundary. Work whose primary purpose is to
-defend against a malicious local extension/user/process, bridge impersonation,
-local secret theft, or hostile local software is intentionally out of scope.
-Do not repeatedly propose redaction, encrypted evidence, mandatory pairing,
-exact extension-ID allowlists, takeover authorization, or another local
-permission system unless the deployment model changes. Existing safeguards
-below stay because they work and support user control; this decision does not
-claim they make localhost a hostile-environment security boundary.
+What is still refused, and why each costs the owner nothing:
 
-| Layer | Mechanism |
+| Refusal | Why it stays |
 |---|---|
-| Network exposure | Bridge binds `127.0.0.1` only. **Never** change to `0.0.0.0`. |
-| Origin validation | Only `/^(chrome\|edge\|moz)-extension:\/\/[a-z0-9-]+$/i` may complete the WS handshake. A malicious page's `new WebSocket('ws://127.0.0.1:8765')` sends its own `https://` origin → 403. **This is the primary defence.** Asserted by self-test #3. |
-| Single client | A second connection displaces the first rather than silently sharing a session. |
-| Protocol robustness | A malformed or oversized frame drops the connection (close 1009), never the process. It throws inside a socket `data` handler, where an uncaught exception would kill the bridge. Asserted by self-test #11. |
-| Optional token | `G9_TOKEN` env var + side-panel field, compared with `crypto.timingSafeEqual`. Off by default. |
-| Scope | Workspace is the default and constrains eligible hosts; Pinned targets one tab; Follow uses the active eligible tab; Multi permits broader tab control. Enforced by target resolution and `requireTabControl()`. See §4.5. |
-| Cookie scope | `chrome.cookies` sees every domain in the profile, not just the attached tab. Outside multi mode, `browser_inspect what:"cookies"` refuses a `url` from another origin — otherwise a pinned agent could read live session cookies for any site the user is signed in to (v1.0.14). |
-| Disclosure | Outside multi mode, `browser_status` lists other tabs by **origin only**. Titles and full URLs carry subject lines, document names, and search queries; handing over all of them would give back most of what pinned mode protects. |
-| Kill switch | Stop sets `halted`, checked in `cdp.send()` *and* at the router in `sw.js`. Only `browser_status` answers while halted. Nothing the agent can call clears it — pinning a tab used to, which made the button self-defeating. |
-| Auditability | Every tool call is logged with args, result, and duration, visible live in the panel. |
-| Supply chain | **Zero dependencies.** Deliberate: nothing with this much access should carry transitive packages. |
+| The daemon binds `127.0.0.1` only. **Never** `0.0.0.0`. | Prevents an accidental LAN exposure; loopback costs nothing. |
+| WebSocket upgrades whose `Origin` is `http(s)://…`, the literal `null` (a sandboxed frame or a `file://` page) or any unknown scheme get 403 — pages on `127.0.0.1`/`localhost` included. Extension origins and a MISSING Origin (shim, runner, desktop) are accepted. | A web page in the person's own browser is not local: without this any site could `new WebSocket('ws://127.0.0.1:8765/g9')` and drive every tab. A page cannot forge its Origin; native clients send none. (A deviation from the plan's wording, recorded in ARCHITECTURE_V2 §0.) |
+| `/health` CORS header only for extension origins. | A blanket `*` would let any page probe for the daemon and read its home path. |
+| A v1 extension is refused (close 4001, "reload the v2 extension"); a v1 bridge on the port is named by pid, never displaced. | Mixed versions fail loudly instead of half-working. |
+| Admin ops (halt/resume, settings, schedule, extension install, shutdown) are UI-only. | An agent can never resume a Stop or reconfigure the machine. |
+| Malformed/oversized frames (64 MiB cap) close that connection (1009), never the daemon. | A crash inside a socket handler would look like a daemon that never started. |
+| `launchBrowser` refuses `--enable-automation` (always), `--remote-debugging-port/-address/-pipe/-io-pipes`, the switches owned by an option, `AutomationControlled` below stealth, and a default user-data-dir (or one inside it, junctions resolved). | Engine 2 has no debugging port anything else could reach; it never identifies as automation; it never touches a person's browser profile (Chrome 136 rule, App-Bound Encryption). |
+| A profile signed in to a browser account is refused at stealth and warned otherwise. | Its synced passwords, history and extensions would enter agent runs (§9 v2.0.0 entry). |
+| `browser_engine stop` refuses an extension engine, and a launched engine with another agent's tab or another client's `acquire` hold (unless `force`). | G9 never closes the person's browser; one agent does not end another's run silently. |
 
-Extension permissions and why each is needed:
+Supply chain: **zero npm dependencies** in `extension/`, `engine/`, `daemon/`, `mcp/`, `lib/`,
+`runner/` (D11); the WebSocket server, client and MCP are hand-written. Only `desktop/` has
+dependencies (electron, electron-builder, electron-updater). The installer is **not code-signed**
+(no certificate available; SmartScreen warns on first run).
+
+Extension permissions (manifest 2.0.3, `minimum_chrome_version` 125 — flat child sessions):
 
 | Permission | Reason |
 |---|---|
-| `debugger` | The entire CDP channel. The core of the tool. |
-| `tabs` | Tab list, titles, URLs. |
-| `activeTab` | Resolving "the current tab" on user gesture. |
-| `cookies` | Application-panel cookie reads, including HttpOnly. |
-| `storage` | Session and local state. |
-| `unlimitedStorage` | Durable recording/evidence storage; does not remove bounded buffers or every storage API's limits. |
+| `debugger` | The CDP channel. The core of Engine 1. |
+| `tabs`, `activeTab` | Tab list, full titles/URLs, attach, popout. |
+| `cookies` | Cookie reads (HttpOnly included) and the handoff export. |
+| `storage`, `unlimitedStorage` | State, recordings, issues; attachment bytes in IndexedDB. |
 | `alarms` | Service-worker revival heartbeat. |
 | `sidePanel` | The control UI. |
-| `<all_urls>` | Attaching to arbitrary user pages. |
+| `downloads` | Engine 1 download tracking (EXT-02; `Browser.setDownloadBehavior` is not reachable through `chrome.debugger`). |
+| `<all_urls>` | Attaching to arbitrary pages. |
 
 ---
 
 ## 6. Component reference
 
-### `bridge/src/server.js` — deliberately dumb
+Signatures are in ARCHITECTURE_V2 §3–§11; this section says what each module is for and what must
+not be broken.
 
-Owns no page DOM/input logic. It correlates request ids, normalizes responses, reports transport
-errors, discovers project configuration/ports, and dispatches filesystem flow-library operations.
+### 6.1 Extension — host and seam
 
-Rationale: the extension is the only side that can actually see the browser, so putting logic in the bridge would split truth across a process boundary. If a click misbehaves, it is wrong in the extension — always. Keep it that way.
+- **`extension/sw.js` — Engine 1's host.** Lifecycle (install/update, the welcome tab once per
+  version, heartbeat, auto-attach), the transport to g9d (`call` → `runTool`, halts, `reload` when
+  idle, `watch` streams frames and pointer samples), and the panel commands (ARCHITECTURE_V2 §13). It
+  reads `dev-daemon.json` (or v1's `dev-bridge.json`) before the first connect — the isolated live
+  test's private daemon address. No tool logic lives here any more.
+- **`lib/platform.js`, `platform-extension.js`, `platform-cdp.js` — the seam (§4.6).** The extension
+  side is thin wrappers over `chrome.*`; its `settings` cache the panel's Input level synchronously
+  (D-b semantics, §4.8). `platform-cdp` supports several launched browsers at once: tab handles from
+  the daemon, page sessions from browser-level flat auto-attach, the child → tab map updated
+  synchronously before any listener runs, held targets (§4.11), `ensureFront`, real window state via
+  `Browser.getWindowForTarget`, cookies over `Storage.*` per browser context, downloads over the
+  BROWSER session (`Browser.setDownloadBehavior allowAndName`, attribution by frame id; a popup's
+  download is attributed to its watched opener with `viaTabId`), and `platform.image` decoded inside a
+  hidden utility page of the launched browser (Node has no image decoder and v2 has no dependencies).
+- **`lib/cdp.js` — the choke point.** `send()` with the halt check, attach check, per-command
+  timeouts (`timeoutFor`; slow commands such as `Page.captureScreenshot` 45 s), named timeout errors
+  (a navigation timeout names the server, not "stuck"), the auto-enable set per stealth level, and
+  `sendOnLiveSession` for per-frame acks. v1's functions kept their signatures; v2 added exports
+  (`timeoutFor`, `COMMAND_TIMEOUT_MS`, `SLOW_COMMANDS`, `NAVIGATION_COMMANDS`, `timeoutMessage`, `asPerson`,
+  `attachHeld`, `forgetTab`, `applyStealthLevel`, `runtimeEnabledTabs`), and `sendOnLiveSession` takes a
+  `sessionId` (ARCHITECTURE_V2 §4.1b).
+- **`lib/state.js`** — state over `platform.storage` (no modes: `currentTabId`, `attachedTabs`,
+  `sessions`, `inputMode`, `autoAttach`, `dialogs`, daemon link state, activity), `serialize()`,
+  `migrateLegacySettings()` (removes v1 `settings.mode` once), `getAbout/setAbout`.
+- **`lib/store.js`** — recordings and issues in `storage.local`, attachment bytes and video frames in
+  `platform.blobs` (extension: IndexedDB `g9-attachments` v2, unchanged schema; daemon:
+  `G9_HOME/store/blobs`). Writes go through `serialize()`.
+- **`lib/transport.js`** (extension only) — one daemon, one port, path `/g9`; `/health` preflight so a
+  still-running v1 bridge is never displaced; "connected" means welcomed; stale-socket guard; a refusal
+  (`welcome.problem`, 4001) stops retrying until a person presses Reconnect; `instanceId`/`loadId`/tabs
+  in the hello (D-c); handoff requests default to 185 s.
 
-Environment variables: `G9_HOST` (default `127.0.0.1`), `G9_PORT` (explicit port pin), `G9_TOKEN`
-(empty), `G9_TIMEOUT_MS` (`60000`). Without a port pin the bridge chooses an available port in
-8765–8775 and registers its identity for discovery. The extension still connects to only one bridge.
+### 6.2 Extension — shared libraries
 
-**It does not exit when it cannot bind the port.** An MCP client that launched the bridge sees only that the process died and reports "Connection closed"; the reason, written to stderr, lands in a log file nobody opens. The stdio channel does not depend on the WebSocket port, so the bridge stays up, serves MCP normally, and returns `startupFailure` from every tool call — a message naming the port, whether the holder is another G9 bridge or an unrelated program, and how to fix each. It re-attempts the bind every 5s, so closing the other window heals the session without an editor restart. Asserted by self-test #12.
+- **`lib/world.js`** — the isolated world `g9` (§4.7): `contextFor`, `inWorld`, `callInWorld`,
+  `verifiedContextFor` (an id proven by the guard, for `Runtime.addBinding` by id), `callOnObject`.
+- **`lib/humanize.js`** — the dispatcher (§4.3, §4.9): `perform()`, `levelFor()` (D-b), per-tab seeds,
+  calibrated profile storage, the hidden-page checks and messages (`HIDDEN_REMEDY`), `MOUSE_PRESSURE`.
+- **`lib/pointer.js`** — the pointer position per tab (persisted) and the cursor track (10 000
+  samples/tab ring, in memory), in top-level CSS pixels on the `Date.now` clock that frames use.
+- **`lib/screencast.js`** — one `Page.startScreencast` per tab shared by consumers (`video:<issueId>`,
+  `watch`): the most demanding parameters win; frames are acked before fan-out, except for
+  `backpressure:true` consumers (the issue video: ack only after the frame is written, 5 s cap). An
+  orphan stream after a worker restart is acked and stopped.
+- **`lib/refs.js`, `lib/frames.js`** — refs (§4.2) and cross-origin child sessions: flat auto-attach
+  repeated on each child so nested frames are reachable; `browser_inspect frames` includes
+  out-of-process frames (a round-2 fix).
+- **`lib/locators.js`, `lib/signature.js`, `lib/flowspec.js`, `lib/visual.js`** — recorder identity,
+  regression memory and FlowSpec (§8b, §8c); `visual.js` decodes through `platform.image`.
 
-### `bridge/src/mcp.js` — hand-written MCP
+### 6.3 Extension — tools
 
-Implements `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`, `resources/list`, `resources/read`. Negotiates protocol version against `['2025-06-18', '2025-03-26', '2024-11-05']`, echoing the client's version when supported.
+- **`tools/index.js` — the shared runtime.** The `TOOLS` table and `runTool`: halted → resolve →
+  dialog (scoped to the call's own tab) → run → activity log; `isReadOnly` (stricter for
+  `console clear`, `network clear`, `diagnose performance reload`); `status({tabId})` reports THAT tab
+  (F4); the delivery tag on input errors (§4.3a). The extension and the daemon both call it: an agent
+  must never get a different result from the same call on another engine.
+- **`tools/events.js`** — the CDP event fan-out moved out of `sw.js`: console/network ingestion,
+  recorder bindings, dialogs, screencast frames, world invalidation, per-tab cleanup. Every handler
+  reports its own failure and never throws into the event source.
+- **`tools/tabs.js`** — target resolution without modes, `listTabs` (full titles/URLs, keyed by
+  `tabId`), attach, sessions, `waitForTab`, `popout` (Engine 1: `chrome.windows.create({tabId})`, the
+  renderer is kept; waits until the tab lists with its title, then reports `visible` from the page's
+  `visibilityState` about 600 ms later. Two callers, two rules since 2.0.3: the side panel's button
+  passes `focus:true` and its window comes up in front; an agent's is created unfocused and focus goes
+  back to the person's window only if the browser moved it. Default geometry: `popoutGeometry()`),
+  `handoffExport` (daemon-only), `realWindowState`.
+- **`tools/interact.js`** — click/double/right/hover/type/key/scroll/drag/select/upload at three
+  levels, the witness and delivery states, obstruction checks, hidden-page refusal, wheel-based reach.
+- **`tools/snapshot.js`** — accessibility tree, pruned (interactive roles always kept, unnamed
+  structure dropped, 900 emitted lines); `a11y+text` extracts text in G9's world; a tree with only
+  its root while the body has elements is asked for again (a CfT flake mitigation). Every regex escape
+  in injected code is doubled (self-test section 17).
+- **`tools/navigate.js`** — goto/reload/back/forward/wait with real conditions; at human/stealth a
+  post-load human idle (600–1500 ms, `humanIdleMs`). `timeoutMs` is the whole goto's deadline and
+  `Page.navigate` gets it (at least 20 s): v2.0 cut `Page.navigate` at a fixed 20 s and called a slow
+  server "stuck" (round-3 fix; measured: a 25 s time-to-first-byte now returns after 26 s).
+- **`tools/capture.js`** — screenshots; at human/stealth an element is brought in with the wheel and
+  clipped inside the viewport (no `captureBeyondViewport` resize, no `scrollIntoView`); full page
+  refused at stealth when taller than the viewport, taken with a `pageSaw` note at human; results carry
+  `pointer`; a capture over 10 s gets a cause (hidden, background, behind another tab, minimized).
+- **`tools/observe.js`** — console/network ring buffers (500 console entries, 400 requests, 512 KB per
+  text body, 8 MB of bodies per HAR, 4 000 characters per console entry at write time), cleared before
+  every navigation; on quota rejection the buffer keeps its newest quarter and says so. At stealth
+  `read` reports that page console capture is unavailable.
+- **`tools/inspect.js`** — dom/styles/box/storage/cookies/frames; any domain's cookies, full values
+  (a 929-character JWT comes back whole — v2.0 cut values to 77 characters, a round-2 fix).
+- **`tools/downloads.js`** — Engine 1 via `chrome.downloads` (attribution `exact`/`probable`/`unknown`,
+  file facts = the browser's record, no hash); Engine 2 via the browser session with file facts from
+  disk (size, sha256, magic bytes, sniffed type, `source:'disk'`). `verified:false` with the reason
+  when nothing could be checked; `watch_downloads` starts a fresh list.
+- **`tools/record.js`** — the recorder in world `g9` (script by `worldName`, binding by name and by
+  context id), raw input samples for calibration (`input-samples.json`: key classes and timing, never
+  text; nothing from password fields), a second start on a recording tab refused, `calibrateFromRecording`.
+- **`tools/replay.js`, `tools/qa.js`, `tools/netpin.js`, `tools/netrules.js`, `tools/issues.js`,
+  `tools/diagnose.js`, `tools/emulate.js`** — as in §8b/§8c and v1, moved onto the seam. Replay passes
+  `humanize`/`seed` and waits (500 ms quiet, 2 s cap) for late evidence after the last step
+  (`settledAfterLastStep`); `awaitQuiet` starts the quiet window only once a poll has seen no request
+  in flight (2.0.2). Issue video is a screencast consumer and stores `pointer-track.json`
+  (`g9-pointer/1`). `diagnose health` caps findings per severity (30/20/10); `performance` returns
+  aggregates only.
 
-Two things to preserve:
+### 6.4 `extension/humanize/` — the pure library
 
-- **stdout carries protocol frames only.** Any stray `console.log` corrupts the stream and the client disconnects with a parse error. All diagnostics go through `log()` → stderr.
-- **Tool failures return `isError: true` results, not JSON-RPC errors.** The agent needs to read the message and adapt; a protocol error looks like a transport fault and gives it nothing to work with.
+`prng.js` (mulberry32 + normal/log-normal), `profiles.js` (built-in `off`/`human`/`stealth`),
+`profile.js` (resolve/validate; `off` is the only direct level), `plan.js` (pointer start, target point
+sampling, `sequence`, `planGap`), `mouse.js` (Bézier path, Fitts duration, minimum-jerk, overshoot and
+correction, jittered sampling, tremor, clicks, drags), `wheel.js` (100 px notches in bursts, drift,
+optional overshoot), `keys.js` (US QWERTY key definitions, shifted characters, chords, `location`,
+typos from an adjacency table), `calibrate.js` (`fitProfile` from v1 raw events or the v2 recorder's
+samples), `index.js` (re-exports). Planners throw a `RangeError` for an off-screen target ("scroll it
+into view first"). Model limits are in §8.
 
-`normalizeToolResult()` converts a result carrying `dataBase64` into a proper MCP image block, so multimodal models see screenshots instead of a base64 wall.
+### 6.5 `engine/` — Engine 2
 
-### `bridge/src/ws-server.js` — hand-written RFC 6455
+- **`find.js`** — installed Edge/Chrome/CfT and their versions, read from the executable's PE version
+  resource (a staged update makes directories and manifests lie); `g9Home()`; the default-profile
+  guard (realpath, junctions).
+- **`cft.js`** — Chrome for Testing: pinned in `versions.json` (153.0.8010.52, sha256 trust-on-first-use
+  cross-checked with Google's MD5), downloaded with Range resume and an IPv4/IPv6 retry
+  (`storage.googleapis.com` answered HTTP 403 over IPv4 from this location; `HTTPS_PROXY` honoured),
+  extracted with `tar -xf` (pure-JS zip reader fallback, byte-identical on the real 205 MB zip),
+  installed atomically under a cross-process lock, one line per event in `engine-versions.log`.
+- **`launch.js`** — `launchBrowser`/`buildArgs`: the plan's switches plus the recorded deviations
+  (`msImplicitSignin` in `--disable-features`, `--disable-sync`, `--disable-component-update` omitted
+  at stealth and for warm, `--disable-frame-rate-limit` for CfT only, headless `--screen-info` with a
+  48 px taskbar and a maximized-size window), `--disable-features`/`--enable-features`/
+  `--disable-blink-features` merged into one switch each, the refusals of §5, argv recorded, a
+  profile already in use refused, `close()` → `{exit, killed, leftovers, profileRemoved, gracefulMs,
+  closeMs}`: `Browser.close`, up to `GRACEFUL_EXIT_MS` (30 s, sized from a measurement in 2.0.2) for a
+  clean exit, then a process-tree kill and sweep; `exit` is never null once the process is gone
+  (`{code:null, signal:null, gone:true}` when its exit event is late). `engine/README.md` explains
+  every switch.
+- **`pipe-cdp.js`** — CDP over fd 3/4: NUL-framed JSON decoded from raw Buffers (split UTF-8 and 24 MB
+  replies in 64 KB chunks are tested), ids, `sessionId` routing, 20 s default timeout with the
+  `SLOW_COMMANDS` table, every pending call failed at once by name when the browser exits.
+- **`profile.js`** — `G9_HOME/profiles/<name>/` + `<name>.json`; preferences merged only while no
+  browser uses the profile; `warm()` (a headed window for a one-time login); `signInState()` (booleans
+  only); `clearSessionRestore()` (CfT reopened the previous session's tabs on every relaunch).
+- **`stealth.js`** — levels, `autoEnableDomains`, `launchArgsFor` (D-a), `launchWarnings`,
+  `checkConsistency` (locale/timezone/Accept-Language).
+- **`firewall.js`** — Chrome for Testing has no Windows Firewall rule of its own, so the first launch
+  from each new executable path carries a warning that Windows may ask and that either answer is fine
+  (G9 uses a pipe, not a port); the paths already seen are kept in `G9_HOME/engines/firewall-seen.json`.
+- **`manager.js` — `EngineManager`, owned by the daemon.** Configures `platform-cdp` (handles, file
+  storage and blobs, the downloads `fileInfo` hook, broadcasts), wires `tools/events.js` as `sw.js`
+  does, imports every shared module lazily (a broken Engine 2 must not stop the daemon serving the
+  extension). Launch: sign-in check, persona (locale → profile languages, timezone), session-restore
+  cleared, the downloads-hub preference, one launch per profile at a time (`reuse`), stray start-up
+  pages closed and reported (`closedAtLaunch`), a headed window fitted to its screen's work area (size
+  only, never moved or activated). `#prepareTab`/`#prepareChild` (§4.11), contexts, tabs, the
+  parallelism gate, evidence runs for replays (`result.json` keeps warnings, steps, surprise count),
+  handoff import, `warm`, versions. `watch(tabId, on, consumerId)` runs the changes for one (tab,
+  consumer) through a chain of its own, in the order they were asked for, so the last request wins for
+  the whole watch: map, pointer subscription, watchdog and screencast (2.0.2).
 
-Full frame codec: FIN/opcode parsing, client unmasking, 16- and 64-bit lengths, continuation frames, ping/pong, close handshake, 64MB frame cap. Server frames are never masked, per spec.
+### 6.6 `daemon/` — g9d
 
-Written by hand so `git clone && node` works with no registry access, and so nothing with this much authority carries a supply chain.
+- **`g9d.mjs`** — the CLI (`--port`, `--home`, `--foreground`); a port held by another g9d exits 0
+  (two shims raced), held by anything else logs the holder and exits 1; a home another live g9d
+  already serves (`home-lock.js`, `G9_HOME/daemon.lock`) exits 0, naming that daemon's port
+  (DAEMON_PROTOCOL §8).
+- **`daemon.js`** — composition: WsServer → Registry → Router → extension relay | EngineManager;
+  admin ops; `daemon.json`; idle exit; the log (`G9_HOME/logs/daemon.log`, rotated at 5 MB). The
+  `watch` admin op answers `{watching:false, tabId, problem}` when a launched engine's stream did not
+  start, and `{watching:false, tabId}` when an unwatch overtook the start; the watcher and its run are
+  undone first (2.0.2).
+- **`ws-server.js`** — hand-written RFC 6455 (codec in `lib/ws-codec.mjs`), many clients, the Origin
+  rule (§5), inline ping answers, `/health`.
+- **`registry.js`** — clients, engines, handles, ownership, sessions, per-tab queues, halts, parked
+  extension engines (D-c). No I/O, unit-tested without sockets.
+- **`router.js`** — every call: halt → target → ownership → queue → relay (ids rewritten) or Engine 2;
+  what the daemon answers itself (`browser_status` overlay, `browser_engine`, `browser_tabs`
+  list/open/claim/release/popout/handoff/sessions, store-level recording/issue actions across both
+  stores); per-tool timeouts (`G9_TIMEOUT_MS`, default 120 s, as a floor raised per tool — replay 30
+  min, handoff 3 min, …; DAEMON_PROTOCOL §3); `deliveryFields`.
+- **`handoff.js`** — cookie conversion (Chrome → CDP shapes; expired skipped), the one-shot storage
+  seed script (world `g9`, top frame of that origin only), `NOT_TRANSFERRED` (in-memory state,
+  IndexedDB, service workers). The result's `storageCheck` counts what actually holds after load.
+- **`storage.js`** — `chrome.storage` semantics exactly (file-backed `local` written atomically and
+  coalesced; in-memory `session`) and `FileBlobs`.
+- **`evidence.js`** — `runs/<runId>/` (`engine.json`, `frames/`, `frames.jsonl`, `pointer.jsonl`,
+  `downloads.jsonl`, `result.json`), caps from `settings.evidence` (counted, not written, beyond them),
+  and `fileInfo` (size, sha256, magic bytes, sniffed mime) for downloads. `prune()` keeps the newest
+  `keepRuns` run folders and never touches an active one; its passes run one at a time through a
+  chain, and the delete retries Windows' EPERM/EBUSY (2.0.2).
+- **`scheduler.js`** — entries in `settings.schedule` (daily or every N minutes); a due entry runs the
+  runner as a child with the daemon's own `process.execPath` (under the desktop: G9.exe as Node);
+  accepts the runner's and the desktop's entry shapes. Enabled entries hold off idle exit.
+- **`settings.js`** — `G9_HOME/settings.json`: port, defaultBrowser, headless, humanize, stealth,
+  maxParallel (8), evidence caps, idleExitMinutes (60), updateUrl (`https://`, or `http://` only on
+  localhost/127.0.0.1/::1; `file://` refused),
+  updateChannel (stable|beta), schedule. Unknown keys kept; bad values refused by name.
+- **`paths.js`, `project.js`, `flows.js`, `extension-update.js`** — the home rule; the project adapter
+  (`g9.project.json`, `workspaceDomains` ignored in v2); the FlowSpec library on disk; the desktop's
+  extension updater (copy to `extension.new`, swap, `{type:'reload'}` when no relayed call is in
+  flight — the folder path, and so the unpacked extension id, never changes).
 
-### `bridge/src/tools.js` — schemas and instructions
+### 6.7 `mcp/`, `lib/`, `bridge/`
 
-`INSTRUCTIONS` is returned in the MCP `initialize` response and therefore **loads into the agent's context automatically** — the user never copies anything. It teaches the perception model (a11y first, screenshots as fallback), the ref lifecycle, and the boundaries.
+- **`mcp/shim.mjs`** — connects to `ws://127.0.0.1:${G9_PORT||8765}/g9`; on `ECONNREFUSED` spawns
+  `daemon/g9d.mjs` detached and hidden and retries for 8 s; a non-g9d `/health` (a v1 bridge) makes
+  every tool fail naming its pid and the fix while MCP itself keeps working; a dropped daemon fails the
+  calls in flight and the next call reconnects. Resources `g9://guide`, `g9://status`. stdout is MCP
+  only; diagnostics go to stderr.
+- **`mcp/mcp.js`** — hand-written MCP (`initialize`, `ping`, `tools/*`, `resources/*`; protocol
+  versions 2025-06-18, 2025-03-26, 2024-11-05); tool failures are `isError:true` results, never
+  JSON-RPC errors; `dataBase64` results become image blocks; remembers `clientInfo.name`.
+- **`mcp/tools.js`** — the 15 schemas and `INSTRUCTIONS` (loaded into the agent's context by
+  `initialize`). Every sentence must describe behaviour that exists (EXT-17).
+- **`lib/version.mjs`** — the one version, read from `package.json`; `setup/unit/version.test.mjs`
+  fails when the manifest or `desktop/package.json` disagree. **`lib/ws-client.mjs`** — the shim's
+  WebSocket (not Node's global one: under `ELECTRON_RUN_AS_NODE` the Node is Electron's, and a native
+  client must send no Origin). **`lib/ws-codec.mjs`** — the shared frame codec, 64 MiB cap.
+- **`bridge/src/server.js`** — prints a note to stderr and imports `mcp/shim.mjs`, so MCP configs
+  written by v1's `install.ps1` keep working (self-test section 14).
 
-Tool descriptions are written **for the agent**, stating when to reach for a tool and what the common mistake is — not as human-facing documentation.
+### 6.8 `runner/`
 
-### `extension/sw.js` — the router
+`g9.mjs`: `list`, `run <flowId|suite:<name>|tag:<name>|all>`, `calibrate`, `approve`, `spec`, `ab`.
+Default `--engine launched` (headless, own profile, flows imported from the repository's FlowSpec
+library into the launched store); `--engine extension` runs on the person's browser's current tab.
+`--browser`, `--headed/--headless`, `--profile`, `--humanize`, `--humanize-seed`, `--stealth`,
+`--keep-engine`, `--port`, plus v1's run options (`--env`, `--data`, `--report`, `--timing`,
+`--signature`, `--pin`, `--strict-pin`, `--seed`, `--no-compare`, `--project`, `--platform agripad`,
+`--fail-on`). Exit codes: 0 pass (warnings allowed), 1 product failure, 2 automation failure, 3
+confirmed surprise, 4 could not run. `report.mjs` writes `run.json`, `junit.xml`, `report.html`,
+`qa-automation-status.json`; the report records every humanize seed. `mcp-client.mjs` spawns the shim.
 
-The `TOOLS` table maps tool name → `{ needsTab, allowWhenHalted, run({ tabId, tab, args }) }`. Adding a capability is one entry here plus one schema in `bridge/src/tools.js`.
+### 6.9 `desktop/` — the Electron shell
 
-`handleBridgeMessage()` is also where the halt check runs, before any tool executes. Put policy that must apply to *every* tool here — a check inside `cdp.send()` is invisible to tools that never call CDP (§4.5).
-
-Also owns event ingestion for Console/Network, recording bindings, frame sessions, interception,
-dialogs and video. Observation begins after attachment/domain enablement and is bounded/pruned;
-it is not a complete browser history. Several handlers report errors, while others still swallow
-them, so a quiet console does not prove complete capture.
-
-### `extension/tools/observe.js` — the capture buffers
-
-Ring buffers in `chrome.storage.session`, keyed per tab, written through the shared `serialize()`
-chain (§4.1). Caps: 500 Console entries, 400 Network requests, roughly 512KB of text per body, and
-8MB of bodies per HAR. Direct request details omit binary bodies. Capture starts on attach.
-
-- Console text is truncated at **write** time, not only on read. Untruncated text still has to fit in storage first.
-- On a quota rejection the buffer drops to its newest quarter and **records that it did**, inside the data the agent reads. Silently shrinking would be worse than the overflow.
-- `clearBuffers(tabId)` is called when a tab closes, when it is unpinned, and — via `navigate.js → resetPageState()` — before every `goto`, `reload`, and history move. Nothing else reclaims these keys. Buffers that survive a navigation do not just leak; they make `browser_diagnose` report the previous page's defects as the current page's (v1.0.9).
-- A request remains `pending` after response headers arrive and until `loadingFinished`/`loadingFailed`. `browser_network format:"har"` converts the same bounded evidence into HAR 1.2 rather than maintaining a second truth.
-
-### `extension/tools/snapshot.js` — perception
-
-Accessibility tree, pruned hard. An unpruned tree from a real app is tens of thousands of nodes.
-
-- `INTERACTIVE` roles → always kept, always get a ref
-- `STRUCTURAL` roles → kept only when they carry a name (an unnamed `role=group` tells the agent nothing)
-- `NOISE` roles (`generic`, `none`, `StaticText`, …) → dropped, children still walked
-- Default cap 900 **emitted lines**, including structural nodes without refs; `truncated: true` when hit
-
-`mode:"a11y+text"` additionally extracts visible text through injected page code. **Every regex escape in injected code must be doubled** (`\s`, not `s`): the string is a template literal, so it is parsed twice, and a single escape is silently swallowed rather than rejected. Self-test #13 enforces it.
-
-### `extension/lib/locators.js` — element identity
-
-The recorder core. Generates several independent locators per element and
-resolves them back, from ONE injected source so the two halves can never
-disagree about what a locator means. Ranking, escaping rules and the reasoning
-are in §8b. Verified against a real DOM before anything was built on it — the
-names it produces match `browser_snapshot` exactly. Discovery walks open Shadow
-roots and same-origin iframe documents. This is narrower than the snapshot/input paths, which also
-use cross-origin child debugger sessions. Closed Shadow DOM is not an absolute privileged-API
-boundary: `DOM.getDocument` with `pierce: true` exposed it in the audit, and Chrome provides
-[`chrome.dom.openOrClosedShadowRoot`](https://developer.chrome.com/docs/extensions/reference/api/dom).
-Extending recorder/locator coverage is implementation work, not an impossible browser feature.
-
-### `extension/tools/record.js` — capture, and normalisation
-
-The injected half emits raw events and decides nothing. All judgement is here:
-collapsing five `input` events into one `type` step, dropping the click pair a
-browser fires before `dblclick`, discarding scrolls the browser performed to
-reveal a focused field. That split is deliberate — normalisation is where the
-interesting mistakes live, and out here it is ordinary code that can be tested
-without a browser. Raw writes are serialized and capped at 5,000 events, with a
-warning in the saved flow if the cap was reached. Native select mechanics are
-collapsed to the final selected values rather than replaying incidental keys.
-
-### `extension/tools/replay.js` — and the failure message
-
-The failure message is the product. Every step waits for the page to be loaded
-and the element to be visible, enabled, and no longer moving; each of those
-fails with its own sentence. When no locator matches, the fingerprint answers
-in human terms and names the nearest element. Recorded gaps contribute wait budgets;
-the recorded mode also sleeps for the remaining pause, capped at ten seconds. Replay
-sets a durable per-tab replay guard, acts on recorded key/drag targets, and
-verifies click trust/target, typed value, selected options, and checkbox state
-before calling a step successful. Assertion steps are executed through
-`tools/qa.js`; each run is retained (last 20) and recent mixed outcomes produce
-a flaky signal rather than being hidden.
-
-### `extension/tools/qa.js` — observable tests
-
-Creates and executes URL, text, visibility, value/state, network, console,
-accessibility, and screenshot-baseline assertions. Variables substitute
-recursively from parameter defaults, environment variables, and replay inputs.
-Recording metadata supplies suite/folder/tags without creating more MCP tools.
-Visual baselines include compact luminance/structure representations, with layout comparison as
-the default. Semantic `aria` baselines compare accessibility structure; balanced numeric-only data
-changes can warn rather than fail. Assertions can be inserted with `atStep` and replay retries them
-within their wait budget. The same record can be exported as Playwright JavaScript, but the exported
-test does not reproduce every G9 signature, verdict or custom assertion automatically.
-
-### `extension/tools/netrules.js` and `downloads.js` — network controls
-
-`browser_network` exposes interception rules, status and teardown alongside HAR pinning. Rules are
-consulted before HAR entries and support controlled blocking, delay and fulfillment. This feature
-is present; it must not remain in the "not built" list.
-
-Download watch/list/wait/stop actions are routed too, but `watch()` uses
-`Browser.setDownloadBehavior`, unavailable through `chrome.debugger`. The real-Edge audit returned
-`'Browser.setDownloadBehavior' wasn't found`. Tracking via the extension
-[`downloads` API](https://developer.chrome.com/docs/extensions/reference/api/downloads) is a possible
-replacement requiring permission and implementation changes. It is not installed by this doc update.
-
-### `extension/tools/issues.js` — evidence, captured at the moment
-
-The title and body are the part a QA could write anywhere. The value is what
-they would otherwise have to remember to collect and a developer always has to
-ask for afterwards — and it is only true while the bug is on screen. Written
-out as real attachments, because an agent filing a ticket uploads files. Video
-frames are written individually to IndexedDB before acknowledgement; session
-storage carries only bounded metadata. Closing/detaching the tab cancels and
-reclaims the spool, and an issue owning an active capture cannot be deleted.
-
-### `extension/tools/diagnose.js` — the opinionated one
-
-`health` deliberately does the correlation the agent would otherwise do across six tools: console errors, failed requests, broken images, unlabelled form controls, nameless interactive elements, horizontal overflow (with the widest offenders named), duplicate IDs, plus load metrics — merged and ranked by severity.
-
-The report is capped **per severity** (30/20/10), never by a flat slice of the ranked list. A flat cut looks equivalent and is not: a page with 60+ console errors pushes every warning past it, and the warnings are where the a11y, layout, and duplicate-ID findings live — the only ones this tool produces that no other tool does. `omittedFindings` reports what was cut. Finding messages are capped at 300 chars; a finding is a pointer, and the full text is in `browser_console`.
-
-`performance` records a trace and returns **aggregates only**. A raw Chrome trace is megabytes and useless in a context window. `vitals` collects buffered LCP, CLS, INP, paint/navigation timing, and long tasks. `memory` samples CDP Performance metrics and reports directional heap/DOM/listener/document growth as a leak signal — not proof of a leak. Health also checks document language, image alternatives, iframe titles, and heading-level jumps.
+`main.mjs` (single-instance lock, tray, one `ui` connection to g9d, starting the daemon detached when
+nothing listens, IPC allowlist, updater, wizard side effects; flags `--smoke [--launch]`, `--hidden`,
+`--check-render <dir>` which renders every view off-screen at −32000,−32000 without activation),
+`preload.cjs`, `renderer/` (views: agents, engines, watch, runs, approvals, schedule, settings, setup;
+Watch draws frames on a canvas with the cursor from the pointer track, says "not live" for a hidden
+tab, and shows the daemon's `problem` when a watch did not start), `lib/` (daemon-client with per-call
+timeouts mirroring DAEMON_PROTOCOL §3 — a copy, checked by
+`daemon.test.mjs`; daemon-launch; extension-install; mcp-register for Claude Code, Cursor, VS Code and
+Claude Desktop, backing up first and never overwriting a `g9-browser` entry silently; policies — HKCU
+`WindowOcclusionEnabled=0`, `HighEfficiencyModeEnabled=0`, `IntensiveWakeUpThrottlingEnabled=0`,
+`BackgroundTabFreezingEnabled=0`, `DeveloperToolsAvailability=1`, recorded first for Undo, one UAC
+prompt when HKCU\Software\Policies is not user-writable; updater — electron-updater generic feed from
+the daemon's `updateUrl`/`updateChannel`, restarting the daemon only when no run is active and no
+launched engine is open; wizard). Packaging: `electron-builder.yml` (NSIS, per-user,
+`asInvoker`), `scripts/build-win.mjs`. Versions installed: electron 44.4.3, electron-builder 26.15.3,
+electron-updater 6.8.9. Pages under test are never loaded here.
 
 ---
 
 ## 7. Testing
 
-`node setup/selftest.mjs` — 26 assertions, **no browser required**. Spawns the real bridge, speaks real MCP over stdio, connects a fake extension over a real WebSocket (hand-rolled client, because the built-in `WebSocket` class cannot set an arbitrary `Origin` — which is exactly what needs testing).
+Every harness uses a fresh temp `G9_HOME`, temp browser profiles and random ports in 18000–18999,
+never port 8765 (the owner's v1 bridge lives there), and ends with a leftover-process and temp-dir
+check. Headed windows, where a harness uses them at all, are created at −32000,−32000 without
+activation. Unset `ELECTRON_RUN_AS_NODE` in the shell before running (`env -u ELECTRON_RUN_AS_NODE …`):
+some agent hosts export it, and it turns `npx electron` into Node.
 
-Covers: MCP handshake, instruction delivery, tool count and schema validity, resources, missing-extension error quality, **Origin rejection**, end-to-end routing, argument fidelity, keepalive, image content blocks, error propagation, disconnect handling, stdout hygiene, standalone survival, and **oversized-frame survival**.
+| Command | What it covers | Latest recorded (marked 2.0.2: 2026-09-24, on the 2.0.2 tree; the rest 2026-09-23, on 2.0.1 — the final pass). 2.0.3 changed only the popout and added seam checks for it |
+|---|---|---|
+| `node setup/unittest.mjs` | every `setup/unit/*.test.mjs` in its own process (suites stub `chrome` before importing, and `platform.js` chooses at load). `G9_UNIT_NO_BROWSER=1` skips the `live:` tests; a filter argument runs matching files only. | **621 passed, 10 suites** (2.0.3, 2026-09-25; 620 three times in a row on 2.0.2) |
+| · `daemon.test.mjs` | registry, router, handles/rewrites, ownership, queues, halts, D-c parking, settings, scheduler, storage, evidence, handoff helpers, the desktop timeout table cross-check, launched-engine watch ordering | 96 (2.0.2; 95 on 2.0.1) |
+| · `desktop.test.mjs` | runs `desktop/test/run.mjs` without `ELECTRON_RUN_AS_NODE`; SKIPs when `desktop/node_modules` is absent | 181 |
+| · `engine.test.mjs` | pipe framing, launch args and refusals, CfT zip/lock/versions, profiles, find; `live:` Edge, system Chrome and cached CfT headless (D-a webdriver per level, the headless screen with its taskbar) | 56 |
+| · `humanize.test.mjs` | determinism, bounds over 2000 random plans, every planner, calibration round trip | 51 |
+| · `interaction.test.mjs` | the witness expression in `node:vm`, delivery states, re-timing, hidden checks, dispatcher timing (80 % rule), levels | 77 |
+| · `panel.test.mjs` | panel/welcome source checks, every §13 command, transport with fake socket/fetch/clock | 75 |
+| · `platform-cdp.test.mjs` | registration, sessions, held targets, F1, tabs, cookies, downloads attribution; `live:` headless Edge | 34 |
+| · `seam.test.mjs` | R2 source scan, no top-level await, Node smoke through platform-cdp, `sw.js` boot and its panel and daemon commands over a stubbed `chrome` — since 2.0.3 also the popout's two callers (the panel's window focused and not buried, an agent's unfocused) and its default geometry | 16 (2.0.2; 2.0.3 adds the popout checks) |
+| · `world.test.mjs` | isolated world guard and invalidation over a vm-based fake browser | 26 |
+| · `version.test.mjs` | one version in package.json, manifest, desktop, `lib/version.mjs` — compared, never pinned | 8 (2.0.2; 7 on 2.0.1) |
+| `node setup/selftest.mjs` | a real daemon, two real shims (two agents), a fake extension over a real WebSocket: /health, Origin rule and version refusal, status composition, relay and id rewriting, ownership, queues, Stop from panel and desktop, extension requests/watch/update, dialogs, delivery tags, disconnects, D-c reconnect, protocol robustness, the v1 forwarder, shim auto-start, a v1 bridge named, idle exit, escaping in injected code | **136/136** (2.0.2) |
+| `node setup/extensiontest.mjs` | extension modules through the real seam over an asynchronous `chrome` stub with a tab/window model; recording, replay, network, downloads, video (write-chain deadlock as behaviour), tab resolution, legacy cleanup, flow library, `/health` CORS, one daemon port, version skew, runner selection; fixture `setup/fixtures/tasks-browse-and-open.flow.json` (EXT-16) | **78/78** (2.0.2) |
+| `cd desktop && node test/run.mjs` / `node test/daemon-contract.mjs` / `npm run build:win` + `npm run test:packaged` / `npm run test:render` | renderer in a fake DOM, main process against a fake Electron API, updater/policies/registration with fakes (never the real registry or configs); the real daemon's admin contract; the built `win-unpacked` with no `node` on PATH (shim starts the packaged daemon); the real window off-screen | **14/14 files (2.0.3; 22.6 s on 2.0.1); contract 15/15 (2.0.1); build OK (`G9-Setup-2.0.3.exe`, 103,591,675 bytes, 2026-09-25, unsigned, `resources/app-update.yml` present, payload identical to the repository); packaged 7/7 (2.0.3); render check PASS (2.0.1)** — 4 scenarios (empty and populated × dark and light), 23 pictures per populated run, 171 window samples in the last one, 0 ever on screen, 0 ever in the foreground |
+| `node setup/engine2-livetest.mjs [--only …]` | Engine 2 through the product path (daemon + shims + headless Edge), every check against what the page, server or disk saw: tabs, snapshot, interact at three levels, frames, console, inspect, screenshots, emulate, dialogs, downloads (sha256), popups, HAR, recording/replay, video, agents/ownership, reads during actions, slots, 4 parallel contexts, watch, halt, handoff (fake Engine 1 payload), stealth, locale persona, downloads hub, stop | **366 passed, 0 failed** (2.0.2: 325 s; on 2.0.1: 330 s, and 352 s on the tree before its bump) |
+| `node setup/isolated-livetest.mjs` | Engine 1 in a real headless browser: private daemon, temp profile, extension copy with `dev-daemon.json` and a tripwire in place of its built-in default port; runs `setup/livetest.mjs` (27 sections: tabs, snapshot, levels, hidden tabs, witness, scroll settle, stealth screenshots, recording, regression memory, issue video, watch, cross-origin frame, popout, handoff, auto-attach, version/welcome, Stop, main-world diff) and renders the panel. `G9_BROWSER` picks Chrome/CfT; `G9_LIVE_SECTIONS` narrows | **196 passed, 0 failed** on Edge 153.0.4234.32 (2.0.2) **and 196 passed, 0 failed on system Chrome 153.0.8010.53** (2.0.1, `G9_BROWSER=chrome`), each with the harness checks (tripwire 0 hits, profile never signed in); CfT sections 12+16 ×20: 20/20 (earlier round) |
+| `node setup/stealthtest.mjs [--matrix] [--local-only] [--configs …] [--repeat N]` | the plan §6.6 gate: local detector page (webdriver, Runtime probe, main-world globals/nodes/calls, listener stacks, untrusted events, cross-site frame, popup, worker, read-tool sweep, press/typing/wheel timing, screen, locale, EME, tabs at end, profile sign-in) + public pages (`stealth-pages.json`); human-level controls must be detected | 2026-09-23, both runs: **0 G9 leaks in every stealth configuration**, both human controls detected. Local page, final tree, 7 configurations: **edge-headed-stealth UNDETECTED**; the rest detected only by browser-inherent signals (the HeadlessChrome UA; CfT's missing Widevine). With the public pages (one full matrix): headed Edge stealth flagged by pixelscan alone (“Automated behavior detected”) and passed by sannysoft, creepjs, browserscan, fingerprint-bot-detection and rebrowser; headed CfT stealth flagged by rebrowser (its brand) alone; every headless stealth run flagged by sannysoft, creepjs, browserscan, pixelscan and fingerprint-bot-detection. Exit 1 by design while headless is detectable |
+| `node setup/matrix.mjs` | P8 background-state matrix, Engine 1 (real extension) and Engine 2, per state: does input/screenshot/screencast reach the page, and does G9's report agree | **exit 0, every cell agrees** (2026-09-23, the full default set: Engine 1 × Edge and Chrome × active/background/minimized/offscreen/hidemid/hidemidheaded, with and without the occlusion switch, and Engine 2 × active/background/popup/minimized/offscreen). The partial-delivery cells report themselves as partial and match the page |
+| `node setup/bench.mjs` / `node setup/endurance.mjs --minutes N` | parallelism (1–24 contexts, CPU/RAM per process tree, per-step latency, maxParallel rule) / the flow in a loop with memory and listener sampling after `gc()` | **2026-09-23: 0 failures at every level.** Bench 1/4/8/16 contexts × 5 iterations, flow p50/p95 11,599/12,211 → 12,668/14,233 ms, recommendation maxParallel 8; endurance 10 min, 93 iterations, 0 failures, daemon +0.39 MB/min, browser +1.79 MB/min, listeners flat. Full tables in §9 2.0.1 |
+| `node setup/livetest.mjs` by hand | against your own daemon and browser (`G9_PORT=…`); without the `G9_LIVE_*` variables the browser-level checks SKIP | — |
 
-`node setup/extensiontest.mjs` — also **no browser required**. It combines module tests under a
-deterministic `chrome` stub with source/fixture checks for recording, replay, network, workspace,
-frames, signatures, flows and the panel. Stub/source checks do not establish that an injected
-expression executes or a CDP method is available through `chrome.debugger`.
+`setup/testpage.html` + `serve.mjs` keep v1's deliberate defects (2 load-time console errors + an
+uncaught `ReferenceError`, a 404, a broken image, an unlabelled password input, 2400 px overflow, a
+duplicate `id`, a transparent overlay over a button, a login form `admin`/`g9secret`) and `/hang`,
+`/slow?ms=`; v2 added a runaway button, a pointerdown-cancelling page, popups, cross-origin frames
+(`crossframe.html`) and the stealth page (`fixtures/stealth-local.html`).
 
-**Latest audit, 2026-09-12:** `selftest.mjs` passed **26/26**. `extensiontest.mjs` stopped with
-`ENOENT` reading `../../../../QA/Flows/web/tasks/tasks-browse-and-open.flow.json` relative to the
-test file, resolving to `G:\QA\Flows\web\tasks\tasks-browse-and-open.flow.json` in this checkout.
-That external fixture is absent; the suite is not currently self-contained. Since `install.ps1`
-runs it before writing config, installation can stop there too. Do not report a complete passing
-extension suite or substitute historical counts. Fixing this dependency is separate from the docs.
+> **The tool-count assertion (`=== 15`) will fail when you add a tool.** That is intentional — it forces
+> this file and the README to be updated too.
 
-> The tool-count assertion (`=== 14`) will fail when you add a tool. That is intentional — it forces this file and the README to be updated too.
-
-`setup/testpage.html` + `serve.mjs` provide six deliberate defects: 2 load-time console errors + 1 uncaught `ReferenceError`, a 404 request, a broken image, an unlabelled password input, 2400px horizontal overflow, a duplicate `id`, plus a transparent overlay covering a button (obstruction detection) and a working login form (`admin` / `g9secret`).
-
-`serve.mjs` also exposes **`/hang`** (accepts the connection, never answers) and **`/slow?ms=`**. `/hang` is the only reliable way to observe `browser_network status:"pending"`: an agent round trip outlasts any latency `browser_emulate` can apply, so throttled requests are always finished by the time the query arrives.
-
-`node setup/isolated-livetest.mjs` launches a temporary **headless** Edge/Chrome profile, copies the
-extension with a private `dev-bridge.json`, drives the seeded page through MCP/CDP, exercises the
-panel, and cleans up. The private bootstrap address prevents takeover of the everyday bridge.
-`livetest.mjs` instead uses the browser you manually attach. The live harness uses global
-`WebSocket`; use Node.js 22+, while the bridge itself declares Node.js 18+.
-
-**Targeted real-browser evidence from the latest audit:** Edge **152.0.4191.66**, Node **22.15.0**,
-temporary profile/extension copy, headless, page commands sent through `chrome.debugger`.
-
-| Probe | Observed result |
-|---|---|
-| Screenshot with `visibilityState: "hidden"`, `hasFocus(): false` | Valid PNG, visually inspected. |
-| Typing into the background test tab | Input changed `A` → `AB` while visibility stayed hidden. |
-| `watchForInput()` during actual input | Page evaluation threw `ReferenceError: sessionId is not defined`; generic delivery verification was bypassed. |
-| `downloads.watch()` | Failed with `'Browser.setDownloadBehavior' wasn't found`. |
-| `DOM.getDocument({depth:-1, pierce:true})` | Returned a closed shadow root and its button content. |
-
-These were temporary targeted probes, not a rerun of the entire isolated suite and not a committed
-new regression suite. Full-suite results in §9 belong to their recorded versions. Current Chrome
-parity, long-duration reliability, and headed/minimized/occluded/locked-desktop behavior are not
-certified by this audit. Test those states explicitly when changing background automation; do not
-infer them from headless success or a page's visibility flag alone.
-
-> **Run the tool against the test page before shipping anything that touches perception or interaction.** Three of the bugs in v1.0.9 were invisible to a full source read and obvious within two minutes of driving a real page. `checkObscured` in particular *reads* correctly; the defect was in the browser API's contract.
+> **Run the live suites before shipping anything that touches perception, input, launching or the
+> seam.** Every v2 live round found defects the unit suites could not see (§9 v2.0.0): the popup wedge,
+> the sign-in, the witness timing and the CfT frame rate were all invisible to a source read.
 
 ---
 
 ## 8. Known gaps and deliberate omissions
 
-**Unresolved implementation defects as of v1.7.21. None is fixed by this documentation update.**
+Re-audited 2026-09-22 against the live measurements and the fixers' open lists. Nothing here is fixed
+by being written down.
 
-The [Extension Fix and Improvement Backlog](EXTENSION_FIX_BACKLOG.md) expands the findings below
-into 17 prioritized work items with source locations, implementation directions, dependencies and
-acceptance criteria. It distinguishes extension work from coordinated bridge/schema/runner work
-and platform boundaries. Background reliability remains an investigation, not a promised outcome.
+### 8.1 Detectability (stealth)
 
-| Finding | Evidence and consequence | Where a fix belongs |
+| Gap | Evidence | Status |
 |---|---|---|
-| Input witness fails to initialize | `tools/interact.js` injects an undefined `sessionId` in page JS. Live reproduction: `ReferenceError`; missing promise becomes `null`, which `witnessed()` accepts. Success can be unverified. | Extension: correct injection/session routing and test delivered, dropped and frame-targeted input. |
-| Download tracking uses a disallowed domain | `tools/downloads.js` sends `Browser.setDownloadBehavior`; the extension transport rejects it. Declared actions are not proof of working support. | Extension: implement a supported path, e.g. `chrome.downloads` with its permission. Reading arbitrary saved-file contents is separate work. |
-| Ref generations are not enforced | `lib/refs.js` stores a generation but resolves only the current ref map and URL. `snapshot.js` reuses `e1` onward. Old handles can refer to a new node after a newer snapshot. | Extension and, if required, tool argument/schema changes. |
-| Screenshot retry may outlive its caller | `lib/cdp.js` allows 45s per screenshot; `capture.js` retries once. `bridge/src/server.js` defaults to a 60s whole-call timeout. A late retry can outlive the tool response. This is a source-level finding. | Coordinate extension retry budgets with the bridge timeout/cancellation model. |
-| Extension regression suite depends on another checkout | Missing external QA flow causes `ENOENT` before the suite completes (§7). Historical green counts do not establish portable tests. | Test-fixture/configuration setup, not browser behavior. |
+| Headless is detected by its user agent (`HeadlessChrome` in the UA and `userAgentData`) | every headless stealth run; public pages round 3: sannysoft (User Agent (Old), HEADCHR_UA, CHR_MEMORY), creepjs headless 67 %, browserscan "Robot", pixelscan, Fingerprint bot 3/3 | inherent; G9 does not spoof the UA (consistency beats spoofing). Use headed stealth for strict cases |
+| Headed Edge stealth: pixelscan "Automated behavior detected" | round 3: 4/4 via the harness (with and without interaction); headed Chrome passes 2/2; no field attributable | unexplained. The final local self-test is UNDETECTED; public pages were not re-run after the round-3 fixes |
+| Brand checks: rebrowser flags Edge ("no Google Chrome brand", a warning) and CfT ("Chrome for Testing") | round 3 | inherent to the binary |
+| `outerWidth/outerHeight` 0×0 at the load event (a CDP-class signal) | live round 2: Edge headless stealth 8/8, headed 5/8, CfT headless 0/8; live round 3: 0/54 local runs | launch warning and STEALTH.md still mention it; not attributable to G9 code |
+| Engine 1 debugger infobar: shorter viewport, two `resize` events per load in every tab | §2.4 | only a policy install (`ExtensionInstallForcelist`) or `--silent-debugger-extension-api` removes it; Engine 1 does "input rules only" at stealth; the panel's Stealth option says so |
+| Human-level full-page screenshots resize the viewport (a transient 1×1 the page can see) | live round 3: in 14/14 stealth-suite human controls, and 1/8 Engine 2 suite runs | deliberate at human (default level); disclosed in `pageSaw`; refused at stealth |
+| Context locale in another language than its profile | a per-tab override does not reach dedicated workers; the UA-override approach left the worker on the old language | refused at stealth, warned otherwise; use a profile whose persona has that locale |
+| A cross-site `window.open` popup's very first script can read the browser default locale | the locale is re-sent when its document commits; stealth popup-vs-top passed 2/2 but is timing-dependent | open |
+| Widevine absent below stealth (by design) and always on CfT (the binary) | round 3 EME probe | by design / inherent |
+| Humanize model limits | uniform ranges, one log-normal, one Bézier with at most one overshoot, white-noise tremor (not 8–12 Hz), 8–16 ms jittered sampling, no pointer-acceleration curve; US QWERTY only, no IME; notched wheel only; one dispatched event per frame (`getCoalescedEvents().length` 1, a weak CDP-class signal) | calibration narrows the gap, does not close it. Calibration bounds: settle rate a lower bound, typo rate an upper bound, the recorder's 16 ms throttle hides the mouse report rate, v1 recordings have no pointer data |
+| Coordinates are whole CSS pixels | `interact.js layoutViewport` passes no `dpr` to the planners | right only at 100 % display scaling; changing it touches replay determinism and unit baselines |
+| CfT's 10 fps root cause | ruled out: `--disable-gpu-vsync`, SkiaGraphite/TreesInViz off, restored tabs, and (2026-09-23) the pending Windows Firewall prompt for the new `chrome.exe` | workaround only (`--disable-frame-rate-limit`, CfT only). Engine 1 on a person's CfT is not given it: a humanized path reached the page as 4–5 mousemoves (Edge 17–23) |
 
-**Capabilities that exist, with bounded coverage:**
+### 8.2 Engines, background states and delivery
 
-- Workspace permits tab management inside its allowlist, including explicit `"*"`; Multi is not the
-  only mode that can open/close/focus tabs. Named sessions are aliases, not independent browser contexts.
-- Cross-origin snapshot/input uses child sessions from Chromium 125+. `frames.js` tracks at most
-  30 iframe sessions. This does not imply complete recorder/replay, network-body, or inspect support
-  in each frame: some direct CDP calls still omit session routing.
-- Closed Shadow DOM is accessible through privileged APIs (§6, §7). Current locator traversal of
-  `element.shadowRoot` and same-origin documents is a narrower implementation, not an immutable boundary.
-- HAR pinning and request fault rules exist. Pin matching ignores query values and request bodies,
-  consumes duplicate entries in order, and passes unmatched requests through unless strict. It does
-  not capture every streaming/protocol interaction or guarantee a fully frozen backend.
-- Fullpage/element screenshot clips are scaled by `min(1, 2000 / width, 8000 / height)`; viewport
-  capture does not use that scaling path. These are configured clip budgets, not universal CDP
-  limits or guaranteed physical output dimensions at every DPR. Lazy/unmounted content is not loaded
-  by taking a full-page screenshot.
-- Tab video uses JPEG screencast frames with configured maximum 1280×800, at most 600 frames or
-  40MiB of stored frame data. It does not record audio or the desktop. Frame availability depends on
-  rendering; historical live tests alternate PASS/SKIP, so headless cannot be labeled always empty.
-- Console/Network buffers are bounded (§6), start after attachment, and are pruned on committed
-  navigation; same-document route changes retain buffers. Direct body output omits binary responses.
-- `browser_inspect` lists IndexedDB database names/versions, cache names and service-worker
-  registrations. Web Storage values are bounded. It is not a complete Application-panel explorer.
-- Device emulation checks viewport results and can fall back to an exact responsive viewport with
-  a warning; this fallback lacks full mobile text-autosizing/scrollbar behavior. Emulation does not
-  prove behavior on a real phone or another engine. Health, memory and surprise findings are signals,
-  not exhaustive audits or proof of a defect.
+| Gap | Evidence | Status |
+|---|---|---|
+| Input to a hidden Engine 1 tab is refused | pointer/wheel do not arrive (physics); keys would arrive (10/10) but are refused by policy (b) | agent remedies in the message (focus, popout, handoff); allowing typing into an already-focused hidden field (option a) was not built |
+| A headed Engine 2 window that is minimized renders about 1 frame per 1.5 s | matrix: click delivered after 28–29 s, screenshots 33–46 s | warned in `browser_status` and the capture note; the fix is not minimizing, or headless |
+| A popped-out Engine 1 window renders only while it is on screen | on Windows a window that another window covers completely is occluded, and Chromium stops rendering it unless the `WindowOcclusionEnabled` policy is off; a minimized one always stops. Reported from real use before 2.0.3: the side panel's Pop out put the new window behind the person's maximized window, and the tab seemed to vanish | **fixed for the panel in 2.0.3** (the window is created focused and in front, smaller than the source, and the person's window is not raised over it). An agent's popout stays unfocused so the person keeps the keyboard, and can still open behind another window: its result reports `visible:false` and the remedy. Checked against a stubbed browser only (`seam.test.mjs`); no harness puts a window on screen |
+| Locked session, another virtual desktop | not measured — both would disrupt the owner's workstation (plan P2.7 asked for a locked-session run) | open |
+| A call that reaches its deadline may still be running | live round 1; `daemon/router.js`. **Fixed 2026-09-22:** the call is cancelled (an `AbortSignal` into `lib/humanize.js perform` on Engine 2, a `{type:'cancel'}` frame to the extension) and the tab's queue is held until it stops, up to 5 s; only if it does not stop does the answer say it may still be running. `browser_interact`'s deadline also grows with the text it types (450 ms per character), which is what used to make a long humanized type hit the deadline and keep typing into the next call's target | mitigated; a call stuck outside `perform` (a wedged CDP command) can still overlap after the grace |
+| A per-agent halt does not interrupt an Engine 2 call already running | only the global halt is mirrored into launched engines. **Fixed 2026-09-22:** `router.cancelFor(agentId)` aborts that agent's running calls and sends `cancel` for relayed ones | closed |
+| A witness listener may stay armed after Stop | `cdp.send` refuses every command while halted, so the release waited for the 10-minute safety net (live round 2) | mitigated: `interact.js cleanupSend` ends and releases G9's own witness on the live session after Stop, bounded at 2 s; only if that fails does it stay armed until the safety net. It lives in G9's world and reacts only to trusted events |
+| D-c limits | after an extension reload/browser restart a tab that navigated during the gap loses its handle (checked by URL on purpose); two browsers sharing a copied profile share one `instanceId` (the newer wins; the other waits for Reconnect); parked 10 min | by design |
+| Handoff moves cookies + local/session storage only; the page reloads | IndexedDB, service-worker state and in-memory state do not travel (listed in every result); a recording's screenshot-baseline attachments are not copied when it is relayed to the launched store | by design (v2.0) |
+| Engine 1 downloads | attribution inferred (`exact`/`probable`/`unknown`), no file hash or content | inherent to `chrome.downloads`; Engine 2 hashes from disk |
+| Smaller known limits | a prerender activation gives the tab a new handle; `tabs.remove` on a page with a `beforeunload` prompt can re-register it under a new handle; netpin's HAR entry stays consumed when a fulfil fails and the request then goes to the live server (it is put back only when the request was cancelled); `verifiedContextFor` checks then uses a context in two commands (a cross-process navigation exactly between them is not excluded); `select` at stealth untested against a headed real popup | open, recorded |
+| Ref generations are not enforced | §4.2. **Fixed 2026-09-22 (EXT-03):** ref numbers are never reused on a page (a snapshot continues the page's numbering) and the last four snapshots each caller took stay resolvable (16 per page in all; per caller since live round 4), so a ref always names the element ITS snapshot showed — another agent's snapshot cannot renumber yours. A ref from an evicted snapshot, another page or a removed element is refused | closed |
+| Engine 1 downloads were attributed to a watched tab against contrary evidence | a download whose referrer origin belongs to no watched tab was claimed by the single watcher, and two tabs that had both requested the URL gave a false `exact`. **Fixed 2026-09-22:** `exact` needs exactly one watched tab that requested that URL since its own watch began; origin evidence (referrer, blob creator) is matched against the tab, its cross-origin frames and the tabs it opened, and evidence pointing elsewhere gives `unknown` instead of a time-based guess | closed |
+| Calibrated profiles from a launched engine are not installed into the extension's store | no daemon → extension message for it | open |
+| CfT-only flakes in live round 3: popout listed an empty title (1 in 11); an identical second replay failed (1 in 14, cause not captured) | mitigations (popout waits for title + renderer; snapshot re-asks on a root-only tree); 20/20 clean runs after them — also ≈15 % / 23 % likely by chance at those rates | not proven fixed; replay flake cause unknown |
+| Extension reload on Chrome/CfT | with `--load-extension` on CfT, `chrome.runtime.reload()` left the extension disabled (`DISABLE_UNSUPPORTED_DEVELOPER_EXTENSION`); with CDP `Extensions.loadUnpacked` the full suite passed (branded Chrome 7/7). Branded Chrome 153 ignores `--load-extension`. A person's Developer-mode "Load unpacked" followed by the desktop's reload was not measured on Chrome | open on Chrome; Edge reloads work (5 per isolated run) |
 
-**Platform boundaries and work requiring another component:**
+### 8.3 Product, installer, measurement coverage
+
+- **Installer and updates.** Unsigned (SmartScreen warns). Not exercised: a real install on this
+  machine, the real UAC prompt, an update server (the updater is tested with a fake), and installing an
+  update while AI clients run shims as `G9.exe` — the installer may close those shims mid-session and a
+  shim may respawn the old daemon while files are replaced (design-level, not fixed). `docs/INSTALL.md` (plan P0.4) is the operator guide; policies are also applied and documented by the
+  desktop (`desktop/README.md`, `lib/policies.mjs`); `BackgroundTabFreezingEnabled` is read by Chrome only from
+  155 (an unknown name is ignored).
+- **maxParallel default is 8.** Live round 3's data put the rule at 12 on this machine class (§9
+  v2.0.0); the default was not changed.
+- **Not measured:** an 8-hour endurance run (only 10-minute runs), macOS/Linux (not in v2.0; POSIX
+  paths untested), the `HTTPS_PROXY` tunnel, zip64, two real processes racing one CfT install, new
+  headed Engine 2 windows copying bounds, headed CfT after the round-3 fixes, a full clone + `install.ps1`
+  on another directory (EXT-16's last criterion).
+- **Re-run on the 2.0.1 tree (2026-09-23, the final pass):** every suite. Unit, self-test, extension, desktop
+  (files, contract, packaged, render), Engine 2 live, isolated Engine 1 live on Edge and Chrome, the
+  stealth matrix including the public pages, the background-state matrix, bench and a 10-minute
+  endurance run. Numbers in the §9 2.0.1 entry. **Re-run on 2.0.2 (2026-09-24):** unit, self-test,
+  extension, desktop files, the packaged build, Engine 2 live and isolated Engine 1 live on Edge (§7).
+  2.0.3 changed only the popout; its checks are in the seam suite.
+- **Version rule.** The owner's standing rule is "bump on every change". 2.0.0 was released under a
+  fixed-2.0.0 contract; the first change after it — the 40 review fixes and the final pass — is
+  **2.0.1**, then **2.0.2** (three flaky-test defects and the close budget) and **2.0.3** (the
+  popout). No test pins a literal version any more: `version.test.mjs`, `panel.test.mjs`,
+  `desktop/test/static.test.mjs` and `desktop/test/smoke.test.mjs` all compare the files with each
+  other and with `lib/version.mjs`, so a bump is one edit in each of four JSON files: `package.json`,
+  `extension/manifest.json`, `desktop/package.json` and `desktop/package-lock.json` (the lock file is
+  compared too, since `npm ci` in `desktop/` installs from it).
+- **Desktop duplication.** The per-call timeout table is copied into `desktop/lib/daemon-client.mjs`
+  (the packaged app cannot import the repo's `lib/`); `daemon.test.mjs` checks the copy never ends a
+  call before the daemon does.
+
+### 8.4 Platform boundaries and things not built
 
 | Boundary | What can and cannot change |
 |---|---|
-| Restricted `chrome.debugger` domains and targets | Extension code cannot grant itself unavailable CDP domains or control forbidden browser-internal pages through that transport. An allowed extension API may solve the underlying task; a privileged external debugger is a different setup. |
-| Native dialogs, desktop input and general filesystem access | Current tools operate on pages. General OS automation/file inspection needs a local component or an appropriate user-granted API. The existing Node bridge could be extended; a native-messaging host is another option. Neither capability is presently exposed. |
-| Independent browser profiles/accounts | Session aliases do not create arbitrary isolated contexts. Separate profiles/processes need an orchestration arrangement beyond creating ordinary tabs. |
-| Background rendering and lifecycle | Reads/screenshots can work while hidden. Focus emulation or activating a tab may help specific flows but is not proof of reliable input/video in minimized, occluded or locked states. A closed browser cannot run its extension; OS suspension cannot be eliminated by extension JS. |
-| Browser/enterprise policy | Policy can deny debugger attachment or capture. Changing extension source does not grant an administrative exemption. |
-| Finite capture/history | Budgets can be redesigned or streamed to disk, but uncaptured past requests and unmounted content cannot be recovered merely by increasing a buffer. |
+| Restricted `chrome.debugger` domains (Engine 1) | No `Browser` domain, no `HeapProfiler`, no `chrome://`/store/other-extension pages. Engine 2 has full CDP; a task needing more moves there (handoff). |
+| Native dialogs, desktop input, general filesystem | Tools operate on pages. The optional real-cursor "showroom" driver (plan §6.5) is not built. |
+| Person's own profile in Engine 2 | Impossible by design (Chrome 136 rule, App-Bound Encryption); Engine 2 profiles are per machine (a copied profile loses its cookies). |
+| Browser/enterprise policy | Policy can deny debugger attachment; changing code does not grant an exemption. |
+| Finite capture/history | Buffers are bounded; uncaptured requests cannot be recovered by a larger buffer. |
 
-**Still not implemented:** full heap snapshots (`HeapProfiler` is not in the extension domain
-allowlist), Lighthouse integration, Firefox/Safari support, desktop/audio recording, arbitrary
-downloaded-file content assertions, and vendor-specific Jira/Azure/Linear clients. Content-script
-and native-messaging paths are not built. Local-adversary hardening remains outside the agreed
-deployment model (§5). Browser API availability is not a promise that these features already exist.
-
-Primary references: [debugger domains, sessions and policies](https://developer.chrome.com/docs/extensions/reference/api/debugger),
-[downloads API](https://developer.chrome.com/docs/extensions/reference/api/downloads),
-[closed-root access](https://developer.chrome.com/docs/extensions/reference/api/dom),
-[focus emulation](https://chromedevtools.github.io/devtools-protocol/tot/Emulation/#method-setFocusEmulationEnabled),
-[native messaging](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging).
+**Not implemented:** full heap snapshots, Lighthouse, Firefox/Safari, desktop/audio recording,
+vendor-specific Jira/Azure/Linear clients, IndexedDB transfer on handoff, the showroom driver, the plan's
+Appendix B spikes (`tabCapture` keep-alive, virtual-desktop popout) and Appendix C (fork spike), a
+published extension (store or forcelist CRX). Local-adversary hardening remains outside the deployment
+model (§5).
 
 ---
 
 ## 8b. Recorder, replay, and issue capture
 
-Designed 2026-08-31, built in v1.2 and expanded in the current QA phase. Written down before the
-code existed because the decisions are the expensive part; the implementation
+Designed 2026-08-31, built in v1.2, expanded through v1.7, moved onto the platform seam in v2. Written
+down before the code existed because the decisions are the expensive part; the implementation
 followed from them, and the record of *why* is worth more than the diff.
 
 ### The problem that shapes it
@@ -645,27 +1067,40 @@ pass/fail results are exposed as a flaky signal.
 
 ### Recording transport
 
-`Page.addScriptToEvaluateOnNewDocument` + `Runtime.addBinding`, over the
-`chrome.debugger` session already open. Injects before the page's own scripts,
-survives navigation by construction, and gives the injected listener a direct
-channel back — with **no content script and no new permission**. It also keeps
-§6's rule intact: all browser logic goes through CDP.
+`Page.addScriptToEvaluateOnNewDocument({worldName:'g9'})` + `Runtime.addBinding`, over the CDP
+session already open, in either engine. Injects before the page's own scripts, survives navigation by
+construction, and gives the injected listener a direct channel back — with **no content script and no
+new permission**; all browser logic still goes through CDP. v2 moved it into G9's isolated world
+(§4.7): v1 left `window.__g9rec`, `window.__g9loc` and the `__g9emit` binding where the page could see
+them. The binding is added by `executionContextName` AND by context id, because a binding by name is
+installed only while Runtime is enabled and stealth never enables it (measured on Edge 153); the script
+buffers events emitted before its binding exists. Alongside the steps it samples the person's hand
+(pointer ≈60 Hz, presses with the target's size, wheel notches, key timing by class — never text, and
+nothing in password fields) into `input-samples.json` for humanize calibration. A second recording on
+a tab that is already recording is refused (v1 silently replaced the session and leaked the first
+one's scripts). Cross-origin frames that attach after recording starts are not armed.
 
 ### Storage
 
-`chrome.storage.local` for structured records, **IndexedDB for attachment
-bytes**. Screenshots and tab video are the only things that get large, and
-`storage.local` is a JSON store — megabytes of base64 there would be
-deserialised on every read of any key. The split is what keeps listing issues
-fast when one of them has a 20MB video. `unlimitedStorage` is requested for durable data; transient
-page state still uses session storage. Settings and records already touch disk, so §4.1 is a
-transient/durable distinction, not a blanket ban on persistence.
+`platform.storage.local` for structured records, **`platform.blobs` for attachment bytes**: in the
+extension `chrome.storage.local` + IndexedDB (`g9-attachments`, the v1 schema, so existing data
+survives), in the daemon `G9_HOME/store/kv-local.json` + `store/blobs/<store>/<id>.bin`. Screenshots
+and tab video are the only things that get large, and a JSON store would deserialise megabytes of
+base64 on every read of any key. The split is what keeps listing issues fast when one of them has a
+20MB video. `unlimitedStorage` is requested for durable data; transient page state still uses session
+storage, so §4.1 is a transient/durable distinction, not a blanket ban on persistence.
 
-Screencast frames themselves also live in IndexedDB, one record per frame and
-session. Acknowledgement happens only after that record is durable, which gives
-Chromium back-pressure and removes asynchronous read/modify/write loss. Session
-storage contains only frame count/bytes/owner metadata; a 40MB recording can no
-longer exceed its practical quota before it is turned into an attachment.
+**Two stores in v2.** The extension's store (Engine 1) and the launched-engine store (Engine 2) are
+separate. The daemon merges `list` across both (each row labelled `engine`), tries the caller's current
+engine first for id-based actions, copies a recording from the extension store before replaying it on a
+launched tab, and keeps the launched store's local truth (known world, run history, flakiness) on
+`import_spec`. The runner imports the repository's FlowSpec files into the launched store before a run:
+the repository is the source of truth.
+
+Screencast frames are written one record per frame and acknowledged only after the record is durable
+(`lib/screencast.js` `backpressure:true`), which gives Chromium back-pressure and removes asynchronous
+read/modify/write loss; each frame record carries the pointer sample of that moment. Session storage
+holds only frame count/bytes/owner metadata.
 
 Backup and restore is a single self-contained JSON bundle with attachments
 inlined — a manifest plus a folder is the kind of backup that arrives
@@ -673,12 +1108,16 @@ incomplete. Import defaults to `merge`; `replace` has to be asked for by name.
 
 ### Media (decided with the user)
 
-Screenshot plus **tab video via `Page.startScreencast`**. No microphone, no
-desktop capture: CDP screencast captures exactly the attached tab, needs no
-additional capture permission beyond the existing debugger permission, and has no source picker.
-Audio/desktop capture would require another implementation and the appropriate capture permissions,
-user gestures or consent for the API chosen; do not assume every audio source needs a microphone
-prompt or that all capture APIs have identical lifetime/visibility rules.
+Screenshot plus **tab video via `Page.startScreencast`**, in v2 one stream per tab shared by the issue
+video and the live watch (`lib/screencast.js`). No microphone, no desktop capture: the screencast
+captures exactly the tab, needs no permission beyond `debugger`, and has no source picker. The cursor
+is a **track, not a picture** (D9): every dispatched mouse event is recorded (`lib/pointer.js`), each
+frame record carries the pointer, the video stores `pointer-track.json` (`g9-pointer/1`), and the
+desktop's Watch view and the reports draw the cursor from it — a DOM cursor would be visible to the
+page. On Engine 2, replays and UI watches spool frames and `pointer.jsonl` into
+`G9_HOME/runs/<runId>/`, capped by `settings.evidence` (3000 frames per run by default; beyond a cap
+frames are counted, not written). Audio/desktop capture would need another implementation and consent
+model; do not assume every capture API has the same lifetime or visibility rules.
 
 ### External task systems stay agent-owned
 
@@ -686,13 +1125,18 @@ The browser tool produces portable structured issues, attachments, HAR, and
 reproducible test steps. The connected AI agent normally already has the right
 GitHub/Jira/Azure/Linear connector and should file from that evidence. No
 vendor-specific tracker client or token handling is implemented here; keeping
-it out preserves the zero-dependency bridge and avoids duplicating the agent.
+it out preserves the zero-dependency core and avoids duplicating the agent.
 
 ### MCP surface
 
-Two grouped tools, keeping §4.4's discipline (12 → 14, not 12 → 30):
-`browser_recording` (list/get/start/stop/replay/assert/update/delete/export/import/export_test) and
-`browser_issue` (list/get/create/update/delete/screenshot/attach/attachment/video start/stop/status).
+Two grouped tools, keeping §4.4's discipline: `browser_recording` (list/get/status/start/stop/replay/
+assert/update/delete/export/import/export_test/export_spec/import_spec/calibrate/approve/known_world/
+signature/suggest/calibrate_humanize) and `browser_issue` (list/get/create/update/delete/screenshot/
+attach/attachment/video_start/video_stop/video_status). v2 added `engine` and `humanize`/`seed` to
+replay — `engine:"launched"` opens the recording's start URL in a launched engine when needed and
+reports `ranOn` — and `calibrate_humanize`, which fits a profile from one or more recordings' input
+samples; with `name` it is saved where unattended runs look it up (a profile fitted on a launched
+engine is not installed into the extension's store, §8.2).
 
 ## 8c. Regression memory — signatures, the known world, and surprises
 
@@ -718,7 +1162,8 @@ run also asks **"did anything happen that has never happened before?"**
 | `lib/flowspec.js` | The portable, canonical, Git-diffable form of a flow |
 | `tools/netpin.js` | Serve the network from a HAR so the backend stops being a variable |
 | `tools/replay.js` | Collects the evidence, builds the signature, runs the comparison, classifies the verdict |
-| `runner/` | Drives all of it with no agent present |
+| `daemon/evidence.js`, `engine/manager.js` | On Engine 2: the replay's evidence run (`engine.json`, frames, pointer track, `result.json` with verdict, warnings, steps and surprise count) |
+| `runner/` | Drives all of it with no agent present — through the shim and the daemon, like any agent; a launched engine by default |
 
 ### Normalisation is the whole game
 
@@ -788,7 +1233,8 @@ normal, which is silent self-healing wearing a different hat.
 2. `edge-64x64-v1` structure map — a binarised gradient. Blind to colour, font
    smoothing and copy is the design goal, not a guarantee: changed contrast or text can alter
    edges too. This is what `mode: "layout"` compares to detect movement, clipping and overlays.
-3. The full PNG — in IndexedDB as an attachment, for a human. Never compared.
+3. The full PNG — an attachment (IndexedDB in the extension, a blob file under `G9_HOME/store/blobs/` on
+   a launched engine), for a human. Never compared.
 
 An old baseline has no structure map, and `compareVisual` throws rather than
 silently falling back to `strict`: a comparison the caller did not ask for is a
@@ -832,9 +1278,20 @@ because one un-recorded font should not look like a product bug.
 `FAIL_AUTOMATION` is decided from the *wording* of the step error
 (`AUTOMATION_FAILURE` in `replay.js`) because those two outcomes have different
 owners: one is a bug, one is a broken test, and filing the second as the first is
-how a QA system loses its audience. That regex is a heuristic and will need
-extending as new failure sentences are written — keep it beside the messages it
+how a QA system loses its audience. That pattern list (`AUTOMATION_FAILURE_PATTERNS`) is a heuristic and
+will need extending as new failure sentences are written — keep it beside the messages it
 matches.
+
+### Late evidence after the last step (v2)
+
+The same replay on an unchanged page used to count 3, 3, 2, 3, 3, 3 surprises in six identical runs
+(desktop render check, live round 3): the page logged an error and fired a failing request just after
+the final click, sometimes before the signature was built and sometimes after. Replay now waits,
+bounded (500 ms of quiet, 2 s cap), for new console entries and requests after the last step, attaches
+what arrived to that step, and reports `settledAfterLastStep`. A page that never goes quiet costs only
+the cap. The quiet window opens only once a poll has seen no request in flight (`pending === 0`):
+`pending` is a level, not an edge, and until 2.0.2 the window could open from the last poll that still
+saw a request running, so a late response and its status could be missed (§9 2.0.2).
 
 ### Evidence attribution is by identity, never by clock
 
@@ -854,9 +1311,11 @@ after every step of a forty-step flow doubles the run for evidence nobody reads.
 
 ### What deliberately did NOT happen
 
-- **No fifteenth tool.** Pinning went into `browser_network` and the known-world
-  actions into `browser_recording`. §4.4's budget is spent on tool *definitions*,
-  which are re-sent every request; actions are free.
+- **No new tool for regression memory.** Pinning went into `browser_network` and the
+  known-world actions into `browser_recording`. §4.4's budget is spent on tool
+  *definitions*, which are re-sent every request; actions are free. (v2's fifteenth
+  tool, `browser_engine`, exists because launched browsers are a new noun, not a new
+  action on an old one.)
 - **No signature in a tool result.** A full signature is kilobytes of normalised
   evidence. `includeSignature` is an internal flag for calibration; the agent
   gets counts and surprises.
@@ -866,7 +1325,633 @@ after every step of a forty-step flow doubles the run for evidence nobody reads.
 ## 9. Change log
 
 Entries below describe what was believed or tested at the time. Current capability claims and
-unresolved findings are in §§4, 7 and 8, which supersede historical assertions.
+unresolved findings are in §§4, 7 and 8, which supersede historical assertions. Entries dated before
+2026-09-21 describe v1 (the bridge, the four control modes, the workspace allowlist).
+
+### 2026-09-25 — v2.0.3: the popped-out window that opened behind the person's own
+
+**Reported from real use.** The owner pressed **⧉ Pop out tab** in the side panel: the tab disappeared
+from its window and no new window appeared.
+
+**Cause (`extension/tools/tabs.js` `popout`).** The window was created unfocused, the size of the source
+window (usually maximised) and 40 px lower, and then the person's window was raised again. The new
+window therefore landed entirely behind the person's window. That is worse than confusing: on Windows a
+window that another window covers completely is occluded, and Chromium stops rendering it unless the
+`WindowOcclusionEnabled` policy is off (plan §2.1) — the opposite of what popping out is for. The
+Engine 1 live test pops out through an agent's call, with an explicit size, in a headless browser
+where no window can cover another, so it could not see this.
+
+**Fix: two callers, two rules.**
+- **The person** asked to see the window. The panel command `popout` (`extension/sw.js`, sent by
+  `extension/panel/session.js`) calls `popout(tab, {focus:true})`: the window is created focused, in
+  front, and nothing is handed back. As before, the panel's own button works while Stop is on.
+- **An agent** (`browser_tabs action:"popout"`) must not take the person's keyboard. Its window is
+  created unfocused, and focus goes back to the person's window only if the browser moved it (that
+  window no longer reports `focused`): raising it unconditionally is exactly what buried the popout.
+  The tool's `focus` argument now also applies to popout (`mcp/tools.js`): `focus:true` creates the
+  window in front and focused.
+- **Default geometry** (`popoutGeometry(source, {width, height, left, top})`, exported): half the
+  source window's width and three quarters of its height, clamped to 640–1280 × 480–1000, at the
+  source's top-right: its right edge 24 px inside the source window's, its top 72 px below the source's
+  top. It is visibly a separate window, never an exact copy of a maximised one. Explicit
+  `width`/`height`/`left`/`top` win.
+- **The result says what the page says.** It carries `focused`, and `visible`: `document.visibilityState`
+  read in G9's world about 600 ms after the move (`POPOUT_VISIBILITY_SETTLE_MS`; occlusion is computed a
+  moment after the window settles), `null` when it could not be read. The note says that a window
+  another window covers completely stops rendering on Windows unless the policy is off (docs/INSTALL.md);
+  when `visible` is false it says the window is not visible now and names the remedies
+  (`browser_tabs action:"focus"`, or the policy). The panel shows a `visible:false` result as a failure,
+  with that note, and the help text under its button says the same (`extension/panel/panel.html`).
+
+**Tests.** `setup/unit/seam.test.mjs` drives `sw.js` over its stubbed `chrome`. The panel's popout
+creates the window with `focused:true` and `state:'normal'`, never raises the person's window over it,
+and reports `focused:true`, a `visible` field and a note that says not to minimise the window; it also
+works while Stop is on. The default geometry for a maximised 1936×1048 source is narrower and shorter
+than the source and inside it, and explicit geometry comes back unchanged. An agent's popout (a relayed
+`browser_tabs` call) is created with `focused:false`, does not raise the person's window, and reports
+`focused:false`. The seam suite's count grows with these checks. **Not measured:** no harness puts a
+window on screen, so the reported case, a real maximised window in front, has not been driven in a real
+browser. The isolated Engine 1 live test's popout section (16) checks the move itself: headless, with
+an explicit size, no reload, the same tab handle, input delivered.
+
+**Found while testing the fix, and fixed in the same release.**
+- **The browser refused the new placement outright.** The first run of the Engine 1 live test on the
+  fix failed at section 16 with `Invalid value for bounds. Bounds must be at least 50% within visible
+  screen space`: headless Edge there runs a window larger than its virtual screen, so the top-right
+  placement fell off-screen and the tab stayed where it was. The extension cannot see the screen (that
+  needs the `system.display` permission), so `createPopoutWindow` now tries the preferred placement,
+  then the same size at the source window's top-left plus 40 px, then the size alone, then the
+  browser's own choice. Only an explicit `left`/`top` from the caller is kept as given; a size alone
+  still gets the fallbacks (the live test asks for 900x700 and no position). The seam suite's stub now
+  answers Chromium's real refusal on demand and checks each step of that chain.
+- **An agent's `focus:true` never reached the extension.** `daemon/router.js` forwarded only
+  `width`/`height`/`left`/`top` for popout (found by the 2.0.3 documentation audit), so the
+  argument the tool description advertises silently did nothing. It now travels, and a new router test
+  in `setup/unit/daemon.test.mjs` checks that focus and geometry reach the extension with the Chrome tab
+  id and that the result comes back as a handle.
+- Smaller corrections the same audit found: the agent instructions said "the last four snapshots of a
+  page" stay usable where `refs.js` keeps four **per caller**; the hidden-tab refusal now also says a
+  completely covered popout stops rendering without the policy; the desktop's Setup view said the CfT
+  download is about 150 MB (it is 205 MB); `runner/g9.mjs` help now states the real defaults of
+  `--browser` and `--port` and lists `--token`; `engine/launch.js` documents close()'s full result.
+
+**Runs on 2.0.3 (2026-09-25).** `unittest.mjs` 621 in 10 suites, `selftest.mjs` 136,
+`extensiontest.mjs` 78, desktop 14 files, `engine2-livetest.mjs` 366/0, `isolated-livetest.mjs` 196/0 on
+Edge with the real popout (a new window, no reload, the same handle, input delivered, not minimised),
+and the installer `G9-Setup-2.0.3.exe` (103,591,675 bytes, unsigned) with `test:packaged` 7/7 and a
+payload identical to the repository.
+
+Version 2.0.3 in `package.json`, `extension/manifest.json`, `desktop/package.json` and
+`desktop/package-lock.json`; the docs that name the release moved with it.
+
+### 2026-09-24 — v2.0.2: three defects that only a flaky test could find
+
+A full re-run of the suites on the untouched 2.0.1 tree failed where the same suites had passed twice
+the day before. Three tests were flaky. Chasing each to its root found **three real product defects**
+and six tests that measured the machine instead of the product. Nothing here was visible in a single
+green run, which is the point worth remembering: on this codebase a flaky test has twice now been a
+defect wearing a disguise.
+
+**Defect 1 — replay could miss a late error (`extension/tools/replay.js`, `awaitQuiet`).** The quiet
+window after the last step treated `pending` — a LEVEL, the count of requests still in flight — as if it
+were an edge, and stamped the clock from the last poll that still saw one. `observe.js` moves no counter
+when a request FINISHES, so nothing reset that clock afterwards: with a slipped poll, replay returned a
+quiet verdict from a moment when the page demonstrably was not quiet, before the late response existed.
+That is exactly the surprise-attribution race the function was added to close. The clock now cannot start
+until a poll has observed `pending === 0`. Measured: `setTimeout(20)` on this machine lands at 21–168 ms
+under load; a paired A/B of old against new, 30 blocks of 20 runs each under load, reproduced the
+reported failure almost verbatim on the old code (29/30 blocks) and 30/30 clean on the new.
+
+**Defect 2 — the evidence prune raced itself (`daemon/evidence.js`).** `startRun()` fired `prune()`
+without awaiting it, so an explicit `prune()` or another run starting overlapped it and two recursive
+deletes walked the same run directory. Measured under load: 16 of 80 concurrent pairs had the first
+`rm` fail with EPERM, and in 5 of 80 the directory was still on disk when that call returned — so
+`await prune()` did not mean pruned, and `settings.evidence.keepRuns` was silently not honoured.
+Prune is now serialised through a chain, and the delete carries the same short Windows EPERM/EBUSY
+retry that `paths.js` already uses for renames. A/B under load: 16/80 → 0/80 failures.
+
+**Defect 3 — a launched-engine watch could be overtaken by its own stop (`engine/manager.js`,
+`daemon/daemon.js`).** `#watch` awaited `engines.watch(handle, true, …)` after its cancel guard, and an
+unwatch arriving during that await reached `EngineManager` first. `EngineManager.watch` had no ordering
+of its own: every guarantee came from `extension/lib/screencast.js`'s private per-tab chain, a module it
+imports optionally and treats as absent-able. Driving a real daemon with a gated screencast layer left a
+tab `running=true` with zero consumers and zero watchers. `watch()` is now a thin wrapper over a
+per-(tab, consumer) chain, so the last request wins for the whole of a watch — the map, the pointer
+subscription, the watchdog and the screencast — not just the CDP calls. The opposite state needed no race
+at all: when the start rejected, the daemon logged it and still answered `{watching:true}`. It now undoes
+the watcher and answers `{watching:false, problem}`; `desktop/renderer/views/watch.js` shows that reason
+instead of waiting forever for a first frame, and DAEMON_PROTOCOL §6 documents the field.
+
+**Also in 2.0.2 — the browser close budget, sized from a measurement (`engine/launch.js`).** `close()`
+sends `Browser.close` and waits for a clean exit before it kills the process tree, because a clean exit
+is what flushes cookies and preferences to the profile: a killed browser can lose the last minutes of a
+warmed login. The wait was 10 s. Measured on 2026-09-24 on headless Edge 153 (i9-10900X): a close took
+0.4–0.5 s idle but up to 17.9 s with 24 CPU-bound processes running, and one of four loaded closes was
+killed at the 10 s mark and exited with code 1. The budget is now the exported `GRACEFUL_EXIT_MS` =
+30 000 ms; with it, 12 closes, loaded and idle, needed 0 kills. A browser that is truly hung still
+dies, only later, and a caller that needs a fast shutdown passes its own `timeoutMs`. `close()` now also
+reports `gracefulMs` (the clean-exit wait) and `closeMs` (the whole close), and its `exit` is never
+null once the process is gone: when the child's exit event has not arrived yet it is `{code:null,
+signal:null, gone:true}`, because a caller reading `exit.code` would crash on null for a shutdown that
+worked. `setup/unit/engine.test.mjs` reports the wait when it asserts that no kill was needed, and
+checks both new fields.
+
+**Six tests that measured the machine.** Two in `daemon.test.mjs` hid `evidence.startRun/finishRun` file
+I/O behind fixed sleeps of 20 and 60 ms; measured worst case under load was 806 ms. They now wait for the
+admin reply, which the daemon sends only after the op completes. Four in `interaction.test.mjs` anchored
+a humanized click's schedule at the first SENT event (absorbing its own lateness, so later events looked
+early), assumed a saturated dispatcher would never merge (merging when behind is the design), assumed the
+first sent sample is the first planned one, and assumed a Stop or a scroll settle inside a fixed window.
+Each now asserts the invariant instead of the clock: no event before its due time, every merge justified
+by the documented lateness threshold, every sent event a step of the replanned path, and the settle
+bounded by the product's own cap. Three budget assertions in `daemon.test.mjs` were rewritten the same
+way; one 500 ms poll was replaced by the file's bounded `waitUntil` after a 446 ms worst case was measured.
+
+**Every changed test was proved to still have teeth**: the behaviour it covers was broken on purpose, the
+test was shown to fail, and the product file was restored byte-for-byte (hashes verified). One of the new
+interaction assertions catches an accumulating-delay regression that no previous assertion caught.
+
+**Runs.** `daemon.test.mjs` 32/32 including 11 under load it generated itself, then 96/96 with the new
+launched-watch test. `interaction.test.mjs` 11/11 (6 idle, 5 under 32 CPU hogs on 20 cores) against 0/3
+before. `unittest.mjs`, `selftest.mjs`, `extensiontest.mjs`, the desktop suites and the live suites were
+re-run for this release; the counts are in §7.
+
+Version 2.0.2 in `package.json`, `extension/manifest.json`, `desktop/package.json` and
+`desktop/package-lock.json`; the docs that name the release or the installer moved with it.
+
+### 2026-09-23 — v2.0.1: the final pass, every suite re-run, and a measurement that nearly cost a switch
+
+The 40 findings of the adversarial review were fixed under the frozen 2.0.0 number. This entry is the
+pass that ran **every** suite on the tree that carries those fixes, and the bump the owner's standing
+rule asks for: **2.0.1** in `package.json`, `extension/manifest.json`, `desktop/package.json` and
+`desktop/package-lock.json`.
+
+**No test pins a version any more.** Three did — `panel.test.mjs` (`assert.equal(manifest.version,
+'2.0.0')`), `desktop/test/static.test.mjs` and `desktop/test/smoke.test.mjs` — and the bump failed all
+three, which is exactly the cost the rule exists to avoid. They now read `package.json` (or
+`desktop/package.json`) and compare; `version.test.mjs` already compared the three files and
+`lib/version.mjs`. The desktop static test also lost its "the extension has not landed 2.x yet" escape
+clause, which would have hidden a stale manifest. The version shows where it must: the panel header
+badge and the About tab (from the manifest at runtime), the desktop window title (`G9 2.0.1` in the
+render check's window samples), the daemon's `/health`, the shim's handshake, and the packaged
+`G9.exe` (ProductVersion 2.0.1.0).
+
+**Offline, on this tree:** unit **618/618** in 10 suites (daemon 95, desktop 181, engine 56, humanize
+51, interaction 77, panel 75, platform-cdp 34, seam 16, version 7, world 26); self-test **136/136**;
+extension suite **78/78**; `desktop/test/run.mjs` **14/14 files** in 22.6 s; `daemon-contract.mjs`
+**15/15**.
+
+**Installer, rebuilt from the final tree:** `G9-Setup-2.0.1.exe`, **103,585,971 bytes**, unsigned,
+with `dist/win-unpacked/resources/app-update.yml` present; `npm run test:packaged` **7/7** (no `node`
+on the PATH, the packaged shim starts the packaged daemon). `npm run test:render` **passed**: 4
+scenarios (empty and populated x dark and light), 23 pictures per populated run, **0 samples on screen
+and 0 in the foreground** out of 171 in the last run alone. The pictures were looked at, not only
+counted — Runs with its steps, warnings and replay; Watch with a live frame and its LIVE/fps badge;
+Setup's five steps; Approvals with a real surprise list; and the empty states. Nothing visibly broken
+in either theme.
+
+**Live, on this tree:** Engine 2 live test **366/0** in 330 s; isolated Engine 1 live test **196/0 on
+Edge 153.0.4234.32** and **196/0 on system Chrome 153.0.8010.53**, each with its tripwire at 0 hits and
+no profile signed in to a browser account; and the stealth matrix **twice** — once over the local
+detector page alone and once including the public detector pages — with identical verdicts both times:
+**edge-headed-stealth UNDETECTED on the local page**, **0 G9 leaks in any stealth configuration**, and
+both human controls detected as they must be.
+
+*Stealth, the full matrix including the public pages (run twice on 2026-09-23, before and after the
+version bump, same verdicts):*
+
+| configuration | local page | public detectors |
+|---|---|---|
+| edge-headless-stealth | 65 pass, 1 fail (0 G9): the HeadlessChrome UA | flagged by sannysoft, creepjs (headless 67 %), browserscan, pixelscan, fingerprint-bot-detection |
+| edge-headless-human (control) | 60 pass, 6 fail (5 G9) — must be detected, and was | all of the above plus rebrowser (navigatorWebdriver) |
+| edge-headed-stealth | 65 pass, 0 fail, 2 warn | **passed sannysoft, creepjs, browserscan, fingerprint-bot-detection and rebrowser; pixelscan alone said "Automated behavior detected"** |
+| edge-headless-stealth-de | 68 pass, 1 fail (0 G9): the UA | local only by design |
+| cft-headless-stealth | 63 pass, 2 fail (0 G9): the UA, no Widevine | the five above plus rebrowser (useragent) |
+| cft-headed-stealth | 63 pass, 1 fail (0 G9): no Widevine | passed sannysoft, creepjs, browserscan, pixelscan and fingerprint-bot-detection; **rebrowser flagged the brand** |
+| cft-headless-human (control) | 59 pass, 6 fail (4 G9) — detected, as it must be | all six |
+
+Headless detection through the `HeadlessChrome` user agent is inherent and not a G9 leak. The run
+exits 1 while any configuration is detected, by design.
+
+**Live, on the tree as it stood an hour earlier — identical product behaviour, only the version string
+and comments differ (the machine had to be quiet for the timing runs, so they were not repeated):**
+
+*Background-state matrix:* **exit 0** over the full default set — Engine 1 x Edge and Chrome x
+active/background/minimized/offscreen/hidemid/hidemidheaded, with and without
+`--disable-features=CalculateNativeWinOcclusion`, and Engine 2 x active/background/popup/minimized/
+offscreen. Every cell agrees with what the page recorded, including the partial deliveries, which
+report themselves as partial.
+
+*Bench (`setup/bench.mjs`, default levels, 5 iterations, shared seeds):*
+
+| contexts | wall s | flow p50/p95 ms | interact p50/p95 ms | click overhead p50/p95 ms | browser priv peak | daemon priv peak | failures |
+|---|---|---|---|---|---|---|---|
+| 1 | 54.8 | 11,599 / 12,211 | 1,456 / 4,859 | 160 / 165 | 554.5 MB | 69.9 MB | 0 |
+| 4 | 55.9 | 11,398 / 12,096 | 1,441 / 4,897 | 157 / 182 | 964.9 MB | 99.8 MB | 0 |
+| 8 | 57.7 | 11,618 / 12,588 | 1,477 / 4,975 | 191 / 260 | 1,512.8 MB | 104.7 MB | 0 |
+| 16 | 64.1 | 12,668 / 14,233 | 1,544 / 5,208 | 249 / 471 | 2,528.1 MB | 108.4 MB | 0 |
+| 16, gated to 8 | 120.0 | 21,880 / 24,730 | 3,408 / 8,969 | 2,572 / 5,183 | 2,505.5 MB | 106.3 MB | 0 |
+
+Recommendation: **maxParallel 8** (16 trips the rule on `select_env` p95 x3.44, +398 ms). The default
+stays 8.
+
+*Endurance (`--minutes 10`):* **93 iterations, 0 failures**, iteration p50 11,976 ms / p95 14,465 ms.
+Slopes after warm-up: daemon **+0.39 MB/min** private (+0.5 working set), handles **-0.15/min**;
+browser **+1.79 MB/min** private (+3.29 working set), process count flat at 20. Listener counts flat
+(48 before and after, delta 0 over 47 samples); the single-page-app view flat at 48 listeners with
+nodes +2 per pass; `gc()` collected in every sample. Spool: 4,085 frames seen by the UI, 300 on disk.
+
+**Chrome for Testing's 10 Hz renderer: still real, and the switch stays.** The owner allowed the
+Windows Firewall prompt for the newly installed `chrome.exe` that had been pending during live round 2
+— the leading suspect for CfT's 100 ms frame interval. Two sequential probe runs then read CfT
+*without* `--disable-frame-rate-limit` at 10.1 ms, as fast as Edge, and the switch was on its way out
+of `KIND_SWITCHES`, tests and documents with it. An interleaved A/B put it back: 4 rounds, each
+launching CfT+switch, CfT alone and Edge alone back to back on fresh temp profiles, the same GPU
+(ANGLE/NVIDIA) in all 12 launches.
+
+| 4 rounds, one line each | rAF | page mousemove | press hold | per dispatch |
+|---|---|---|---|---|
+| CfT + `--disable-frame-rate-limit` | 17.3–17.4 ms | 17.2–17.4 ms | 25.7–59.3 ms | 17.3 ms |
+| CfT, nothing added | 100.5–100.6 ms | 100.5 ms | 1.4–3.1 ms | 100.5 ms |
+| Edge, nothing added | 10.5 ms | 10.6–10.9 ms | 106–108 ms | 10.3–10.4 ms |
+
+8 launches out of 8 at 10 Hz without the switch; 12 out of 12 at 17.4 ms with it. The two 10.1 ms
+readings came from a window in which the machine had been running browser suites continuously for half
+an hour, and could not be reproduced afterwards. **The lesson is the method, not the number:** a
+sequential probe cannot tell a per-binary effect from a per-hour one, and a switch is not removed on a
+reading that has not been reproduced against its own control in the same minutes. The removal was
+reverted in full — `engine/launch.js`, `engine/stealth.js`, `setup/stealthtest.mjs`,
+`setup/unit/engine.test.mjs` and the six documents that describe the switch — and each of them now
+carries the A/B table instead of a bare assertion. The press hold in that table is short under the
+switch because the probe dispatches on the plan's raw schedule at 17.3 ms per dispatch; it is
+`perform` rule 1 (the 80 % rule) that brings the product's own hold back to 60–151 ms.
+
+**Hygiene.** Every run used a fresh temp `G9_HOME`, temp profiles and a random port in 18000–18999;
+each suite reported its own cleanup (`leftovers: []`, temp root removed). Port **8765 was never bound,
+connected to or probed**: it is still held by the owner's v1 bridge (pid 71076, listening since
+2026-09-21), and `setup/matrix.mjs`'s own guard counted `attempts8765: 0`.
+
+### 2026-09-22 — v2.0.0: two engines, one daemon, human input — and what three live rounds found
+
+**The release.** The whole of [V2_IMPLEMENTATION_PLAN.md](V2_IMPLEMENTATION_PLAN.md) (P0–P8) was built as
+one release, 2.0.0, by parallel work packages against the contracts in
+[docs/ARCHITECTURE_V2.md](docs/ARCHITECTURE_V2.md) (§12 lists who owned which files), then integrated
+and driven through three rounds of live suites and fixes on the owner's workstation. §§1–8 above
+describe the result; this entry records how it got there. The two 2026-09-22 entries below are earlier
+steps of the same release (the round-2 fixes, and the extension suite's migration). Round numbers here
+are the live suites' rounds; some code comments call the final fix round's own measurements "round 4".
+
+**What was built.**
+
+- **The platform seam** (`extension/lib/platform.js`, `platform-extension.js`, `platform-cdp.js`), and the
+  tool runtime moved out of `sw.js` into `tools/index.js` (`runTool`, `status`) and `tools/events.js`,
+  so the same tool modules run in the extension and in the daemon (§4.6).
+- **Engine 2** (`engine/`): browser discovery by PE version, the Chrome for Testing fetcher (pinned
+  153.0.8010.52, sha256 trust-on-first-use, Range resume, IPv4/IPv6 retry — Google's storage answered
+  HTTP 403 over IPv4 from this location), `launchBrowser` over `--remote-debugging-pipe`, `PipeCdp`,
+  G9 profiles with `warm`, stealth levels, and `EngineManager` in the daemon.
+- **The daemon and shim** (`daemon/`, `mcp/`, `lib/`): one `g9d` per machine, many agents, daemon-wide
+  tab handles, ownership, per-tab queues, global and per-agent halts, handoff, evidence runs, the
+  scheduler, settings, the extension updater; the shim that starts the daemon on demand; the version
+  in one place. `bridge/` was deleted except a forwarder for v1 MCP configs; the runner now talks to the
+  daemon through the shim with `--engine launched` as the default, and v1's port rule is gone.
+- **Extension v2**: modes, workspace allowlist, cookie scoping and title withholding removed; attach =
+  full access; auto-attach; `chrome.downloads`; every internal evaluation in the isolated world `g9`;
+  popout; handoff ("Send to background"); the panel rewritten around the daemon, agents, input level,
+  Stop and activity; the version in the panel title, badge, About tab and welcome page.
+- **Human input**: `extension/humanize/` (pure, seeded) and the dispatcher `extension/lib/humanize.js`,
+  `pointer.js` (cursor track), `screencast.js` (shared), the rebuilt witness with delivery states,
+  calibration from recordings (`calibrate_humanize`).
+- **Evidence v2**: `G9_HOME/runs/<runId>/` with frames, `pointer.jsonl`, downloads verified on disk, the
+  live watch stream to UI clients.
+- **The desktop** (`desktop/`, Electron 44.4.3): tray, Watch, Runs, Approvals, Engines, Agents, Schedule,
+  Settings, Setup wizard (browsers, CfT, profile warm, HKCU policies with Undo, MCP registration, the
+  extension step), updater (generic feed), per-user NSIS installer.
+- **Tests**: ten unit suites under `setup/unit/` run by `setup/unittest.mjs`; `selftest.mjs` rewritten
+  around a real daemon and two shims; `extensiontest.mjs`, `livetest.mjs` and `isolated-livetest.mjs`
+  migrated; new `engine2-livetest.mjs`, `stealthtest.mjs`, `matrix.mjs`, `bench.mjs`, `endurance.mjs`.
+  Docs: ARCHITECTURE_V2, DAEMON_PROTOCOL, STEALTH, HUMANIZE, engine/README, desktop/README.
+
+**Decisions taken during the build** (ARCHITECTURE_V2 §0; D-a answers the owner's requirement that stealth runs be undetectable):
+
+- **D-a — the `AutomationControlled` switch, at stealth only.** Measured on Edge 153.0.4234.32, Chrome
+  153 and CfT 153.0.8010.52: `--remote-debugging-pipe` itself makes `navigator.webdriver === true` on every
+  Engine 2 page, headless or headed, with no `--enable-automation`; only
+  `--disable-blink-features=AutomationControlled` clears it, and `Emulation.setAutomationOverride({enabled:false})`
+  does not. Plan §P2.2 forbade the switch. Decision: `stealth.launchArgsFor('stealth')` passes it;
+  `off`/`human` refuse it in `extraArgs` and warn that webdriver is true; `--enable-automation` is refused
+  always. Also every headless launch gets `--screen-info` (headless otherwise reports an 800×600 screen).
+  Result (live round 3): webdriver `false` in 40/40 stealth runs, a native getter, not an own property;
+  `true` in 14/14 human controls.
+- **D-b — the stricter level wins.** The effective input level is the stricter of the call's `humanize`
+  and the tab's `stealthFor`: a stealth context with `humanize:"human"` had fallen back to `DOM.focus` and
+  programmatic scrolling. In the extension the first reading made the panel's Input setting (default
+  Human) a floor, so an agent's `humanize:"off"` became human input; the converge stage flagged it for
+  the owner. The shipped semantics, as `platform-extension.js` documents them: **only Stealth is a floor** in the extension (`stealthFor` is
+  `'stealth'` only when the panel says Stealth), the panel's setting is otherwise the default level.
+- **D-c — `instanceId` resume.** MV3 restarts the worker when it likes and the desktop reloads the
+  extension after every update; each reconnect reshuffled every handle and agents lost their tabs
+  mid-task. The extension now says which extension it is (`instanceId`, `loadId`, open tabs); the
+  daemon parks a disconnected one for 10 minutes and gives its engine id, handles, claims and names back.
+
+**Deviations from the plan, and why** (all recorded in ARCHITECTURE_V2 §0 or in the code that carries them):
+
+- `humanize/` lives under **`extension/humanize/`**: an unpacked extension cannot import outside its
+  folder; the daemon imports it from there.
+- **`bridge/src/server.js` stays as a forwarder** to `mcp/shim.mjs`: every QA machine's MCP config written
+  by v1's `install.ps1` points there.
+- **One release, 2.0.0**, instead of 1.8.0 … 1.14.0: the owner asked for the whole plan in one phase.
+- **Web origins are refused** (403 on an `http(s)://` Origin): a page in the person's own browser is not
+  local; without it any site could drive every tab (§5).
+- **`platform.image`** instead of OffscreenCanvas in `visual.js`: Node has no image decoder and v2 has no
+  dependencies, so Engine 2 decodes inside a hidden page of the launched browser.
+- Launch switches beyond plan §P2.2, each with its measurement in `engine/launch.js`: `msImplicitSignin`
+  disabled, `--disable-sync`, `--disable-component-update` omitted at stealth and for warm,
+  `--disable-frame-rate-limit` for CfT only, `--screen-info` with a taskbar work area.
+- Auto-attach with **`waitForDebuggerOnStart:true`** (the plan said `false`), resuming every held target (§4.11).
+- Humanize profiles inlined as import-free objects in `extension/humanize/profiles.js` rather than
+  `profiles/*.json` (ARCHITECTURE_V2 §6); calibrated profiles in `platform.storage.local`.
+
+**Defects the live suites found, and what was done.** Live round 1: the Engine 1 suite (5 full runs,
+Edge 153.0.4234.32 headless). Round 2: the stealth self-test (3 matrix passes, 50 local runs, 96 public
+evaluations) and the P8 bench/matrix/endurance. Round 3: all five live suites again (Engine 1 on Edge,
+branded Chrome and CfT; Engine 2; stealth; bench/matrix/endurance; desktop). Fixes followed rounds 2 and 3;
+the round-2 fixes have their own entry below.
+
+- **Blocker — Edge signed every new G9 profile into the owner's Windows account and synced it.** Edge
+  153.0.4234.32 signed the first profile of every NEW user-data-dir into the Windows primary account
+  (WAM single sign-on) within seconds of its first start and turned full sync on: passwords, history,
+  open tabs, extensions (7/7 automation profiles, 13/13 test profiles, every launch longer than ~20 s;
+  Local State `info_cache.user_name` set, `consented_to_sync` and `sync.has_setup_completed` true).
+  `--no-first-run` did not prevent it, and a pre-seeded `signin.allowed=false` was rewritten to true by
+  Edge. Consequences measured: synced extensions injected scripts (globals, DOM nodes, main-world calls)
+  into stealth pages and then degraded a headed engine until input stopped arriving (hovers 30–62 s);
+  without `--disable-sync` a sync-confirmation dialog and two onboarding tabs appeared ~75 s after
+  launch and cost ~1.7 GB. Fix: every launch of every browser disables `msImplicitSignin` (measured: fresh profiles stay signed out, 6/6) and passes
+  `--disable-sync`; `profile.signInState` (booleans only, no identity read) is checked before every
+  launch — refused at stealth, warned otherwise; the harnesses that spawn Edge themselves carry the same
+  switches. Round 3: 0 signed-in profiles across 40 Engine 1 profiles, every Engine 2 profile of the
+  matrix, 16 bench level-runs, 2 endurance runs, the Engine 2 suite's profiles and 26 stealth
+  configurations. **What it means for the owner:** the profiles involved were temporary and were deleted
+  by the harnesses, but what synced *into the owner's Microsoft account* from those sessions cannot be
+  undone from code — pages the round-1 and round-2 suites opened (the 127.0.0.1 fixtures, public
+  detector pages) may be in the owner's synced Edge history; checking it is the owner's call. Any G9
+  profile that an earlier v2 build launched stays signed in until someone signs it out; the launch check
+  says how (`browser_engine action:"warm"`, then the browser's profile menu → Sign out).
+- **Hidden-tab input hung, then was misreported.** Round 1: human/stealth input to a hidden background
+  tab ran until the daemon's 120 s deadline (5/5 runs; a diagnostic was still dispatching at 330 s with 66
+  trusted mousemoves and 0 clicks), and the error blamed a "JavaScript dialog"; round 2 found the first
+  error blamed a screencast nobody was running (30/30 hidden-tab cells). Raw CDP: `mouseMoved` to a
+  hidden page returned after ~5 s or not at all; key events DID reach its focused field (10/10, round 3).
+  Fix: every input action asks for visibility first and sends nothing to a hidden page (policy (b) for
+  keys), naming the agent's own remedies (focus, popout, handoff) — the round-3 wording no longer says
+  "ask the user" or "headed Chromium"; a tab hidden part-way reports `partial` with the events sent and
+  the page's measured scroll delta (round 3: a 2000 px scroll hidden 0.55 s in had delivered 3–6 notches
+  and 300–600 px, yet said "never received"). Round 3 re-check: 20/20 hidden rows refused in 7–42 ms with
+  nothing reaching the page; after the partial fix, reported px = page px 4/4. The relay-timeout text
+  still guesses a dialog (open, §8.2).
+- **The witness called delivered input lost, and lost input delivered.** Round 1/2: the verdict was
+  timed from arming, so a slow dispatch outran it — an Engine 2 CDP trace showed the witness armed at
+  t=20.7 s, ~64 moves and 19 notches at ~1 s each, the press at t=84.4 s, and the click reported
+  not-delivered although the page had it (3/3). Round 2 also found presses on a page that cancels
+  `pointerdown` reported lost (it gets no `mousedown`), and hovers/clicks that landed on another element
+  after a scroll reported delivered (CfT 22/22 misses). Fix (§4.3a): timed from the end of dispatch,
+  10-minute safety net answering `expired`, pressed by `pointerdown` OR `mousedown`, armed on the element
+  to report `missed` with what was hit; the delivery state tagged into the error text and carried as
+  protocol fields (round 3 found it was not machine-visible). Re-check: a minimized-window Engine 2 click
+  reported delivered after 28–29 s, matching the page; cancelled pointerdown delivered at every level; a
+  runaway button reported `missed` naming the track, 16/16, never repeated.
+- **`window.open()` wedged its opener on Engine 2.** Round 3: the click that opened a popup failed after
+  21–25 s ("Input.dispatchMouseEvent did not return after 20s") in 18/18 stealth runs and 7/7 Engine 2
+  runs, the popup stayed at `url ''`, the opener's next goto timed out. Raw probe on Edge and Chrome 153:
+  under browser-level auto-attach with `waitForDebuggerOnStart:false` the click did not return within
+  15 s; with no auto-attach, 51 ms; resuming held targets, 37–46 ms. Fix: every target attached with
+  `waitForDebuggerOnStart:true` and resumed after its preparation hook has SENT its commands (§4.11) —
+  36–48 ms in the fixer's probes; the same mechanism made page-opened tabs capture their first load's
+  network and carry the persona from their first script. Final: popup checks passed in all 15 stealth
+  popup runs; Engine 2 suite 366/0.
+- **CfT ran at 10 fps.** CfT 153.0.8010.52 ran `requestAnimationFrame` every 100.5 ms (Chrome
+  153.0.8010.53 and Edge 10.5 ms), headless and headed; input is frame-aligned, so humanized paths reached
+  pages as 100 ms jumps (mousemove median 100.4–100.6 ms) and each dispatch took ~85 ms; CfT press holds
+  collapsed to 1.9–8.1 ms (20/22 runs). Ruled out: `--disable-gpu-vsync`, SkiaGraphite/TreesInViz off,
+  restored tabs. Fix: `--disable-frame-rate-limit` for CfT only (rAF 17.4 ms; on Chrome/Edge it would
+  slow them to 17.4 ms) plus the dispatcher's 80 % interval rule. Measured after: CfT mousemove median
+  16.8–17.3 ms, stealth press holds 60–151 ms (Edge and CfT, round 3). Root cause not isolated (§8.1).
+- **Cross-site iframes ignored the persona.** Round 3: under a de-DE/Europe/Berlin persona the
+  out-of-process frame reported locale `de` and the host's own time zone (7/7 runs). Fix: overrides and a
+  nested auto-attach sent to the held child's own session (`#prepareChild`); a cross-site popup gets its
+  locale again at commit. oopif-vs-top then passed in every configuration of 3 local passes. Round 2 had
+  also found a launch locale changed only `Intl` (navigator.languages and Accept-Language stayed en-US,
+  6/6): the locale now becomes the profile's `intl.accept_languages` and is saved with the timezone as
+  the profile's persona.
+- **Pointer pressure 0.** Every CDP press read `pressure 0` (50/50 runs, round 2); a real mouse reports
+  0.5 while a button is down. Fix: CDP `force: 0.5` on every mouse event while a button is held (`MOUSE_PRESSURE`). Round 3: 0.5 at
+  every level in every run, both engines.
+- **Screenshots were visible to the page.** Round 2: a full-page capture made the page see 1–2 resizes
+  and a transient 1×1 viewport in 27/50 runs; an element capture `scrollIntoView`ed and left the page
+  scrolled. Fix (§6.3 `capture.js`): wheel reach + viewport clip; full page refused at stealth, disclosed
+  at human. Round 3: 0 resizes and 0 scrolls at stealth (520 read-tool calls in the sweep with 0
+  page-visible change).
+- **Widevine was missing.** Round 3: `requestMediaKeySystemAccess('com.widevine.alpha')` rejected in
+  9/9 Edge runs (PlayReady worked). Raw probe on Edge and Chrome 153: `--disable-component-update`
+  prevents the CDM from ever loading, even when already in the profile. Fix: the switch is omitted at
+  stealth and for warm; eme-widevine then passed in every Edge stealth run. Side effect measured: with
+  updates on, Edge records the machine's external-extension registrations as disabled permission-only
+  stubs (no files; nothing runs in a page).
+- **Also fixed in these rounds:** `goto` cut `Page.navigate` at a fixed 20 s and called a slow server
+  "stuck" (4 public gotos failed at 20.01 s while 8 others took 20.1–49.3 s; a 25 s time-to-first-byte
+  now returns after 26 s); headed windows 1920×1080 on a 1032 px work area (now fitted to the work
+  area, position untouched, never activated); an Engine 2 tab behind a page-opened tab took 20.9 s per
+  click (now brought to the front on headless engines: 4.9 s; warned on headed); a minimized window's
+  stalled capture blamed "a compositor stall" (now names the minimized window); CfT restored previous
+  tabs on every relaunch (session restore cleared, strays closed and reported); headless screen with no
+  work area; Edge's `edge://downloads-hub/` tab; cookie values cut to 77 characters; `inspect frames`
+  missing out-of-process frames; waits holding a `maxParallel` slot; the obstruction check blaming an
+  ancestor for an element that had moved; replay `result.json` dropping warnings; surprise counts varying
+  between identical replays (3, 3, 2, 3, 3, 3 → late evidence now awaited); a watch on a hidden tab
+  freezing with no signal (`watchStatus`); the Watch picker empty on a second visit (desktop).
+- **A regression the fixers introduced and caught:** moving the tool layer's attach earlier made the
+  Runtime console probe hit in every stealth run (the attach ran before the context's stealth level was
+  registered); the stealth self-test caught it and the attach moved to `openTab` only.
+- **Incidents, recorded honestly.** One build agent's leftover check made a bare TCP connect to
+  127.0.0.1:8765 (no bytes sent) against the test rule; a v1 bridge replaces its client only on a
+  completed WebSocket upgrade, so it could not have affected the owner's session. Every run since used
+  18000–18999; the matrix/bench guard proxy recorded 0 attempts on 8765 and the isolated test's tripwire 0
+  connections. A daemon build report states the repository's `.mcp.json` was pointed at `mcp/shim.mjs`;
+  that was not re-verified here (MCP configs are not touched by these runs). While a v1 bridge holds 8765,
+  a v2 shim fails every tool naming the bridge's pid; a v1 extension is refused by a v2 daemon (4001)
+  until the v2 extension is loaded.
+
+**Measurements** (2026-09-22; Windows 11 Pro 10.0.26200, Intel i9-10900X with 20 logical CPUs, 63.7 GB,
+Node 22.15.0, G9 2.0.0, Edge 153.0.4234.32, Chrome 153.0.8010.53, CfT 153.0.8010.52; other suites shared
+the machine, 27–57 % busy):
+
+- **Bench** (live round 3, three passes 07:59–08:59 UTC; Engine 2 headless Edge, human input, 5
+  iterations, shared seeds, maxParallel 64): 815 humanized flows, 0 failures, every interaction
+  delivered. One context: flow p50/p95 11.6–12.0 s / 12.4–12.5 s, humanized click p50 ~1.4 s of which
+  143–149 ms is G9's overhead, screenshot p50 54–68 ms. Throughput (flows/min): 1 context 5.2–5.3, 4:
+  20.6–20.7, 8: 39.8–40.5, 12: 57.9–58.2, 16: 73.4–74.4, 24: 101.1; 16 contexts gated to 8 give 39.8–40.3
+  (the gate caps exactly). Browser ≈395 MB idle + ≈128 MB per loaded context; daemon 104–112 MB
+  private, flat. The maxParallel rule gives **12** on this machine class (16 failed only on the select
+  step's p95 in 2 of 3 passes; 24 failed flow p95 ×1.27; 16 contexts used ~1.9 cores). The default
+  stays 8. Engine 2 launch: 737–1046 ms. Round 2 → after fixes: a gated `wait_signed_in` p50 535–700
+  ms → 19 ms (waits no longer hold a slot).
+- **Matrix** (live round 3, 2 full passes, Engine 1 real extension on Edge and Chrome; Engine 2
+  daemon-launched Edge): Engine 1 visible states (active headless; off-screen headed with occlusion
+  disabled) delivered every operation (142–147 animation frames per 1.5 s in round 2); hidden
+  states (background tab ±switch, minimized ±switch, off-screen without the switch) — 20/20 rows `hidden`, every input refused in 7–42 ms, nothing reached
+  the page, `watchStatus` exactly `["hidden"]`. Ground truth on the harness's own pipe: `mouseMoved` no
+  answer within 5 s on every hidden page, a bare `keyDown` landed 10/10, `captureScreenshot` no answer
+  within 5 s on a minimized window but 44–487 ms on background/off-screen tabs. Type hidden 1.55 s in:
+  30/30 keydowns landed, reported delivered (correct). `--start-minimized` not honoured (8/8). Engine 2
+  active headless click/type/wheel/screenshot 5408/4505/1407/91 ms and 5442/4511/1400/69 ms; minimized
+  headed: delivered, click 28–29 s. After the round-3 fixes (hidemid and Engine 2 active/popup/minimized
+  only): exit 0 — popup state click 4.9 s, type 5.1 s, screenshot 100 ms with a BEHIND warning. Not
+  measured: a locked session, another virtual desktop.
+- **Endurance** (live round 3, 2 × 10 min, 2 contexts of which one a single-page app, live watch on,
+  30 s samples): 90 and 89 iterations, 766 and 757 steps, 0 failures; iteration p50/p95 12.4/15.0 s.
+  JS listeners read after `gc()`: flow minus fresh load = 0 in 46/46 and 45/45 readings; the SPA stayed at
+  exactly 47 and 48 listeners. A humanized `type` with `clear:true` keeps 1 DOM node alive per call
+  (as does `clear` alone). Round-2-fixed code, 2 × 10 min: 0 failures, daemon +0.58/+0.43 MB/min,
+  browser +3.0/+1.0 MB/min. No 8-hour run.
+- **Stealth.** Round 3 (54 local runs, 59 public evaluations, before the round-3 fixes): Runtime probe 0
+  hits in 40/40 stealth runs (every control hit, 55–63 per run); main world: 0 G9 globals, nodes,
+  main-world calls, listener stacks or untrusted events, cross-site frame included; press hold 60–151 ms,
+  pressure 0.5, keydown-interval medians 123.7–201 ms, wheel-notch interval medians 82–123 ms; headless
+  screen 1920×1080 with avail 1920×1032; exactly one tab at the end 26/26; 0 signed-in profiles 26/26.
+  Public pages: headless stealth detected by the user agent on every page; headed Edge passed sannysoft,
+  creepjs, browserscan, Fingerprint and rebrowser and failed pixelscan (unexplained; headed Chrome passes
+  2/2); headed CfT 5/6 (rebrowser brand). Final, after the round-3 fixes (local page only): 0 G9-class
+  leaks in every stealth configuration, **headed Edge stealth UNDETECTED**, headless stealth detected
+  only by the HeadlessChrome UA, controls detected. Host facts, not G9: the machine's time zone does
+  not match where its public IP geolocates (a hosting range), which pixelscan flags on every run.
+- **Engine 1** (live round 3): 204/0 (195 + 9 harness) on the final files; full runs passed 9/9 on Edge,
+  7/7 on branded Chrome, 4/5 on CfT (a popout flake). Handoff 1.8–3.0 s (2 cookies incl. HttpOnly, 1
+  localStorage item seen by the Engine 2 page); popout kept `timeOrigin` and JS state (no reload); a
+  929-character JWT cookie came back whole; Stop mid-typing ended the call 37–94 ms later; issue
+  video 72–87 frames with `pointer-track.json`.
+- **Desktop** (live round 3): unit 14/14 files in 9 runs (176 checks on the final tree), contract
+  15/15 ×8, installer built 3×, `test:packaged` 10× with no `node` on PATH, render check 6 runs / 24 off-screen windows / 0 on screen;
+  the payload equalled the repo file for file. The final installer was rebuilt after the round-3 fixes
+  (103,541,901 bytes, unsigned; `platform-cdp.js` and `manager.js` in it checked byte-identical).
+
+**Final validation** (after the round-3 fixes): unit 580 in 10 suites, self-test 130/130, extension
+suite 71/71, desktop 14/14 files + contract 15/15 + packaged 7/7, Engine 2 live 366/0 (348 s), isolated
+Engine 1 live 195/0 twice, CfT Engine 1 sections 12+16 ×20 PASS, stealth local matrix as above, matrix
+(hidemid + Engine 2 subset) exit 0. Mutation checks: each fixer re-introduced its defects in scratch
+copies (19 mutants in round 2, 11 in the interaction review, 18 for the extension suite, 8 for the
+panel); each failed the intended test. The version stayed 2.0.0 throughout (the release contract,
+enforced by `version.test.mjs`); the reports record no commits.
+
+**What remains open** is §8: headless detectability by UA, pixelscan on headed Edge, the Engine 1
+infobar, hidden-tab keys as policy, minimized headed Engine 2 at ~1 frame per 1.5 s, the relay-timeout
+wording and overlap, locked-session/virtual-desktop/8-hour runs not measured, bench/endurance/public
+stealth/full matrix/render check not re-run on the final tree, the unsigned installer and never-exercised
+update server/UAC path, maxParallel 8 vs a measured 12, and the version-bump rule after the release.
+
+### 2026-09-22 — v2 live round 2 fixed: Edge stops signing itself in, the witness says where input landed, a slow browser keeps its rhythm
+
+Two live suites (the stealth self-test, and the P8 bench/matrix/endurance) measured the v2 build and
+found 19 defects. Every one is fixed or answered below; version stays 2.0.0 (release contract).
+
+- **Blocker — Edge signed every new profile into the Windows account** and turned full sync on
+  (passwords, history, open tabs, extensions); synced extensions then injected scripts into every
+  stealth page. Every launch now carries `--disable-features=msImplicitSignin` (measured: new
+  profiles stay signed out) and `--disable-sync`; `profile.signInState` (booleans only, no identity)
+  is checked before every launch — refused at stealth, warned otherwise, because a profile already
+  signed in stays signed in. engine/README.md's "did not sign in … checked once" was wrong and says so.
+  The harnesses that spawn Edge themselves (isolated live test, matrix) carry the same switches.
+- **The input witness** is armed ON the element for ref actions and answers where the event landed:
+  `delivery:"missed"` (an error naming the element hit) instead of "delivered" when a press or hover
+  reached another element; presses are witnessed by pointerdown OR mousedown (a page that cancels
+  pointerdown gets no mousedown — a delivered click used to be called lost); the in-page safety net is
+  10 minutes and answers "expired", never "not delivered" (a slow dispatch outran the old ceiling and a
+  received click was reported lost after 85 s).
+- **Hidden tabs**: every input action asks for visibility first and sends nothing to a hidden page (the
+  first error used to be a wheel "screencast" stall with no screencast running, then a 120 s "dialog"
+  timeout); a wheel stall names the cause actually present; a live watch of a hidden tab tells the
+  viewer (`watchStatus`), and the desktop's Watch view says "not live".
+- **Timing**: `perform()` keeps at least 80 % of every interval that ends in a press, release, key or
+  notch, and merges overdue pointer moves instead (CfT press holds were 2–8 ms); presses carry pressure 0.5;
+  scrolls return only once the page has stopped moving, and a reach settles before aiming (hovers and
+  clicks after a scroll missed); Chrome for Testing gets `--disable-frame-rate-limit` (its renderer ran
+  at 10 fps on this machine: requestAnimationFrame every 100.5 ms, measured 17.4 ms with the switch).
+- **Environment**: the headless screen has a 48 px taskbar work area and a maximized-size window; a launch
+  locale becomes the profile's languages (`intl.accept_languages`/`selected_languages`) and is saved with
+  its timezone as the profile's persona; a context locale in another language than the profile is
+  refused at stealth (measured: a per-tab override does not reach workers); CfT's restored tabs are
+  cleared before launch and stray start-up pages closed; the headless launch warning names what was
+  measured; docs/STEALTH.md is written.
+- **Screenshots** at the human levels bring an element in with the wheel and clip inside the viewport
+  (no resize, no scrollIntoView); a full page taller than the viewport is refused at stealth and taken
+  with a `pageSaw` note at human; a stalled capture names a hidden, background or minimized cause.
+- **Engine 2**: every page G9 opens gets a real window of its own (a second tab in the same window put
+  the first one behind it at ~1 frame per 1.5 s); `browser_status` warns about a minimized launched
+  window; waits (`navigate wait`, `wait_download`, `tabs wait`) hold no maxParallel slot; the tool
+  layer's attach happens before a new tab's first navigation (the first load's requests and its
+  cross-origin iframe were missed); Edge's own `edge://downloads-hub/` tab is suppressed by a
+  preference and never an agent's default tab.
+- Found on the way by the re-run live suites and fixed: `browser_inspect cookies` cut values to 77
+  characters (a JWT-sized session cookie came back unusable); `browser_inspect frames` left out
+  cross-origin (out-of-process) iframes; the off-level drag centred its drop target and scrolled the
+  grip away (the new witness reported that press as missed). The Engine 2 live test went from 289
+  passed / 6 failed to 297 / 0; the isolated Engine 1 live test from 1 failure to none.
+
+Regression tests in `setup/unit/` (interaction, engine, daemon, seam, platform-cdp, desktop views); 19
+re-introduced defects each failed them. Live: the stealth self-test (both browsers, all
+configurations), the Engine 2 and isolated live tests, the P8 matrix and bench — results in the
+round's report.
+
+### 2026-09-22 — v2: the extension regression suite migrated and made self-contained (EXT-16)
+
+`setup/extensiontest.mjs` was still v1: it imported `bridge/src/*` and `extension/lib/workspace.js`
+(both deleted in v2) and read a FlowSpec from a QA tree outside the repository. Now:
+
+- It runs over the real platform seam (`lib/platform.js` → `platform-extension.js`): the `chrome`
+  stub gained a tab/window model, debugger events and `chrome.downloads`, IndexedDB is the fake from
+  `setup/unit/world.test.mjs`, and tool calls go through `tools/index.js runTool` as `sw.js` sends them.
+- Tests of removed features went with them: the workspace allowlist and its refusals, the redaction
+  rule, `requireTabControl`, Follow mode's target, `migrateModeDefault`, bridge port discovery and
+  `normaliseDomains`. Tested in their place: a full-access listing keyed by `tabId`, attach making a
+  tab current, the §4.1 resolution order, `migrateLegacySettings`, one daemon port (the real `g9d` on a
+  held private port exits and names the holder), `/health` CORS for extension origins only, version
+  skew through the daemon's router, and a project adapter that still lists `workspaceDomains`.
+- Text greps became behaviour where the code allowed it: video capture on a detached tab (the v1
+  write-chain deadlock), the HAR body budget, the flow library (no history on disk, a hash that agrees
+  with `sw.js specHash`, suites as queries), runner selection and `assertWithin` (lifted from their
+  source and run), the witness expression in `node:vm`, watch-before-download, a broadcast with no
+  receiver, and the popped-out panel never being taken for the page under test.
+- EXT-16: `setup/fixtures/tasks-browse-and-open.flow.json`, written by `toFlowSpec` + `canonicalJson`
+  in the shape the test asserts (19 steps, 10 interleaved assertions, each with a wait budget). The
+  test also validates it, checks its bytes are canonical, and that the budgets survive `fromFlowSpec`.
+- Fixed on the way: the ES-module parse check left a `g9-parse-*` folder in `%TEMP%` on every run;
+  the `browser_tabs` schema had lost v1's note that a browser only delivers input to the tab it is
+  SHOWING (still true of Engine 1), which the old test pinned — restored in `mcp/tools.js`.
+
+Validation: unit 531 tests in 10 suites, self-test 126/126, extension suite 71/71, `desktop/test` 14
+files, all passed. In a scratch copy of the repo, 18 re-introduced defects each failed the extension
+suite (one more mutation changed nothing observable). No version bump: the release contract fixes
+2.0.0 everywhere.
+
+### 2026-09-21 — v2 implementation plan: two engines, one flow (no runtime change)
+
+Added [V2_IMPLEMENTATION_PLAN.md](V2_IMPLEMENTATION_PLAN.md), the design and phase plan for G9 v2,
+written after a research and design discussion with the owner. It fixes twelve decisions: no
+Chromium fork; the extension stays for authoring (Engine 1) and a launched real Chrome/Edge/Chrome
+for Testing driven over a CDP pipe becomes the execution engine (Engine 2, headless by default); one
+local daemon that any number of agents connect to through an MCP stdio shim; the four control modes,
+the workspace allowlist, cookie scoping and title withholding are removed (attach = full access,
+local trust model); Electron is the desktop shell and installer, never the engine; a shared human
+input engine with seeded, reproducible pointer/wheel/keyboard behaviour; the cursor rendered in the
+evidence as a pointer track, never in the DOM; stealth as a per-profile level with a self-test.
+
+The plan records the verified Chromium facts behind it: a hidden, minimized, occluded, locked-screen
+or other-virtual-desktop window stops rendering and silently drops `Input.dispatch*`;
+`--disable-backgrounding-occluded-windows` covers occluded and locked but not minimized; new headless
+creates no platform window; Chrome 136+ needs a non-default `--user-data-dir` for remote debugging;
+App-Bound Encryption prevents any other binary from reading the cookies of a Chrome profile. Sources
+are in its Appendix A. Nothing in the runtime changed and no version was bumped; the backlog items
+are absorbed into the plan phases and will be marked done or superseded as each phase lands.
 
 ### 2026-09-12 — extension improvement backlog (no runtime change)
 
@@ -3303,9 +4388,11 @@ When you change anything:
 
 1. Make the change.
 2. Add a **Change log** entry above — date, what changed, why. Include bugs found and fixed; that history is more valuable than the diff.
-3. Update the affected section of this file (architecture, component reference, gaps).
-4. Adding a tool means **four** edits: `extension/sw.js` router, `bridge/src/tools.js` schema, the README table, and §6 here.
-5. Run `node setup/selftest.mjs`. It asserts the tool count, so it fails until everything is updated. Update the assertion last, deliberately — not reflexively.
-6. If you remove a deliberate omission from §8, say so and explain what changed.
+3. Update the affected section of this file (architecture, component reference, gaps). When a signature or a message changes, update [docs/ARCHITECTURE_V2.md](docs/ARCHITECTURE_V2.md) or [docs/DAEMON_PROTOCOL.md](docs/DAEMON_PROTOCOL.md) in the same change.
+4. The version is one string, in `package.json`, mirrored in `extension/manifest.json` and `desktop/package.json` (and `desktop/package-lock.json`); `setup/unit/version.test.mjs` fails when they disagree. Bump it on every change — that is how the owner knows a reload took effect. No test pins a literal number: they all compare the files with each other and with `lib/version.mjs`, so a bump is four JSON edits and nothing else (the lock file is compared too, since `npm ci` in desktop/ installs from it).
+5. Adding a tool means **four** edits: `extension/tools/index.js` (`TOOLS`), `mcp/tools.js` (schema; and `daemon/router.js` if the daemon answers it itself), the README table, and §4.4/§6 here. Prefer a new action on an existing tool.
+6. Run `npm test` (`setup/unittest.mjs`, `setup/selftest.mjs`, `setup/extensiontest.mjs`) and the live suites that cover what changed (§7). The self-test asserts the tool count, so it fails until everything is updated. Update the assertion last, deliberately — not reflexively.
+7. Test safely: a temp `G9_HOME`, temp profiles, random ports in 18000–18999, never port 8765, never a person's browser profile, registry or MCP client config, no on-screen windows, and kill only processes the test started.
+8. If you remove a deliberate omission from §8, say so and explain what changed.
 
-**Do not simplify past the five constraints in §4** without recording why. Each one exists because the obvious approach fails in a specific, non-obvious way.
+**Do not simplify past the constraints in §4** without recording why. Each one exists because the obvious approach fails in a specific, non-obvious way.

@@ -7,8 +7,14 @@
  * accessibility violations, layout overflow — and returns them ranked.
  */
 
-import { send, evaluate } from '../lib/cdp.js';
+import { platform } from '../lib/platform.js';
+import { send } from '../lib/cdp.js';
+import { inWorld } from '../lib/world.js';
 import { consoleLog, network } from './observe.js';
+
+// The in-page audit and the vitals observers run in G9's isolated world: they
+// see the same DOM and the same performance timeline, and they leave nothing on
+// the page's own window — so the page is measured without G9 inside it.
 
 export async function health(tabId) {
   const [logs, net, page] = await Promise.all([
@@ -123,7 +129,7 @@ function capPerSeverity(findings) {
 
 /** In-page checks that need DOM access rather than CDP domains. */
 async function pageAudit(tabId) {
-  const audit = await evaluate(
+  const audit = await inWorld(
     tabId,
     `(() => {
       const findings = [];
@@ -300,17 +306,23 @@ export async function performance(tabId, { durationMs = 4000, reload = false } =
   if (reload) await send(tabId, 'Page.reload', { ignoreCache: false });
   await new Promise((r) => setTimeout(r, durationMs));
 
+  // The completion arrives as an event, so listen on the platform's event
+  // stream for exactly this tab's Tracing.tracingComplete, and always remove
+  // the listener — on success, on timeout, and when Tracing.end itself fails.
   const streamHandle = await new Promise((resolve, reject) => {
-    const chrome = globalThis.chrome ?? globalThis.browser;
-    const timer = setTimeout(() => reject(new Error('Tracing did not complete in time')), 20_000);
-    const onEvent = (source, method, params) => {
-      if (source.tabId !== tabId || method !== 'Tracing.tracingComplete') return;
+    let unsubscribe = () => {};
+    const finish = (fn, value) => {
       clearTimeout(timer);
-      chrome.debugger.onEvent.removeListener(onEvent);
-      resolve(params.stream);
+      unsubscribe();
+      fn(value);
     };
-    chrome.debugger.onEvent.addListener(onEvent);
-    send(tabId, 'Tracing.end').catch(reject);
+    const timer = setTimeout(() => finish(reject, new Error('Tracing did not complete in time')), 20_000);
+    const off = platform.debugger.onEvent((source, method, params) => {
+      if (source.tabId !== tabId || source.sessionId || method !== 'Tracing.tracingComplete') return;
+      finish(resolve, params.stream);
+    });
+    if (typeof off === 'function') unsubscribe = off;
+    send(tabId, 'Tracing.end').catch((err) => finish(reject, err));
   });
 
   const events = await readTraceStream(tabId, streamHandle);
@@ -323,7 +335,7 @@ export async function performance(tabId, { durationMs = 4000, reload = false } =
  */
 export async function vitals(tabId, { durationMs = 1000 } = {}) {
   const wait = Math.max(100, Math.min(Number(durationMs) || 1000, 5000));
-  return evaluate(
+  return inWorld(
     tabId,
     `new Promise((resolve) => {
       const data = { lcp: [], shifts: [], events: [], longTasks: [] };

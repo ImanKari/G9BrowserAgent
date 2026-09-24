@@ -12,7 +12,7 @@
  * navigation trail in the same instant the bug is visible.
  */
 
-import { send, evaluate, sendOnLiveSession } from '../lib/cdp.js';
+import { send } from '../lib/cdp.js';
 import { screenshot } from './capture.js';
 import * as observe from './observe.js';
 import {
@@ -20,8 +20,13 @@ import {
   putVideoFrame, listVideoFrames, deleteVideoFrames,
 } from '../lib/store.js';
 import { serialize } from '../lib/state.js';
+import { platform } from '../lib/platform.js';
+// Page reads run in G9's isolated world: same DOM, none of the page's globals.
+import { inWorld } from '../lib/world.js';
+import * as screencast from '../lib/screencast.js';
+import * as pointer from '../lib/pointer.js';
 
-const api = globalThis.browser ?? globalThis.chrome;
+const session = () => platform.storage.session;
 
 /** How much of each buffer is worth keeping with a bug report. */
 const CONSOLE_TAIL = 40;
@@ -36,7 +41,7 @@ const NETWORK_TAIL = 25;
  */
 export async function captureContext(tabId) {
   const [page, logs, net] = await Promise.all([
-    evaluate(
+    inWorld(
       tabId,
       `({
          url: location.href,
@@ -165,7 +170,7 @@ async function attachEvidence(tabId, issueId, context) {
 
   // The DOM of the element under suspicion is often the whole answer, and it is
   // impossible to recover once the tab moves on.
-  const html = await evaluate(
+  const html = await inWorld(
     tabId,
     `(() => {
        const el = document.activeElement && document.activeElement !== document.body
@@ -229,12 +234,12 @@ export { getIssue, listIssues, listAttachments };
  */
 async function screencastSessions() {
   let keys;
-  if (typeof api.storage.session.getKeys === 'function') {
-    keys = (await api.storage.session.getKeys()).filter((k) => k.startsWith('g9:screencast:'));
+  if (typeof session().getKeys === 'function') {
+    keys = (await session().getKeys()).filter((k) => k.startsWith('g9:screencast:'));
     if (!keys.length) return [];
   }
-  const stored = await api.storage.session.get(keys ?? null);
-  return Object.entries(stored).filter(([key]) => key.startsWith('g9:screencast:'));
+  const stored = await session().get(keys ?? null);
+  return Object.entries(stored ?? {}).filter(([key]) => key.startsWith('g9:screencast:'));
 }
 
 export async function deleteIssue(id) {
@@ -256,7 +261,7 @@ export async function attachScreenshot(tabId, id, { area = 'viewport', ref, note
   if (!issue) throw new Error(`No issue with id "${id}".`);
 
   const shot = await screenshot(tabId, { area, ref, format: 'png' });
-  const url = await evaluate(tabId, 'location.href').catch(() => null);
+  const url = await inWorld(tabId, 'location.href').catch(() => null);
 
   return putAttachment({
     owner: id,
@@ -295,12 +300,46 @@ export async function attachFile(id, { name, mime, dataBase64, note }) {
  * rather than an encoded video — which is why they are stored as frames and
  * played back in the panel, instead of pretending to be a .webm.
  *
+ * v2: the stream is shared (lib/screencast.js). The video is one CONSUMER of
+ * it, `video:<issueId>`, next to whatever else is watching the tab (the
+ * desktop's live watch); stopping the video no longer blinds the watcher, and
+ * the watcher cannot stop the video. The video consumer is registered with
+ * back-pressure, so its rule since v1 still holds: a frame is acknowledged only
+ * after it is durable.
+ *
+ * The cursor is not in the frames — CDP input moves no real cursor, and
+ * drawing one into the page would be visible to it (plan D9). Instead every
+ * stored frame carries `pointer: {x, y, buttons}`, the pointer at the moment
+ * the frame arrived, and stopVideo attaches the whole track as
+ * `pointer-track.json`, so any viewer can draw the cursor over the frames.
+ *
  * Frames are capped by count and by total bytes. A screencast left running is
  * otherwise an unbounded write to disk.
  */
 const VIDEO_KEY = (tabId) => `g9:screencast:${tabId}`;
 const MAX_FRAMES = 600;
 const MAX_VIDEO_BYTES = 40 * 1024 * 1024;
+const consumerOf = (issueId) => `video:${issueId}`;
+const streamOptions = (quality, everyNthFrame) => ({
+  format: 'jpeg', quality, maxWidth: 1280, maxHeight: 800, everyNthFrame, backpressure: true,
+});
+
+/**
+ * After a service-worker restart the stream keeps delivering frames for a
+ * video whose session record survived in storage; re-attach the consumer to
+ * the running stream instead of letting its frames be judged orphans.
+ */
+screencast.onRevive(async (tabId) => {
+  const key = VIDEO_KEY(tabId);
+  const current = (await session().get(key))?.[key];
+  if (!current || current.starting) return;
+  screencast.adopt(
+    tabId,
+    consumerOf(current.issueId),
+    streamOptions(current.quality ?? 60, current.everyNthFrame ?? 2),
+    (frame) => ingestVideoFrame(tabId, frame),
+  );
+});
 
 /**
  * Why no CDP call happens inside `serialize()` here.
@@ -333,55 +372,60 @@ export async function startVideo(tabId, { id: issueId, quality = 60, everyNthFra
   }
 
   const key = VIDEO_KEY(tabId);
+  const consumer = consumerOf(issueId);
 
   // Claim the slot atomically, so two concurrent starts cannot both proceed.
-  const session = await serialize(async () => {
-    const existing = (await api.storage.session.get(key))[key];
+  const claimed = await serialize(async () => {
+    const existing = (await session().get(key))?.[key];
     if (existing) {
       throw new Error('This tab is already recording video for issue "' + existing.issueId + '". Stop that capture first.');
     }
-    const claimed = {
+    const record = {
       sessionId: 'video_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
       issueId,
+      consumer,
+      quality,
+      everyNthFrame,
       frames: 0,
       bytes: 0,
       startedAt: Date.now(),
       truncated: false,
+      viewport: null,
       // Frames arriving before the screencast is confirmed have nothing to be
-      // attributed to yet; ingestFrame skips them rather than guessing.
+      // attributed to yet; the consumer skips them rather than guessing.
       starting: true,
     };
-    await api.storage.session.set({ [key]: claimed });
-    return claimed;
+    await session().set({ [key]: record });
+    return record;
   });
 
+  screencast.subscribe(tabId, consumer, (frame) => ingestVideoFrame(tabId, frame));
   try {
-    await send(tabId, 'Page.startScreencast', {
-      format: 'jpeg', quality, maxWidth: 1280, maxHeight: 800, everyNthFrame,
-    });
+    await screencast.start(tabId, consumer, streamOptions(quality, everyNthFrame));
   } catch (err) {
-    await serialize(async () => api.storage.session.remove(key));
+    await screencast.stop(tabId, consumer, { sendStop: false }).catch(() => {});
+    await serialize(async () => session().remove(key));
     throw err;
   }
 
   await serialize(async () => {
-    const current = (await api.storage.session.get(key))[key];
+    const current = (await session().get(key))?.[key];
     // Only promote the session we actually claimed: a stop that raced us must
     // not be resurrected here.
-    if (current?.sessionId !== session.sessionId) return;
+    if (current?.sessionId !== claimed.sessionId) return;
     delete current.starting;
-    await api.storage.session.set({ [key]: current });
+    await session().set({ [key]: current });
   });
 
   // Say so NOW if this recording cannot produce anything.
   //
   // `Page.startScreencast` captures composited frames, so a tab that is not
-  // being painted yields none — a hidden tab, or a headless surface. The
-  // command succeeds either way, frames simply never arrive, and the only
-  // symptom is an empty video at the end, long after the bug being recorded has
-  // gone. Same shape as the input problem in tools/interact.js: the browser
-  // accepts the request and quietly does nothing.
-  const visible = await evaluate(tabId, 'document.visibilityState').catch(() => null);
+  // being painted yields none — a hidden tab in a headed window. The command
+  // succeeds either way, frames simply never arrive, and the only symptom is an
+  // empty video at the end, long after the bug being recorded has gone. Same
+  // shape as the input problem in tools/interact.js: the browser accepts the
+  // request and quietly does nothing.
+  const visible = await inWorld(tabId, 'document.visibilityState').catch(() => null);
   const warning = visible && visible !== 'visible'
     ? `The tab is "${visible}", and a tab that is not being painted produces no video frames. ` +
       `Nothing will be captured until it is brought to the foreground — the recording is running, ` +
@@ -392,131 +436,212 @@ export async function startVideo(tabId, { id: issueId, quality = 60, everyNthFra
     recording: true,
     tabId,
     issueId,
-    startedAt: session.startedAt,
+    startedAt: claimed.startedAt,
+    sharedWith: screencast.consumers(tabId).filter((c) => c !== consumer),
     ...(warning ? { warning } : {}),
   };
 }
 
-/** Called from sw.js for every Page.screencastFrame event. */
-export async function ingestFrame(tabId, params) {
+/**
+ * The video consumer's frame handler. Returns a promise the stream waits on
+ * before acknowledging the frame (write-before-ack back-pressure).
+ */
+async function ingestVideoFrame(tabId, frame) {
   const key = VIDEO_KEY(tabId);
-  try {
-    // Chromium sends the next frame only after the previous one is acked, so
-    // frames arrive strictly one at a time and this read needs no lock. The
-    // earlier reserve-then-commit pair was guarding against a concurrency that
-    // the protocol already prevents, and it cost two trips through the shared
-    // write chain per frame — which, during a scroll, is a lot of frames.
-    const session = (await api.storage.session.get(key))[key];
-    if (!session || session.starting) return;
+  // Chromium sends the next frame only after the previous one is acked, and
+  // this handler holds the ack, so frames reach it strictly one at a time and
+  // this read needs no lock. The earlier reserve-then-commit pair was guarding
+  // against a concurrency that the protocol already prevents, and it cost two
+  // trips through the shared write chain per frame.
+  const current = (await session().get(key))?.[key];
+  if (!current || current.starting) return;
 
-    const approximateBytes = Math.ceil(params.data.length * 0.75);
-    if (session.frames >= MAX_FRAMES || session.bytes + approximateBytes > MAX_VIDEO_BYTES) {
-      await serialize(async () => {
-        const current = (await api.storage.session.get(key))[key];
-        if (current?.sessionId !== session.sessionId) return;
-        current.truncated = true;
-        await api.storage.session.set({ [key]: current });
-      });
-      return;
-    }
-
-    const size = await putVideoFrame({
-      sessionId: session.sessionId,
-      seq: session.frames,
-      at: Date.now() - session.startedAt,
-      dataBase64: params.data,
-    });
-
-    // One serialized write per frame, after the bytes are durable. Never hold
-    // the chain across the IndexedDB write, and never call CDP inside it — see
-    // the note on startVideo.
+  const approximateBytes = Math.ceil(frame.data.length * 0.75);
+  if (current.frames >= MAX_FRAMES || current.bytes + approximateBytes > MAX_VIDEO_BYTES) {
+    if (current.truncated) return;
     await serialize(async () => {
-      const current = (await api.storage.session.get(key))[key];
-      if (current?.sessionId !== session.sessionId) return;
-      current.frames += 1;
-      current.bytes += size;
-      await api.storage.session.set({ [key]: current });
+      const latest = (await session().get(key))?.[key];
+      if (latest?.sessionId !== current.sessionId) return;
+      latest.truncated = true;
+      await session().set({ [key]: latest });
     });
-  } finally {
-    // Ack only after the frame is durable, so Chromium's back-pressure is real.
-    //
-    // Deliberately NOT through send(): that would run a halt check, an attach
-    // check and a getTargets() round trip for every frame, on the same
-    // single-threaded worker the agent's own calls run on. It starved them
-    // badly enough that a scroll during a recording timed out after 60s. The
-    // event we are answering is itself proof the session is live.
-    await sendOnLiveSession(tabId, 'Page.screencastFrameAck', { sessionId: params.sessionId })
-      .catch(() => {});
+    return;
   }
+
+  // Where the cursor was when this frame arrived, from the input dispatcher's
+  // track (lib/pointer.js). Null before anything ever moved it on this tab.
+  const p = pointer.sampleAt(tabId, frame.at);
+  const meta = frameMeta(frame.metadata);
+  const size = await putVideoFrame({
+    sessionId: current.sessionId,
+    seq: current.frames,
+    at: frame.at - current.startedAt,
+    dataBase64: frame.data,
+    pointer: p ? { x: p.x, y: p.y, buttons: p.buttons } : null,
+    meta,
+  });
+
+  // One serialized write per frame, after the bytes are durable. Never hold
+  // the chain across the store write, and never call CDP inside it — see the
+  // note on startVideo.
+  await serialize(async () => {
+    const latest = (await session().get(key))?.[key];
+    if (latest?.sessionId !== current.sessionId) return;
+    latest.frames += 1;
+    latest.bytes += size;
+    if (meta && (!latest.viewport || latest.viewport.width !== meta.deviceWidth || latest.viewport.height !== meta.deviceHeight)) {
+      latest.viewport = { width: meta.deviceWidth, height: meta.deviceHeight };
+    }
+    await session().set({ [key]: latest });
+  });
+}
+
+/** The frame facts a viewer needs to map CSS-pixel pointer samples onto the image. */
+function frameMeta(metadata) {
+  if (!metadata || typeof metadata !== 'object') return null;
+  const pick = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : undefined);
+  return {
+    deviceWidth: pick(metadata.deviceWidth),
+    deviceHeight: pick(metadata.deviceHeight),
+    pageScaleFactor: pick(metadata.pageScaleFactor),
+    offsetTop: pick(metadata.offsetTop),
+    scrollOffsetX: pick(metadata.scrollOffsetX),
+    scrollOffsetY: pick(metadata.scrollOffsetY),
+  };
+}
+
+/**
+ * Compatibility: v1's event router called this for every Page.screencastFrame.
+ * In v2 tools/events.js hands frames to lib/screencast.js, which acks and fans
+ * them out; routing a frame here does exactly that (and a frame that arrives
+ * through both routes is handled once).
+ */
+export function ingestFrame(tabId, params) {
+  return screencast.onFrame(tabId, params);
 }
 
 export async function stopVideo(tabId, issueId) {
   const key = VIDEO_KEY(tabId);
+  const stoppedAt = Date.now();
 
   // Read and claim under the lock; everything after it — the CDP stop, the
-  // IndexedDB reads, the attachment write — happens outside, per startVideo.
-  const session = await serialize(async () => {
-    const current = (await api.storage.session.get(key))[key];
-    if (!current) return null;
+  // frame reads, the attachment writes — happens outside, per startVideo.
+  const current = await serialize(async () => {
+    const record = (await session().get(key))?.[key];
+    if (!record) return null;
     // Ownership is checked before stopping. A typo in the issue id must not
     // silently stop a valid capture and leave an unfinishable session behind.
-    if (issueId && issueId !== current.issueId) {
-      throw new Error('This video belongs to issue "' + current.issueId + '", not "' + issueId + '". Nothing was re-attributed.');
+    if (issueId && issueId !== record.issueId) {
+      throw new Error('This video belongs to issue "' + record.issueId + '", not "' + issueId + '". Nothing was re-attributed.');
     }
-    await api.storage.session.remove(key);
-    return current;
+    await session().remove(key);
+    return record;
   });
 
-  await send(tabId, 'Page.stopScreencast').catch(() => {});
-  if (!session) return { frames: 0, attached: false };
+  if (!current) {
+    // Nothing of ours is recording; still make sure no stream is left that
+    // only a vanished video wanted.
+    if (!screencast.consumers(tabId).length) await send(tabId, 'Page.stopScreencast').catch(() => {});
+    return { frames: 0, attached: false };
+  }
+  // Stops the stream only when no other consumer (a live watch) still uses it.
+  await screencast.stop(tabId, current.consumer ?? consumerOf(current.issueId)).catch(() => {});
 
-  const frames = await listVideoFrames(session.sessionId);
+  const frames = await listVideoFrames(current.sessionId);
   if (!frames.length) {
-    await deleteVideoFrames(session.sessionId);
+    await deleteVideoFrames(current.sessionId);
     // An empty capture is a result that needs explaining, not a bare zero.
-    const visible = await evaluate(tabId, 'document.visibilityState').catch(() => null);
+    const visible = await inWorld(tabId, 'document.visibilityState').catch(() => null);
     return {
       frames: 0,
       attached: false,
-      issueId: session.issueId,
+      issueId: current.issueId,
       reason: visible && visible !== 'visible'
         ? `No frames were captured: the tab was "${visible}" for the whole recording, and a tab ` +
           `that is not being painted produces none. Bring it to the foreground and record again.`
         : 'No frames were captured. The tab reports it is visible, so either nothing on the page ' +
           'changed during the recording, or this browser is not compositing it (a headless ' +
-          'browser produces no screencast frames at all).',
+          'browser only produces screencast frames while something on the page repaints).',
     };
   }
+
   const durationMs = frames[frames.length - 1].at;
+  const withPointer = frames.map(({ data, at, pointer: p, meta }) => {
+    const sample = p ?? pointer.sampleAt(tabId, current.startedAt + at);
+    return {
+      data,
+      at,
+      ...(sample ? { pointer: { x: sample.x, y: sample.y, buttons: sample.buttons ?? 0 } } : {}),
+      ...(meta ? { meta } : {}),
+    };
+  });
   const payload = JSON.stringify({
-    format: 'g9-frames/1', durationMs,
-    frames: frames.map(({ data, at }) => ({ data, at })),
+    format: 'g9-frames/1',
+    durationMs,
+    // CSS-pixel size of the captured viewport: a viewer scales pointer samples
+    // by image.width / viewport.width to draw the cursor on a frame.
+    viewport: current.viewport,
+    frames: withPointer,
   });
   const attachment = await putAttachment({
-    owner: session.issueId,
+    owner: current.issueId,
     name: 'capture-' + Date.now() + '.g9frames.json',
     mime: 'application/json', kind: 'video', bytes: new TextEncoder().encode(payload),
-    meta: { frames: frames.length, durationMs, truncated: session.truncated },
+    meta: { frames: frames.length, durationMs, truncated: current.truncated, withPointer: true },
   });
-  await deleteVideoFrames(session.sessionId);
-  return { frames: frames.length, attached: true, issueId: session.issueId, truncated: session.truncated, attachment };
+
+  // The whole cursor track of the recording, finer-grained than the frames:
+  // every dispatched mouse event, so the exporter can interpolate between
+  // frames and show the path, not just where the cursor happened to be.
+  const samples = pointer.trackSince(tabId, current.startedAt)
+    .filter((s) => s.at <= stoppedAt)
+    .map((s) => ({ t: Math.round(s.at - current.startedAt), x: s.x, y: s.y, buttons: s.buttons, type: s.type }));
+  const resting = pointer.sampleAt(tabId, current.startedAt);
+  const track = await putAttachment({
+    owner: current.issueId,
+    name: 'pointer-track.json',
+    mime: 'application/json',
+    kind: 'pointer-track',
+    bytes: new TextEncoder().encode(JSON.stringify({
+      format: 'g9-pointer/1',
+      startedAt: current.startedAt,
+      durationMs: stoppedAt - current.startedAt,
+      viewport: current.viewport,
+      start: resting ? { x: resting.x, y: resting.y } : null,
+      samples,
+    })),
+    meta: { samples: samples.length, video: attachment.id },
+  }).catch(() => null);
+
+  await deleteVideoFrames(current.sessionId);
+  return {
+    frames: frames.length,
+    attached: true,
+    issueId: current.issueId,
+    truncated: current.truncated,
+    attachment,
+    ...(track ? { pointerTrack: { id: track.id, samples: samples.length } } : {}),
+  };
 }
 
 export async function videoStatus(tabId) {
-  const session = (await api.storage.session.get(VIDEO_KEY(tabId)))[VIDEO_KEY(tabId)];
-  return session ? { recording: true, ...session } : { recording: false };
+  const current = (await session().get(VIDEO_KEY(tabId)))?.[VIDEO_KEY(tabId)];
+  return current
+    ? { recording: true, ...current, sharedWith: screencast.consumers(tabId).filter((c) => c !== current.consumer) }
+    : { recording: false };
 }
 
 /** Reclaim a capture whose tab or debugger session disappeared. */
 export async function cancelVideo(tabId) {
   const key = VIDEO_KEY(tabId);
-  const session = (await api.storage.session.get(key))[key];
-  if (!session) return { cancelled: false };
+  const current = (await session().get(key))?.[key];
   // Called after debugger detach/tab close. CDP already stopped the stream;
-  // calling the normal send() wrapper here would attach the tab again.
-  await api.storage.session.remove(key);
-  await deleteVideoFrames(session.sessionId);
-  return { cancelled: true, issueId: session.issueId, frames: session.frames };
+  // talking to CDP here would attach the tab again.
+  screencast.forget(tabId);
+  if (!current) return { cancelled: false };
+  await session().remove(key);
+  await deleteVideoFrames(current.sessionId);
+  return { cancelled: true, issueId: current.issueId, frames: current.frames };
 }
 
 function base64ToBytes(b64) {

@@ -1,18 +1,42 @@
 /**
- * Extension-side regression tests with a deliberately asynchronous chrome API
- * stub. No browser is needed; setup/livetest.mjs covers real CDP separately.
+ * Extension-side regression tests (v2), with a deliberately asynchronous chrome
+ * API stub under the REAL platform seam: every module below reaches "the
+ * browser" through lib/platform.js → platform-extension.js → this stub, exactly
+ * as it does in the service worker. No browser is needed; the unit suites
+ * (setup/unittest.mjs) and the live harnesses cover real CDP.
+ *
+ * The file also keeps the daemon-, MCP- and runner-side rules that v1 kept in
+ * the bridge (now daemon/*, mcp/*, runner/*). The few loopback sockets it opens
+ * use a random port in 18000-18999 — never 8765, where a person's own daemon
+ * (or a v1 bridge) may be running.
+ *
+ * v2 removed the four modes, the workspace allowlist, redaction, the pinned tab,
+ * requireTabControl, migrateModeDefault, the token and bridge port discovery
+ * (ARCHITECTURE_V2 §4.1, §14). Their tests went with them. Where v2 has a rule
+ * in their place — a full-access listing, attach makes the tab current, the
+ * resolution order, the one-time cleanup of v1 settings, one daemon port — that
+ * rule is tested instead, next to where the old test stood.
+ *
+ *   node setup/extensiontest.mjs
  */
 
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { fakeIndexedDB } from './unit/world.test.mjs';
 
 const sessionData = new Map();
 const localData = new Map();
-let attached = false;
+/** Tabs the stub's debugger reports as attached (chrome.debugger.getTargets). */
+const attachedTabs = new Set();
+/** Every CDP command the stub answered, in order. */
+const commandLog = [];
+let getTargetsCalls = 0;
 let failModernNetwork = false;
 let failLocale = false;
 let failUserAgent = false;
 let axNodes = [];
+/** What Network.getResponseBody answers (null: "no longer buffered"). */
+let responseBody = null;
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * 3)));
 const clone = (value) => value == null ? value : structuredClone(value);
@@ -44,6 +68,38 @@ function storageArea(map) {
   };
 }
 
+/** A chrome.events-shaped listener list the tests can fire. */
+function eventSource() {
+  const set = new Set();
+  return {
+    set,
+    addListener: (fn) => set.add(fn),
+    removeListener: (fn) => set.delete(fn),
+    hasListener: (fn) => set.has(fn),
+    fire: (...args) => { for (const fn of set) fn(...args); },
+  };
+}
+
+/**
+ * The browser the tab tools see. Tab 7 is the ordinary page most tests act on;
+ * tab 9 is a browser-internal page, which nothing may control, and it is the
+ * ACTIVE tab — so a call that falls through to "whatever the user is looking
+ * at" lands on something it must refuse. Tests that need more tabs or windows
+ * add them and put the model back afterwards (resetBrowser).
+ */
+const browserModel = { windows: new Map(), tabs: new Map(), lastFocusedWindow: 1, nextTabId: 100 };
+function resetBrowser() {
+  browserModel.windows = new Map([[1, { id: 1, type: 'normal', state: 'normal', focused: true }]]);
+  browserModel.tabs = new Map([
+    [7, { id: 7, url: 'http://example.test/', title: 'Test', windowId: 1, active: false, status: 'complete' }],
+    [9, { id: 9, url: 'chrome://settings', title: 'Settings', windowId: 1, active: true, status: 'complete' }],
+  ]);
+  browserModel.lastFocusedWindow = 1;
+}
+resetBrowser();
+
+const downloadItems = new Map();
+
 globalThis.chrome = {
   storage: { session: storageArea(sessionData), local: storageArea(localData) },
   runtime: {
@@ -51,16 +107,74 @@ globalThis.chrome = {
     getManifest: () => ({ version: 'test' }),
   },
   tabs: {
-    query: async () => [{ id: 9, active: true, url: 'chrome://settings', title: 'Settings', windowId: 1 }],
-    get: async (id) => ({ id, url: 'http://example.test/', title: 'Test', windowId: 1 }),
+    async query(info = {}) {
+      await tick();
+      let rows = [...browserModel.tabs.values()];
+      if (info.active) rows = rows.filter((t) => t.active);
+      if (info.lastFocusedWindow) rows = rows.filter((t) => t.windowId === browserModel.lastFocusedWindow);
+      if (info.windowId != null) rows = rows.filter((t) => t.windowId === info.windowId);
+      return rows.map(clone);
+    },
+    async get(id) {
+      await tick();
+      const tab = browserModel.tabs.get(id);
+      if (!tab) throw new Error(`No tab with id: ${id}.`);
+      return clone(tab);
+    },
+    async update(id, patch = {}) {
+      const tab = browserModel.tabs.get(id);
+      if (!tab) throw new Error(`No tab with id: ${id}.`);
+      if (patch.active) for (const other of browserModel.tabs.values()) if (other.windowId === tab.windowId) other.active = false;
+      Object.assign(tab, patch);
+      return clone(tab);
+    },
+    async create({ url = 'about:blank', active = false, windowId = 1 } = {}) {
+      const tab = { id: browserModel.nextTabId++, url, title: '', windowId, active, status: 'complete' };
+      browserModel.tabs.set(tab.id, tab);
+      return clone(tab);
+    },
+    async remove(id) { browserModel.tabs.delete(id); },
+    onRemoved: eventSource(),
+    onCreated: eventSource(),
+    onUpdated: eventSource(),
   },
-  windows: { update: async () => {} },
+  windows: {
+    WINDOW_ID_NONE: -1,
+    async get(id) {
+      const win = browserModel.windows.get(id);
+      if (!win) throw new Error(`No window with id: ${id}.`);
+      return clone(win);
+    },
+    async getAll({ populate = false } = {}) {
+      return [...browserModel.windows.values()].map((w) => ({
+        ...clone(w),
+        ...(populate ? { tabs: [...browserModel.tabs.values()].filter((t) => t.windowId === w.id).map(clone) } : {}),
+      }));
+    },
+    update: async () => ({}),
+    onFocusChanged: eventSource(),
+  },
+  downloads: {
+    onCreated: eventSource(),
+    onChanged: eventSource(),
+    search: async ({ id }) => (downloadItems.has(id) ? [clone(downloadItems.get(id))] : []),
+  },
   debugger: {
-    getTargets: async () => attached ? [{ tabId: 7, attached: true }] : [],
-    attach: async () => { attached = true; },
-    detach: async () => { attached = false; },
-    sendCommand: async (_source, method) => {
+    getTargets: async () => {
+      getTargetsCalls += 1;
+      return [...attachedTabs].map((tabId) => ({ tabId, attached: true }));
+    },
+    attach: async ({ tabId }) => { attachedTabs.add(tabId); },
+    detach: async ({ tabId }) => { attachedTabs.delete(tabId); },
+    onEvent: eventSource(),
+    onDetach: eventSource(),
+    sendCommand: async (source, method, params) => {
+      commandLog.push({ tabId: source?.tabId, method, params });
       if (method === 'Accessibility.getFullAXTree') return { nodes: axNodes };
+      if (method === 'Network.getResponseBody') {
+        if (responseBody == null) throw new Error('No resource with given identifier found');
+        return { body: responseBody, base64Encoded: false };
+      }
       if (method === 'DOM.getDocument') return { root: { nodeId: 1, documentURL: 'http://example.test/', title: 'Test' } };
       if (method === 'Network.emulateNetworkConditionsByRule' || method === 'Network.overrideNetworkState') {
         if (failModernNetwork) throw new Error('Method not found');
@@ -74,6 +188,10 @@ globalThis.chrome = {
   },
 };
 
+// Attachments and video frames live in IndexedDB in the extension
+// (platform-extension's blob store). The same minimal fake the unit suites use.
+globalThis.indexedDB = fakeIndexedDB();
+
 const record = await import('../extension/tools/record.js');
 const observe = await import('../extension/tools/observe.js');
 const snapshotModule = await import('../extension/tools/snapshot.js');
@@ -81,7 +199,15 @@ const emulateModule = await import('../extension/tools/emulate.js');
 const tabsModule = await import('../extension/tools/tabs.js');
 const qa = await import('../extension/tools/qa.js');
 const visual = await import('../extension/lib/visual.js');
-const toolsModule = await import('../bridge/src/tools.js');
+const stateModule = await import('../extension/lib/state.js');
+const { platform } = await import('../extension/lib/platform.js');
+// The shared tool runtime (ARCHITECTURE_V2 §4): the same pipeline sw.js runs
+// for every daemon call — halted → resolve → dialog → run → activity.
+const runtime = await import('../extension/tools/index.js');
+// v2: the MCP schemas moved from bridge/src/tools.js to mcp/tools.js.
+const toolsModule = await import('../mcp/tools.js');
+
+assert.equal(platform.name, 'extension', 'the stub must put these modules on platform-extension, as in the worker');
 
 let passed = 0;
 function test(name, fn) {
@@ -91,7 +217,38 @@ function test(name, fn) {
   });
 }
 
-console.log('\nG9 Browser Agent — extension regression test\n');
+/** Fail instead of hanging: a deadlock is a failure, not a slow test. */
+function within(ms, promise, what) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${what} did not finish within ${ms}ms — a hang, not a slow call`)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Lift named top-level functions out of a module's source so a rule the module
+ * does not export can be exercised as code, not matched as text. Each function
+ * runs from its real source; `deps` supplies what it closes over.
+ */
+function liftFunctions(source, names, deps = {}) {
+  const bodies = names.map((name) => {
+    const found = new RegExp(`^(?:export )?(?:async )?function ${name}\\(`, 'm').exec(source);
+    assert.ok(found, `${name}() is missing`);
+    const end = source.indexOf('\n}\n', found.index);
+    assert.ok(end > found.index, `${name}() has no end`);
+    return source.slice(found.index, end + 2).replace(/^export /, '');
+  });
+  const factory = new Function(...Object.keys(deps), `${bodies.join('\n')}\nreturn { ${names.join(', ')} };`);
+  return factory(...Object.values(deps));
+}
+
+/** A random loopback port in 18000-18999 (never 8765: a person's daemon or v1 bridge may be there). */
+const testPort = () => 18000 + Math.floor(Math.random() * 1000);
+
+console.log('\nG9 Browser Agent — extension regression test (v2)\n');
 
 await test('normalizer collapses click/click/dblclick into one double click', () => {
   const target = { locators: [{ kind: 'testid', value: 'save' }] };
@@ -206,8 +363,48 @@ await test('emulation reports failures and retains reset state for retry', async
   failUserAgent = false;
 });
 
-await test('follow status has no target when the active page is unattachable', async () => {
-  assert.equal(await tabsModule.currentTargetId({ mode: 'follow', pinnedTabId: 7 }), null);
+await test('emulate reset gives the browser its own user agent AND Client Hints back; presets and locales are refused at stealth', async () => {
+  // "Restoring" the real UA string left an override in place with no userAgentMetadata: the tab
+  // reported empty navigator.userAgentData brands and sent no Sec-CH-UA for the rest of its life,
+  // and the result said `cleared: [… "userAgent"]` (docs review, 2026-09-22). '' removes it.
+  const uaCalls = () => commandLog.filter((c) => c.method === 'Emulation.setUserAgentOverride');
+  commandLog.length = 0;
+  const reset = await emulateModule.emulate(7, { reset: true });
+  assert.equal(reset.reset, true);
+  assert.equal(uaCalls().length, 1);
+  assert.equal(uaCalls()[0].params.userAgent, '', 'the override is removed, not replaced');
+  assert.ok(reset.cleared.includes('userAgent'));
+
+  // Not stealth-safe, so refused on a stealth tab — nothing is sent.
+  await stateModule.setState({ inputMode: 'stealth' });
+  try {
+    commandLog.length = 0;
+    await assert.rejects(() => emulateModule.emulate(7, { device: 'iphone-15' }), /Refused on a stealth tab[\s\S]*user agent/);
+    await assert.rejects(() => emulateModule.emulate(7, { locale: 'de-DE' }), /Refused on a stealth tab[\s\S]*navigator\.languages/);
+    assert.equal(commandLog.filter((c) => /^Emulation\./.test(c.method)).length, 0, 'nothing was emulated');
+    // Layout emulation (width/height) has no such tell and is not refused: it is not in this
+    // guard's list at all.
+    await assert.doesNotReject(() => emulateModule.emulate(7, { network: '4g' }));
+  } finally {
+    await stateModule.setState({ inputMode: 'human' });
+  }
+});
+
+await test('with nothing current, an unattachable active page is refused, never guessed around', async () => {
+  // v1 asked this of Follow mode ("no target when the active page is
+  // unattachable"). v2 has no modes, and the rule outlived them: a call without
+  // a tabId acts on the current tab, else the tab the user is looking at — and
+  // when that is a browser page, the answer is a refusal that names it, never a
+  // different tab picked instead.
+  resetBrowser();
+  await stateModule.setState({ currentTabId: null, sessions: {} });
+  assert.equal(await tabsModule.peekTarget(), null, 'status must report no target');
+  await assert.rejects(() => tabsModule.resolveTarget(null, null),
+    /The active tab is chrome:\/\/settings, a browser-internal page that cannot be controlled/);
+  await assert.rejects(() => tabsModule.resolveTarget(9, null), /Tab 9 is on chrome:\/\/settings/);
+  const status = await runtime.status();
+  assert.equal(status.current, null);
+  assert.match(status.hint, /No tab to act on/);
 });
 
 await test('data substitution and Playwright select export preserve test intent', async () => {
@@ -237,6 +434,11 @@ await test('visual comparison returns a normalized deterministic difference', ()
 await test('diagnose is not annotated read-only because performance may reload', () => {
   const tool = toolsModule.TOOLS.find((item) => item.name === 'browser_diagnose');
   assert.equal(tool.annotations?.readOnlyHint, undefined);
+  // v2: the same judgement decides tab OWNERSHIP in the daemon (a read never
+  // claims a tab), so the runtime must agree with the schema — a trace that
+  // reloads the page is not a read.
+  assert.equal(runtime.isReadOnly('browser_diagnose', { what: 'performance', reload: true }), false);
+  assert.equal(runtime.isReadOnly('browser_diagnose', { what: 'performance' }), true);
 });
 
 await test('replay, idle, video, and panel regressions retain their invariants', async () => {
@@ -254,7 +456,9 @@ await test('replay, idle, video, and panel regressions retain their invariants',
   assert.match(issues, /putVideoFrame/);
   assert.doesNotMatch(issues, /session\.frames\.push/);
   assert.match(issues, /Stop the active video capture before deleting this issue/);
-  assert.match(issues, /deleteVideoFrames\(session\.sessionId\)/);
+  // v2 names the claimed capture record `current` (the stream itself is shared,
+  // lib/screencast.js); its frames are still deleted by that capture's id.
+  assert.match(issues, /deleteVideoFrames\(current\.sessionId\)/);
   assert.match(panelIssues, /await saveIssueNow/);
   assert.match(panelIssues, /videoStatus/);
   assert.match(replay, /interact\.drag/);
@@ -276,47 +480,102 @@ await test('every dispatching interaction witnesses that the page received it', 
   // page that is not visible, so every action returned a success object for
   // something that never happened. Each dispatching action must now prove the
   // page saw a TRUSTED event, and say why when it did not.
+  //
+  // v2 gives every action two paths: direct input (level "off", v1's events)
+  // and humanized input. BOTH must prove delivery — otherwise switching the
+  // input level would silently switch the proof off with it. (The witness is
+  // exercised as code in setup/unit/interaction.test.mjs; this pins where it
+  // sits, which is what a refactor loses.)
   const bodyOf = (name) => {
-    const start = interact.indexOf('export async function ' + name + '(');
-    assert.ok(start > -1, name + '() is missing');
-    const next = interact.indexOf('\nexport ', start + 10);
-    return interact.slice(start, next === -1 ? undefined : next);
+    const found = new RegExp(`\\n(?:export )?async function ${name}\\(`).exec(interact);
+    assert.ok(found, name + '() is missing');
+    const next = interact.indexOf('\n}\n', found.index + 1);
+    return interact.slice(found.index + 1, next === -1 ? undefined : next);
   };
-  for (const action of ['click', 'hover', 'type', 'key', 'drag']) {
-    assert.match(bodyOf(action), /witnessed\(/, action + '() dispatches without witnessing the result');
+  for (const impl of ['directClick', 'humanClick', 'directHover', 'humanHover', 'directDrag', 'humanDrag', 'type']) {
+    assert.match(bodyOf(impl), /witnessed\(/, impl + '() dispatches without witnessing the result');
   }
+  assert.equal((bodyOf('key').match(/witnessed\(/g) ?? []).length, 2, 'key() must witness at level off AND at the human levels');
+  // And every level of an exported action goes through one of those paths.
+  for (const [action, paths] of [
+    ['click', ['humanClick', 'directClick']],
+    ['hover', ['humanHover', 'directHover']],
+    ['drag', ['humanDrag', 'directDrag']],
+    ['scroll', ['humanScroll', 'directScroll']],
+  ]) {
+    for (const impl of paths) assert.match(bodyOf(action), new RegExp(`${impl}\\(tabId`), `${action}() must route to ${impl}()`);
+  }
+
   // scroll is the exception, and for a reason worth pinning: Chromium may
   // handle wheel entirely on the compositor, so no DOM event arrives even when
-  // the scroll worked. It verifies the scroll POSITION instead.
-  const scrollBody = bodyOf('scroll');
-  assert.doesNotMatch(scrollBody, /witnessed\(/, 'scroll must not witness a wheel event');
-  assert.match(scrollBody, /scrollX, y: scrollY/);
-  assert.match(scrollBody, /moved/);
-  // Wheel scrolling settles on the compositor AFTER the command resolves, so
-  // reading the position once reported a working scroll as `moved: false`.
-  assert.match(scrollBody, /settleBy/);
-  assert.match(scrollBody, /if \(moved \|\| Date\.now\(\) >= settleBy\) break;/);
-  assert.doesNotMatch(interact, /WITNESS_EVENTS = \[[^\]]*'wheel'/);
+  // the scroll worked. It verifies the scroll POSITION instead; a seen `wheel`
+  // is only ever a positive signal, never the verdict.
+  for (const impl of ['directScroll', 'humanScroll']) {
+    const scrollBody = bodyOf(impl);
+    assert.doesNotMatch(scrollBody, /witnessed\(/, `${impl}() must not make a wheel event its verdict`);
+    assert.match(scrollBody, /scrollState\(tabId, node\)/);
+    // Wheel scrolling settles on the compositor AFTER the command resolves, so
+    // reading the position once reported a working scroll as `moved: false`;
+    // and stopping at the FIRST changed read reported a mid-scroll position,
+    // at which the next action aimed (live round 2: 50/50 runs). The position
+    // is read until the page has stopped (settledScroll).
+    assert.match(scrollBody, /await settledScroll\(tabId, node, before\)/, `${impl}() must wait for the page to stop scrolling`);
+    assert.match(scrollBody, /movedAtAll \? \(witness\.release\(\), \{ delivery: 'delivered' \}\)/,
+      `${impl}(): a position that moved is delivered, whatever the wheel witness saw`);
+  }
+  const settleBody = bodyOf('settledScroll');
+  assert.match(settleBody, /moveWithinMs/, 'first: wait for the first movement (a page at its edge never moves)');
+  assert.match(settleBody, /quietMs/, 'then: until the position has not changed for a quiet window');
+  assert.match(settleBody, /capMs/, 'capped');
+  assert.match(settleBody, /moved: scrollMoved\(before, last\)/, 'moved is the net movement to where the page came to rest');
+  assert.match(interact, /scrollX, y: scrollY/);
   assert.match(interact, /document\.visibilityState/);
   assert.match(interact, /explainNoInput/);
   assert.match(interact, /isTrusted/);
 
-  // Arm and read in ONE evaluate. Two calls assume both land in the same
+  // Arm and read as ONE promise. Two calls assume both land in the same
   // execution context, and a single-page app swaps context as its router
   // moves — the listener is gone by the time the counter is read, and a
   // caption that typed perfectly gets reported as a failure. That inverse
   // failure is as damaging as the original: retrying a click posts twice.
-  assert.match(interact, /function watchForInput/);
-  assert.doesNotMatch(interact, /armWitness|witnessSaw|__g9witness/,
+  // v2 arms a promise that lives entirely inside one context (G9's isolated
+  // world) and settles THAT promise. Run the real expression against a
+  // stand-in page: it must leave nothing behind in the page, ignore a
+  // synthetic event, answer on a trusted one, and remove its listeners.
+  assert.doesNotMatch(interact, /witnessSaw|__g9witness/,
     'the witness must not keep state between separate evaluate calls');
+  const { witnessExpression } = await import('../extension/tools/interact.js');
+  const vm = await import('node:vm');
+  const listeners = new Map();
+  const page = {
+    frames: { length: 0 },
+    addEventListener: (kind, fn) => listeners.set(kind, fn),
+    removeEventListener: (kind) => listeners.delete(kind),
+    setTimeout,
+    clearTimeout,
+  };
+  page.window = page;
+  const pageKeys = new Set(Object.keys(page));
+  const witness = vm.runInContext(witnessExpression(['mousedown'], 5000), vm.createContext(page));
+  assert.equal(typeof witness?.then, 'function', 'the witness is one promise');
+  assert.deepEqual(Object.keys(page).filter((k) => !pageKeys.has(k)), [], 'the witness leaves no state in the page');
+  listeners.get('mousedown')({ isTrusted: false });
+  assert.equal(listeners.size, 1, 'a synthetic event proves nothing: the witness is still listening');
+  listeners.get('mousedown')({ isTrusted: true });
+  assert.equal(await witness, true, 'a trusted event answers; a synthetic one proves nothing');
+  assert.equal(listeners.size, 0, 'the witness removes its listeners once it has answered');
+
   // An observable outcome outranks any opinion about events.
   assert.match(interact, /verify && \(await verify\(\)/);
-  assert.match(interact, /readValue\(tabId, node\.backendNodeId\)\) !== before/);
+  assert.match(interact, /readValue\(tabId, node\)\) !== before/);
 
   // The witness must never be armed inside another witness: arming resets the
   // counter, so a nested one turns a working action into a false failure.
   assert.match(interact, /async function dispatchKey\(/);
-  const emitBody = interact.slice(interact.indexOf('const emit = async ()'), interact.indexOf('if (text.length)'));
+  const typeBody = bodyOf('type');
+  const emitBody = typeBody.slice(typeBody.indexOf('let emit;'), typeBody.indexOf('let w = null;'));
+  assert.ok(emitBody.length > 200, 'type() must build its dispatch before witnessing it');
+  assert.match(emitBody, /dispatchKey\(tabId/);
   assert.doesNotMatch(emitBody, /await key\(tabId/, 'type() must call the unwitnessed dispatchKey');
 });
 
@@ -336,33 +595,66 @@ await test('video capture never calls CDP inside the serialize chain', async () 
     return text.slice(openIndex);
   };
 
-  for (const fn of ['startVideo', 'ingestFrame', 'stopVideo']) {
-    const start = issues.indexOf('export async function ' + fn);
-    assert.ok(start > -1, fn + ' is missing');
-    const next = issues.indexOf('\nexport ', start + 10);
-    const body = issues.slice(start, next === -1 ? undefined : next);
-
+  // v2: the stream is shared (lib/screencast.js) and the video is one consumer
+  // of it, so "talking to CDP" is screencast.start/stop as well as send().
+  const CDP_CALL = /\b(?:send|sendOnLiveSession|inWorld|callInWorld)\(tabId|screencast\.(?:start|stop)\(tabId/;
+  const bodyOf = (fn) => {
+    const found = new RegExp(`\\n(?:export )?async function ${fn}\\(`).exec(issues);
+    assert.ok(found, fn + ' is missing');
+    const next = issues.indexOf('\n}\n', found.index + 1);
+    return issues.slice(found.index + 1, next === -1 ? undefined : next);
+  };
+  for (const fn of ['startVideo', 'ingestVideoFrame', 'stopVideo']) {
+    const body = bodyOf(fn);
     for (const block of [...body.matchAll(/serialize\(async \(\) => (\{)/g)]) {
       const inside = blockAt(body, block.index + block[0].length - 1);
-      assert.doesNotMatch(inside, /\bsend(OnLiveSession)?\(tabId/, fn + '() calls CDP inside serialize() — that deadlocks the write chain');
+      assert.doesNotMatch(inside, CDP_CALL, fn + '() calls CDP inside serialize() — that deadlocks the write chain');
     }
-    // …and the CDP call still has to happen somewhere in the function.
-    assert.match(body, /\bsend(OnLiveSession)?\(tabId/, fn + '() no longer talks to CDP at all');
   }
-  assert.match(issues, /Page\.screencastFrameAck/);
+  // …and the CDP calls still have to happen somewhere.
+  assert.match(bodyOf('startVideo'), /screencast\.start\(tabId/, 'startVideo() no longer starts the stream');
+  assert.match(bodyOf('stopVideo'), /screencast\.stop\(tabId/, 'stopVideo() no longer stops the stream');
 
   // The ack must NOT go through send(): its halt check, attach check and
   // getTargets() round trip, paid per frame on the single worker thread,
   // starved the agent's own calls until an ordinary scroll during a recording
   // timed out after 60s. The frame event is itself proof the session is live.
-  const ingest = issues.slice(issues.indexOf('export async function ingestFrame'));
-  assert.match(ingest, /sendOnLiveSession\(tabId, 'Page\.screencastFrameAck'/);
+  const screencastSrc = await readFile(new URL('../extension/lib/screencast.js', import.meta.url), 'utf8');
+  assert.match(screencastSrc, /sendOnLiveSession\(tabId, 'Page\.screencastFrameAck'/);
   const cdp = await readFile(new URL('../extension/lib/cdp.js', import.meta.url), 'utf8');
   assert.match(cdp, /export function sendOnLiveSession/);
   // At most one serialized write per frame path, never across the blob write.
-  const ingestBody = ingest.slice(0, ingest.indexOf('\nexport '));
-  assert.ok((ingestBody.match(/serialize\(/g) || []).length <= 2,
-    'ingestFrame holds the shared write chain more than necessary per frame');
+  assert.ok((bodyOf('ingestVideoFrame').match(/serialize\(/g) || []).length <= 2,
+    'the frame path holds the shared write chain more than necessary per frame');
+
+  // And as behaviour, in the exact situation that deadlocked v1: the person
+  // pressed Cancel on the debugging banner, so the tab is NOT in attachedTabs,
+  // and starting a capture has to attach — setState() and logActivity(), both
+  // on the write chain — on the way. Every step must finish, and the chain must
+  // still take writes afterwards.
+  const issuesTool = await import('../extension/tools/issues.js');
+  localData.set('g9:issue:vid-1', { id: 'vid-1', title: 'video probe', status: 'open' });
+  attachedTabs.delete(7);
+  await stateModule.setState({ attachedTabs: [], halted: false });
+  const started = await within(5000, issuesTool.startVideo(7, { id: 'vid-1' }), 'startVideo on a detached tab');
+  assert.equal(started.recording, true);
+  assert.ok(commandLog.some((c) => c.tabId === 7 && c.method === 'Page.startScreencast'));
+  await assert.rejects(() => issuesTool.deleteIssue('vid-1'), /Stop the active video capture before deleting this issue/);
+
+  const acks = () => commandLog.filter((c) => c.method === 'Page.screencastFrameAck').length;
+  const acksBefore = acks();
+  const targetsBefore = getTargetsCalls;
+  for (let i = 1; i <= 3; i++) {
+    await within(5000, issuesTool.ingestFrame(7, { data: 'AAAA', sessionId: i, metadata: { deviceWidth: 800, deviceHeight: 600 } }), 'a video frame');
+  }
+  assert.equal(acks() - acksBefore, 3, 'every frame is acknowledged');
+  assert.equal(getTargetsCalls - targetsBefore, 0, 'a frame must not pay for send()\'s attach check');
+  await within(2000, stateModule.setState({ autoAttach: false }), 'a state write after the frames');
+
+  const stopped = await within(5000, issuesTool.stopVideo(7, 'vid-1'), 'stopVideo');
+  assert.equal(stopped.frames, 3);
+  assert.equal(stopped.attached, true);
+  assert.deepEqual(await issuesTool.videoStatus(7), { recording: false });
 });
 
 await test('connection status does not rewrite durable bridge settings', async () => {
@@ -370,8 +662,9 @@ await test('connection status does not rewrite durable bridge settings', async (
   localData.clear();
   sessionData.clear();
 
-  // A configured port, as the side panel or the isolated harness would write it.
-  await setState({ bridge: { host: '127.0.0.1', port: 55099, token: '' } });
+  // A configured daemon address, as the side panel or the isolated harness
+  // would write it (v2 has no token: host and port are the whole setting).
+  await setState({ bridge: { host: '127.0.0.1', port: 55099 } });
   assert.equal(localData.get('settings').bridge.port, 55099);
 
   // A failed connection is live status, not configuration. It used to mirror
@@ -383,6 +676,175 @@ await test('connection status does not rewrite durable bridge settings', async (
   const state = await getState();
   assert.equal(state.bridge.connected, false);
   assert.equal(state.bridge.port, 55099);
+});
+
+await test('approving folds in the run the person REVIEWED; a newer run that arrived since is refused', async () => {
+  // The desktop sent only the flow id, and the store merged `lastSignature` — which a scheduled
+  // replay finishing between the review and the click had already replaced, so that run's surprises
+  // (a real regression among them) went into the known world unseen (desktop review, 2026-09-22).
+  const store = await import('../extension/lib/store.js');
+  const replayModule = await import('../extension/tools/replay.js');
+  const base = {
+    id: 'rec_approve', name: 'Checkout', startUrl: 'https://shop.test/', steps: [],
+    lastSignature: { network: { 'GET /api/banner 2xx': { count: 1 } }, console: {}, ui: {}, steps: [] },
+    lastRun: { at: 1_000, verdict: 'SURPRISE', passed: 1, failed: 0 },
+  };
+  await store.saveRecording(base);
+  // A newer run arrives while the dialog is open.
+  await store.saveRecording({ ...base, lastRun: { ...base.lastRun, at: 2_000 }, lastSignature: { network: { 'POST /api/pay 5xx': { count: 1 } }, console: {}, ui: {}, steps: [] } });
+  await assert.rejects(
+    () => replayModule.approveKnownWorld('rec_approve', { by: 'qa', note: 'expected', expectLastRunAt: 1_000 }),
+    /newer run[\s\S]*arrived after the one you reviewed/,
+  );
+  assert.equal((await store.getRecording('rec_approve')).knownWorld ?? null, null, 'nothing was approved');
+  // Approving the run that IS on screen works, as always.
+  const ok = await replayModule.approveKnownWorld('rec_approve', { by: 'qa', note: 'expected', expectLastRunAt: 2_000 });
+  assert.equal(ok.id, 'rec_approve');
+  assert.equal((await store.getRecording('rec_approve')).knownWorld.approvedBy, 'qa');
+  await store.deleteRecording('rec_approve');
+});
+
+await test('a ref keeps naming the element ITS snapshot showed; another agent\'s snapshot never renumbers it (EXT-03)', async () => {
+  // Refs were renumbered from e1 by every snapshot of a tab, and the table was the tab's: another
+  // agent's snapshot (a read, allowed on any tab) after the page inserted a row made this agent's
+  // e2 the row above the one it had seen, and its click deleted the wrong one, reported "delivered"
+  // (docs review, 2026-09-22).
+  const refs = await import('../extension/lib/refs.js');
+  const TABID = 77;
+  const page = 'https://rows.test/list';
+  await refs.clearRefs(TABID);
+  const first = await refs.refNumbering(TABID, page);
+  assert.deepEqual([first.next(), first.next()], ['e1', 'e2']);
+  await refs.saveRefs(TABID, { url: page, entries: [['e1', { backendNodeId: 11 }], ['e2', { backendNodeId: 12 }]] });
+
+  // A second snapshot of the same page (whoever takes it) continues the numbering.
+  const second = await refs.refNumbering(TABID, page);
+  assert.deepEqual([second.next(), second.next(), second.next()], ['e3', 'e4', 'e5']);
+  await refs.saveRefs(TABID, { url: page, entries: [['e3', { backendNodeId: 10 }], ['e4', { backendNodeId: 11 }], ['e5', { backendNodeId: 12 }]] });
+  assert.equal((await refs.resolveRef(TABID, 'e2', page)).backendNodeId, 12, 'the older snapshot\'s ref still names its own element');
+  assert.equal((await refs.resolveRef(TABID, 'e3', page)).backendNodeId, 10, 'and the newest snapshot\'s refs work as always');
+
+  // Older than the ring, or from another page: refused with the fix, never resolved elsewhere.
+  for (let i = 0; i < refs.KEEP_GENERATIONS; i++) {
+    await refs.saveRefs(TABID, { url: page, entries: [[`e${100 + i}`, { backendNodeId: 500 + i }]] });
+  }
+  await assert.rejects(refs.resolveRef(TABID, 'e2', page), /Unknown element ref/);
+  await refs.saveRefs(TABID, { url: 'https://rows.test/other', entries: [['e1', { backendNodeId: 90 }]] });
+  await assert.rejects(refs.resolveRef(TABID, 'e103', 'https://rows.test/other'), /Unknown element ref/);
+  assert.equal((await refs.refNumbering(TABID, 'https://rows.test/other')).next(), 'e2', 'a new page numbers from the start again');
+
+  // A replay's reserved refs live apart: they never replace an agent's table.
+  await refs.saveRefs(TABID, { url: page, entries: [['e1', { backendNodeId: 61 }]] });
+  const seen = await refs.withPrivateRefs(TABID, { url: page, entries: [['__replay', { backendNodeId: 99 }]] }, async () => {
+    assert.equal((await refs.resolveRef(TABID, '__replay', page)).backendNodeId, 99);
+    return (await refs.getRefs(TABID)).map.e1.backendNodeId;
+  });
+  assert.equal(seen, 61, 'the agent\'s snapshot is untouched during a replay step');
+  await assert.rejects(refs.resolveRef(TABID, '__replay', page), /Unknown element ref/);
+  await refs.clearRefs(TABID);
+});
+
+await test('two attaches at the same time both land in attachedTabs, and Detach releases what the browser really holds', async () => {
+  // attach() read attachedTabs, then wrote [itself]: two attaches finishing together each read []
+  // and one tab was lost from the list — Detach then left that tab debugged while reporting a clean
+  // release, and switching to Stealth never reached it (extension review, 2026-09-22: 20/20 runs
+  // with a stub that delays storage).
+  const cdp = await import('../extension/lib/cdp.js');
+  resetBrowser();
+  browserModel.tabs.set(8, { id: 8, url: 'http://example.test/second', title: 'Second', windowId: 1, active: false, status: 'complete' });
+  try {
+    await stateModule.setState({ attachedTabs: [], currentTabId: null, sessions: {}, halted: false });
+    await Promise.all([cdp.attach(7), cdp.attach(8)]);
+    assert.deepEqual([...(await stateModule.getState()).attachedTabs].sort(), [7, 8], 'neither attach was lost');
+
+    // A tab the browser debugs for us but that fell out of the list (an older build, a race) is
+    // still released by Detach — and a tab the extension does not hold is left alone, silently.
+    await stateModule.setState({ attachedTabs: [7] });
+    const results = await tabsModule.detachAllTabs();
+    assert.deepEqual(results.filter((r) => r.detached).map((r) => r.tabId).sort(), [7, 8]);
+    assert.equal(attachedTabs.has(8), false, 'the forgotten tab is no longer debugged');
+    assert.equal(attachedTabs.has(7), false);
+    assert.deepEqual((await stateModule.getState()).attachedTabs, []);
+  } finally {
+    await stateModule.setState({ attachedTabs: [], currentTabId: null, halted: false });
+    resetBrowser();
+  }
+});
+
+await test('the v1 mode is removed from settings once, and the daemon address survives it', async () => {
+  // v1 had four modes and a migration (migrateModeDefault) that moved people
+  // onto Workspace without ever widening their access. v2 has no modes; in its
+  // place is a one-time cleanup, which must not take the configured address
+  // with it — someone who moved off the default port did so for a reason.
+  localData.set('settings', {
+    mode: 'multi',
+    modeDefaultMigrated: true,
+    bridge: { host: '127.0.0.1', port: 55123, token: 'v1-token', serverPath: 'C:/old/bridge/src/server.js' },
+    inputMode: 'stealth',
+  });
+  const note = await stateModule.migrateLegacySettings();
+  assert.match(note, /"multi"/);
+  assert.match(note, /v2 has no modes/);
+  const settings = localData.get('settings');
+  assert.equal('mode' in settings, false);
+  assert.equal('modeDefaultMigrated' in settings, false);
+  assert.deepEqual(settings.bridge, { host: '127.0.0.1', port: 55123 }, 'the token and path hints go; the address stays');
+  assert.equal(settings.inputMode, 'stealth', 'a real v2 setting is kept');
+  assert.equal(await stateModule.migrateLegacySettings(), null, 'once: a second run finds nothing to do');
+
+  // A mode left in session state by a v1 worker never leaks back into v2 state.
+  sessionData.set('state', { ...(sessionData.get('state') ?? {}), mode: 'pinned', pinnedTabId: 7 });
+  const state = await stateModule.getState();
+  assert.equal('mode' in state, false);
+  assert.equal('pinnedTabId' in state, false);
+  await stateModule.setState({ inputMode: 'human' });
+});
+
+await test('a v1 bridge port the BRIDGE chose (8766-8775) is kept but flagged, so g9d on 8765 can be found once', async () => {
+  // v1 bridges without G9_PORT took the next free port in 8765-8775, and the panel saved whichever
+  // one the person clicked. An in-place upgrade kept dialling it for ever: "Daemon offline" while
+  // g9d ran on 8765 (extension review, 2026-09-22). The port is kept — someone may have set
+  // G9_PORT there on purpose — and marked, so the transport tries 8765 once and switches only if
+  // g9d answers there.
+  localData.set('settings', { mode: 'workspace', bridge: { host: '127.0.0.1', port: 8766, token: 't' } });
+  const note = await stateModule.migrateLegacySettings();
+  assert.match(note, /port 8766/);
+  assert.deepEqual(localData.get('settings').bridge, { host: '127.0.0.1', port: 8766, v1AutoPort: true });
+  // A port outside that range was chosen by a person or a test: never flagged.
+  localData.set('settings', { mode: 'workspace', bridge: { host: '127.0.0.1', port: 55123, token: 't' } });
+  await stateModule.migrateLegacySettings();
+  assert.deepEqual(localData.get('settings').bridge, { host: '127.0.0.1', port: 55123 });
+  // 8765 itself is the default and needs no fallback.
+  localData.set('settings', { mode: 'workspace', bridge: { host: '127.0.0.1', port: 8765, token: 't' } });
+  await stateModule.migrateLegacySettings();
+  assert.deepEqual(localData.get('settings').bridge, { host: '127.0.0.1', port: 8765 });
+  localData.set('settings', { inputMode: 'human', bridge: { host: '127.0.0.1', port: 55099 } });
+});
+
+await test("D-b in your own browser: the panel's Input is the default level, and only Stealth is a floor an agent cannot loosen", async () => {
+  const { levelFor } = await import('../extension/lib/humanize.js');
+  try {
+    await stateModule.setState({ inputMode: 'human' });
+    assert.equal(platform.settings.humanizeFor(7), 'human');
+    assert.equal(platform.settings.stealthFor(7), 'off', 'Human is a default, not a stealth level');
+    const direct = await levelFor(7, { humanize: 'off' });
+    assert.equal(direct.level, 'off', 'an agent asking for direct input on a Human panel gets it');
+    assert.equal(direct.raisedFrom, undefined);
+    assert.equal((await levelFor(7, {})).level, 'human', 'a call that names no level runs at the panel setting');
+
+    await stateModule.setState({ inputMode: 'stealth' });
+    assert.equal(platform.settings.stealthFor(7), 'stealth');
+    const raised = await levelFor(7, { humanize: 'off' });
+    assert.equal(raised.level, 'stealth', 'Stealth is a floor');
+    assert.equal(raised.raisedFrom, 'off', 'and the raise is reported');
+
+    await stateModule.setState({ inputMode: 'off' });
+    assert.equal(platform.settings.stealthFor(7), 'off');
+    assert.equal((await levelFor(7, { humanize: 'human' })).level, 'human', 'Direct is a default too');
+    assert.equal((await levelFor(7, {})).level, 'off');
+  } finally {
+    await stateModule.setState({ inputMode: 'human' });
+  }
 });
 
 await test('snapshot reports the real document title', async () => {
@@ -415,12 +877,47 @@ await test('bounded evidence: HAR bodies and Web Storage cannot exceed the trans
     readFile(new URL('../extension/tools/observe.js', import.meta.url), 'utf8'),
     readFile(new URL('../extension/tools/inspect.js', import.meta.url), 'utf8'),
   ]);
-  // ws-server.js drops any frame over 64MB AND the connection with it, so an
-  // unbounded result does not truncate — it ends the session.
+  // The socket drops any frame over 64MB AND the connection with it, so an
+  // unbounded result does not truncate — it ends the session. In v2 that limit
+  // is the daemon's (daemon/ws-server.js through lib/ws-codec.mjs), and a
+  // result relayed from the extension crosses it.
+  const { MAX_FRAME_BYTES } = await import('../lib/ws-codec.mjs');
+  assert.equal(MAX_FRAME_BYTES, 64 * 1024 * 1024);
   assert.match(observeSrc, /MAX_HAR_BODY_BYTES/);
-  assert.match(observeSrc, /bodiesOmitted/);
   assert.match(inspectSrc, /MAX_TOTAL/);
   assert.match(inspectSrc, /truncated/);
+
+  // The HAR budget as behaviour: forty finished requests with 400KB bodies is
+  // 16MB of bodies. The export must stop adding bodies at its budget, keep
+  // every entry's headers and timing, and SAY how many bodies it left out.
+  await observe.clearBuffers(7);
+  for (let index = 0; index < 40; index++) {
+    const requestId = 'har' + index;
+    await observe.ingest(7, 'Network.requestWillBeSent', {
+      requestId, loaderId: 'l', timestamp: index, wallTime: 2000 + index,
+      type: 'XHR', request: { url: 'http://example.test/api/big/' + index, method: 'GET', headers: {} },
+    });
+    await observe.ingest(7, 'Network.responseReceived', {
+      requestId, response: { status: 200, statusText: 'OK', headers: {}, mimeType: 'application/json' },
+    });
+    await observe.ingest(7, 'Network.loadingFinished', { requestId, timestamp: index + 0.5, encodedDataLength: 400 * 1024 });
+  }
+  responseBody = 'x'.repeat(400 * 1024);
+  let exported;
+  try {
+    exported = await observe.har(7, { includeBody: true });
+  } finally {
+    responseBody = null;
+  }
+  const bodies = exported.log.entries.map((e) => e.response.content.text ?? '');
+  const bodyBytes = bodies.reduce((sum, text) => sum + text.length, 0);
+  assert.equal(exported.log.entries.length, 40, 'every entry is kept, with or without its body');
+  assert.ok(exported.bodiesOmitted > 0, 'the budget ran out, so some bodies were left out');
+  assert.equal(bodies.filter((text) => !text).length, exported.bodiesOmitted, 'and the count says exactly how many');
+  assert.ok(bodyBytes <= 8 * 1024 * 1024 + 400 * 1024, `bodies stay within the budget (${bodyBytes} bytes)`);
+  assert.match(exported.note, /budget ran out/);
+  assert.ok(JSON.stringify(exported).length < MAX_FRAME_BYTES);
+  await observe.clearBuffers(7);
 });
 
 await test('a click that navigates is not reported as an unobserved event', async () => {
@@ -448,13 +945,44 @@ await test('locators refuse a text locator that resolves to a different element'
   assert.match(LOCATOR_SOURCE, /rootCache/);
 });
 
-await test('version skew between bridge and extension is reported to the agent', async () => {
-  const server = await readFile(new URL('../bridge/src/server.js', import.meta.url), 'utf8');
+await test('version skew between the daemon and the extension is reported to the agent', async () => {
   // Both sides always exchanged a version and neither compared them, while the
   // documented workflow (reload extension, restart client) drifts them routinely.
-  assert.match(server, /versionSkew/);
-  assert.match(server, /extensionVersion/);
-  assert.match(server, /browser_status/);
+  // v2: the daemon (not a bridge) compares each extension's hello version with
+  // its own and browser_status carries the mismatch to the agent. A v1 (major 1)
+  // extension is refused at hello with code 4001 — setup/selftest.mjs checks
+  // that over a real socket.
+  const { Registry } = await import('../daemon/registry.js');
+  const { Router } = await import('../daemon/router.js');
+  const registry = new Registry({ resumeMs: 0 });
+  const engines = { list: () => [], available: () => true, unavailableReason: () => null };
+  const router = new Router({ registry, engines, version: '2.0.0', info: () => ({ pid: process.pid, port: 0 }) });
+  let ext = null;
+  ext = registry.addClient({
+    role: 'engine',
+    name: 'extension',
+    version: '2.0.0-rc.1',
+    browser: 'Edge',
+    // The extension answers the relayed browser_status as sw.js would.
+    send: (msg) => {
+      if (msg.type === 'call') {
+        setTimeout(() => router.onRelayResult(ext, { type: 'result', id: msg.id, ok: true, result: { engine: 'extension', current: null } }), 0);
+      }
+      return true;
+    },
+  });
+  const agent = registry.addClient({ role: 'agent', name: 'skew-probe' });
+
+  const [row] = router.engineRows();
+  assert.match(row.versionMismatch ?? '', /extension is v2\.0\.0-rc\.1 but the daemon is v2\.0\.0\b/);
+  assert.match(row.versionMismatch, /Reload the extension/);
+  const status = await within(5000, router.call(agent, 'browser_status', {}), 'browser_status');
+  assert.equal(status.versionMismatch, row.versionMismatch, 'the agent is told, in browser_status');
+
+  ext.version = '2.0.0';
+  assert.equal(router.engineRows()[0].versionMismatch, undefined, 'the same version is not a finding');
+  const clean = await within(5000, router.call(agent, 'browser_status', {}), 'browser_status');
+  assert.equal(clean.versionMismatch, undefined);
 });
 
 // ------------------------------------- regression memory (signature/known world)
@@ -652,7 +1180,41 @@ await test('pinned network answers every paused request exactly once', async () 
   }
 });
 
-await test('the new assertion and network actions are declared in the bridge schema', () => {
+await test('a pinned response is not used up by a request the page cancelled before it was answered', async () => {
+  const netpin = await import('../extension/tools/netpin.js');
+  const answered = [];
+  let gone = new Set();
+  const originalSend = chrome.debugger.sendCommand;
+  chrome.debugger.sendCommand = async (_source, method, params) => {
+    if (/^Fetch\.(fulfillRequest|continueRequest|failRequest)$/.test(method)) {
+      // A request the page cancelled no longer exists: the browser refuses every answer.
+      if (gone.has(params.requestId)) throw new Error('Invalid InterceptionId.');
+      answered.push({ method, requestId: params.requestId, body: params.body ? Buffer.from(params.body, 'base64').toString('utf8') : null });
+    }
+    return {};
+  };
+  const entry = (page) => ({
+    request: { method: 'GET', url: 'https://a.test/api/list' },
+    response: { status: 200, headers: [{ name: 'content-type', value: 'application/json' }], content: { mimeType: 'application/json', text: `{"page":${page}}` } },
+  });
+  try {
+    await netpin.pin(7, { har: { log: { entries: [entry(1), entry(2), entry(3)] } } });
+    gone = new Set(['c1']);
+    await netpin.onRequestPaused(7, { requestId: 'c1', request: { method: 'GET', url: 'https://a.test/api/list' } });
+    assert.equal(answered.length, 0, 'nothing could be answered: the request is gone');
+    await netpin.onRequestPaused(7, { requestId: 'c2', request: { method: 'GET', url: 'https://a.test/api/list' } });
+    await netpin.onRequestPaused(7, { requestId: 'c3', request: { method: 'GET', url: 'https://a.test/api/list' } });
+    assert.deepEqual(answered.map((a) => a.body), ['{"page":1}', '{"page":2}'], 'the cancelled request did not use up page 1');
+    const status = await netpin.status(7);
+    assert.equal(status.served, 2, 'only what was really served is counted');
+    assert.equal(status.passedThrough, 0);
+  } finally {
+    chrome.debugger.sendCommand = originalSend;
+    await netpin.unpin(7).catch(() => {});
+  }
+});
+
+await test('the new assertion and network actions are declared in the MCP schema', () => {
   const tools = toolsModule.TOOLS;
   const recording = tools.find((t) => t.name === 'browser_recording');
   const network = tools.find((t) => t.name === 'browser_network');
@@ -669,88 +1231,137 @@ await test('the new assertion and network actions are declared in the bridge sch
   assert.match(toolsModule.INSTRUCTIONS, /Never approve on your own initiative/);
 });
 
-// ---------------------------------------------------- v1.7.0: workspace mode
+// ----------------------------------------- v2: no modes (replaced workspace)
+//
+// v1.7.0's workspace mode (the allowlist, the redacted listing, refusals that
+// named the project file) and the pinned/follow/multi modes are gone in v2
+// (decision D6): the deployment is local and trusted, and attaching a tab gives
+// full access. What replaced them is tested here — a listing that shows every
+// tab, attach making a tab the current one, and one resolution order for every
+// call (ARCHITECTURE_V2 §4.1).
 
-await test('an empty workspace allowlist denies everything, never allows everything', async () => {
-  const { inWorkspace } = await import('../extension/lib/workspace.js');
-
-  // THE rule. Get this backwards and a missing config file silently hands an
-  // agent every tab the user has open, which is the opposite of what the mode
-  // is for. It is also exactly the shape a tired refactor reaches for.
-  assert.equal(inWorkspace('https://anything.example', []), false);
-  assert.equal(inWorkspace('https://anything.example', undefined), false);
-  assert.equal(inWorkspace('https://anything.example', null), false);
+await test('v2 has no modes: the tab list shows every tab in full, keyed by tabId', async () => {
+  resetBrowser();
+  browserModel.tabs.set(8, {
+    id: 8, url: 'https://mail.example.com/inbox/thread/42', title: 'Inbox — thread 42', windowId: 1, active: false, status: 'complete',
+  });
+  try {
+    await stateModule.setState({ currentTabId: null, sessions: {}, halted: false });
+    const { tabs } = await runtime.runTool('browser_tabs', { action: 'list' });
+    const byId = new Map(tabs.map((t) => [t.tabId, t]));
+    // Titles and URLs are exactly what v1 withheld outside Multi mode. In v2 a
+    // listing that hides them is a bug, not a boundary.
+    assert.equal(byId.get(8).url, 'https://mail.example.com/inbox/thread/42');
+    assert.equal(byId.get(8).title, 'Inbox — thread 42');
+    // A browser page is listed too — as not attachable, never as hidden.
+    assert.equal(byId.get(9).url, 'chrome://settings');
+    assert.equal(byId.get(9).attachable, false);
+    assert.equal(byId.get(7).attachable, true);
+    // Identity is always `tabId`, never `id`: the daemon rewrites that one key
+    // between Chrome tab ids and its own handles, and a second spelling would
+    // slip past the rewrite and hand an agent a raw Chrome id.
+    for (const row of tabs) assert.equal('id' in row, false, 'a listing row must not carry `id`');
+    for (const key of ['tabId', 'title', 'url', 'active', 'windowId', 'windowState', 'current', 'attached', 'attachable', 'status', 'openerTabId']) {
+      assert.ok(key in byId.get(7), `listTabs rows carry ${key} (ARCHITECTURE_V2 §4.1)`);
+    }
+    // v1's ways of choosing a mode are gone, and say what to do instead.
+    await assert.rejects(() => runtime.runTool('browser_tabs', { action: 'pin', tabId: 7 }), /removed in v2 — there are no modes/);
+    await assert.rejects(() => runtime.runTool('browser_tabs', { action: 'unpin' }), /Use action:"attach"/);
+    const tabsSchema = toolsModule.TOOLS.find((t) => t.name === 'browser_tabs');
+    assert.ok(!tabsSchema.inputSchema.properties.action.enum.includes('pin'), 'pin is not offered to agents');
+    assert.equal('mode' in (await stateModule.getState()), false, 'state has no mode');
+  } finally {
+    resetBrowser();
+  }
 });
 
-await test('workspace domain matching covers subdomains, ports, and refuses paths', async () => {
-  const { inWorkspace } = await import('../extension/lib/workspace.js');
-  const { normaliseDomains } = await import('../bridge/src/project.js');
+await test('attach makes the tab current, and a call without a tabId then acts on it', async () => {
+  // v1 had the pinned tab. v2 has the current tab (§4.1 step 3), set by the
+  // panel's Attach and by browser_tabs attach — and it outranks the tab the
+  // person happens to be looking at, or an agent would follow their clicks
+  // around the browser.
+  resetBrowser();
+  browserModel.tabs.set(8, { id: 8, url: 'http://example.test/other', title: 'Other', windowId: 1, active: true, status: 'complete' });
+  browserModel.tabs.get(9).active = false;
+  try {
+    await stateModule.setState({ currentTabId: null, sessions: {}, halted: false });
+    assert.equal((await tabsModule.resolveTarget(null, null)).id, 8, 'nothing current: the active tab');
 
-  assert.equal(inWorkspace('https://app.acme.example/x', ['*.acme.example']), true);
-  // An apex must match its own wildcard. A QA who allowlists the subdomains and
-  // then finds the bare domain refused would rightly call that a bug.
-  assert.equal(inWorkspace('https://acme.example/', ['*.acme.example']), true);
-  assert.equal(inWorkspace('https://evil-acme.example/', ['*.acme.example']), false);
-  assert.equal(inWorkspace('https://mail.google.com/', ['*.acme.example']), false);
+    const attached = await runtime.runTool('browser_tabs', { action: 'attach', tabId: 7 });
+    assert.deepEqual({ tabId: attached.tabId, url: attached.url }, { tabId: 7, url: 'http://example.test/' });
+    assert.equal((await stateModule.getState()).currentTabId, 7);
+    assert.ok(attachedTabs.has(7), 'attached for real — the browser reports it');
+    assert.equal((await tabsModule.resolveTarget(null, null)).id, 7, 'the current tab outranks the active one');
+    assert.equal((await runtime.status()).current.tabId, 7, 'and browser_status describes it');
 
-  // A pattern with a port pins the port; one without matches any.
-  assert.equal(inWorkspace('http://localhost:5173/', ['localhost:5173']), true);
-  assert.equal(inWorkspace('http://localhost:5174/', ['localhost:5173']), false);
-  assert.equal(inWorkspace('http://localhost:9999/', ['localhost']), true);
-
-  // Never a browser-internal page, whatever the list says — including "*".
-  // Chrome will not let any debugger attach to these, so claiming them would be
-  // a promise the tool cannot keep.
-  assert.equal(inWorkspace('chrome://settings', ['*']), false);
-  assert.equal(inWorkspace('devtools://devtools/x', ['*']), false);
-  assert.equal(inWorkspace('view-source:https://x.test/', ['*']), false);
-
-  const problems = [];
-  // "*" is now a supported entry and must survive; path and URL shapes are still
-  // refused, and still reported rather than silently dropped.
-  assert.deepEqual(normaliseDomains(['example.com/path', 'https://x.com', '*', 'ok.com'], problems), ['*', 'ok.com']);
-  assert.equal(problems.length, 2, 'every refused pattern must be reported, not silently dropped');
+    // An agent's attach never lifts a Stop; only the person's own Attach in the
+    // panel does (v1's pin bug made the Stop button self-defeating).
+    await stateModule.setState({ halted: true });
+    await assert.rejects(() => runtime.runTool('browser_tabs', { action: 'attach', tabId: 7 }), /pressed Stop/);
+    const fromPanel = await tabsModule.attachTab(7, { clearHalt: true });
+    assert.equal(fromPanel.resumed, true);
+    assert.equal((await stateModule.getState()).halted, false);
+  } finally {
+    await stateModule.setState({ currentTabId: null, halted: false });
+    resetBrowser();
+  }
 });
 
-await test('workspace refusal names the allowlist and both ways out', async () => {
-  const { refusalFor } = await import('../extension/lib/workspace.js');
+await test('one resolution order for every call: tabId, session, current tab, active tab — else a refusal', async () => {
+  resetBrowser();
+  browserModel.tabs.set(8, { id: 8, url: 'http://example.test/buyer', title: 'Buyer', windowId: 1, active: false, status: 'complete' });
+  try {
+    await stateModule.setState({ currentTabId: 7, sessions: {}, halted: false });
+    await runtime.runTool('browser_tabs', { action: 'session', name: 'buyer', tabId: 8 });
 
-  // "Not allowed" without a remedy is the message that makes people uninstall a
-  // tool. Both remedies must appear, and they are different in kind: edit the
-  // project file (durable, shared, reviewed) or switch mode (immediate, personal).
-  const refusal = refusalFor('https://mail.google.com/', ['*.acme.example'], { projectPath: '/repo/g9.project.json' });
-  assert.match(refusal, /mail\.google\.com/);
-  assert.match(refusal, /\*\.acme\.example/);
-  assert.match(refusal, /workspaceDomains/);
-  assert.match(refusal, /Multi-tab/);
+    assert.equal((await tabsModule.resolveTarget(8, null)).id, 8, '1. an explicit tabId');
+    assert.equal((await tabsModule.resolveTarget(null, 'buyer')).id, 8, '2. a session name');
+    assert.equal((await tabsModule.resolveTarget(null, null)).id, 7, '3. the current tab');
+    await assert.rejects(() => tabsModule.resolveTarget(404, null), /Tab 404 no longer exists/);
+    await assert.rejects(() => tabsModule.resolveTarget(null, 'seller'), /No session named "seller"\. Open sessions: buyer\./);
 
-  const empty = refusalFor('', [], {});
-  assert.match(empty, /no allowlist/i);
-  assert.match(empty, /Pinned/);
-});
+    // The same order runs inside every tool call: a snapshot addressed by
+    // session reads THAT tab, not the current one.
+    axNodes = [{ nodeId: '1', role: { value: 'RootWebArea' }, name: { value: 'Buyer' }, childIds: [] }];
+    const before = commandLog.length;
+    await runtime.runTool('browser_snapshot', { session: 'buyer' });
+    const read = commandLog.slice(before).filter((c) => c.method === 'Accessibility.getFullAXTree').map((c) => c.tabId);
+    assert.deepEqual(read, [8], 'the snapshot read the session\'s tab');
 
-await test('workspace is the default mode and the migration cannot widen access', async () => {
-  const state = await readFile(new URL('../extension/lib/state.js', import.meta.url), 'utf8');
-  assert.match(state, /mode: 'workspace'/, 'workspace must be the shipped default');
-  assert.match(state, /migrateModeDefault/);
-  // follow and multi are deliberate choices and must survive the migration.
-  assert.match(state, /!settings\.mode \|\| settings\.mode === 'pinned'/);
+    // A current tab that navigated to a browser page is refused, not swapped
+    // for another tab behind the agent's back.
+    browserModel.tabs.get(7).url = 'edge://settings/';
+    await assert.rejects(() => tabsModule.resolveTarget(null, null),
+      /The current tab \(7\) is on edge:\/\/settings, a browser-internal page that cannot be controlled/);
+
+    // 4. A current tab that CLOSED is forgotten, and the active tab is used.
+    browserModel.tabs.delete(7);
+    browserModel.tabs.get(9).active = false;
+    browserModel.tabs.get(8).active = true;
+    assert.equal((await tabsModule.resolveTarget(null, null)).id, 8, '4. the active tab');
+    assert.equal((await stateModule.getState()).currentTabId, null, 'a closed current tab is forgotten, not kept as a stale id');
+  } finally {
+    await stateModule.setState({ currentTabId: null, sessions: {} });
+    resetBrowser();
+  }
 });
 
 // ------------------------------------------------- v1.7.0: named sessions
 
-await test('every tab-taking tool accepts a session, and browser_tabs does not', () => {
-  const withTabId = toolsModule.TOOLS.filter(
-    (t) => t.inputSchema?.properties?.tabId && t.name !== 'browser_tabs',
-  );
+await test('every tab-taking tool accepts a session, and browser_tabs manages them by name', () => {
+  const withTabId = toolsModule.TOOLS.filter((t) => t.inputSchema?.properties?.tabId);
   assert.ok(withTabId.length >= 10, 'expected most tools to take a tabId');
   for (const tool of withTabId) {
     assert.ok(tool.inputSchema.properties.session, `${tool.name} accepts tabId but not session`);
   }
-  // browser_tabs uses `name`, not `session`: it MANAGES sessions rather than
-  // acting inside one, and accepting both would make "which tab" ambiguous.
+  // v1 kept `session` off browser_tabs so "which tab" could never be ambiguous.
+  // v2 keeps that guarantee a different way: on browser_tabs `session` is only
+  // the tab an action such as close/focus/claim/popout is ABOUT (the daemon
+  // resolves it like a tabId), while the name a "session" action CREATES is
+  // `name`. The two never mean the same thing.
   const tabs = toolsModule.TOOLS.find((t) => t.name === 'browser_tabs');
-  assert.equal(tabs.inputSchema.properties.session, undefined);
+  assert.match(tabs.inputSchema.properties.session.description, /Instead of tabId/);
+  assert.match(tabs.inputSchema.properties.name.description, /session name/);
   for (const action of ['session', 'sessions', 'end_session']) {
     assert.ok(tabs.inputSchema.properties.action.enum.includes(action), `browser_tabs is missing "${action}"`);
   }
@@ -760,27 +1371,37 @@ await test('every tab-taking tool accepts a session, and browser_tabs does not',
   assert.match(tabs.description, /only delivers input to the tab it is SHOWING/i);
 });
 
-await test('a session is a name for a tab, never a grant of access to one', async () => {
-  const tabs = await readFile(new URL('../extension/tools/tabs.js', import.meta.url), 'utf8');
-  // resolveSession must re-check the mode. Without this, naming a tab would be
-  // a way around workspace mode: open a session on the user's bank, then drive
-  // it by name forever.
-  assert.match(tabs, /function resolveSession/);
-  assert.match(tabs, /state\.mode === 'workspace' && !isWorkspaceTab\(tab, state\)/);
-  // Opening a session goes through the same control check as opening a tab.
-  assert.match(tabs, /export async function openSession[\s\S]*requireTabControl\('session', url\)/);
-  // Detaching drops sessions, or a name outlives the debugger session it points at.
-  assert.match(tabs, /pinnedTabId: null, sessions: \{\}/);
-});
+await test('a session is a name for a tab: ending it keeps the tab, detaching drops every name', async () => {
+  resetBrowser();
+  browserModel.tabs.set(8, { id: 8, url: 'http://example.test/buyer', title: 'Buyer', windowId: 1, active: false, status: 'complete' });
+  try {
+    await stateModule.setState({ currentTabId: 7, sessions: {}, halted: false });
+    const named = await runtime.runTool('browser_tabs', { action: 'session', name: 'buyer', tabId: 8 });
+    assert.deepEqual({ session: named.session, tabId: named.tabId }, { session: 'buyer', tabId: 8 });
+    const { sessions } = await runtime.runTool('browser_tabs', { action: 'sessions' });
+    assert.deepEqual(sessions.map((s) => [s.session, s.tabId, s.alive]), [['buyer', 8, true]]);
 
-await test('workspace tab control checks the URL before the tab exists', async () => {
-  const tabs = await readFile(new URL('../extension/tools/tabs.js', import.meta.url), 'utf8');
-  const sw = await readFile(new URL('../extension/sw.js', import.meta.url), 'utf8');
-  assert.match(tabs, /export async function requireTabControl/);
-  // Checking after the fact would mean the tab is already open, and "we opened
-  // your bank and then closed it" is not a boundary.
-  assert.match(tabs, /Refused before the tab was touched/);
-  assert.match(sw, /requireTabControl\(action, urlFor\(action, args\)\)/);
+    // Ending a session forgets the name and lets go of the debugger. It never
+    // closes the tab: the person may be looking at that page, and a tool that
+    // closes tabs as a side effect of bookkeeping is one people stop trusting.
+    const ended = await runtime.runTool('browser_tabs', { action: 'end_session', name: 'buyer' });
+    assert.equal(ended.closed, true);
+    assert.ok(browserModel.tabs.has(8), 'the tab stays open');
+    assert.equal(attachedTabs.has(8), false, 'and is no longer being debugged');
+
+    // Detaching drops sessions, or a name outlives the debugger session it
+    // points at — and the next call would silently re-attach a tab the person
+    // just asked us to let go of.
+    await runtime.runTool('browser_tabs', { action: 'session', name: 'buyer', tabId: 8 });
+    await tabsModule.detachAllTabs();
+    const state = await stateModule.getState();
+    assert.deepEqual(state.sessions, {});
+    assert.equal(state.currentTabId, null);
+    assert.equal(attachedTabs.has(8), false);
+  } finally {
+    await stateModule.setState({ currentTabId: null, sessions: {} });
+    resetBrowser();
+  }
 });
 
 // --------------------------------------------- v1.7.0: panel + flow library
@@ -800,9 +1421,23 @@ await test('the panel exposes the whole automation surface, not five commands of
     'flowStatus',
     'flowPull',
     'flowPush',
-    'discoverBridges',
+    // v2 (ARCHITECTURE_V2 §13): the input level, auto-attach, popping a tab
+    // out, handing it to a launched browser, and what the daemon and this
+    // build are.
+    'setInputMode',
+    'setAutoAttach',
+    'popout',
+    'handoff',
+    'daemonInfo',
+    'about',
   ]) {
     assert.match(sw, new RegExp(`case '${command}'`), `the panel cannot call ${command}`);
+  }
+  // The v1 commands for what v2 removed: one daemon on one port leaves nothing
+  // to discover, and there are no modes to set. A worker that still answered
+  // them would keep a dead feature reachable from an old panel.
+  for (const gone of ['discoverBridges', 'setMode']) {
+    assert.doesNotMatch(sw, new RegExp(`case '${gone}'`), `sw.js still answers the removed ${gone}`);
   }
 });
 
@@ -826,14 +1461,51 @@ await test('the replay report renders the verdict and surprises it was always gi
   assert.doesNotMatch(advice, /^An element moved or was renamed\.$/);
 });
 
+/** A throwaway flow-library folder for one test (daemon/flows.js works on real files). */
+async function withFlowLibrary(fn) {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { FlowLibrary } = await import('../daemon/flows.js');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'g9-flows-'));
+  try {
+    return await fn(new FlowLibrary(root), root, path);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
 await test('the flow library refuses to write local-only run history to the repo', async () => {
-  const { relativePathFor } = await import('../bridge/src/flows.js');
-  const flows = await readFile(new URL('../bridge/src/flows.js', import.meta.url), 'utf8');
+  // v2: the flow library moved with the bridge into the daemon (daemon/flows.js).
+  const { relativePathFor } = await import('../daemon/flows.js');
+  const flows = await readFile(new URL('../daemon/flows.js', import.meta.url), 'utf8');
 
   // Committing run history means every replay dirties the working tree, which
   // trains people to `git checkout .` — and eventually to discard a real edit.
   assert.match(flows, /LOCAL_ONLY = \['runHistory', 'lastRun', 'flaky', 'knownWorld', 'surpriseHistory'\]/);
   assert.match(flows, /for \(const field of LOCAL_ONLY\) delete clean\[field\]/);
+
+  // As behaviour, on a real folder: a flow that arrives carrying all five.
+  await withFlowLibrary(async (library, root, path) => {
+    const spec = flowspec.toFlowSpec({
+      id: 'rec_hist', name: 'Login', folder: 'auth',
+      steps: [{ id: 's1', type: 'navigate', url: 'https://app.test/' }],
+    });
+    const history = {
+      runHistory: [{ at: 1, verdict: 'PASS' }], lastRun: { at: 1 }, flaky: { rate: 0.1 },
+      knownWorld: { runs: 3 }, surpriseHistory: [[]],
+    };
+    const written = await library.write({ ...spec, ...history });
+    assert.equal(written.file, 'web/auth/login.flow.json');
+    const onDisk = JSON.parse(await readFile(path.join(root, written.file), 'utf8'));
+    for (const field of Object.keys(history)) {
+      assert.equal(field in onDisk, false, `${field} must never reach the repository`);
+    }
+    assert.equal(onDisk.id, 'rec_hist');
+    // A replay changes only local history, so pushing again changes no byte —
+    // and says so, which answers "did my edit actually save?".
+    assert.equal((await library.write({ ...spec, lastRun: { at: 2 } })).changed, false);
+  });
 
   // A path a human can read in a diff, derived from the flow's own metadata.
   assert.equal(
@@ -847,49 +1519,130 @@ await test('the flow library refuses to write local-only run history to the repo
 });
 
 await test('both sides hash the same bytes, or the sync indicator lies forever', async () => {
-  const flows = await readFile(new URL('../bridge/src/flows.js', import.meta.url), 'utf8');
+  const flows = await readFile(new URL('../daemon/flows.js', import.meta.url), 'utf8');
   const sw = await readFile(new URL('../extension/sw.js', import.meta.url), 'utf8');
-  const flowspec = await readFile(new URL('../extension/lib/flowspec.js', import.meta.url), 'utf8');
+  const flowspecSrc = await readFile(new URL('../extension/lib/flowspec.js', import.meta.url), 'utf8');
 
   // canonicalJson() is what the extension hashes; `JSON.stringify(x, null, 2)`
-  // plus a newline is what the bridge writes AND hashes. If those two strings
+  // plus a newline is what the daemon writes AND hashes. If those two strings
   // ever diverge, every flow reports as "differs" and the indicator becomes
   // noise people stop reading.
-  assert.match(flowspec, /JSON\.stringify\(canonicalize\(spec\), null, 2\)\}\\n/);
+  assert.match(flowspecSrc, /JSON\.stringify\(canonicalize\(spec\), null, 2\)\}\\n/);
   assert.match(flows, /const serialised = `\$\{JSON\.stringify\(value, null, 2\)\}\\n`/);
   assert.match(flows, /createHash\('sha1'\)/);
   assert.match(sw, /crypto\.subtle\.digest\('SHA-1'/);
   assert.match(sw, /\.slice\(0, 12\)/);
+
+  // As behaviour: sw.js's own specHash (Web Crypto) against the hash the
+  // daemon's library reports (node:crypto) for the same flow pushed the way
+  // flowPush pushes it — toFlowSpec, then JSON over the socket.
+  const { specHash } = liftFunctions(sw, ['specHash'], {
+    toFlowSpec: flowspec.toFlowSpec, canonicalJson: flowspec.canonicalJson, crypto: globalThis.crypto,
+  });
+  const recording = {
+    id: 'rec_sync', name: 'Sync probe', folder: 'auth', tags: ['smoke'], runHistory: [{ at: 1 }],
+    steps: [
+      { id: 's1', type: 'navigate', url: 'https://app.test/' },
+      { id: 's2', type: 'click', target: { locators: [{ kind: 'testid', value: 'save' }] } },
+    ],
+  };
+  const extensionHash = await specHash(recording);
+  assert.match(extensionHash, /^[0-9a-f]{12}$/);
+  await withFlowLibrary(async (library) => {
+    await library.write(JSON.parse(JSON.stringify(flowspec.toFlowSpec(recording))));
+    const [listed] = (await library.list()).flows;
+    assert.equal(listed.hash, extensionHash, 'the daemon and the extension disagree about identical bytes');
+    const inSync = await library.status([{ id: 'rec_sync', name: 'Sync probe', hash: extensionHash }]);
+    assert.deepEqual(inSync.differing, []);
+    const edited = await library.status([{ id: 'rec_sync', name: 'Sync probe', hash: await specHash({ ...recording, name: 'Renamed' }) }]);
+    assert.equal(edited.differing.length, 1, 'a real edit on one side is reported');
+  });
 });
 
 await test('the suite is a query, so a forgotten flow cannot silently shrink it', async () => {
-  const flows = await readFile(new URL('../bridge/src/flows.js', import.meta.url), 'utf8');
+  const flows = await readFile(new URL('../daemon/flows.js', import.meta.url), 'utf8');
   assert.match(flows, /async resolveSuite/);
   assert.match(flows, /select\.excludeTags/);
   // A hand-maintained array is the failure this exists to prevent: it shrinks
   // the first time somebody forgets, and still reports green.
   assert.match(flows, /A suite is a QUERY, not a list/);
+
+  // As behaviour: a suite selected by tags picks up a flow recorded after it
+  // was written, with nobody editing the suite.
+  await withFlowLibrary(async (library, root, path) => {
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    await mkdir(path.join(root, 'suites'), { recursive: true });
+    await writeFile(path.join(root, 'suites', 'web.smoke.json'), JSON.stringify({
+      id: 'web.smoke', name: 'Smoke', select: { platform: 'web', tags: ['smoke'], excludeTags: ['slow'] }, order: 'name',
+    }));
+    const flow = (id, name, tags) => flowspec.toFlowSpec({ id, name, tags, steps: [{ id: 's1', type: 'navigate', url: 'https://app.test/' }] });
+    await library.write(flow('a', 'Alpha', ['smoke']));
+    await library.write(flow('b', 'Bravo', ['smoke', 'slow']));
+    await library.write(flow('c', 'Charlie', ['nightly']));
+    const ids = async () => (await library.resolveSuite('web.smoke')).flows.map((f) => f.id);
+    assert.deepEqual(await ids(), ['a']);
+    await library.write(flow('d', 'Delta', ['smoke']));
+    assert.deepEqual(await ids(), ['a', 'd'], 'a new smoke flow joins the suite by its tags alone');
+    await assert.rejects(() => library.resolveSuite('nope'), /No suite "nope"\. Known suites: web\.smoke/);
+  });
 });
 
-await test('bridge discovery scans a bounded range and health identifies each one', async () => {
-  const transport = await readFile(new URL('../extension/lib/transport.js', import.meta.url), 'utf8');
-  const wsServer = await readFile(new URL('../bridge/src/ws-server.js', import.meta.url), 'utf8');
-  const registry = await readFile(new URL('../bridge/src/registry.js', import.meta.url), 'utf8');
-
-  assert.match(transport, /PORT_RANGE = \{ start: 8765, end: 8775 \}/);
-  assert.match(registry, /PORT_RANGE_START = 8765/);
-  assert.match(registry, /PORT_RANGE_END = 8775/);
-  assert.match(transport, /export async function discoverBridges/);
-  // The most useful fact in the list: connecting to that bridge displaces
-  // whatever browser is already on it.
-  assert.match(transport, /extensionConnected/);
+await test('one daemon on one port: nothing to discover, and /health identifies it only to extensions', async () => {
+  // v1 scanned 8765-8775 for bridges, because every editor started its own and
+  // the extension had to choose one. v2 has ONE daemon per machine, shared by
+  // every agent (ARCHITECTURE_V2 §1): the extension dials one configured
+  // address, and there is nothing left to discover.
+  const transport = await import('../extension/lib/transport.js');
+  const { DEFAULT_PORT } = await import('../daemon/paths.js');
+  const { DEFAULTS } = await import('../daemon/settings.js');
+  assert.equal(transport.DEFAULT_PORT, 8765);
+  assert.equal(DEFAULT_PORT, transport.DEFAULT_PORT, 'the daemon and the extension agree on the default port');
+  assert.equal(DEFAULTS.port, transport.DEFAULT_PORT);
+  for (const gone of ['discoverBridges', 'PORT_RANGE']) {
+    assert.equal(gone in transport, false, `transport still exports ${gone}`);
+  }
 
   // CORS on /health must stay conditional. A blanket allow-origin would hand a
-  // malicious page a way to probe for a bridge and read the project path off
+  // malicious page a way to probe for the daemon and read its home path off
   // it — defeating the Origin check the whole security model rests on.
-  assert.match(wsServer, /ALLOWED_ORIGIN\.test\(origin\)/);
-  assert.match(wsServer, /access-control-allow-origin/);
-  assert.doesNotMatch(wsServer, /'access-control-allow-origin': '\*'/);
+  const { WsServer, classifyOrigin } = await import('../daemon/ws-server.js');
+  assert.deepEqual(classifyOrigin('https://evil.example'), { ok: false, kind: 'web' });
+  assert.deepEqual(classifyOrigin('chrome-extension://abcdefghijklmnop'), { ok: true, kind: 'extension' });
+  assert.deepEqual(classifyOrigin(''), { ok: true, kind: 'native' });
+
+  const server = new WsServer({ port: testPort(), health: () => ({ name: 'g9d', home: 'C:/Users/someone/G9' }) });
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await server.listen();
+      break;
+    } catch (err) {
+      if (err.code !== 'EADDRINUSE' || attempt >= 5) throw err;
+      server.port = testPort();
+    }
+  }
+  try {
+    const http = await import('node:http');
+    const health = (origin) => new Promise((resolve, reject) => {
+      const req = http.get({ host: '127.0.0.1', port: server.port, path: '/health', headers: origin ? { origin } : {} }, (res) => {
+        let body = '';
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => resolve({ headers: res.headers, body: JSON.parse(body) }));
+      });
+      req.on('error', reject);
+    });
+    const web = await health('https://evil.example');
+    assert.equal(web.headers['access-control-allow-origin'], undefined, 'a web page must not be able to read /health');
+    const ext = await health('chrome-extension://abcdefghijklmnop');
+    assert.equal(ext.headers['access-control-allow-origin'], 'chrome-extension://abcdefghijklmnop');
+    const native = await health(null);
+    assert.equal(native.headers['access-control-allow-origin'], undefined);
+    // The name is what tells a v2 daemon from a v1 bridge on the same port
+    // (the extension's preflight and the shim both read it).
+    assert.equal(native.body.name, 'g9d');
+    assert.equal(native.body.ok, true);
+  } finally {
+    await server.close();
+  }
 });
 
 await test('a harness failure is never reported as a product regression', async () => {
@@ -992,37 +1745,66 @@ await test('a device run reports its duration instead of NaN', async () => {
   assert.match(device, /run\.durationMs = run\.finishedAt - run\.startedAt/);
 });
 
-await test('a workspace refusal never quotes the URL of a tab it is refusing', async () => {
-  const tabs = await readFile(new URL('../extension/tools/tabs.js', import.meta.url), 'utf8');
-  const { refusalFor } = await import('../extension/lib/workspace.js');
+await test('the daemon keeps its configured port, and explains a held one instead of moving', async () => {
+  // v1: "a pinned port is honoured and an unset one is discovered" — a bridge
+  // that could not have 8765 scanned for the next free port. v2 has ONE daemon
+  // on ONE port (G9_PORT, else settings.port, else 8765) that every shim and the
+  // extension dial. A daemon that helpfully moved would be one nobody finds, so
+  // a held port is explained — naming the holder — and the daemon exits.
+  const { parsePort } = await import('../daemon/paths.js');
+  assert.equal(parsePort('18555'), 18555);
+  for (const bad of ['0', '65536', 'abc', '8765.5', '']) assert.equal(parsePort(bad), null, `"${bad}" is not a port`);
+  const g9d = await readFile(new URL('../daemon/g9d.mjs', import.meta.url), 'utf8');
+  assert.match(g9d, /const explicitPort = parsePort\(args\.port\) \?\? parsePort\(process\.env\.G9_PORT\)/);
+  const shim = await readFile(new URL('../mcp/shim.mjs', import.meta.url), 'utf8');
+  // The shim dials the same G9_PORT, and starts a daemon on exactly that port.
+  assert.match(shim, /Number\(process\.env\.G9_PORT\)/);
+  assert.match(shim, /G9_PORT: String\(PORT\)/);
 
-  // FOUND LIVE, 2026-09-10. Naming a tab by id reached requireTabControl with a
-  // URL read off the BROWSER, and the refusal echoed it in full — handing back
-  // `https://chatgpt.com/c/<conversation-id>` for a tab the agent was being told
-  // it may not touch. Titles and URLs are exactly what pinned and workspace mode
-  // withhold, so a refusal must not become the way to read them.
-  assert.match(tabs, /targets \$\{originOf\(url\)\}/, 'the refusal must redact to an origin');
-  assert.doesNotMatch(tabs, /targets \$\{url\}/, 'the refusal must never interpolate a raw URL');
-
-  const refusal = refusalFor('https://mail.example.com/inbox/thread/secret-subject', ['*.ok.test'], {});
-  assert.doesNotMatch(refusal, /secret-subject/, 'refusalFor leaked a path');
-  assert.doesNotMatch(refusal, /inbox/, 'refusalFor leaked a path');
-  assert.match(refusal, /mail\.example\.com/, 'the host is fine — it is the path that is private');
-
-  // An unparseable address is described, never quoted: that fallback is where a
-  // redaction is most likely to be skipped and least likely to be noticed.
-  const weird = refusalFor('not a url at all', ['*.ok.test'], {});
-  assert.doesNotMatch(weird, /not a url at all/);
-});
-
-await test('a pinned port is honoured and an unset one is discovered', async () => {
-  const server = await readFile(new URL('../bridge/src/server.js', import.meta.url), 'utf8');
-  // If the user wrote G9_PORT they typed the same number into the side panel.
-  // A bridge that helpfully moved would break the setup they configured.
-  assert.match(server, /PORT_PINNED = process\.env\.G9_PORT != null/);
-  assert.match(server, /pinned: PORT_PINNED/);
-  // Discovery inside listenOrExplain, so a retry after a conflict re-scans.
-  assert.match(server, /async function listenOrExplain\(\)[\s\S]*registry\.pickPort/);
+  // As behaviour: hold a private port with something that answers /health the
+  // way a v1 bridge does, start the real g9d on it with a throwaway home, and
+  // watch it refuse rather than take another port.
+  const http = await import('node:http');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { spawn } = await import('node:child_process');
+  const holder = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, version: '1.9.2', pid: 4242 }));
+  });
+  let port;
+  for (let attempt = 0; ; attempt++) {
+    port = testPort();
+    try {
+      await new Promise((resolve, reject) => {
+        holder.once('error', reject);
+        holder.listen(port, '127.0.0.1', () => { holder.removeListener('error', reject); resolve(); });
+      });
+      break;
+    } catch (err) {
+      if (err.code !== 'EADDRINUSE' || attempt >= 5) throw err;
+    }
+  }
+  const home = await mkdtemp(path.join(os.tmpdir(), 'g9-port-'));
+  try {
+    const env = { ...process.env, G9_PORT: String(port), G9_HOME: home, G9_IDLE_EXIT_MS: '3000' };
+    delete env.G9_PROJECT;
+    const { fileURLToPath } = await import('node:url');
+    const child = spawn(process.execPath, [fileURLToPath(new URL('../daemon/g9d.mjs', import.meta.url))], {
+      env, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true,
+    });
+    const exit = await within(30_000, new Promise((resolve) => child.on('exit', (code) => resolve(code))), 'g9d on a held port')
+      .catch((err) => { child.kill(); throw err; });
+    assert.equal(exit, 1, 'a daemon that cannot have its port exits with an error');
+    const log = await readFile(path.join(home, 'logs', 'daemon.log'), 'utf8');
+    assert.match(log, new RegExp(`port ${port} is held by a G9 v1 bridge \\(pid 4242, v1\\.9\\.2\\)`), 'the holder is named');
+    assert.match(log, /set G9_PORT/, 'and the way out is said');
+    assert.doesNotMatch(log, /listening on/, 'it never listened anywhere else');
+  } finally {
+    await new Promise((resolve) => holder.close(resolve));
+    await rm(home, { recursive: true, force: true }).catch(() => {});
+  }
 });
 
 await test('the project file is found by searching upward, not only in the cwd', async () => {
@@ -1042,38 +1824,94 @@ await test('the project file is found by searching upward, not only in the cwd',
   assert.match(runner, /path\.resolve\(project\?\.dir \?\? process\.cwd\(\), configured\)/);
 });
 
-await test('a selector that matches no flow refuses instead of reporting PASS', async () => {
+/**
+ * The runner's selection rules, lifted from runner/g9.mjs and run as code.
+ * g9.mjs runs its CLI when imported (and a run starts a daemon), so the
+ * functions are taken from its source instead — the real ones, not copies.
+ */
+async function runnerSelection() {
   const runner = await readFile(new URL('../runner/g9.mjs', import.meta.url), 'utf8');
+  const path = (await import('node:path')).default;
+  const lifted = liftFunctions(
+    runner,
+    ['selectFlows', 'loadDeviceFlows', 'requireSelection', 'applySelect', 'readSuite', 'flowsRoot', 'collectJson'],
+    { readFile, path },
+  );
+  return { runner, path, ...lifted };
+}
+
+await test('a selector that matches no flow refuses instead of reporting PASS', async () => {
+  const { runner, selectFlows, requireSelection } = await runnerSelection();
 
   // The failure this prevents is silent: 0 flows selected gives failed === 0,
   // verdict PASS and exit 0, which is indistinguishable in every artifact from a
   // suite that really passed. A release gate wired to an empty suite is green
   // forever. Assert the behaviour, not the wording.
   assert.match(runner, /function requireSelection\(chosen, target, all, suite\)/);
+  const flows = [
+    { id: 'a', name: 'Alpha', tags: ['smoke'] },
+    { id: 'b', name: 'Bravo', tags: ['nightly'], suite: 'legacy' },
+  ];
+  const chosen = [flows[0]];
+  assert.equal(requireSelection(chosen, 'tag:smoke', flows, null), chosen, 'a non-empty selection passes through untouched');
 
-  const guard = runner.slice(runner.indexOf('function requireSelection'), runner.indexOf('function applySelect'));
-  assert.match(guard, /if \(chosen\.length\) return chosen/, 'a non-empty selection must pass through untouched');
-  assert.match(guard, /throw new Error/, 'an empty selection must throw');
+  // Every selector that can come up empty refuses, and names what emptied it.
+  await assert.rejects(() => selectFlows(flows, 'tag:missing', null, 'here'),
+    /"tag:missing" selected 0 of 2 flow\(s\), so there is nothing to run\.\nA suite that matches nothing reports PASS/);
+  await assert.rejects(() => selectFlows(flows, 'suite:missing', null, 'here'), /"suite:missing" selected 0 of 2 flow\(s\)/);
+  await assert.rejects(() => selectFlows(flows, 'no-such-flow', null, 'here'), /Nothing matched "no-such-flow"/);
+  await assert.rejects(() => selectFlows([], 'all', null, 'here'), /There are no flows here/);
+  assert.deepEqual((await selectFlows(flows, 'tag:nightly', null, 'here')).map((f) => f.id), ['b']);
 
   // Both platforms must route through it, or the guard only covers one of them.
   const device = runner.slice(runner.indexOf('async function loadDeviceFlows'));
   assert.match(device.slice(0, 1600), /requireSelection\(/, 'the AgriPad path must use the guard');
-  const web = runner.slice(runner.indexOf('async function resolveFlows'));
-  assert.match(web.slice(0, 1600), /requireSelection\(/, 'the browser path must use the guard');
+  // v2: every browser path (launched engine, extension) selects through selectFlows.
+  for (const fn of ['runLaunched', 'runExtension']) {
+    const at = runner.indexOf(`async function ${fn}(`);
+    assert.ok(at > -1, `${fn}() is missing`);
+    assert.match(runner.slice(at, runner.indexOf('\n}\n', at)), /selectFlows\(/, `${fn}() must select through the guarded selectFlows()`);
+  }
 });
 
 await test('a suite means the same thing on both platforms', async () => {
-  const runner = await readFile(new URL('../runner/g9.mjs', import.meta.url), 'utf8');
+  const { selectFlows, loadDeviceFlows, path } = await runnerSelection();
 
   // The device path read QA/Flows/suites/*.json and applied `select`; the browser
   // path only matched a literal `suite` field on the recording. One suite id, two
   // meanings, and a Full-Test that covered different things depending on platform.
-  const web = runner.slice(runner.indexOf('async function resolveFlows'), runner.indexOf('async function commandRun('));
-  assert.match(web, /readSuite\(flowsRoot\(project\), name\)/, 'the browser path must read the suite file');
-  assert.match(web, /applySelect\(recordings, suite\.select/, 'the browser path must apply the query');
-  // The literal-field match stays as the fallback, so recordings that predate the
-  // suite files keep running.
-  assert.match(web, /recordings\.filter\(\(r\) => r\.suite === name\)/);
+  // As behaviour: one suite file, the browser flows and the device flows, the
+  // same query applied to both.
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises');
+  const os = await import('node:os');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'g9-suite-'));
+  try {
+    const project = { dir: root, flowsDir: 'QA/Flows' };
+    const lib = path.join(root, 'QA', 'Flows');
+    await mkdir(path.join(lib, 'suites'), { recursive: true });
+    await mkdir(path.join(lib, 'agripad', 'map'), { recursive: true });
+    await writeFile(path.join(lib, 'suites', 'smoke.json'), JSON.stringify({ id: 'smoke', select: { tags: ['smoke'], excludeTags: ['wip'] } }));
+    const web = [
+      { id: 'w1', name: 'Web one', tags: ['smoke'] },
+      { id: 'w2', name: 'Web two', tags: ['smoke', 'wip'] },
+      { id: 'w3', name: 'Web three', tags: [], suite: 'smoke' },
+      { id: 'w4', name: 'Web four', tags: [], suite: 'legacy' },
+    ];
+    for (const [id, extra] of [['d1', { tags: ['smoke'] }], ['d2', { tags: ['smoke', 'wip'] }], ['d3', { tags: [], suite: 'smoke' }]]) {
+      await writeFile(path.join(lib, 'agripad', 'map', `${id}.flow.json`), JSON.stringify({ id, name: id, ...extra }));
+    }
+    assert.deepEqual((await selectFlows(web, 'suite:smoke', project, 'web')).map((f) => f.id), ['w1'],
+      'the browser path must read the suite file and apply its query');
+    assert.deepEqual((await loadDeviceFlows(project, 'suite:smoke')).map((f) => f.id), ['d1'],
+      'the device path applies the very same query');
+    // A bare suite name (what the desktop's Schedule form sends) means the same.
+    assert.deepEqual((await selectFlows(web, 'smoke', project, 'web')).map((f) => f.id), ['w1']);
+    // The literal-field match stays as the fallback for a suite with no file,
+    // so recordings that predate the suite files keep running.
+    assert.deepEqual((await selectFlows(web, 'suite:legacy', project, 'web')).map((f) => f.id), ['w4']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 await test('a device readiness timeout is not filed as a product regression', async () => {
@@ -1144,70 +1982,76 @@ await test('a device command budget rides the request root, not the args object'
   assert.match(idle, /\{ timeoutMs: budget \+ 5_000 \}/, 'the transport budget must exceed the wait');
 });
 
-await test('a workspace of ["*"] allows everything, and an empty one still allows nothing', async () => {
-  const { inWorkspace, isUnrestricted, refusalFor } = await import('../extension/lib/workspace.js');
+await test('a project adapter that still lists workspaceDomains loads cleanly and never forwards them', async () => {
+  // v1's bridge validated `workspaceDomains` — and once stripped "*" out of
+  // them, turning "allow all" into "allow nothing". v2 has no allowlist (the
+  // project adapter moved to daemon/project.js): an adapter that still carries
+  // one is simply not consulted for it. No problem is reported for it, nothing
+  // of it reaches a client, and everything else in the file keeps working.
+  const { loadProject, projectForClient } = await import('../daemon/project.js');
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'g9-project-'));
+  try {
+    await mkdir(path.join(root, 'src', 'deep'), { recursive: true });
+    await writeFile(path.join(root, 'g9.project.json'), JSON.stringify({
+      workspaceDomains: ['*', '*.x.test', 'a.test/path'],
+      flowsDir: 'qa/flows',
+      defaultEnvironment: 'dev',
+      environments: { dev: { baseUrl: 'https://dev.x.test' } },
+      secretRefs: ['PASSWORD'],
+    }));
+    // Found by walking up from where the agent was started, like git finds .git.
+    const project = loadProject(path.join(root, 'src', 'deep'), { explicit: null });
+    assert.equal(project.found, true);
+    assert.deepEqual(project.problems, [], 'an old allowlist is not a problem worth reporting');
+    // Relative paths belong to the file, not to the directory it was found from.
+    assert.equal(project.flowsDir, path.join(root, 'qa', 'flows').replace(/\\/g, '/'));
+    const sent = projectForClient(project);
+    assert.equal('workspaceDomains' in sent, false, 'nothing of the allowlist reaches a client');
+    assert.equal('secretRefs' in sent, false, 'secret names stay in the daemon');
+    assert.equal(sent.defaultEnvironment, 'dev');
 
-  // The two must never converge. An empty list is a misconfiguration; "*" is a
-  // decision somebody typed into a reviewed file. Treating silence as consent is
-  // the one mistake this module exists to avoid.
-  assert.equal(inWorkspace('https://anything.example/x', ['*']), true);
-  assert.equal(inWorkspace('https://anything.example/x', []), false);
-  assert.equal(isUnrestricted(['*']), true);
-  assert.equal(isUnrestricted(['*.example.com']), false);
-
-  // "*" must cover the addresses a host rule cannot describe at all.
-  assert.equal(inWorkspace('file:///D:/report.html', ['*']), true);
-  assert.equal(inWorkspace('file:///D:/report.html', ['*.example.com']), false);
-
-  // A narrow list keeps behaving exactly as before.
-  assert.equal(inWorkspace('https://dev.example.com/a', ['*.example.com']), true);
-  assert.equal(inWorkspace('https://evil.test/a', ['*.example.com']), false);
-
-  // With "*" nothing is refused for being outside the workspace, so the refusal
-  // must not send the reader off to edit a list that already allows everything.
-  const refusal = refusalFor('chrome://settings', ['*'], {});
-  assert.doesNotMatch(refusal, /outside this project's workspace/);
-  assert.match(refusal, /chrome:\/\//);
+    // A broken adapter is a reported problem, never a daemon that will not start.
+    await writeFile(path.join(root, 'g9.project.json'), '{ not json');
+    const broken = loadProject(root, { explicit: null });
+    assert.equal(broken.found, false);
+    assert.match(broken.problems[0], /not valid JSON/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
-await test('the bridge does not strip "*" out of the allowlist', async () => {
-  const { normaliseDomains } = await import('../bridge/src/project.js');
-
-  // FOUND 2026-09-11, before it could ship. The extension understood "*" and the
-  // bridge dropped it as "not host-shaped", so the extension received an EMPTY
-  // list — which it correctly reads as deny-everything. A config line saying
-  // "allow all" would have meant "allow nothing": the worst way for a rule about
-  // permissions to fail.
-  assert.deepEqual(normaliseDomains(['*'], []), ['*']);
-
-  // And the hard validation everything else gets must be untouched.
-  const problems = [];
-  assert.deepEqual(
-    normaliseDomains(['*.x.com', 'https://y.com', 'a.com/path', 'localhost:1234'], problems),
-    ['*.x.com', 'localhost:1234'],
-  );
-  assert.equal(problems.length, 2, 'a rejected entry must be reported, never silently dropped');
-});
-
-await test('the bridge and the extension agree on one version, read not typed', async () => {
-  const { readFile } = await import('node:fs/promises');
-  const server = await readFile(new URL('../bridge/src/server.js', import.meta.url), 'utf8');
-  const pkg = JSON.parse(await readFile(new URL('../bridge/package.json', import.meta.url), 'utf8'));
-  const manifest = JSON.parse(await readFile(new URL('../extension/manifest.json', import.meta.url), 'utf8'));
-
+await test('the daemon and the extension agree on one version, read not typed', async () => {
   // FOUND 2026-09-11. VERSION was a hand-typed constant and had drifted eight
   // releases behind package.json, so every "VERSION MISMATCH" the bridge printed
   // was measured against a number nobody maintained — telling people to reload an
   // extension that was already correct. A version announced in two places will be
   // wrong in one of them.
-  assert.match(server, /const VERSION = readVersion\(\)/, 'the bridge must read its version');
-  assert.doesNotMatch(server, /const VERSION = '[\d.]+'/, 'no hand-typed bridge version');
-
+  // v2: every Node component (daemon, shim, runner, engine manager) reads the
+  // root package.json through lib/version.mjs; setup/unit/version.test.mjs also
+  // holds desktop/package.json to it.
+  const { VERSION } = await import('../lib/version.mjs');
+  const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  const manifest = JSON.parse(await readFile(new URL('../extension/manifest.json', import.meta.url), 'utf8'));
+  assert.equal(VERSION, pkg.version, 'lib/version.mjs must read the root package.json');
   // The two halves ship together, so they must carry the same number.
   assert.equal(
     manifest.version, pkg.version,
-    `extension manifest (${manifest.version}) and bridge package.json (${pkg.version}) must match`,
+    `extension manifest (${manifest.version}) and package.json (${pkg.version}) must match`,
   );
+  const daemon = await readFile(new URL('../daemon/daemon.js', import.meta.url), 'utf8');
+  assert.match(daemon, /import \{ VERSION[^}]*\} from '\.\.\/lib\/version\.mjs'/, 'the daemon must read its version');
+  // And no Node component types its own.
+  const { readdir } = await import('node:fs/promises');
+  for (const dir of ['daemon', 'mcp', 'runner', 'lib', 'engine', 'bridge/src']) {
+    for (const name of await readdir(new URL(`../${dir}/`, import.meta.url))) {
+      if (!/\.m?js$/.test(name)) continue;
+      const src = await readFile(new URL(`../${dir}/${name}`, import.meta.url), 'utf8');
+      assert.doesNotMatch(src, /\b(?:const|let|var)\s+VERSION\s*=\s*['"`]\d/, `${dir}/${name} types its own version`);
+    }
+  }
 });
 
 await test('an interception rule must say what it does, and say it validly', async () => {
@@ -1259,27 +2103,78 @@ await test('rules are consulted before the pinned HAR, and never hang the tab', 
 });
 
 await test('a download can only be observed if the watch started first', async () => {
-  const { readFile } = await import('node:fs/promises');
   const dl = await readFile(new URL('../extension/tools/downloads.js', import.meta.url), 'utf8');
+  const cdpPlatform = await readFile(new URL('../extension/lib/platform-cdp.js', import.meta.url), 'utf8');
 
-  // The whole feature turns on Browser.setDownloadBehavior with events on;
-  // without eventsEnabled the progress events never arrive and every wait times
-  // out for a reason nobody can see.
-  assert.match(dl, /Browser\.setDownloadBehavior/);
-  assert.match(dl, /eventsEnabled: true/);
-
-  // "empty" is the assertion people actually want, so it is computed rather than
-  // left to the caller to derive from two other fields.
-  assert.match(dl, /empty: item\.state === 'completed' && !item\.receivedBytes/);
-
+  // On a launched engine the whole feature turns on Browser.setDownloadBehavior
+  // with events on; without eventsEnabled the progress events never arrive and
+  // every wait times out for a reason nobody can see. v2 sends it from
+  // platform-cdp on the BROWSER session: in the extension chrome.debugger cannot
+  // reach the Browser domain at all (the real-Edge audit, EXT-02), so Engine 1
+  // watches chrome.downloads instead.
+  assert.match(cdpPlatform, /Browser\.setDownloadBehavior/);
+  assert.match(cdpPlatform, /eventsEnabled: true/);
   // Waiting before watching is the mistake this must explain, not just refuse.
   assert.match(dl, /BEFORE the click that starts it/);
+
+  // As behaviour, on the extension's chrome.downloads path, through the same
+  // runTool pipeline an agent's call takes.
+  resetBrowser();
+  await stateModule.setState({ halted: false, currentTabId: null });
+  await assert.rejects(
+    () => runtime.runTool('browser_network', { action: 'wait_download', tabId: 7, timeoutMs: 300 }),
+    /BEFORE the click that starts it/,
+  );
+  assert.match((await runtime.runTool('browser_network', { action: 'downloads', tabId: 7 })).hint, /BEFORE the click/);
+
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 60));
+  const item = (id, patch = {}) => ({
+    id,
+    url: `http://example.test/export-${id}.csv`,
+    referrer: 'http://example.test/',
+    startTime: new Date().toISOString(),
+    state: 'in_progress',
+    filename: `C:\\Users\\qa\\Downloads\\export-${id}.csv`,
+    bytesReceived: 0,
+    totalBytes: 0,
+    fileSize: 0,
+    exists: true,
+    mime: 'text/csv',
+    ...patch,
+  });
+  // A download that begins while nothing is watched is the person's own, and
+  // it is not evidence for anything — even if it finishes after a watch starts.
+  downloadItems.set(40, item(40));
+  chrome.downloads.onCreated.fire(item(40));
+  await settle();
+
+  await runtime.runTool('browser_network', { action: 'watch_downloads', tabId: 7 });
+  downloadItems.set(41, item(41));
+  chrome.downloads.onCreated.fire(item(41));
+  await settle();
+  // Both finish, with nothing in them.
+  for (const id of [40, 41]) {
+    downloadItems.set(id, item(id, { state: 'complete', endTime: new Date().toISOString() }));
+    chrome.downloads.onChanged.fire({ id, state: { current: 'complete' } });
+  }
+
+  const done = await runtime.runTool('browser_network', { action: 'wait_download', tabId: 7, timeoutMs: 5000 });
+  assert.equal(done.state, 'complete');
+  assert.equal(done.filename, 'export-41.csv');
+  // "empty" is the assertion people actually want, so it is computed rather than
+  // left to the caller to derive from two other fields: a finished, zero-byte file.
+  assert.equal(done.empty, true);
+  const all = await runtime.runTool('browser_network', { action: 'downloads', tabId: 7 });
+  assert.deepEqual(all.downloads.map((d) => d.id), ['41'], 'the download that began before the watch is not claimed');
+  assert.equal(all.empty, 1);
+  await runtime.runTool('browser_network', { action: 'stop_downloads', tabId: 7 });
 });
 
 await test('every extension source parses as a real ES module', async () => {
   const { readdir, readFile, writeFile, mkdtemp } = await import('node:fs/promises');
   const { execFile } = await import('node:child_process');
   const { promisify } = await import('node:util');
+  const { fileURLToPath } = await import('node:url');
   const os = await import('node:os');
   const path = await import('node:path');
   const run = promisify(execFile);
@@ -1306,34 +2201,52 @@ await test('every extension source parses as a real ES module', async () => {
 
   const dir = await mkdtemp(path.join(os.tmpdir(), 'g9-parse-'));
   const broken = [];
-  for (const file of files) {
-    // .mjs forces MODULE parsing, which is how the browser actually loads these.
-    const copy = path.join(dir, path.basename(file).replace(/\.js$/, '') + '.mjs');
-    await writeFile(copy, await readFile(file, 'utf8'));
-    try {
-      await run(process.execPath, ['--check', copy]);
-    } catch (err) {
-      broken.push(`${path.basename(file)}: ${String(err.stderr ?? err).split('\n')[1] ?? ''}`.trim());
+  try {
+    for (const file of files) {
+      // .mjs forces MODULE parsing, which is how the browser actually loads these.
+      const copy = path.join(dir, path.basename(file).replace(/\.js$/, '') + '.mjs');
+      await writeFile(copy, await readFile(file, 'utf8'));
+      try {
+        await run(process.execPath, ['--check', copy]);
+      } catch (err) {
+        broken.push(`${path.relative(fileURLToPath(root), file)}: ${String(err.stderr ?? err).split('\n')[1] ?? ''}`.trim());
+      }
     }
+  } finally {
+    // It used to leave one g9-parse-* folder in %TEMP% per run.
+    const { rm } = await import('node:fs/promises');
+    await rm(dir, { recursive: true, force: true });
   }
   assert.deepEqual(broken, [], `these do not parse as ES modules:\n  ${broken.join('\n  ')}`);
 });
 
 await test('refusing a browser-internal page says whose rule it is and what to do', async () => {
-  const { readFile } = await import('node:fs/promises');
-  const tabs = await readFile(new URL('../extension/tools/tabs.js', import.meta.url), 'utf8');
-
   // HIT FOR REAL, 2026-09-11. Reloading the extension leaves you standing on
   // edge://extensions, so the very next thing anybody does is press "Attach &
   // Pin" there. The message named the page and stopped, which reads as the tool
   // refusing rather than the browser forbidding — and a user had to ask what the
   // error meant. The two facts that help are whose rule it is, and that
   // switching tabs is the entire fix.
-  const guard = tabs.slice(tabs.indexOf('export async function pinTab'), tabs.indexOf('export async function unpinTab'));
-  assert.match(guard, /the browser itself does not let any debugger attach/);
-  assert.match(guard, /Switch to the page you want to test/);
-  assert.match(guard, /Workspace mode you usually do not need to/);
-  assert.match(guard, /This is not a setting/, 'say it cannot be turned on, or somebody will look for the switch');
+  // v2: pinTab is gone; the panel's Attach (attachTab) is where people hit it.
+  resetBrowser();
+  browserModel.tabs.set(11, { id: 11, url: 'edge://extensions/', title: 'Extensions', windowId: 1, active: true, status: 'complete' });
+  browserModel.tabs.get(9).active = false;
+  try {
+    await stateModule.setState({ currentTabId: null, halted: false });
+    const refusal = await tabsModule.attachTab(null, { clearHalt: true }).then(
+      () => assert.fail('attaching edge://extensions must be refused'),
+      (err) => err.message,
+    );
+    assert.match(refusal, /Cannot attach to edge:\/\/extensions — /, 'the page is named the way the address bar shows it');
+    assert.match(refusal, /the browser itself does not let any debugger attach/);
+    assert.match(refusal, /Switch to the page you want to test/);
+    assert.match(refusal, /This is not a setting/, 'say it cannot be turned on, or somebody will look for the switch');
+    assert.doesNotMatch(refusal, /Workspace|Pinned|mode/, 'v2 has no modes to send anybody to');
+    assert.equal(attachedTabs.has(11), false, 'nothing was attached');
+    assert.equal((await stateModule.getState()).currentTabId, null);
+  } finally {
+    resetBrowser();
+  }
 });
 
 await test('an internal page is named the way the address bar shows it', async () => {
@@ -1362,7 +2275,6 @@ await test('an internal page is named the way the address bar shows it', async (
 });
 
 await test('an assertion waits for its budget, and a dry run still does not', async () => {
-  const { readFile } = await import('node:fs/promises');
   const replay = await readFile(new URL('../extension/tools/replay.js', import.meta.url), 'utf8');
 
   // FOUND 2026-09-11 writing the first long flow. Assertions ran the instant
@@ -1371,8 +2283,11 @@ await test('an assertion waits for its budget, and a dry run still does not', as
   // the run reported FAIL_PRODUCT for an app that was merely rendering.
   assert.match(replay, /async function assertWithin\(tabId, step, budgetMs\)/);
 
-  const run = replay.slice(replay.indexOf('async function runStep'));
-  assert.match(run.slice(0, 400), /assertWithin\(tabId, step, budgetMs\)/, 'the real run must retry');
+  // The real run hands every assertion to assertWithin with the step's budget.
+  const runAt = replay.indexOf('async function runStep');
+  const run = replay.slice(runAt, replay.indexOf('\n}\n', runAt));
+  assert.match(run, /const budgetMs = Math\.round\(\(step\.waitMs \?\? 0\) \* mode\.budget\)/);
+  assert.match(run, /if \(step\.type === 'assert'\) return assertWithin\(tabId, step, budgetMs\)/, 'the real run must retry');
 
   // The dry run must NOT: "resolve everything, change nothing" would become a
   // slow partial execution if it started waiting for assertions to come true.
@@ -1380,19 +2295,49 @@ await test('an assertion waits for its budget, and a dry run still does not', as
   assert.match(probe, /executeAssertion\(tabId, step\)/, 'dry run calls it directly');
   assert.doesNotMatch(probe, /assertWithin/, 'dry run must not wait');
 
-  // executeAssertion throws rather than returning ok:false, so the retry must
-  // rethrow the LAST real error — a synthetic timeout would hide the cause.
-  const helper = replay.slice(replay.indexOf('async function assertWithin'), replay.indexOf('/** What a dry run does'));
-  assert.match(helper, /catch \(err\)/);
-  assert.match(helper, /throw err/);
-  assert.match(helper, /Date\.now\(\) >= deadline/);
+  // The retry as behaviour, run from replay.js's own source. executeAssertion
+  // throws rather than returning ok:false, so the retry must rethrow the LAST
+  // real error — a synthetic timeout would hide the cause.
+  let calls = 0;
+  let passFrom = 3;
+  const executeAssertion = async () => {
+    calls += 1;
+    if (calls < passFrom) throw new Error(`page text is still "" (attempt ${calls})`);
+    return { assertion: 'text', matched: 'Tasks' };
+  };
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const { assertWithin } = liftFunctions(replay, ['assertWithin'], { executeAssertion, sleep });
+  assert.deepEqual(await assertWithin(7, {}, 3000), { assertion: 'text', matched: 'Tasks' });
+  assert.equal(calls, 3, 'it kept looking until the page caught up');
+
+  calls = 0;
+  passFrom = Infinity;
+  const started = Date.now();
+  await assert.rejects(() => assertWithin(7, {}, 300), (err) => {
+    assert.match(err.message, /^page text is still "" \(attempt (\d+)\)$/);
+    assert.equal(err.message, `page text is still "" (attempt ${calls})`, 'the LAST real error, not a timeout');
+    return true;
+  });
+  assert.ok(Date.now() - started >= 250, 'it used its budget before giving up');
+  // No budget is one look — what a step without a wait asked for.
+  calls = 0;
+  await assert.rejects(() => assertWithin(7, {}, 0), /attempt 1\)/);
+  assert.equal(calls, 1);
 });
 
 await test('the long web flow places its checks where they belong', async () => {
-  const { readFile } = await import('node:fs/promises');
-  const raw = await readFile(
-    new URL('../../../../QA/Flows/web/tasks/tasks-browse-and-open.flow.json', import.meta.url), 'utf8');
+  // EXT-16: this used to read a flow from a QA tree OUTSIDE the repository
+  // (../../../../QA/Flows/web/tasks/tasks-browse-and-open.flow.json), so any
+  // other checkout failed here with ENOENT — and install.ps1 runs this file.
+  // The fixture now lives in the repo: a minimal representative FlowSpec with
+  // that flow's shape, written by the product's own exporter.
+  const raw = (await readFile(new URL('./fixtures/tasks-browse-and-open.flow.json', import.meta.url), 'utf8'))
+    .replace(/\r\n/g, '\n');
   const flow = JSON.parse(raw);
+  // A FlowSpec the runner and the importer accept, byte for byte canonical — a
+  // fixture nothing could produce would test the fixture, not the product.
+  assert.deepEqual(flowspec.validateFlowSpec(flow), []);
+  assert.equal(raw, flowspec.canonicalJson(flow), 'the fixture is canonical FlowSpec JSON');
 
   const kinds = flow.steps.map((s) => s.action);
   assert.ok(flow.steps.length >= 15, `a long flow, got ${flow.steps.length} steps`);
@@ -1409,6 +2354,10 @@ await test('the long web flow places its checks where they belong', async () => 
   // races the first paint.
   for (const step of flow.steps.filter((s) => s.action === 'assert')) {
     assert.ok((step.waitBudgetMs ?? 0) > 0, `assertion ${step.id} has no wait budget`);
+  }
+  // …and that budget survives the import: replay reads it as the step's waitMs.
+  for (const step of flowspec.fromFlowSpec(flow).steps.filter((s) => s.type === 'assert')) {
+    assert.ok(step.waitMs > 0, `assertion ${step.id} lost its wait budget on import`);
   }
 });
 
@@ -1469,10 +2418,27 @@ await test('a run you can watch, and a stop that only stops the run', async () =
   // A replay must not fail because nobody had the panel open. sendMessage
   // rejects when there is no receiver, which is the normal agent-driven case —
   // so it goes through the one helper that already swallows that, rather than a
-  // second sender written next to it.
+  // second sender written next to it. v2: that helper is state.js broadcast(),
+  // which hands the message to platform.runtime.broadcast — so prove, through
+  // the real chain, that a missing receiver is swallowed in both of the ways
+  // chrome reports it.
   assert.match(replaySrc, /broadcast\(\{/);
-  const state = await readFile(new URL("../extension/lib/state.js", import.meta.url), "utf8");
-  assert.match(state.slice(state.indexOf("export function broadcast")), /catch/);
+  assert.match(replaySrc, /import \{ broadcast \} from '\.\.\/lib\/state\.js'/);
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  const originalSend = chrome.runtime.sendMessage;
+  try {
+    chrome.runtime.sendMessage = () => Promise.reject(new Error('Could not establish connection. Receiving end does not exist.'));
+    stateModule.broadcast({ type: 'replayProgress', index: 1 });
+    chrome.runtime.sendMessage = () => { throw new Error('Extension context invalidated.'); };
+    stateModule.broadcast({ type: 'replayProgress', index: 2 });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  } finally {
+    chrome.runtime.sendMessage = originalSend;
+    process.off('unhandledRejection', onUnhandled);
+  }
+  assert.deepEqual(unhandled, [], 'a broadcast nobody receives must never surface as an error');
 
   // The live state has to be gone before anything repaints, or an error leaves
   // a stuck bar and a Stop button on a flow that already finished.
@@ -1496,30 +2462,48 @@ await test('a run you can watch, and a stop that only stops the run', async () =
 });
 
 await test("the agent's own window is never mistaken for the page under test", async () => {
-  const { readFile } = await import('node:fs/promises');
   const tabs = await readFile(new URL('../extension/tools/tabs.js', import.meta.url), 'utf8');
 
   // lastFocusedWindow includes the popped-out panel and devtools. Taking it at
   // face value means the agent loses its target the moment somebody clicks the
   // agent's own interface — which is exactly when they are about to use it.
   const active = tabs.slice(tabs.indexOf('export async function getActiveTab'),
-                            tabs.indexOf('/** Is this tab inside'));
-  assert.match(active, /isAttachable\(tab\.url/, 'an extension page is not the user\u2019s place');
+                            tabs.indexOf('export async function resolveTarget'));
+  assert.match(active, /isAttachable\(tab\.url/, 'an extension page is not the user’s place');
   assert.match(active, /type === 'normal'/, 'only ordinary browser windows count');
-
-  // getAll has no ordering, so the last ordinary window has to be remembered as
-  // it happens rather than reconstructed afterwards — and remembered somewhere
-  // that outlives the service worker.
-  assert.match(tabs, /export async function rememberFocus/);
-  assert.match(tabs, /storage\.session\.set/);
   const sw = await readFile(new URL('../extension/sw.js', import.meta.url), 'utf8');
   assert.match(sw, /windows\.onFocusChanged/, 'nothing records focus unless the worker listens');
+  assert.match(sw, /rememberFocus\(windowId\)/);
 
-  // And a pinned tab outranks every guess: it is the user saying "this one".
-  const workspace = tabs.slice(tabs.indexOf('async function resolveWorkspaceTarget'),
-                               tabs.indexOf('/** Look up a named session'));
-  assert.ok(workspace.indexOf('state.pinnedTabId') < workspace.indexOf('workspace tabs are open'),
-    'the pinned tab is consulted before refusing as ambiguous');
+  // As behaviour. Window 1 is the browser, its active tab 8 the page being
+  // worked on; window 5 is the popped-out panel, a popup whose only tab is the
+  // extension's own page — and it is the window the OS focused last.
+  resetBrowser();
+  browserModel.tabs.get(9).active = false;
+  browserModel.tabs.set(8, { id: 8, url: 'http://example.test/work', title: 'Work', windowId: 1, active: true, status: 'complete' });
+  browserModel.windows.get(1).focused = false;
+  browserModel.windows.set(5, { id: 5, type: 'popup', state: 'normal', focused: true });
+  browserModel.tabs.set(50, { id: 50, url: 'chrome-extension://g9/panel/panel.html', title: 'G9', windowId: 5, active: true, status: 'complete' });
+  try {
+    await stateModule.setState({ currentTabId: null, sessions: {} });
+    // getAll has no ordering, so the last ordinary window has to be remembered as
+    // it happens rather than reconstructed afterwards — and remembered somewhere
+    // that outlives the service worker (storage.session).
+    await tabsModule.rememberFocus(1);
+    await tabsModule.rememberFocus(5);
+    assert.equal(sessionData.get('g9:lastNormalWindow'), 1, 'focusing the panel window must not overwrite it');
+    browserModel.lastFocusedWindow = 5;
+    assert.equal((await tabsModule.getActiveTab()).id, 8, 'the panel window is never the page under test');
+    assert.equal((await tabsModule.resolveTarget(null, null)).id, 8);
+
+    // And the current tab outranks every guess: it is the user saying "this one"
+    // (v1: the pinned tab, consulted before any guess).
+    await stateModule.setState({ currentTabId: 7 });
+    assert.equal((await tabsModule.resolveTarget(null, null)).id, 7);
+  } finally {
+    await stateModule.setState({ currentTabId: null });
+    resetBrowser();
+  }
 });
 
 await test("another extension's traffic is not this product's behaviour", () => {
