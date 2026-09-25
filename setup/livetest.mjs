@@ -345,7 +345,11 @@ try {
   check(status.engine?.kind === 'extension', 'status is about the extension engine', short(status.engine));
   check(!('mode' in status) && !('pinnedTabId' in status), 'no v1 mode fields in browser_status');
   check(status.capabilities?.popout === true && status.capabilities?.handoff === true, 'capabilities: popout and handoff available', short(status.capabilities));
-  check(status.inputMode === 'human' && status.autoAttach === false, 'defaults: input "human", auto-attach off', `inputMode=${status.inputMode}, autoAttach=${status.autoAttach}`);
+  // v3 (V3_UX_PLAN A2): auto-attach defaults to "Project sites". `autoAttach` stays a boolean for agents
+  // ("does auto-attach capture anything": true only with project domains known) and the mode is
+  // `autoAttachMode`. A fresh profile with no project anywhere captures nothing by itself.
+  check(status.inputMode === 'human' && status.autoAttachMode === 'project' && typeof status.autoAttach === 'boolean',
+    'defaults: input "human", auto-attach "Project sites"', `inputMode=${status.inputMode}, autoAttachMode=${status.autoAttachMode}, autoAttach=${status.autoAttach}`);
 
   if (CDP_PORT) {
     const version = await (await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`)).json();
@@ -1348,27 +1352,39 @@ try {
   });
 
   // -------------------------------------------------------------- auto-attach
-  await section('18. Auto-attach toggle (the panel\'s switch)', async () => {
+  // v3: three settings (Off / Project sites / All tabs), picked in the panel's segmented control.
+  await section('18. Auto-attach: Off, Project sites, All tabs (the panel\'s control)', async () => {
     if (!cdp || !FIXTURES) return skip('auto-attach', cdp ? NO_FIXTURES : NO_CDP);
     const p = await openPanel();
-    const flip = async (want) => {
-      const checked = await p.evaluate('document.getElementById("autoAttach").checked');
-      if (checked !== want) await p.evaluate('document.getElementById("autoAttach").click(); true');
-      return waitFor(async () => (await call('browser_status')).autoAttach === want, { timeoutMs: 6000 });
+    const pick = async (mode, want) => {
+      await p.evaluate(`document.querySelector('input[name="autoAttach"][value="${mode}"]').click(); true`);
+      return waitFor(async () => {
+        const st = await call('browser_status');
+        return st.autoAttachMode === mode && st.autoAttach === want ? st : null;
+      }, { timeoutMs: 6000 });
     };
     const attachedState = async (url) => rowFor((await call('browser_tabs', { action: 'list' })).tabs ?? [], url)?.attached;
+    const opened = [];
+    const openAndWait = async (query, ms = 3000) => {
+      const t = await cdp.send('Target.createTarget', { url: PAGE + 'auto.html?' + query, background: true });
+      opened.push(t.targetId);
+      await sleep(ms);
+      return attachedState(PAGE + 'auto.html?' + query);
+    };
 
-    check(!!(await flip(true)), 'switch on: browser_status reports autoAttach true');
-    const on = await cdp.send('Target.createTarget', { url: PAGE + 'auto.html?on=1', background: true });
+    check(!!(await pick('all', true)), 'All tabs: browser_status reports autoAttachMode "all", autoAttach true');
+    await cdp.send('Target.createTarget', { url: PAGE + 'auto.html?on=1', background: true }).then((t) => opened.push(t.targetId));
     const onAttached = await waitFor(async () => (await attachedState(PAGE + 'auto.html?on=1')) === true, { timeoutMs: 10_000 });
-    check(!!onAttached, 'a tab opened while it is on attaches by itself');
-    check(!!(await flip(false)), 'switch off: browser_status reports autoAttach false');
-    const off = await cdp.send('Target.createTarget', { url: PAGE + 'auto.html?off=1', background: true });
-    await sleep(3000);
-    const offState = await attachedState(PAGE + 'auto.html?off=1');
-    check(offState === false, 'a tab opened while it is off stays unattached', `attached=${offState}`);
-    await cdp.send('Target.closeTarget', { targetId: on.targetId }).catch(() => {});
-    await cdp.send('Target.closeTarget', { targetId: off.targetId }).catch(() => {});
+    check(!!onAttached, 'a tab opened under All tabs attaches by itself');
+    check(!!(await pick('off', false)), 'Off: autoAttachMode "off", autoAttach false');
+    const offState = await openAndWait('off=1');
+    check(offState === false, 'a tab opened under Off stays unattached', `attached=${offState}`);
+    // The default, and with no project domains known (no agent here has a g9.project.json with
+    // environments), it behaves as Off: the fixture server is on no project's site either way.
+    check(!!(await pick('project', false)), 'Project sites with no project known: autoAttachMode "project", autoAttach false');
+    const projectState = await openAndWait('project=1');
+    check(projectState === false, 'a tab opened under Project sites, on no project site, stays unattached', `attached=${projectState}`);
+    for (const targetId of opened) await cdp.send('Target.closeTarget', { targetId }).catch(() => {});
     await activateMain();
   });
 

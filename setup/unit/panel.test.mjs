@@ -13,7 +13,9 @@
  *  1. Source-level: the four modes, the workspace allowlist and bridge
  *     discovery are gone; the version is shown in the header, the title, the
  *     About tab and the welcome page; every command the panel sends is in the
- *     §13 table; every element the scripts reach for exists.
+ *     §13 table; every element the scripts reach for exists. (v3) The Attach
+ *     button is gone, Record from now / the three auto-attach modes / the
+ *     blocked-agent toast are there, and no script builds HTML from strings.
  *  2. Behavioural, for the small pure parts of the panel (ui.js titles and
  *     browser detection) and for welcome.js against a stub DOM.
  *  3. The transport, twice: once as an isolated copy over a stub state.js (the
@@ -286,8 +288,11 @@ await test('manifest: version equals package.json, Chrome 125+, downloads permis
     assert.ok(manifest.permissions.includes(p), `permission ${p}`);
   }
   assert.deepEqual(manifest.host_permissions, ['<all_urls>']);
-  assert.equal(manifest.action.default_title, 'G9 Browser Agent v2');
-  assert.match(manifest.description, /v2/);
+  // The toolbar title names the MAJOR version (sw.js sets the exact one at runtime). Derived from
+  // the manifest's own version, so a major bump cannot leave a stale literal behind again.
+  const major = manifest.version.split('.')[0];
+  assert.equal(manifest.action.default_title, `G9 Browser Agent v${major}`);
+  assert.match(manifest.description, /\bv[23]\b/, 'the description names the engine architecture (v2 onwards)');
   assert.ok(manifest.description.length <= 132, 'store descriptions are capped at 132 characters');
   assert.equal(manifest.background.service_worker, 'sw.js');
   assert.equal(manifest.background.type, 'module');
@@ -310,10 +315,12 @@ await test('no trace of the four modes, the workspace allowlist or bridge discov
       assert.doesNotMatch(src, pattern, `${file} still has ${pattern}`);
     }
   }
-  // Styles: the mode buttons and the allowlist box and its chips.
+  // Styles: the mode buttons and the allowlist box and its chips. (v3 has a
+  // generic `.chip` component — tags, evidence, tab chips — so the allowlist is
+  // checked by its own names, not by the word "chip".)
   assert.doesNotMatch(panelCss, /^\.modes\b/m);
   assert.doesNotMatch(panelCss, /\.wsbox/);
-  assert.doesNotMatch(panelCss, /(^|[\s,])\.chips?\s*\{/m);
+  assert.doesNotMatch(panelCss, /workspace|allowlist|\.ws-?chip/i);
   // The welcome page names the modes only to say they are gone.
   assert.doesNotMatch(welcomeHtml, /Attach &amp; Pin|locked to that tab/);
   assert.match(welcomeHtml, /Workspace, Pinned, Follow and Multi are gone/);
@@ -350,7 +357,7 @@ await test('every panel command is in the ARCHITECTURE_V2 §13 table, and every 
   const added = [...s13.matchAll(/^\|\s*`([A-Za-z]+)`\s*\|/gm)].map((m) => m[1]);
   assert.ok(kept.includes('getState') && kept.includes('rec*'), 'kept list parsed');
   assert.deepEqual(removed.sort(), ['discoverBridges', 'setMode']);
-  assert.deepEqual(added.sort(), ['about', 'daemonInfo', 'handoff', 'popout', 'setAutoAttach', 'setInputMode']);
+  assert.deepEqual(added.sort(), ['about', 'daemonInfo', 'focusTab', 'handoff', 'popout', 'recordNow', 'setAutoAttach', 'setInputMode']);
 
   const allowed = (c) =>
     added.includes(c) ||
@@ -411,7 +418,8 @@ await test('every element the scripts reach for exists, once', () => {
   // The input level: three radios with the contract's values.
   const levels = [...panelHtml.matchAll(/name="inputMode" value="([^"]+)"/g)].map((m) => m[1]);
   assert.deepEqual(levels, ['off', 'human', 'stealth']);
-  for (const label of ['Direct', 'Human', 'Stealth', 'Pop out tab', 'Send to background', 'Auto-attach', 'Detach all', 'Attach current tab']) {
+  for (const label of ['Direct', 'Human', 'Stealth', 'Pop out tab', 'Send to background', 'Auto-attach', 'Detach all',
+    'Record from now', 'reload to capture page load', 'Keep working elsewhere', 'Project sites', 'All tabs']) {
     assert.ok(panelHtml.includes(label), `panel shows "${label}"`);
   }
   assert.match(panelHtml, /Do not minimise it/);
@@ -427,6 +435,160 @@ await test('every element the scripts reach for exists, once', () => {
   // A per-second countdown must not be a live region; the status label is one.
   assert.doesNotMatch(panelHtml, /id="retryNote"[^>]*aria-live/);
   assert.match(panelHtml, /id="daemonLabel" aria-live="polite"/);
+});
+
+await test('v3 A1: the Attach button is gone; Record from now (with its reload box) sends recordNow', () => {
+  assert.doesNotMatch(panelHtml, /id="attachActive"|Attach current tab/, 'the big Attach button and its copy are gone');
+  for (const [file, src] of Object.entries(panelJs)) {
+    assert.doesNotMatch(code(src), /el\.attachActive|cmd:\s*'attachActive'/, `${file} still drives the removed Attach button`);
+  }
+  assert.match(panelHtml, /<button id="recordNow"[^>]*>/);
+  assert.match(panelHtml, /<input type="checkbox" id="recordReload"/);
+  assert.match(panelJs['session.js'], /cmd\(\{ cmd: 'recordNow', reload \}\)/, 'the box decides reload');
+  // The capture is stated honestly, from attachedSince.
+  assert.match(panelJs['session.js'], /Recording console and network since \$\{hm\(since\)\}/);
+  assert.match(panelJs['session.js'], /Not recording — starts on an agent(’|\\u2019)s first action, or press Record/);
+  assert.match(panelJs['session.js'], /status\.current\.attachedSince[\s\S]{0,80}state\.attachedSince/);
+});
+
+await test('v3 A2: auto-attach is three settings — Off, Project sites, All tabs — sent as setAutoAttach {mode}', () => {
+  const modes = [...panelHtml.matchAll(/name="autoAttach" value="([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(modes, ['off', 'project', 'all']);
+  assert.doesNotMatch(panelHtml, /id="autoAttach"[^>]*role="switch"/, 'the v2 on/off switch is gone');
+  assert.match(panelHtml, /<fieldset class="field" id="autoAttachGroup">\s*<legend[^>]*>Auto-attach<\/legend>/);
+  assert.match(panelJs['session.js'], /cmd\(\{ cmd: 'setAutoAttach', mode \}\)/);
+  assert.doesNotMatch(panelJs['session.js'], /setAutoAttach', enabled/, 'not the v2 boolean form');
+  // One line of help per option, and the honest "behaves as Off" line.
+  for (const mode of ['off', 'project', 'all']) assert.match(panelJs['session.js'], new RegExp(`^  ${mode}: '`, 'm'));
+  assert.match(panelJs['session.js'], /behaves as Off until an agent whose g9\.project\.json lists environments connects/);
+  assert.match(panelJs['session.js'], /state\.projectDomains/);
+});
+
+await test('v3 A3/A4: the blocked-agent toast sits above the tab bar; agent rows name project and tab (focusTab)', () => {
+  const toastAt = panelHtml.indexOf('id="blockedAlerts"');
+  assert.ok(toastAt > 0 && toastAt < panelHtml.indexOf('<nav class="tabs"'), 'the toast is pinned above the tab bar');
+  assert.match(panelHtml, /<section class="alerts" id="blockedAlerts"[^>]*hidden>/);
+  const session = panelJs['session.js'];
+  // Read from state on every render (a panel opened later still shows it), and moved by the broadcasts.
+  assert.match(session, /function renderBlocked\(state\) \{[\s\S]{0,200}state\.blocked/);
+  assert.match(session, /^  renderBlocked\(state\);$/m, 'every render paints it');
+  assert.match(panelJs['panel.js'], /case 'agentBlocked':\s*case 'agentUnblocked':\s*session\.onBlockedMessage\(msg\)/);
+  const alert = session.slice(session.indexOf('function blockedAlert'), session.indexOf('export function onBlockedMessage'));
+  assert.match(alert, /btn\('⧉ Pop out'[\s\S]*popout\(e\.tabId\)/);
+  assert.match(alert, /btn\('⇢ Send to background'[\s\S]*handoff\(e\.tabId\)/);
+  assert.match(alert, /btn\('Dismiss'/);
+  assert.match(alert, /node\('b', null, who\)/, 'it names the agent');
+  assert.match(alert, /node\('b', null, `“\$\{tab\}”`\)/, 'and the tab');
+  assert.match(session, /cmd\(\{ cmd: 'popout', \.\.\.\(tabId != null \? \{ tabId \} : \{\}\) \}\)/);
+  assert.match(session, /cmd\(\{ cmd: 'handoff', \.\.\.\(tabId != null \? \{ tabId \} : \{\}\) \}\)/);
+  // Agents: "name · project", then where it works; the tab chip focuses the tab.
+  assert.match(session, /\[a\.name \|\| 'agent', a\.project\]\.filter\(Boolean\)\.join\(' · '\)/);
+  for (const words of ['working in a launched browser', 'working in another browser', 'no tab yet']) assert.ok(session.includes(words), words);
+  assert.match(session, /cmd\(\{ cmd: 'focusTab', tabId \}\)/);
+  // The daemon line names no project any more (U4).
+  const bare = code(session);
+  const daemon = bare.slice(bare.indexOf('function renderDaemon'), bare.indexOf('export function noteRetry'));
+  assert.doesNotMatch(daemon, /project/i, 'the daemon line drops the project name');
+  assert.doesNotMatch(bare, /function projectName/, 'and the helper that made it');
+  // Pop out and Send to background: one line each, the long explanation in the title (A3).
+  assert.match(panelHtml, /<button id="popoutTab"[^>]*title="[^"]*Do not minimise it[^"]*"/);
+  assert.match(panelHtml, /<button id="handoffTab"[^>]*title="[^"]*reloads there with its cookies and storage[^"]*"/);
+});
+
+await test('no script builds HTML from strings; links are http(s) only and open with noopener noreferrer', () => {
+  // Page titles, URLs, flow names, issue titles, tags and agent names come from
+  // arbitrary pages or people, and this page runs with the extension's debugger
+  // privileges. So: DOM nodes and textContent only. An assignment of '' (or a
+  // fixed literal) is the one allowed use of innerHTML/outerHTML.
+  const staticLiteral = /^\s*(?:'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*")\s*$/;
+  let scanned = 0;
+  for (const [file, src] of Object.entries(panelJs)) {
+    const body = code(src);
+    scanned += 1;
+    for (const m of body.matchAll(/\.(innerHTML|outerHTML)\s*\+?=\s*([^;\n]*)/g)) {
+      assert.match(m[2], staticLiteral, `${file}: .${m[1]} = ${m[2].trim()} — build nodes instead`);
+    }
+    for (const m of body.matchAll(/\b(insertAdjacentHTML|document\.write(?:ln)?)\s*\(([^)]*)\)/g)) {
+      const arg = m[1] === 'insertAdjacentHTML' ? m[2].split(',').slice(1).join(',') : m[2];
+      assert.match(arg, staticLiteral, `${file}: ${m[1]}(${m[2].trim()}) — build nodes instead`);
+    }
+    assert.doesNotMatch(body, /createContextualFragment|\.srcdoc\s*=|\beval\s*\(|new Function\s*\(/, `${file} evaluates or parses markup`);
+    assert.doesNotMatch(body, /setAttribute\(\s*['"]on[a-z]+['"]/i, `${file} sets an inline event handler`);
+    // One place makes links: ui.js extLink, from safeHref.
+    if (file !== 'ui.js') assert.doesNotMatch(body, /\.href\s*=/, `${file} sets a link's href itself — use ui.js extLink`);
+  }
+  assert.ok(scanned >= 7, 'every panel script was scanned');
+  // The scan itself works: it would have caught the v2 empty-log line if it were dynamic.
+  assert.doesNotMatch("el.log.innerHTML = `<li>${x}</li>`".match(/\.(innerHTML)\s*\+?=\s*([^;\n]*)/)[2], staticLiteral);
+  const ui = code(panelJs['ui.js']);
+  const link = ui.slice(ui.indexOf('export function extLink'), ui.indexOf('export const prefs'));
+  assert.match(link, /const href = safeHref\(url\);\s*if \(!href\) return null;/);
+  assert.match(link, /a\.rel = 'noopener noreferrer'/);
+});
+
+await test('v3 pure helpers: safeHref, middle, the flow filter and scope, the issue filter and evidence chips', async () => {
+  const ui = await import(pathToFileURL(path.join(ROOT, PANEL_DIR, 'ui.js')).href);
+  assert.equal(ui.safeHref('https://a.test/x?y=1'), 'https://a.test/x?y=1');
+  assert.equal(ui.safeHref('http://a.test'), 'http://a.test/');
+  for (const bad of ['javascript:alert(1)', 'JAVASCRIPT:alert(1)', 'data:text/html,<b>x</b>', 'chrome://settings', 'not a url', null]) {
+    assert.equal(ui.safeHref(bad), null, String(bad));
+  }
+  assert.equal(ui.middle('short', 20), 'short');
+  const cut = ui.middle('/a/very/long/path/that/ends/with/the-file.csv', 24);
+  assert.equal(cut.length, 24);
+  assert.ok(cut.startsWith('/a/very') && cut.endsWith('file.csv') && cut.includes('…'), cut);
+
+  const automation = await import(pathToFileURL(path.join(ROOT, PANEL_DIR, 'automation.js')).href);
+  const rows = [
+    { id: 'a', name: 'Login', startUrl: 'https://admin.test/login', suite: 'smoke', tags: ['@smoke'], lastRun: { verdict: 'PASS', at: 1 } },
+    { id: 'b', name: 'Refund', startUrl: 'https://admin.test/r', suite: 'orders', tags: [], lastRun: { verdict: 'FAIL_PRODUCT', at: 2 }, flaky: { detected: true } },
+    { id: 'c', name: 'Checkout', startUrl: 'https://shop.test/c', suite: 'smoke', tags: ['@manual'], lastRun: null },
+    { id: 'd', name: 'Old', startUrl: null, suite: null, tags: [], lastRun: null },
+  ];
+  const ids = (f) => automation.applyFilter(rows, { site: '', suite: '', tag: '', verdict: '', flaky: false, q: '', ...f }).map((r) => r.id);
+  assert.deepEqual(ids({}), ['a', 'b', 'c', 'd']);
+  assert.deepEqual(ids({ site: 'https://admin.test' }), ['a', 'b'], 'site = origin of startUrl');
+  assert.deepEqual(ids({ site: 'none' }), ['d'], 'no start URL is its own bucket');
+  assert.deepEqual(ids({ suite: 'smoke' }), ['a', 'c']);
+  assert.deepEqual(ids({ suite: automation.NO_SUITE }), ['d'], 'no suite is its own bucket, under a key nobody can type');
+  // v3 review, finding 8: a real suite named "none" is not the no-suite bucket.
+  const withNone = [...rows, { id: 'e', name: 'Named none', startUrl: 'https://admin.test/n', suite: 'none', tags: [], lastRun: null }];
+  const idsIn = (list, f) => automation.applyFilter(list, { site: '', suite: '', tag: '', verdict: '', flaky: false, q: '', ...f }).map((r) => r.id);
+  assert.deepEqual(idsIn(withNone, { suite: 'none' }), ['e']);
+  assert.deepEqual(idsIn(withNone, { suite: automation.NO_SUITE }), ['d']);
+  assert.deepEqual(ids({ tag: '@manual' }), ['c']);
+  assert.deepEqual(ids({ verdict: 'none' }), ['c', 'd'], 'never run');
+  assert.deepEqual(ids({ verdict: 'FAIL_PRODUCT' }), ['b']);
+  assert.deepEqual(ids({ flaky: true }), ['b']);
+  assert.deepEqual(ids({ q: 'check' }), ['c']);
+  const scope = (f) => automation.scopeText({ site: '', suite: '', tag: '', verdict: '', flaky: false, q: '', ...f });
+  assert.equal(scope({}), 'all sites');
+  assert.equal(scope({ suite: 'smoke' }), 'smoke');
+  assert.equal(scope({ site: 'https://admin.test', suite: 'smoke' }), 'smoke on admin.test');
+  assert.equal(scope({ site: 'http://intranet:8080' }), 'http://intranet:8080', 'a non-https origin is named in full');
+  assert.equal(scope({ suite: 'smoke', flaky: true }), 'smoke (flaky)');
+  // The runner runs what the filter shows and never a flow tagged @manual.
+  assert.match(panelJs['automation.js'], /const list = applyFilter\(res\?\.recordings \?\? \[\]\)\.filter\(\(r\) => !isManual\(r\)\);/);
+  assert.match(panelJs['automation.js'], /`▶ Run \$\{runnable\.length\} flow\$\{runnable\.length === 1 \? '' : 's'\} in \$\{scope\}`/);
+
+  const issues = await import(pathToFileURL(path.join(ROOT, PANEL_DIR, 'issues.js')).href);
+  assert.deepEqual(issues.evidenceChips({ screenshots: 2, videos: 1, files: 3, console: true, network: true, dom: true }).map((c) => c[0]),
+    ['shot 2', 'video', 'file 3', 'console', 'network', 'DOM']);
+  assert.deepEqual(issues.evidenceChips({ screenshots: 0, videos: 2, files: 0, console: false, network: false, dom: false }).map((c) => c[0]), ['video 2']);
+  assert.deepEqual(issues.evidenceChips(undefined), []);
+  const list = [
+    { id: 1, title: 'Total wrong', site: 'https://a.test', status: 'open', severity: 'blocker', tags: ['orders'] },
+    { id: 2, title: 'Tooltip', site: 'https://a.test', status: 'filed', severity: 'minor', tags: [], filedAs: 'X-9' },
+    { id: 3, title: 'Legacy', url: 'https://b.test/p', status: 'open' }, // written before v3: no site, no severity
+  ];
+  const iids = (f) => issues.applyIssueFilter(list, { site: '', status: '', severity: '', tag: '', q: '', ...f }).map((i) => i.id);
+  assert.deepEqual(iids({ site: 'https://b.test' }), [3], 'site falls back to the origin of the URL');
+  assert.deepEqual(iids({ severity: 'normal' }), [3], 'no severity reads as normal');
+  assert.deepEqual(iids({ status: 'filed' }), [2]);
+  assert.deepEqual(iids({ tag: 'orders' }), [1]);
+  assert.deepEqual(iids({ q: 'x-9' }), [2], 'search covers the tracker key');
+  // The editor saves tags with the rest, so the list shows them after Back (C2).
+  assert.match(panelJs['issues.js'], /tags: el\.dTags\.value\.split\(','\)/);
 });
 
 await test('every panel script and the transport parse', async () => {
@@ -559,6 +721,10 @@ await test('F8: Record is disabled, with the reason shown, while this tab record
     setAttribute(k, v) { this.attrs[k] = v; },
     addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); },
     appendChild() {},
+    // v3: the lists and selects are repainted with these.
+    append() {},
+    replaceChildren() {},
+    querySelectorAll() { return []; },
   });
   const previousDocument = globalThis.document;
   globalThis.document = { title: '', getElementById: (id) => (els[id] ??= make(id)), createElement: (tag) => make(tag) };
@@ -1492,6 +1658,26 @@ const TRANSPORT_TESTS = [
     await second;
     await flush();
     assert.equal(FakeWebSocket.instances.length, sockets + 1, 'one socket, from the live attempt only');
+  }],
+
+  ['a lost daemon link forgets project sites and blocked-agent alerts, and tells the panel (v3 review 2, 3)', async (g) => {
+    const t = await g.fresh();
+    const ws = await connectWelcomed(t);
+    // What the daemon's word made true while it was connected.
+    await g.state.setState({
+      projectDomains: ['admin.example.test'],
+      projects: [{ name: 'shop', domains: ['admin.example.test'] }],
+      blocked: { 12: { tabId: 12, agent: { id: 'agent-1', name: 'claude-code' }, reason: 'hidden', at: 1 } },
+    });
+    broadcasts.length = 0;
+    ws.serverClose(1006);
+    await flush();
+    const st = await g.state.getState();
+    assert.deepEqual(st.projectDomains, [], 'Project sites no longer attaches a departed project\'s hosts');
+    assert.deepEqual(st.projects, []);
+    assert.deepEqual(st.blocked, {}, 'an alert naming a per-process agent id does not outlive its daemon');
+    assert.ok(broadcasts.some((m) => m?.type === 'agentUnblocked' && m.tabId === 12), 'the open panel is told to drop the alert');
+    await t.disconnect();
   }],
 ];
 

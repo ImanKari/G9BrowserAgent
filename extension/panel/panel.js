@@ -4,7 +4,8 @@
  * Owns four things and nothing else: the version on screen, which tab body is
  * showing, the polling loop, and the message listener that wakes the views
  * when the service worker says something changed. Each view module owns its
- * own rendering and wiring.
+ * own rendering and wiring; ui.js holds what they share (the components of the
+ * v3 visual system among it).
  *
  * ## Why the panel is split
  *
@@ -87,6 +88,12 @@ api.runtime.onMessage.addListener((msg) => {
       break;
     case 'reconnecting':
       session.noteRetry(msg);
+      break;
+    // (v3, A3) An agent's input could not reach a hidden tab, or that is over:
+    // the toast above the tab bar appears or goes at once, not at the next poll.
+    case 'agentBlocked':
+    case 'agentUnblocked':
+      session.onBlockedMessage(msg);
       break;
     case 'dialog':
       showPanelError(`Page opened a ${msg.dialogType}: ${msg.message}`);

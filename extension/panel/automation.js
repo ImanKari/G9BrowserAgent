@@ -1,5 +1,5 @@
 /**
- * The Automation view — the whole engine, finally reachable without an agent.
+ * The Automation view — the whole engine, reachable without an agent.
  *
  * ## What changed in v1.7.0 and why
  *
@@ -26,9 +26,22 @@
  *   candidate with a strength and a reason, and adds nothing by itself. Shown
  *   as checkboxes, that becomes a thirty-second job. A weak assertion someone
  *   consciously accepted is a decision; one a tool added quietly is a blind spot.
+ *
+ * ## What changed in v3 (V3_UX_PLAN part B)
+ *
+ * The index always carried startUrl, suite, folder, tags, lastRun, flaky,
+ * assertionCount and environment; the list used none of them and rendered one
+ * flat column. Now: site (the origin of startUrl) → suite → flow, filters built
+ * from the values the QA already enters, a row that says the last verdict, the
+ * checks and flakiness at a glance, and one drawer per flow holding everything
+ * the old per-flow row offered. "Run all" runs what the filter shows and says so.
  */
 
-import { el, cmd, node, row, toast, showPanelError, ago, view } from './ui.js';
+import { siteOf, displayUrl } from '../lib/sites.js';
+import {
+  el, cmd, node, btn, chip, dot, toast, showPanelError, ago, view, setOptions, prefs, group, keepFocus, middle, extLink,
+  copyText, metaLine,
+} from './ui.js';
 
 let recording = false;
 /** A start or stop is on its way to the service worker. */
@@ -89,7 +102,7 @@ function paintRecordControls() {
   el.recWhy.hidden = !c.why;
 }
 
-/** Flow ids whose detail row is expanded. */
+/** Flow ids whose drawer is open. */
 const expanded = new Set();
 /**
  * The run happening right now, if any.
@@ -141,6 +154,135 @@ const VERDICT_ADVICE = {
   FAIL_AUTOMATION: 'The test could not run, so this says nothing about the product. An element moved or was renamed, or the browser never delivered the input — check the step message.',
 };
 
+/** The verdict as a row shows it: short, next to its dot. The code is in the title.
+ * Kept after VERDICT_ADVICE: setup/extensiontest.mjs reads the first FAIL_AUTOMATION string in this file as the advice. */
+const VERDICT_LABEL = {
+  PASS: 'Pass',
+  PASS_WITH_WARNING: 'Warnings',
+  SURPRISE: 'Surprise',
+  FAIL_PRODUCT: 'Product fail',
+  FAIL_AUTOMATION: 'Test fail',
+  none: 'Never run',
+};
+
+// ------------------------------------------------------------------ filters
+
+const FILTER_KEY = 'g9.flowFilters';
+const FOLD_KEY = 'g9.flowFold';
+const EMPTY_FILTER = { site: '', suite: '', tag: '', verdict: '', flaky: false, q: '' };
+/** The filter, remembered for this viewer: a QA working one site all day should not re-pick it. */
+let filter = { ...EMPTY_FILTER, ...prefs.get(FILTER_KEY, {}) };
+/** The index as last read, for the filters' change handlers. */
+let lastList = [];
+/** Full recordings (recGet) for open drawers: the run history and the start URL. */
+const details = new Map();
+/** Each open drawer's wizard box, kept across repaints so ticked checkboxes survive a poll. */
+const wizards = new Map();
+/** Bumped by anything that changes what the list shows without changing the index. */
+let dirty = 0;
+let paintedKey = null;
+let affinityKey = null;
+
+const NO_SITE = 'none';
+// A value nobody can type: a real suite named "none" used to merge into "No suite" (v3 review, finding 8).
+const NO_SUITE = '\u0000none';
+
+const siteKeyOf = (r) => siteOf(r?.startUrl) ?? NO_SITE;
+const suiteKeyOf = (r) => (typeof r?.suite === 'string' && r.suite.trim() ? r.suite.trim() : NO_SUITE);
+/** A run from before v1.7 has no verdict, only passed/failed: that much is said, and no more. */
+const verdictOf = (r) => {
+  if (!r?.lastRun) return 'none';
+  if (VERDICT[r.lastRun.verdict]) return r.lastRun.verdict;
+  return r.lastRun.failed ? 'FAIL_AUTOMATION' : 'PASS';
+};
+const isManual = (r) => Array.isArray(r?.tags) && r.tags.includes('@manual');
+const isFlaky = (r) => !!(r?.flaky === true || r?.flaky?.detected);
+const lastAt = (r) => r?.lastRun?.at ?? 0;
+
+/** "admin.example.test", or "http://intranet:8080" when it is not plain https. */
+function siteLabel(key) {
+  if (key === NO_SITE) return 'No start URL';
+  const d = displayUrl(key);
+  return d.origin?.startsWith('https://') ? d.host : (d.origin ?? key);
+}
+
+/** Pure; exported for the unit test. Which of the index rows the filter lets through. */
+export function applyFilter(list, f = filter) {
+  const q = String(f.q ?? '').trim().toLowerCase();
+  return (Array.isArray(list) ? list : []).filter((r) => {
+    if (f.site && siteKeyOf(r) !== f.site) return false;
+    if (f.suite && suiteKeyOf(r) !== f.suite) return false;
+    if (f.tag && !(Array.isArray(r.tags) && r.tags.includes(f.tag))) return false;
+    if (f.verdict && verdictOf(r) !== f.verdict) return false;
+    if (f.flaky && !isFlaky(r)) return false;
+    if (q) {
+      const hay = [r.name, r.suite, r.folder, typeof r.environment === 'string' ? r.environment : '', r.startUrl, ...listOf(r.tags), ...listOf(r.qaTestCaseIds)]
+        .filter((v) => typeof v === 'string').join(' ').toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+}
+
+/** What "Run N flows in <scope>" names. Pure; exported for the unit test. */
+export function scopeText(f = filter) {
+  const site = f.site ? (f.site === NO_SITE ? 'no start URL' : siteLabel(f.site)) : null;
+  const suite = f.suite ? (f.suite === NO_SUITE ? 'no suite' : f.suite) : null;
+  const base = suite && site ? `${suite} on ${site}` : suite || site || 'all sites';
+  const extra = [
+    f.tag || null,
+    f.verdict ? (VERDICT_LABEL[f.verdict] ?? f.verdict).toLowerCase() : null,
+    f.flaky ? 'flaky' : null,
+    String(f.q ?? '').trim() ? `“${String(f.q).trim()}”` : null,
+  ].filter(Boolean);
+  return extra.length ? `${base} (${extra.join(', ')})` : base;
+}
+
+function setFilter(patch) {
+  filter = { ...filter, ...patch };
+  prefs.set(FILTER_KEY, filter);
+  dirty += 1;
+  renderList(lastList);
+}
+
+/** The selects, built from the distinct values in the index (B2: structure from what the QA enters). */
+function paintFilters(list) {
+  el.flowFilters.hidden = list.length === 0;
+  const count = (fn) => {
+    const m = new Map();
+    for (const r of list) for (const k of [].concat(fn(r))) if (k != null) m.set(k, (m.get(k) ?? 0) + 1);
+    return m;
+  };
+  const withSelected = (map, value) => (value && !map.has(value) ? new Map([...map, [value, 0]]) : map);
+
+  const sites = withSelected(count(siteKeyOf), filter.site);
+  const siteOpts = [...sites.keys()].sort((a, b) => (a === NO_SITE) - (b === NO_SITE) || siteLabel(a).localeCompare(siteLabel(b)));
+  setOptions(el.fSite, [['', `All sites (${list.length})`], ...siteOpts.map((k) => [k, `${siteLabel(k)} (${sites.get(k)})`])], filter.site);
+
+  // Suites and tags narrow to the chosen site, so the choices are ones that match something.
+  const inSite = filter.site ? list.filter((r) => siteKeyOf(r) === filter.site) : list;
+  const suites = withSelected(count(suiteKeyOf), filter.suite);
+  const suitesHere = withSelected(new Map([...count(suiteKeyOf)].filter(([k]) => inSite.some((r) => suiteKeyOf(r) === k))), filter.suite);
+  const suiteOpts = [...suitesHere.keys()].sort((a, b) => (a === NO_SUITE) - (b === NO_SUITE) || a.localeCompare(b));
+  setOptions(el.fSuite, [['', 'All suites'], ...suiteOpts.map((k) => [k, k === NO_SUITE ? 'No suite' : k])], filter.suite);
+  el.fSuite.hidden = !filter.suite && ![...suites.keys()].some((k) => k !== NO_SUITE);
+
+  const tags = withSelected(count((r) => (Array.isArray(r.tags) ? r.tags.filter((t) => typeof t === 'string') : [])), filter.tag);
+  const tagsHere = [...tags.keys()].filter((t) => t === filter.tag || inSite.some((r) => r.tags?.includes(t))).sort();
+  setOptions(el.fTag, [['', 'All tags'], ...tagsHere.map((t) => [t, t])], filter.tag);
+  el.fTag.hidden = !filter.tag && tags.size === 0;
+
+  const verdicts = withSelected(count(verdictOf), filter.verdict);
+  const order = ['FAIL_PRODUCT', 'FAIL_AUTOMATION', 'SURPRISE', 'PASS_WITH_WARNING', 'PASS', 'none'];
+  setOptions(el.fVerdict, [['', 'Any verdict'], ...order.filter((v) => verdicts.has(v)).map((v) => [v, VERDICT_LABEL[v]])], filter.verdict);
+
+  el.fFlaky.setAttribute('aria-pressed', String(!!filter.flaky));
+  el.fFlaky.hidden = !filter.flaky && !list.some(isFlaky);
+  if (document.activeElement !== el.fSearch) el.fSearch.value = filter.q ?? '';
+}
+
+// ------------------------------------------------------------------ the list
+
 export async function refresh() {
   if (view.active !== 'automation') return;
   let res;
@@ -169,96 +311,303 @@ export async function refresh() {
 }
 
 function renderList(list) {
-  el.recCount.textContent = list.length ? `${list.length} saved` : '';
-  el.recEmpty.hidden = list.length > 0;
-  el.suiteCard.hidden = list.length === 0;
-  el.recList.innerHTML = '';
+  lastList = Array.isArray(list) ? list : [];
+  el.recCount.textContent = lastList.length ? `${lastList.length} saved` : '';
+  el.recEmpty.hidden = lastList.length > 0;
+  paintFilters(lastList);
 
-  for (const r of list) {
-    const verdict = VERDICT[r.lastRun?.verdict] ?? null;
-    const bits = [
-      r.suite ? r.suite : null,
-      `${r.stepCount} steps`,
-      r.assertionCount ? `${r.assertionCount} checks` : 'no checks yet',
-      r.lastRun ? `${verdict?.icon ?? ''} ${ago(r.lastRun.at ?? r.updatedAt)}` : 'never run',
-      r.flaky?.detected ? 'possibly flaky' : null,
-    ].filter(Boolean);
+  const shown = applyFilter(lastList);
+  const here = siteOf(view.current?.url);
+  paintAffinity(lastList, here);
+  paintRunBar(shown);
 
-    const li = row(
-      r.name,
-      bits.join(' · '),
-      [
-        liveRun?.id === r.id
-          ? ['■', 'danger', () => stopRun(), 'Stop this run']
-          : ['▶', 'primary', () => runReplay(r.id, false), 'Replay for real'],
-        ['🔍', '', () => runReplay(r.id, true), 'Dry run — resolve every step, change nothing'],
-        [expanded.has(r.id) ? '▴' : '▾', '', () => toggle(r.id), 'More'],
-      ],
-      () => toggle(r.id),
-    );
-    el.recList.append(li);
+  // Repaint only when what the list shows changed (or once a minute, for the
+  // "2h ago"s): the list holds buttons and fields, and a rebuild on every poll
+  // took the keyboard focus and a half-typed tag with it.
+  const key = JSON.stringify([
+    shown.map((r) => [r.id, r.name, r.updatedAt, r.lastRun?.at, r.lastRun?.verdict, isFlaky(r), r.assertionCount,
+      r.environment, r.suite, r.folder, r.tags, r.startUrl, r.stepCount, r.qaTestCaseIds]),
+    here, dirty, liveRun?.id ?? null, Math.floor(Date.now() / 60_000), lastList.length,
+  ]);
+  if (key === paintedKey) return;
+  paintedKey = key;
+  keepFocus(el.recList, () => paintGroups(shown, here));
+}
 
-    if (liveRun?.id === r.id) el.recList.append(progressRow(r));
-    if (expanded.has(r.id)) el.recList.append(detailRow(r));
-    const result = lastResult.get(r.id);
-    if (result) el.recList.append(reportRow(r.id, result));
+function paintGroups(shown, here) {
+  if (!lastList.length) {
+    el.recList.replaceChildren();
+    return;
   }
+  if (!shown.length) {
+    const empty = node('div', 'empty');
+    empty.append(node('p', null, 'No flows match these filters.'),
+      btn('Clear filters', 'link', () => setFilter({ ...EMPTY_FILTER }), { key: 'clearfilters' }));
+    el.recList.replaceChildren(empty);
+    return;
+  }
+
+  // Site → suite → flow. The site in front of the person first, then the most
+  // recently run, "No start URL" last; suites by name; flows newest run first.
+  const bySite = new Map();
+  for (const r of shown) {
+    const s = siteKeyOf(r);
+    if (!bySite.has(s)) bySite.set(s, []);
+    bySite.get(s).push(r);
+  }
+  const newest = (rows) => Math.max(0, ...rows.map((r) => lastAt(r) || r.updatedAt || 0));
+  const sites = [...bySite.keys()].sort((a, b) =>
+    (b === here) - (a === here) || (a === NO_SITE) - (b === NO_SITE) || newest(bySite.get(b)) - newest(bySite.get(a)));
+
+  const out = [];
+  for (const site of sites) {
+    const rows = bySite.get(site);
+    const g = group({
+      store: FOLD_KEY, key: `site:${site}`, title: siteLabel(site), count: rows.length, level: 1,
+      titleAttr: site === NO_SITE ? 'Flows recorded without a start URL: open one and fill in Start URL to give it a site' : site,
+    });
+    if (site === NO_SITE) {
+      g.body.append(node('p', 'help', 'These have no start URL, so they have no site. Open one and fill in Start URL to give it one.'));
+    }
+    const bySuite = new Map();
+    for (const r of rows) {
+      const k = suiteKeyOf(r);
+      if (!bySuite.has(k)) bySuite.set(k, []);
+      bySuite.get(k).push(r);
+    }
+    const suites = [...bySuite.keys()].sort((a, b) => (a === NO_SUITE) - (b === NO_SUITE) || a.localeCompare(b));
+    // One suite, and it is "no suite": a second level would only add a header.
+    const flat = suites.length === 1 && suites[0] === NO_SUITE;
+    for (const suite of suites) {
+      const flows = bySuite.get(suite).sort((a, b) => lastAt(b) - lastAt(a) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+      let target = g.body;
+      if (!flat) {
+        const sg = group({ store: FOLD_KEY, key: `suite:${site}|${suite}`, title: suite === NO_SUITE ? 'No suite' : suite, count: flows.length, level: 2 });
+        g.body.append(sg.wrap);
+        target = sg.body;
+      }
+      for (const r of flows) target.append(flowBlock(r));
+    }
+    out.push(g.wrap);
+  }
+  el.recList.replaceChildren(...out);
+}
+
+/** "This site: admin.example.test — 3 flows": the QA lands on what is in front of them. */
+function paintAffinity(list, here) {
+  const n = here ? list.filter((r) => siteKeyOf(r) === here).length : 0;
+  el.flowAffinity.hidden = n === 0;
+  if (!n) return;
+  const only = filter.site === here;
+  // Painted when it changes, not on every poll: it holds a button.
+  const key = JSON.stringify([here, n, only]);
+  if (key === affinityKey) return;
+  affinityKey = key;
+  const text = node('span', 'grow-text');
+  text.append('This site: ', node('b', null, siteLabel(here)), ` — ${n} flow${n === 1 ? '' : 's'}`);
+  text.title = here;
+  const action = only
+    ? btn('Show all sites', 'link', () => setFilter({ site: '' }), { key: 'aff' })
+    : btn('Show only these', 'link', () => setFilter({ site: here, suite: '' }), { key: 'aff' });
+  keepFocus(el.flowAffinity, () => el.flowAffinity.replaceChildren(text, action));
+}
+
+/** "Run 3 flows in smoke" — the scope is the filter, so it is never an accidental run of everything. */
+function paintRunBar(shown) {
+  el.suiteCard.hidden = lastList.length === 0;
+  const runnable = shown.filter((r) => !isManual(r));
+  const manual = shown.length - runnable.length;
+  const scope = scopeText(filter);
+  if (!suiteRun?.running) {
+    el.suiteBtn.textContent = runnable.length
+      ? `▶ Run ${runnable.length} flow${runnable.length === 1 ? '' : 's'} in ${scope}`
+      : `No runnable flows in ${scope}`;
+    el.suiteBtn.title = `Replays ${runnable.length} flow${runnable.length === 1 ? '' : 's'} one after another` +
+      (manual ? `, skipping ${manual} tagged @manual` : '') + '. The filter above decides which.';
+    el.suiteBtn.disabled = runnable.length === 0;
+    if (!suiteRun) {
+      el.suiteProgress.textContent = manual
+        ? `In order; ${manual} tagged @manual skipped.`
+        : 'In order, one tab at a time; @manual flows are skipped.';
+    }
+  }
+}
+
+// ------------------------------------------------------------------ a flow
+
+function flowBlock(r) {
+  const wrap = node('div', 'flow-panel');
+  const open = expanded.has(r.id);
+  const v = verdictOf(r);
+  const drawerId = `drawer-${cssSafe(r.id)}`;
+
+  const row = node('div', `flow${open ? ' open' : ''}`);
+  const main = btn(null, 'flow-open', () => toggle(r.id), { key: `open:${r.id}` });
+  main.setAttribute('aria-expanded', String(open));
+  if (open) main.setAttribute('aria-controls', drawerId);
+  main.title = `${r.name ?? '(unnamed)'}${r.lastRun ? ` — last run ${v} ${ago(r.lastRun.at ?? r.updatedAt)}` : ' — never run'}`;
+
+  const l1 = node('span', 'l1');
+  l1.append(dot('v', v), node('span', 'nm', r.name || '(unnamed)'));
+  const vt = node('span', 'vt', VERDICT_LABEL[v]);
+  vt.dataset.v = v;
+  const f = r.flaky ?? {};
+  main.append(l1, metaLine([
+    vt,
+    r.assertionCount ? `${r.assertionCount} check${r.assertionCount === 1 ? '' : 's'}` : 'macro — no checks',
+    isFlaky(r)
+      ? chip('flaky', 'warn', f.sampleSize ? `${f.passRuns ?? '?'} passed and ${f.failRuns ?? '?'} failed of the last ${f.sampleSize} runs` : 'Recent runs both passed and failed')
+      : null,
+    typeof r.environment === 'string' && r.environment ? r.environment : null,
+    r.lastRun ? ago(r.lastRun.at ?? r.updatedAt) : null,
+  ]));
+
+  const side = node('div', 'side');
+  side.append(liveRun?.id === r.id
+    ? btn('■', 'danger sm', () => stopRun(), { title: 'Stop this run', aria: `Stop the run of ${r.name}`, key: `run:${r.id}` })
+    : btn('▶', 'sm', () => runReplay(r.id, false), { title: 'Replay for real', aria: `Replay ${r.name}`, key: `run:${r.id}` }));
+  row.append(main, side);
+  wrap.append(row);
+
+  if (liveRun?.id === r.id) wrap.append(progressRow(r));
+  const result = lastResult.get(r.id);
+  if (result) wrap.append(reportRow(r.id, result));
+  if (open) wrap.append(drawer(r, drawerId));
+  return wrap;
+}
+
+function cssSafe(id) {
+  return String(id).replace(/[^A-Za-z0-9_-]/g, '_');
 }
 
 function toggle(id) {
   if (expanded.has(id)) expanded.delete(id);
-  else expanded.add(id);
-  refresh();
+  else {
+    expanded.add(id);
+    loadDetails(id);
+  }
+  dirty += 1;
+  renderList(lastList);
 }
 
-/** The row that holds everything the panel could not previously do. */
-function detailRow(r) {
-  const li = node('li', 'detail');
-  const acts = node('div', 'btnrow wrap');
+/** The full recording for a drawer — once, and again only when the flow changed. */
+async function loadDetails(id) {
+  const row = lastList.find((r) => r.id === id);
+  const have = details.get(id);
+  if (have && (have.pending || have.updatedAt === row?.updatedAt)) return;
+  details.set(id, { pending: true, updatedAt: row?.updatedAt });
+  const res = await cmd({ cmd: 'recGet', id }).catch(() => null);
+  details.set(id, { pending: false, updatedAt: row?.updatedAt, rec: res?.ok ? res.recording : null });
+  dirty += 1;
+  renderList(lastList);
+}
 
+/** Everything the per-flow row used to offer, in one place. */
+function drawer(r, id) {
+  if (details.get(r.id)?.updatedAt !== r.updatedAt) loadDetails(r.id);
+  const rec = details.get(r.id)?.rec ?? null;
+  const box = node('div', 'drawer');
+  box.id = id;
+
+  // Where it starts.
+  const start = node('div', 'startline');
+  if (r.startUrl) {
+    const d = displayUrl(r.startUrl);
+    const url = node('span', 'mono', middle(`${d.origin ?? ''}${d.path}${d.query ? '?…' : ''}`, 64));
+    url.title = d.href;
+    start.append(node('span', 'muted', 'Starts at'), url);
+    const link = extLink(r.startUrl, 'open');
+    if (link) start.append(link);
+  } else {
+    start.append(node('span', 'help', 'No start URL recorded.'));
+  }
+  box.append(start);
+
+  // How it has been doing: one dot per run, oldest first.
+  const runs = Array.isArray(rec?.runHistory) ? rec.runHistory : r.lastRun ? [r.lastRun] : [];
+  const hist = node('div', 'row wrap');
+  hist.append(node('span', 'muted sm', runs.length ? `Last ${runs.length} run${runs.length === 1 ? '' : 's'}` : 'Never run'));
+  if (runs.length) {
+    const spark = node('span', 'spark');
+    spark.setAttribute('role', 'img');
+    const pass = runs.filter((x) => x.verdict === 'PASS' || x.verdict === 'PASS_WITH_WARNING').length;
+    spark.setAttribute('aria-label', `${pass} of the last ${runs.length} runs passed`);
+    for (const run of runs.slice(-20)) {
+      const d = dot('v', VERDICT[run.verdict] ? run.verdict : 'none');
+      d.title = `${run.verdict ?? '?'} — ${run.passed ?? '?'}/${(run.passed ?? 0) + (run.failed ?? 0)} in ${run.durationMs ?? '?'}ms · ${run.at ? ago(run.at) : ''}`;
+      d.removeAttribute('aria-hidden');
+      spark.append(d);
+    }
+    hist.append(spark);
+  }
+  hist.append(node('span', 'muted sm', `${r.stepCount ?? 0} steps`));
+  if (rec?.knownWorld?.runs) hist.append(node('span', 'muted sm', `known world: ${rec.knownWorld.runs} approved`));
+  box.append(hist);
+
+  const acts = node('div', 'btnrow');
   acts.append(
-    button('✦ Add checks', 'primary sm', () => openWizard(r.id), 'Ask the tool what is worth asserting here'),
-    button('⚖ Calibrate', 'ghost sm', () => calibrate(r.id), 'Run twice on this build and mark what differs as noise'),
-    button('✓ Approve', 'ghost sm', () => approve(r.id), 'Fold the last run into this flow’s known world'),
-    button('📜 History', 'ghost sm', () => history(r.id), 'Past runs and the known world'),
-    button('⬆ Push', 'ghost sm', () => push([r.id]), 'Write this flow to the repo'),
-    button('⤓ Playwright', 'ghost sm', () => exportTest(r.id), 'Export as a Playwright test'),
-    button('✕ Delete', 'ghost sm danger', () => remove(r.id)),
+    liveRun?.id === r.id
+      ? btn('■ Stop', 'danger sm', () => stopRun(), { key: `drun:${r.id}` })
+      : btn('▶ Replay', 'primary sm', () => runReplay(r.id, false), { title: 'Replay for real', key: `drun:${r.id}` }),
+    btn('🔍 Dry run', 'sm', () => runReplay(r.id, true), { title: 'Resolve every step, change nothing', key: `dry:${r.id}` }),
+    btn('✦ Add checks', 'sm', () => openWizard(r.id), { title: 'Ask the tool what is worth asserting here', key: `wiz:${r.id}` }),
+    btn('⚖ Calibrate', 'sm', () => calibrate(r.id), { title: 'Run twice on this build and mark what differs as noise', key: `cal:${r.id}` }),
+    btn('✓ Approve', 'sm', () => approve(r.id), { title: 'Fold the last run into this flow’s known world', key: `ok:${r.id}` }),
+    btn('📜 History', 'sm', () => history(r.id), { title: 'Past runs and the known world', key: `hist:${r.id}` }),
+    btn('⬆ Push', 'sm', () => push([r.id]), { title: 'Write this flow to the repo', key: `push:${r.id}` }),
+    btn('⤓ Playwright', 'sm', () => exportTest(r.id), { title: 'Copy it as a Playwright test', key: `pw:${r.id}` }),
+    btn('✕ Delete', 'sm danger', () => remove(r.id), { title: 'Delete this flow from this browser', key: `del:${r.id}` }),
   );
+  box.append(acts);
 
-  const meta = node('div', 'metaedit');
+  const meta = node('div', 'fields');
   meta.append(
-    field('Section', r.folder ?? '', (v) => patch(r.id, { folder: v })),
-    field('Suite', r.suite ?? '', (v) => patch(r.id, { suite: v })),
-    field('Tags', (r.tags ?? []).join(', '), (v) =>
+    field(r.id, 'folder', 'Section', r.folder ?? '', (v) => patch(r.id, { folder: v })),
+    field(r.id, 'suite', 'Suite', r.suite ?? '', (v) => patch(r.id, { suite: v })),
+    field(r.id, 'tags', 'Tags', listOf(r.tags).join(', '), (v) =>
       patch(r.id, { tags: v.split(',').map((t) => t.trim()).filter(Boolean) }),
     ),
-    field('Covers (TC ids)', (r.qaTestCaseIds ?? []).join(', '), (v) =>
+    field(r.id, 'tc', 'Covers (TC ids)', listOf(r.qaTestCaseIds).join(', '), (v) =>
       patch(r.id, { qaTestCaseIds: v.split(',').map((t) => t.trim()).filter(Boolean) }),
     ),
+    // The flow's site is the origin of its start URL. A flow recorded without one sits in
+    // "No start URL"; this is how it gets a site without being recorded again. The service
+    // worker validates it (http(s) only) and says why when it refuses.
+    field(r.id, 'start', 'Start URL', r.startUrl ?? '', (v) => patch(r.id, { startUrl: v })),
   );
-
-  li.append(acts, meta, node('div', 'wizard', ''));
-  li.querySelector('.wizard').id = `wizard-${r.id}`;
-  return li;
+  box.append(meta, wizardBox(r.id));
+  return box;
 }
 
-function button(label, cls, fn, title) {
-  const b = node('button', cls, label);
-  if (title) b.title = title;
-  b.addEventListener('click', fn);
-  return b;
+/**
+ * A list field as a list, whatever was stored. A stored string or object would otherwise throw
+ * inside a repaint and freeze the whole Automation list (v3 review, finding 4).
+ */
+function listOf(value) {
+  if (Array.isArray(value)) return value.filter((item) => typeof item === 'string');
+  if (typeof value === 'string') return value.split(',').map((item) => item.trim()).filter(Boolean);
+  return [];
 }
 
-function field(label, value, onSave) {
-  const wrap = node('label', 'metafield');
-  wrap.append(node('span', null, label));
+function field(id, name, label, value, onSave) {
+  const wrap = node('label', 'fl');
+  wrap.append(label);
   const input = document.createElement('input');
   input.value = value;
   input.spellcheck = false;
+  input.dataset.k = `field:${id}:${name}`;
   input.addEventListener('change', () => onSave(input.value.trim()));
   wrap.append(input);
   return wrap;
+}
+
+function wizardBox(id) {
+  if (!wizards.has(id)) {
+    const box = node('div', 'wizard');
+    box.setAttribute('aria-live', 'polite');
+    wizards.set(id, box);
+  }
+  return wizards.get(id);
 }
 
 // ------------------------------------------------------------- the wizard
@@ -272,48 +621,39 @@ function field(label, value, onSave) {
  * wondering why the obvious check is missing.
  */
 async function openWizard(id) {
-  const box = document.getElementById(`wizard-${id}`);
-  if (!box) return;
-  box.innerHTML = '';
-  box.append(node('p', 'muted', 'Looking at what this flow actually did…'));
+  const box = wizardBox(id);
+  box.replaceChildren(node('p', 'help', 'Looking at what this flow actually did…'));
 
   let res;
   try {
     res = await cmd({ cmd: 'recSuggest', id });
   } catch (err) {
-    box.innerHTML = '';
-    return box.append(node('p', 'warn', `Could not suggest: ${err?.message ?? err}`));
+    return box.replaceChildren(node('p', 'warn', `Could not suggest: ${err?.message ?? err}`));
   }
-  if (!res?.ok) {
-    box.innerHTML = '';
-    return box.append(node('p', 'warn', res?.error ?? 'Could not suggest assertions.'));
-  }
+  if (!res?.ok) return box.replaceChildren(node('p', 'warn', res?.error ?? 'Could not suggest assertions.'));
 
   const list = res.suggestions ?? res.assertions ?? [];
-  box.innerHTML = '';
   if (!list.length) {
-    return box.append(node('p', 'muted', 'Nothing to propose for this flow yet — try running it once first.'));
+    return box.replaceChildren(node('p', 'help', 'Nothing to propose for this flow yet — try running it once first.'));
   }
 
-  box.append(node('div', 'nm', 'Suggested checks — tick the ones you want'));
   const form = node('div', 'wizlist');
   for (const [index, s] of list.entries()) {
-    const line = node('label', `wizrow ${s.strength === 'blocked' ? 'blocked' : ''}`);
-    const box2 = document.createElement('input');
-    box2.type = 'checkbox';
-    box2.disabled = s.strength === 'blocked';
-    box2.dataset.index = String(index);
+    const line = node('label', `wizrow${s.strength === 'blocked' ? ' blocked' : ''}`);
+    const tick = document.createElement('input');
+    tick.type = 'checkbox';
+    tick.disabled = s.strength === 'blocked';
+    tick.dataset.index = String(index);
     line.append(
-      box2,
+      tick,
       node('span', 'kind', s.kind ?? s.assertion ?? '?'),
       node('span', `strength ${s.strength ?? ''}`, s.strength ?? ''),
       node('span', 'why', s.reason ?? ''),
     );
     form.append(line);
   }
-  box.append(form);
 
-  const add = button('Add selected checks', 'primary sm', async () => {
+  const add = btn('Add selected checks', 'primary sm', async () => {
     const chosen = [...form.querySelectorAll('input:checked')].map((c) => list[Number(c.dataset.index)]);
     if (!chosen.length) return toast('Nothing ticked.');
     let added = 0;
@@ -323,12 +663,12 @@ async function openWizard(id) {
       else showPanelError(res2?.error ?? 'Could not add a check.');
     }
     toast(`${added} check${added === 1 ? '' : 's'} added`);
-    box.innerHTML = '';
+    box.replaceChildren();
     refresh();
   });
   const actions = node('div', 'btnrow');
-  actions.append(add);
-  box.append(actions);
+  actions.append(add, btn('Cancel', 'sm ghost', () => box.replaceChildren()));
+  box.replaceChildren(node('div', 'card-t', 'Suggested checks — tick the ones you want'), form, actions);
 }
 
 // ------------------------------------------------------------------ actions
@@ -353,6 +693,7 @@ async function runReplay(id, dryRun) {
   // A ticking clock, because a bar that only moves on step changes looks frozen
   // during exactly the slow step somebody is worried about.
   liveTimer = setInterval(paintProgress, 250);
+  dirty += 1;
   refresh();
 
   let res;
@@ -372,6 +713,7 @@ async function runReplay(id, dryRun) {
   if (failure) return showPanelError(failure);
 
   lastResult.set(id, res);
+  dirty += 1;
   refresh();
 }
 
@@ -379,6 +721,7 @@ function endRun() {
   clearInterval(liveTimer);
   liveTimer = null;
   liveRun = null;
+  dirty += 1;
   if (haltedForRun) {
     haltedForRun = false;
     cmd({ cmd: 'resume' }).catch(() => {}).then(refresh);
@@ -473,10 +816,10 @@ function describeProgress(run) {
   return { bar, label: `${where} · ${time}${run.describe ? ` · ${run.describe}` : ''}` };
 }
 
-function progressRow(rec) {
-  const li = node('li', 'reportrow');
+function progressRow() {
   const box = node('div', 'report running');
   box.id = 'runProgress';
+  box.setAttribute('role', 'status');
 
   const head = node('div', 'nm', liveRun.dryRun ? 'Dry run in progress' : 'Running');
   const bar = node('div', 'bar');
@@ -484,10 +827,9 @@ function progressRow(rec) {
   const label = node('div', 'runlabel sub', '');
 
   box.append(head, bar, label);
-  li.append(box);
   // Fill it in immediately rather than waiting for the first tick.
   queueMicrotask(paintProgress);
-  return li;
+  return box;
 }
 
 async function calibrate(id) {
@@ -504,33 +846,35 @@ async function approve(id) {
   const res = await cmd({ cmd: 'recApprove', id }).catch((err) => ({ ok: false, error: String(err) }));
   if (!res?.ok) return showPanelError(res?.error ?? 'Could not approve.');
   toast('Approved — this run is now the known normal for this flow');
+  details.delete(id);
+  dirty += 1;
   refresh();
 }
 
 async function history(id) {
   const res = await cmd({ cmd: 'recKnownWorld', id }).catch((err) => ({ ok: false, error: String(err) }));
   if (!res?.ok) return showPanelError(res?.error ?? 'Could not read history.');
-  const box = document.getElementById(`wizard-${id}`);
-  if (!box) return;
-  box.innerHTML = '';
+  const box = wizardBox(id);
   const runs = res.runHistory ?? [];
-  box.append(node('div', 'nm', `Last ${runs.length} run${runs.length === 1 ? '' : 's'}`));
-  if (!runs.length) box.append(node('p', 'muted', 'Never run.'));
+  const lines = [node('div', 'card-t', `Last ${runs.length} run${runs.length === 1 ? '' : 's'}`)];
+  if (!runs.length) lines.push(node('p', 'help', 'Never run.'));
   for (const run of [...runs].reverse()) {
     const v = VERDICT[run.verdict] ?? {};
-    box.append(
-      node('div', 'sub', `${v.icon ?? '·'} ${run.verdict ?? '?'} — ${run.passed}/${run.passed + run.failed} in ${run.durationMs}ms · ${ago(run.at)}`),
+    lines.push(
+      node('div', 'histline', `${v.icon ?? '·'} ${run.verdict ?? '?'} — ${run.passed}/${run.passed + run.failed} in ${run.durationMs}ms · ${ago(run.at)}`),
     );
   }
-  box.append(
+  lines.push(
     node(
       'div',
-      'sub',
+      'help',
       res.knownWorld?.runs
         ? `Known world: built from ${res.knownWorld.runs} approved run(s).`
         : 'Known world: not established yet — approve a run you trust.',
     ),
+    btn('Close', 'link', () => box.replaceChildren()),
   );
+  box.replaceChildren(...lines);
 }
 
 async function patch(id, fields) {
@@ -544,14 +888,16 @@ async function remove(id) {
   await cmd({ cmd: 'recDelete', id });
   expanded.delete(id);
   lastResult.delete(id);
+  details.delete(id);
+  wizards.delete(id);
+  dirty += 1;
   refresh();
 }
 
 async function exportTest(id) {
   const res = await cmd({ cmd: 'recExportTest', id }).catch((err) => ({ ok: false, error: String(err) }));
   if (!res?.ok) return showPanelError(res?.error ?? 'Could not export.');
-  await navigator.clipboard.writeText(res.test ?? res.code ?? '');
-  toast('Playwright test copied to the clipboard');
+  await copyText(res.test ?? res.code ?? '', 'Playwright test copied to the clipboard');
 }
 
 // --------------------------------------------------------------- the report
@@ -566,7 +912,6 @@ async function exportTest(id) {
  * assertion for that.
  */
 function reportRow(id, res) {
-  const li = node('li', 'reportrow');
   const v = VERDICT[res.verdict] ?? { icon: '·', cls: '', text: res.verdict ?? 'done' };
   const box = node('div', `report ${v.cls}`);
 
@@ -597,40 +942,39 @@ function reportRow(id, res) {
     );
   }
 
+  const acts = node('div', 'btnrow');
   if (res.verdict === 'SURPRISE' || res.verdict === 'PASS_WITH_WARNING') {
-    const acts = node('div', 'btnrow');
-    acts.append(button('✓ This is the new normal', 'ghost sm', () => approve(id)));
-    box.append(acts);
+    acts.append(btn('✓ This is the new normal', 'sm', () => approve(id)));
   }
-
-  const dismiss = node('button', 'link', 'dismiss');
-  dismiss.addEventListener('click', () => {
+  acts.append(btn('dismiss', 'link', () => {
     lastResult.delete(id);
+    dirty += 1;
     refresh();
-  });
-  box.append(dismiss);
-
-  li.append(box);
-  return li;
+  }, { key: `dismiss:${id}` }));
+  box.append(acts);
+  return box;
 }
 
 // ------------------------------------------------------------- suite + sync
 
 /**
- * Run every flow in the library, one after another.
+ * Run the flows the filter shows, one after another.
  *
  * Sequential on purpose. A browser delivers input only to the tab it is
  * showing, so two flows running at once would have one of them clicking into a
  * hidden page — the exact failure v1.4.0 was released to stop reporting as
- * success.
+ * success. The scope is read again at the press: the list may have changed
+ * since it was painted.
  */
 async function runAll() {
   const res = await cmd({ cmd: 'recStatus' });
-  const list = (res?.recordings ?? []).filter((r) => !r.tags?.includes('@manual'));
-  if (!list.length) return toast('No flows to run.');
+  const scope = scopeText(filter);
+  const list = applyFilter(res?.recordings ?? []).filter((r) => !isManual(r));
+  if (!list.length) return toast(`No flows to run in ${scope}.`);
 
-  suiteRun = { total: list.length, done: 0, results: [] };
+  suiteRun = { total: list.length, done: 0, results: [], scope, running: true };
   el.suiteBtn.disabled = true;
+  el.suiteBtn.textContent = `Running ${scope}…`;
   for (const r of list) {
     suiteRun.done += 1;
     el.suiteProgress.textContent = `Running ${suiteRun.done}/${suiteRun.total} — ${r.name}`;
@@ -641,7 +985,9 @@ async function runAll() {
     }));
     suiteRun.results.push({ name: r.name, verdict: out?.verdict ?? 'FAIL_AUTOMATION', ok: out?.ok });
     lastResult.set(r.id, out);
+    dirty += 1;
   }
+  suiteRun.running = false;
   el.suiteBtn.disabled = false;
   renderSuiteSummary();
   refresh();
@@ -651,7 +997,7 @@ function renderSuiteSummary() {
   if (!suiteRun) return;
   const counts = {};
   for (const r of suiteRun.results) counts[r.verdict] = (counts[r.verdict] ?? 0) + 1;
-  el.suiteProgress.textContent = Object.entries(counts)
+  el.suiteProgress.textContent = `${suiteRun.scope}: ` + Object.entries(counts)
     .map(([verdict, n]) => `${VERDICT[verdict]?.icon ?? '·'} ${n} ${verdict}`)
     .join('   ');
 }
@@ -727,6 +1073,17 @@ export function wire() {
   el.syncPull.addEventListener('click', pull);
   el.syncPush.addEventListener('click', () => push());
   el.syncRefresh.addEventListener('click', syncStatus);
+
+  el.fSite.addEventListener('change', () => setFilter({ site: el.fSite.value, suite: '' }));
+  el.fSuite.addEventListener('change', () => setFilter({ suite: el.fSuite.value }));
+  el.fTag.addEventListener('change', () => setFilter({ tag: el.fTag.value }));
+  el.fVerdict.addEventListener('change', () => setFilter({ verdict: el.fVerdict.value }));
+  el.fFlaky.addEventListener('click', () => setFilter({ flaky: !filter.flaky }));
+  let typing = null;
+  el.fSearch.addEventListener('input', () => {
+    clearTimeout(typing);
+    typing = setTimeout(() => setFilter({ q: el.fSearch.value }), 150);
+  });
 }
 
-export { syncStatus };
+export { syncStatus, NO_SUITE, NO_SITE };

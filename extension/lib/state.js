@@ -38,9 +38,38 @@ const DEFAULTS = {
    * never enabled). Read synchronously by platform.settings — see noteInputMode.
    */
   inputMode: 'human',
-  /** Attach every attachable tab on startup, creation and navigation. */
-  autoAttach: false,
-  /** The agents list last pushed by the daemon: [{ id, name, owned: [tabId…] }]. */
+  /**
+   * (v3) Which tabs are attached by themselves, on startup, creation and navigation:
+   * 'off' | 'project' (only tabs on a connected agent's project sites, `projectDomains`) |
+   * 'all' (every attachable tab — v2's `true`). 'project' is the default: all-tabs capture shares
+   * one 10 MB storage.session quota, enables Runtime on every site and keeps the debugger bar up
+   * everywhere (V3_UX_PLAN U2). A capture filter, never an access boundary. See autoAttachMode.
+   */
+  autoAttach: 'project',
+  /**
+   * (v3) The daemon's `{type:'projects'}` push: `projectDomains` is the union of the hosts
+   * (host[:port]) of every connected agent's project environments; `projects` is
+   * [{ name, path, domains, agents:[agentId…] }]. The daemon's truth, re-sent on every connect.
+   */
+  projectDomains: [],
+  projects: [],
+  /**
+   * (v3) Tabs an agent could not drive because they are hidden: { [tabId]: { tabId, agent:{id,name},
+   * reason:'hidden', at, title, url, tool, delivery } } — what the panel's "agent blocked" toast reads
+   * when it opens later. Written by sw.js only; cleared when the tab is shown, popped out, handed off,
+   * closed, a later input from the daemon lands on it, or its agent is no longer connected.
+   */
+  blocked: {},
+  /**
+   * (v3) { [tabId]: epoch ms } — when the debugger session that is capturing this tab's console and
+   * network started (lib/cdp.js attach). Removed on detach and on tab close. The panel's "recording
+   * since 14:03".
+   */
+  attachedSince: {},
+  /**
+   * The agents list last pushed by the daemon: [{ id, name, owned: [tabId…], halted, project, cwd,
+   * current, currentEngine }] (DAEMON_PROTOCOL §5; the last four since v3).
+   */
   agents: [],
   /**
    * The project adapter, as delivered by the daemon on connect.
@@ -119,6 +148,24 @@ export const V1_AUTO_PORTS = Object.freeze({ from: 8766, to: 8775 });
 
 const INPUT_MODES = new Set(['off', 'human', 'stealth']);
 
+/** (v3) The auto-attach modes, in the order the panel offers them. */
+export const AUTO_ATTACH_MODES = Object.freeze(['off', 'project', 'all']);
+
+/**
+ * A stored or requested auto-attach value as a v3 mode, or null when it is not one.
+ *
+ * v2 stored a boolean. The approved plan (V3_UX_PLAN A2) maps it: `true` → 'all' (what it meant:
+ * every attachable tab), `false` → 'off'. That keeps the choice of an install that ever wrote its
+ * settings; only an install that never did gets the new default, 'project'. The mapping is applied
+ * on every read, so the worker agrees with itself before migrateLegacySettings() has rewritten the
+ * stored value (once).
+ */
+export function autoAttachMode(value) {
+  if (value === true) return 'all';
+  if (value === false) return 'off';
+  return AUTO_ATTACH_MODES.includes(value) ? value : null;
+}
+
 function durableSettings(settings = {}) {
   const out = {};
   if (settings.bridge) {
@@ -127,7 +174,8 @@ function durableSettings(settings = {}) {
     out.bridge = bridge;
   }
   if (INPUT_MODES.has(settings.inputMode)) out.inputMode = settings.inputMode;
-  if (typeof settings.autoAttach === 'boolean') out.autoAttach = settings.autoAttach;
+  const auto = autoAttachMode(settings.autoAttach);
+  if (auto) out.autoAttach = auto;
   return out;
 }
 
@@ -154,6 +202,8 @@ export async function getState() {
     updatedAt: local.about?.updatedAt ?? null,
   };
   if (!INPUT_MODES.has(state.inputMode)) state.inputMode = DEFAULTS.inputMode;
+  // Session state written by a v2 worker still holds a boolean (a worker restart keeps storage.session).
+  state.autoAttach = autoAttachMode(state.autoAttach) ?? DEFAULTS.autoAttach;
   // Keep the synchronous cache that platform.settings reads in step with the
   // truth. Every tool call reads state before it acts, so the cache is never
   // older than the call that depends on it.
@@ -238,6 +288,7 @@ async function commit(current, patch) {
   const next = { ...current, ...patch };
   if (patch.bridge) next.bridge = { ...current.bridge, ...patch.bridge };
   if (!INPUT_MODES.has(next.inputMode)) next.inputMode = current.inputMode;
+  next.autoAttach = autoAttachMode(next.autoAttach) ?? current.autoAttach;
 
   await platform.storage.session.set({ state: strip(next, [...LEGACY, ...COMPUTED]) });
   platform.settings.noteInputMode?.(next.inputMode);
@@ -249,14 +300,14 @@ async function commit(current, patch) {
   const bridgeChanged =
     !!patch.bridge && BRIDGE_SETTING_FIELDS.some((k) => k in patch.bridge && patch.bridge[k] !== current.bridge[k]);
   const inputChanged = 'inputMode' in patch && next.inputMode !== current.inputMode;
-  const autoChanged = 'autoAttach' in patch && !!next.autoAttach !== !!current.autoAttach;
+  const autoChanged = 'autoAttach' in patch && next.autoAttach !== current.autoAttach;
 
   if (bridgeChanged || inputChanged || autoChanged) {
     await platform.storage.local.set({
       settings: {
         bridge: { host: next.bridge.host, port: next.bridge.port, ...(next.bridge.v1AutoPort === true ? { v1AutoPort: true } : {}) },
         inputMode: next.inputMode,
-        autoAttach: !!next.autoAttach,
+        autoAttach: next.autoAttach,
       },
     });
   }
@@ -279,8 +330,17 @@ export async function migrateLegacySettings() {
   if (!settings) return null;
   const legacyKeys = ['mode', 'modeDefaultMigrated'].filter((k) => k in settings);
   const legacyBridge = ['token', 'serverPath', 'repoRoot'].filter((k) => settings.bridge && k in settings.bridge);
-  if (!legacyKeys.length && !legacyBridge.length) return null;
+  // (v3) A v2 boolean auto-attach becomes its mode, once: the stored value is rewritten as the
+  // string, so a second run finds nothing to do (autoAttachMode says why true → 'all', false → 'off').
+  const autoWas = typeof settings.autoAttach === 'boolean' ? settings.autoAttach : null;
+  if (!legacyKeys.length && !legacyBridge.length && autoWas === null) return null;
   const kept = durableSettings(settings);
+  const autoNote = autoWas === null ? ''
+    : ` Auto-attach now has three settings: yours, "${autoWas ? 'on' : 'off'}", became "${kept.autoAttach === 'all' ? 'All tabs' : 'Off'}".`;
+  if (!legacyKeys.length && !legacyBridge.length) {
+    await platform.storage.local.set({ settings: { ...settings, autoAttach: kept.autoAttach } });
+    return autoNote.trim();
+  }
   // A port in v1's automatic range (8766-8775) is kept — a person may have set G9_PORT there on
   // purpose, and the v2 compatibility entry starts g9d on the same G9_PORT — but FLAGGED: when
   // nothing answers there, the transport tries 8765 once and switches only if g9d answers there.
@@ -293,7 +353,7 @@ export async function migrateLegacySettings() {
   const note = autoPort ? ` The daemon address keeps port ${port} from v1; if the G9 daemon is not there, G9 switches to 8765 once it finds the daemon there.` : '';
   return (settings.mode
     ? `Removed the v1 control mode ("${settings.mode}") from settings: v2 has no modes — attaching a tab gives full access.`
-    : 'Removed obsolete v1 settings.') + note;
+    : 'Removed obsolete v1 settings.') + note + autoNote;
 }
 
 /**

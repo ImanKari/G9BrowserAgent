@@ -15,7 +15,7 @@
       <span class="name">G9 Browser Agent</span>
       <button id="versionBadge" class="ver" type="button" title="About this version">v</button>
     </div>
-    <button id="detachPanel" class="popout" type="button"
+    <button id="detachPanel" class="icon" type="button"
             title="Open this panel in its own window — more room for a long report, and it stays put while the page under test scrolls"
             aria-label="Open this panel in its own window">↗</button>
     <button id="stop" class="stop" type="button" aria-pressed="false"
@@ -28,8 +28,14 @@
   <div class="updnote" id="updateNote" role="status" hidden>
     <span id="updateText"></span>
     <button class="link" id="updateWhatsNew" type="button">what's new</button>
-    <button class="link" id="updateDismiss" type="button" aria-label="Dismiss the update notice">✕</button>
+    <button class="icon" id="updateDismiss" type="button" aria-label="Dismiss the update notice">✕</button>
   </div>
+
+  <!-- (v3, A3) An agent's input could not reach its tab because the tab is
+       hidden. Above the tab bar, whichever tab is open: this is the moment the
+       person has to act. Filled from state.blocked (so a panel opened later
+       still shows it) and the agentBlocked/agentUnblocked broadcasts. -->
+  <section class="alerts" id="blockedAlerts" aria-label="Agents waiting on a hidden tab" hidden></section>
 
   <!-- One job per tab. Recording a flow, filing a bug and checking which build
        is running have nothing to do with each other, and stacking them under
@@ -55,7 +61,7 @@
       <p class="muted" id="daemonHint">Waiting for the local G9 daemon.</p>
       <p class="warn" id="daemonWarn" hidden></p>
       <div class="btnrow" id="daemonRetryRow" hidden>
-        <button id="reconnectBtn" class="ghost sm" type="button">Reconnect now</button>
+        <button id="reconnectBtn" class="sm" type="button">Reconnect now</button>
         <!-- Not a live region: it counts down every second, and a screen
              reader would read out every tick. The status line above is live. -->
         <span class="muted sm grow-text" id="retryNote"></span>
@@ -63,7 +69,7 @@
       <div class="settings" id="daemonSettings" hidden>
         <label>Host <input id="host" value="127.0.0.1" spellcheck="false" autocomplete="off" /></label>
         <label>Port <input id="port" value="8765" inputmode="numeric" autocomplete="off" /></label>
-        <p class="muted sm">One daemon per machine, on 127.0.0.1:8765. Change the port only if you set <code>G9_PORT</code>.</p>
+        <p class="help">One daemon per machine, on 127.0.0.1:8765. Change the port only if you set <code>G9_PORT</code>.</p>
         <button id="saveDaemon" class="primary sm" type="button">Save &amp; reconnect</button>
       </div>
 
@@ -72,72 +78,92 @@
           <span class="label">Agents</span>
           <span class="muted sm" id="agentCount"></span>
         </div>
-        <ul class="minilist" id="agentList"></ul>
-        <p class="muted sm" id="agentEmpty" hidden>No agent is connected. Open your AI client — its G9 tools connect through the daemon.</p>
+        <ul class="list" id="agentList"></ul>
+        <p class="help" id="agentEmpty" hidden>No agent is connected. Open your AI client — its G9 tools connect through the daemon.</p>
       </div>
 
+      <!-- Folded by default: every browser the daemon drives is worth one line
+           until something is wrong with one (then it opens by itself). -->
       <div class="subblock" id="enginesBlock" hidden>
         <div class="row spread">
-          <span class="label">Engines</span>
+          <button class="disclose" id="enginesToggle" type="button" aria-expanded="false" aria-controls="engineList">
+            <span class="chev" aria-hidden="true">▾</span><span class="label">Engines</span>
+            <span class="muted sm" id="engineCount"></span>
+          </button>
           <button class="link" id="enginesRefresh" type="button">refresh</button>
         </div>
-        <ul class="minilist" id="engineList"></ul>
+        <ul class="list" id="engineList" hidden></ul>
       </div>
     </section>
 
-    <!-- The tab the agent acts on, and what can be done with it. -->
-    <section class="card" id="tabCard">
+    <!-- The tab agents act on, what is being captured on it, and where it can go. -->
+    <section class="card" id="tabCard" aria-labelledby="tabCardLabel">
       <div class="row spread">
-        <strong>Current tab</strong>
-        <span class="muted sm" id="attachedCount"></span>
+        <span class="label" id="tabCardLabel">Current tab</span>
+        <span class="row">
+          <span class="muted sm" id="attachedCount"></span>
+          <button id="detach" class="link" type="button" hidden
+                  title="Release every tab this browser has attached">Detach all</button>
+        </span>
       </div>
 
       <div id="attached" class="attached empty">
-        <p class="muted">No tab attached yet.</p>
+        <p class="muted">No tab yet.</p>
       </div>
 
-      <div class="btnrow">
-        <button id="attachActive" class="primary" type="button"
-                title="Attach the tab you are looking at and make it the one the agent acts on">Attach current tab</button>
-        <button id="detach" class="ghost" type="button" hidden
-                title="Release every tab this browser has attached">Detach all</button>
+      <!-- (v3, A1) The daemon pins each agent's tab on its first call, so an
+           Attach button had nothing left to do but start capture early. That
+           is what this says it does. -->
+      <div class="recnow">
+        <button id="recordNow" class="sm" type="button"
+                title="Start recording console and network on the tab you are looking at now, and make it the tab agents act on. Lifts Stop."><span class="dot rec" aria-hidden="true"></span> Record from now</button>
+        <label class="check" for="recordReload"
+               title="Reload the page right after capture starts, so its load (every request from the first) is recorded too">
+          <input type="checkbox" id="recordReload" /> reload to capture page load
+        </label>
       </div>
 
-      <label class="switch" for="autoAttach">
-        <input type="checkbox" id="autoAttach" role="switch" />
-        <span class="track" aria-hidden="true"></span>
-        <span class="txt"><b>Auto-attach</b> <span class="muted">every tab you open or load, so agents never have to ask.</span></span>
-      </label>
+      <div class="divider"></div>
 
-      <div class="tabacts">
-        <div class="tabact">
-          <button id="popoutTab" class="ghost sm" type="button">⧉ Pop out tab</button>
-          <p class="muted sm">Opens the page in its own window, in front, without reloading it. It keeps rendering while it is on screen. Do not minimise it. If another window will cover it completely, turn the WindowOcclusionEnabled policy off first.</p>
+      <fieldset class="field" id="autoAttachGroup">
+        <legend class="label">Auto-attach</legend>
+        <div class="seg">
+          <label title="Nothing attaches by itself: an agent attaches the tab it works on"><input type="radio" name="autoAttach" value="off" /><b>Off</b></label>
+          <label title="Tabs on the sites of connected agents' projects (g9.project.json environments)"><input type="radio" name="autoAttach" value="project" /><b>Project sites</b></label>
+          <label title="Every tab you open or load"><input type="radio" name="autoAttach" value="all" /><b>All tabs</b></label>
         </div>
-        <div class="tabact">
-          <button id="handoffTab" class="ghost sm" type="button">⇢ Send to background</button>
-          <p class="muted sm">Continues in a browser G9 launches; the page reloads there with its cookies and storage.</p>
-        </div>
+        <p class="help" id="autoAttachHelp"></p>
+        <p class="help" id="autoAttachSites" hidden></p>
+      </fieldset>
+
+      <div class="divider"></div>
+
+      <!-- (v3, A3) Offered in the moment by the toast above the tab bar; here
+           they are one line each, the long explanation in the title. -->
+      <div class="elsewhere" role="group" aria-labelledby="elsewhereLabel">
+        <span class="label" id="elsewhereLabel">Keep working elsewhere</span>
+        <button id="popoutTab" class="sm" type="button"
+                title="Opens the page in its own window, in front, without reloading it. It keeps rendering while it is on screen. Do not minimise it. If another window will cover it completely, turn the WindowOcclusionEnabled policy off first.">⧉ Pop out tab</button>
+        <span class="help">Own window, keeps rendering — don't minimise it.</span>
+        <button id="handoffTab" class="sm" type="button"
+                title="Continues in a browser G9 launches; the page reloads there with its cookies and storage. In-page state that was never saved stays behind.">⇢ Send to background</button>
+        <span class="help">Reloads in a browser G9 launches.</span>
       </div>
       <div class="result" id="tabResult" role="status" hidden></div>
     </section>
 
     <!-- How the agent's pointer and keyboard look to the page. -->
     <section class="card">
-      <fieldset class="inputmode" id="inputModeGroup">
-        <legend>Input</legend>
-        <label class="opt">
-          <input type="radio" name="inputMode" value="off" />
-          <span><b>Direct</b> <span class="muted">Instant, exact input as in v1, unless the agent asks for human input. Fastest; easiest for a bot detector to spot.</span></span>
-        </label>
-        <label class="opt">
-          <input type="radio" name="inputMode" value="human" />
-          <span><b>Human</b> <span class="muted">Curved mouse paths, natural clicks and typing rhythm. The default; an agent can still ask for direct input.</span></span>
-        </label>
-        <label class="opt">
-          <input type="radio" name="inputMode" value="stealth" />
-          <span><b>Stealth</b> <span class="muted">Human input with no scripted shortcuts, and page console capture off. Always used: an agent cannot ask for less. Slowest. In your own browser this is about input only: while G9 is attached the browser shows its debugging bar, which pages can notice. Use a launched browser for pages that must not.</span></span>
-        </label>
+      <fieldset class="field" id="inputModeGroup">
+        <legend class="label">Input</legend>
+        <div class="seg">
+          <label title="Instant, exact input as in v1, unless the agent asks for human input. Fastest; easiest for a bot detector to spot."><input type="radio" name="inputMode" value="off" /><b>Direct</b> <span class="muted">Instant, exact input as in v1, unless the agent asks for human input. Fastest; easiest for a bot detector to spot.</span></label>
+          <label title="Curved mouse paths, natural clicks and typing rhythm. The default; an agent can still ask for direct input."><input type="radio" name="inputMode" value="human" /><b>Human</b> <span class="muted">Curved mouse paths, natural clicks and typing rhythm. The default; an agent can still ask for direct input.</span></label>
+          <label title="In your own browser this is about input only: while G9 is attached the browser shows its debugging bar, which pages can notice. Use a launched browser for pages that must not."><input type="radio" name="inputMode" value="stealth" /><b>Stealth</b> <span class="muted">Human input with no scripted shortcuts, and page console capture off. Always used: an agent cannot ask for less. Slowest; your own browser still shows its debugging bar while attached.</span></label>
+        </div>
+        <!-- The selected option's words, for the eye; a screen reader already
+             hears them as part of the option's label. -->
+        <p class="help" id="inputHelp" aria-hidden="true"></p>
       </fieldset>
     </section>
 
@@ -145,31 +171,31 @@
          until then and an empty card is one more thing to read past. -->
     <section class="card" id="sessionCard" hidden>
       <div class="row spread">
-        <strong>Named tabs</strong>
-        <span class="muted sm">a browser only clicks into the tab it is showing</span>
+        <span class="label">Named tabs</span>
+        <span class="muted sm" title="A browser only clicks into the tab it is showing">shown tab gets the clicks</span>
       </div>
-      <ul class="minilist" id="sessionList"></ul>
+      <ul class="list" id="sessionList"></ul>
     </section>
 
     <section class="card">
       <div class="row spread">
-        <strong>Connect your agent</strong>
-        <button class="link" id="copyGuide" type="button">copy config</button>
+        <span class="label">Connect your agent</span>
+        <span class="row">
+          <button class="link" id="copyGuide" type="button">copy config</button>
+          <button class="link" id="snippetToggle" type="button" aria-expanded="false" aria-controls="snippet">show</button>
+        </span>
       </div>
-      <p class="muted">
-        G9 Desktop registers your AI clients for you. For a manual setup, add this
-        to your MCP client's config — the shim starts the daemon when it needs it.
-      </p>
-      <pre class="snippet" id="snippet"></pre>
+      <p class="help">G9 Desktop registers your AI clients. For a manual setup, add this to your MCP client's config — the shim starts the daemon when it needs it.</p>
+      <pre class="snippet" id="snippet" hidden></pre>
     </section>
 
     <section class="card grow">
       <div class="row spread">
-        <strong>Activity</strong>
+        <span class="label">Activity</span>
         <button class="link" id="clearLog" type="button">clear</button>
       </div>
       <ul class="log" id="log" aria-label="Agent activity">
-        <li class="muted pad">Nothing yet. Agent actions will appear here in real time.</li>
+        <li class="pad">Nothing yet. Agent actions appear here in real time.</li>
       </ul>
     </section>
   </div>
@@ -177,48 +203,56 @@
   <!-- ========================================================= AUTOMATION -->
   <div class="tabbody" data-body="automation" id="body-automation" role="tabpanel" aria-labelledby="tab-automation" hidden>
     <section class="card">
-      <strong>Record a flow</strong>
-      <p class="muted">
-        Press record, then use the page exactly as you would when testing it.
-        Every click, entry, and selection is captured with several ways to find
-        the element again, so the flow still replays after a redeploy.
-      </p>
+      <div class="row spread">
+        <span class="label">Record a flow</span>
+        <span class="muted sm" title="Every click, entry and selection is captured with several ways to find the element again, so the flow still replays after a redeploy.">several locators per step</span>
+      </div>
       <div class="btnrow">
         <button id="recToggle" class="primary" type="button">● Start recording</button>
-        <button id="recStop" class="primary stop" type="button" hidden>■ Stop and save</button>
+        <button id="recStop" class="stop" type="button" hidden>■ Stop and save</button>
       </div>
-      <p class="muted sm" id="recWhy" role="status" hidden></p>
+      <p class="help" id="recWhy" role="status" hidden></p>
       <p class="reclive" id="recLive" hidden></p>
     </section>
 
-    <section class="card grow">
+    <section class="card" aria-labelledby="flowsLabel">
       <div class="row spread">
-        <strong>Saved flows</strong>
+        <span class="label" id="flowsLabel">Flows</span>
         <span class="muted sm" id="recCount"></span>
       </div>
-      <ul class="minilist flows" id="recList"></ul>
-      <p class="muted pad" id="recEmpty">No flows recorded yet.</p>
-    </section>
 
-    <section class="card" id="suiteCard" hidden>
-      <div class="row spread">
-        <strong>Run everything</strong>
-        <button id="suiteBtn" class="primary sm" type="button">▶ Full test</button>
+      <!-- Only when the page in front of the person has flows: they land on it. -->
+      <div class="affinity" id="flowAffinity" hidden></div>
+
+      <div class="filters" id="flowFilters" role="group" aria-label="Filter flows" hidden>
+        <select id="fSite" aria-label="Site"></select>
+        <select id="fSuite" aria-label="Suite"></select>
+        <select id="fTag" aria-label="Tag"></select>
+        <select id="fVerdict" aria-label="Last verdict"></select>
+        <button id="fFlaky" class="chip" type="button" aria-pressed="false" title="Only flows whose recent runs both passed and failed">flaky only</button>
+        <input id="fSearch" type="search" placeholder="Search flows" aria-label="Search flows" spellcheck="false" autocomplete="off" />
       </div>
-      <p class="muted" id="suiteProgress">
-        Runs every saved flow in order, skipping any tagged <code>@manual</code>.
-      </p>
+
+      <!-- "Run all", scoped to the filter above and named by it, so it is never
+           an accidental run of everything. -->
+      <div class="runbar" id="suiteCard" hidden>
+        <button id="suiteBtn" class="primary sm" type="button">▶ Run</button>
+        <span class="help" id="suiteProgress">Runs in order; skips flows tagged <code>@manual</code>.</span>
+      </div>
+
+      <div class="groups" id="recList"></div>
+      <p class="empty" id="recEmpty">No flows recorded yet. Press Start recording, then use the page.</p>
     </section>
 
     <section class="card">
       <div class="row spread">
-        <strong>Repository</strong>
+        <span class="label">Repository</span>
         <button class="link" id="syncRefresh" type="button">check</button>
       </div>
-      <p class="muted" id="syncLine">Flows in this browser live only in this browser until you push them.</p>
+      <p class="help" id="syncLine">Flows in this browser live only in this browser until you push them.</p>
       <div class="btnrow">
-        <button id="syncPull" class="ghost sm" type="button">↓ Pull from repo</button>
-        <button id="syncPush" class="ghost sm" type="button">↑ Push all to repo</button>
+        <button id="syncPull" class="sm" type="button">↓ Pull from repo</button>
+        <button id="syncPush" class="sm" type="button">↑ Push all to repo</button>
       </div>
     </section>
   </div>
@@ -227,78 +261,91 @@
   <div class="tabbody" data-body="issues" id="body-issues" role="tabpanel" aria-labelledby="tab-issues" hidden>
 
     <!-- list view -->
-    <div id="issueListView">
+    <div id="issueListView" class="stack">
       <section class="card">
-        <strong>Report what you found</strong>
-        <p class="muted">
-          The screenshot, URL, console tail, failed requests, and the surrounding
-          DOM are captured the moment you press this — while the bug is still on
-          screen. You add detail afterwards.
-        </p>
-        <div class="btnrow">
-          <button id="issueNew" class="primary" type="button">⚑ New issue</button>
-        </div>
-      </section>
-
-      <section class="card grow">
         <div class="row spread">
-          <strong>Open issues</strong>
+          <button id="issueNew" class="primary" type="button"
+                  title="The screenshot, URL, console tail, failed requests and the surrounding DOM are captured the moment you press this — while the bug is still on screen. You add detail afterwards.">⚑ New issue</button>
           <span class="muted sm" id="issueUsage"></span>
         </div>
-        <ul class="minilist" id="issueList"></ul>
-        <p class="muted pad" id="issueEmpty">Nothing reported yet.</p>
+        <p class="help">Captures the screen, console, failed requests and DOM now; you write it up after.</p>
+      </section>
+
+      <section class="card" aria-labelledby="issuesLabel">
+        <div class="row spread">
+          <span class="label" id="issuesLabel">Issues</span>
+          <span class="muted sm" id="issueCount"></span>
+        </div>
+        <div class="filters" id="issueFilters" role="group" aria-label="Filter issues" hidden>
+          <select id="iSite" aria-label="Site"></select>
+          <select id="iStatus" aria-label="Status"></select>
+          <select id="iSeverity" aria-label="Severity"></select>
+          <select id="iTag" aria-label="Tag"></select>
+          <input id="iSearch" type="search" placeholder="Search issues" aria-label="Search issues" spellcheck="false" autocomplete="off" />
+        </div>
+        <div class="groups" id="issueList"></div>
+        <p class="empty" id="issueEmpty">Nothing reported yet.</p>
       </section>
     </div>
 
     <!-- detail view -->
-    <div id="issueDetailView" hidden>
+    <div id="issueDetailView" class="stack" hidden>
       <section class="card">
         <div class="row spread">
-          <button class="link" id="issueBack" type="button">← all issues</button>
-          <span class="muted sm" id="issueSaved"></span>
+          <button class="link" id="issueBack" type="button">← All issues</button>
+          <span class="muted sm" id="issueSaved" role="status"></span>
         </div>
         <input id="dTitle" class="bigfield" placeholder="Short summary of the problem" spellcheck="false" aria-label="Issue title" />
         <textarea id="dBody" rows="5" placeholder="What you did, what you expected, what happened instead." aria-label="Issue description"></textarea>
-        <div class="row">
-          <select id="dSeverity" title="Severity" aria-label="Severity">
-            <option value="blocker">Blocker</option>
-            <option value="major">Major</option>
-            <option value="normal">Normal</option>
-            <option value="minor">Minor</option>
-          </select>
-          <select id="dStatus" title="Status" aria-label="Status">
-            <option value="open">Open</option>
-            <option value="filed">Filed</option>
-            <option value="closed">Closed</option>
-          </select>
-          <input id="dFiledAs" placeholder="PROJ-1234" spellcheck="false" title="Tracker key once filed" aria-label="Tracker key once filed" />
+        <div class="fields">
+          <label class="fl">Severity
+            <select id="dSeverity">
+              <option value="blocker">Blocker</option>
+              <option value="major">Major</option>
+              <option value="normal">Normal</option>
+              <option value="minor">Minor</option>
+            </select>
+          </label>
+          <label class="fl">Status
+            <select id="dStatus">
+              <option value="open">Open</option>
+              <option value="filed">Filed</option>
+              <option value="closed">Closed</option>
+            </select>
+          </label>
+          <label class="fl code">Tracker key
+            <input id="dFiledAs" placeholder="PROJ-1234" spellcheck="false" title="Tracker key once filed" />
+          </label>
+          <label class="fl">Tags
+            <input id="dTags" placeholder="checkout, regression" spellcheck="false" title="Comma-separated" />
+          </label>
         </div>
       </section>
 
       <section class="card">
         <div class="row spread">
-          <strong>Evidence</strong>
+          <span class="label">Evidence</span>
           <span class="muted sm" id="dAttCount"></span>
         </div>
-        <div class="btnrow wrap">
-          <button id="dShot" class="ghost sm" type="button">📷 Screenshot</button>
-          <button id="dShotFull" class="ghost sm" type="button">🖼 Full page</button>
-          <button id="dVideo" class="ghost sm" type="button">● Record tab</button>
-          <button id="dFile" class="ghost sm" type="button">📎 Attach file</button>
-          <button id="dRecapture" class="ghost sm" type="button">↻ Re-capture context</button>
+        <div class="btnrow">
+          <button id="dShot" class="sm" type="button">📷 Screenshot</button>
+          <button id="dShotFull" class="sm" type="button">🖼 Full page</button>
+          <button id="dVideo" class="sm" type="button">● Record tab</button>
+          <button id="dFile" class="sm" type="button">📎 Attach file</button>
+          <button id="dRecapture" class="sm" type="button" title="Capture the URL, console, failed requests and DOM again, from the page as it is now">↻ Re-capture</button>
         </div>
         <input type="file" id="dFileInput" hidden multiple />
         <ul class="attgrid" id="dAttachments"></ul>
       </section>
 
       <section class="card">
-        <strong>Captured context</strong>
-        <pre class="snippet" id="dContext"></pre>
+        <span class="label">Captured context</span>
+        <pre class="snippet wrap" id="dContext"></pre>
       </section>
 
       <section class="card">
         <div class="btnrow">
-          <button id="dDelete" class="ghost danger" type="button">Delete this issue</button>
+          <button id="dDelete" class="danger sm" type="button">Delete this issue</button>
         </div>
       </section>
     </div>
@@ -311,7 +358,7 @@
       <div class="herotext">
         <div class="heroname">G9 Browser Agent</div>
         <div class="herover" id="aboutVersion">v</div>
-        <div class="muted" id="aboutUpdated"></div>
+        <div class="help" id="aboutUpdated"></div>
       </div>
     </section>
 
@@ -328,14 +375,14 @@
       </dl>
       <p class="warn" id="aboutSkew" hidden></p>
       <div class="btnrow">
-        <button id="aboutCopy" class="ghost sm" type="button">Copy details</button>
-        <button id="aboutWelcome" class="ghost sm" type="button">What's new in v2</button>
+        <button id="aboutCopy" class="sm" type="button">Copy details</button>
+        <button id="aboutWelcome" class="sm" type="button">What's new</button>
       </div>
     </section>
 
     <section class="card">
-      <strong>Two engines, one tool layer</strong>
-      <p class="muted">
+      <span class="label">Two engines, one tool layer</span>
+      <p class="help">
         This extension is Engine 1: agents drive the tabs of this browser. Engine 2 is a
         browser the daemon launches in the background — for unattended runs and for tabs
         you send there. Both run the same tools, and the daemon keeps each tab to one agent

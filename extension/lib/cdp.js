@@ -69,10 +69,13 @@ export async function attachedTabIds() {
   return targets.filter((t) => t.attached && t.tabId != null).map((t) => t.tabId);
 }
 
-export async function attach(tabId) {
+export async function attach(tabId, { log = true } = {}) {
   const state = await getState();
   if (state.attachedTabs.includes(tabId) && (await isAttached(tabId))) return;
 
+  // A NEW debugger session starts capture now (attachedSince, below); one found still attached
+  // from before a worker restart has been capturing all along and keeps its start time.
+  let fresh = true;
   try {
     await platform.debugger.attach(tabId);
   } catch (err) {
@@ -82,6 +85,7 @@ export async function attach(tabId) {
     if (msg.includes('Another debugger') || msg.includes('already attached')) {
       if (!(await isAttached(tabId))) throw new CdpError(msg, { tabId });
       // It's us from before the SW restarted — carry on.
+      fresh = false;
     } else {
       throw new CdpError(msg, { tabId });
     }
@@ -117,8 +121,30 @@ export async function attach(tabId) {
   // (auto-attach on several loading tabs, two agents on two tabs) each read [] and wrote [itself],
   // and one tab was lost from attachedTabs — Detach then left it debugged while reporting a clean
   // release, and Stealth never reached it (extension review, 2026-09-22: 20/20 stub runs).
-  await updateState((s) => (s.attachedTabs.includes(tabId) ? null : { attachedTabs: [...s.attachedTabs, tabId] }));
-  await logActivity({ kind: 'attach', tabId, ok: true });
+  await updateState((s) => noteAttached(s, tabId, fresh));
+  // `log: false` — the caller writes the one activity line itself (the panel's Record from now,
+  // which may reload the page too: one gesture, one line).
+  if (log) await logActivity({ kind: 'attach', tabId, ok: true });
+}
+
+/**
+ * The state patch for "tab N is attached": listed in attachedTabs, and its capture start time
+ * (attachedSince, v3 — the panel's "recording since 14:03") set when the session is new or none
+ * is known. null when nothing changes. Runs inside updateState: never a read-modify-write of its own.
+ */
+function noteAttached(s, tabId, fresh) {
+  const since = s.attachedSince ?? {};
+  const patch = {};
+  if (!s.attachedTabs.includes(tabId)) patch.attachedTabs = [...s.attachedTabs, tabId];
+  if (fresh || since[tabId] == null) patch.attachedSince = { ...since, [tabId]: Date.now() };
+  return Object.keys(patch).length ? patch : null;
+}
+
+/** attachedTabs and attachedSince without these tabs (a detach, a closed tab) — for updateState. */
+export function forgetAttached(s, tabIds) {
+  const gone = new Set(tabIds.map(String));
+  const since = Object.fromEntries(Object.entries(s.attachedSince ?? {}).filter(([id]) => !gone.has(id)));
+  return { attachedTabs: s.attachedTabs.filter((id) => !gone.has(String(id))), attachedSince: since };
 }
 
 /** Tabs whose Runtime domain this extension enabled (the stealth switch must reach every one). */
@@ -152,7 +178,7 @@ export function attachHeld(tabId) {
   // Cross-origin frames, as attach() does (platform-cdp holds each one until it is prepared).
   answers.push(rawSend(tabId, 'Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }).catch(() => {}));
   return Promise.all(answers).then(async () => {
-    await updateState((s) => (s.attachedTabs.includes(tabId) ? null : { attachedTabs: [...s.attachedTabs, tabId] }));
+    await updateState((s) => noteAttached(s, tabId, true));
     await logActivity({ kind: 'attach', tabId, ok: true });
   });
 }
@@ -199,7 +225,7 @@ export async function detachMany(tabIds) {
     ? new Set()
     : new Set(await attachedTabIds().catch(() => []));
 
-  await updateState((s) => ({ attachedTabs: s.attachedTabs.filter((id) => !ids.includes(id)) }));
+  await updateState((s) => forgetAttached(s, ids));
 
   const results = ids.map((id) => ({
     tabId: id,

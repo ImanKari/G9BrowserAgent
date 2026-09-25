@@ -22,6 +22,11 @@
  *   node setup/unittest.mjs              every suite
  *   node setup/unittest.mjs daemon seam  only files whose name contains a filter
  *   G9_UNIT_NO_BROWSER=1 node setup/unittest.mjs   no real browser at all
+ *
+ * Suites run one after another. While one runs longer than 15 s, a line every 15 s says which, for
+ * how long, and how many of its tests have passed — interaction.test.mjs alone takes over two
+ * minutes (its tests wait on real, human-paced timers), and silence is indistinguishable from a
+ * hang. For only the suites a change needs, several at a time: node setup/check.mjs.
  */
 
 import { spawn } from 'node:child_process';
@@ -32,6 +37,7 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const UNIT = path.join(HERE, 'unit');
 const PER_FILE_TIMEOUT_MS = 5 * 60_000;
+const PROGRESS_MS = Number(process.env.G9_CHECK_HEARTBEAT_MS) || 15_000;
 
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('--'));
 const verbose = process.argv.includes('--verbose');
@@ -52,12 +58,18 @@ function runFile(file) {
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { out += d; });
+    const name = path.basename(file);
+    const progress = setInterval(() => {
+      const passed = (out.match(/^s*PASS/gm) ?? []).length;
+      console.log(color(90, `  … ${name} still running, ${Math.round((Date.now() - started) / 1000)} s, ${passed} passed so far`));
+    }, PROGRESS_MS);
     const timer = setTimeout(() => {
       out += `\n(timed out after ${PER_FILE_TIMEOUT_MS / 1000}s)`;
       child.kill();
     }, PER_FILE_TIMEOUT_MS);
     child.on('exit', (code, signal) => {
       clearTimeout(timer);
+      clearInterval(progress);
       const passes = (out.match(/^\s*PASS\b/gm) ?? []).length;
       const skips = (out.match(/^\s*SKIP\b/gm) ?? []).length;
       resolve({ file, code: code ?? (signal ? 1 : 0), passes, skips, out, ms: Date.now() - started });

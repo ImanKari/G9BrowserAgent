@@ -26,9 +26,9 @@ npm run test:render  # the real window, off-screen: every view as PNGs in dark a
 ```
 
 Latest recorded state (the dates and versions say which run):
-- `npm test`: 14 of 14 files, 181 PASS lines (2.0.3, 2026-09-25; 176 on 2026-09-22);
+- `npm test`: 14 of 14 files, 181 PASS lines (3.0.1, 2026-09-25; 176 on 2026-09-22);
 - `test:daemon`: 15 of 15 (2.0.1, 2026-09-23);
-- `test:packaged`: 7 of 7 (2.0.3, 2026-09-25, the build of `G9-Setup-2.0.3.exe`);
+- `test:packaged`: 7 of 7 (3.0.0, 2026-09-25, the build of `G9-Setup-3.0.0.exe`);
 - `test:render`: 4 scenarios (empty and populated, dark and light), no problems reported, and no
   window ever on screen or in the foreground (2.0.1, 2026-09-23).
 
@@ -136,7 +136,7 @@ Everything the wizard does is written to `G9_HOME/logs/install.log`.
 
 ```powershell
 $env:G9_UPDATE_URL = 'https://updates.example.com/g9/'   # optional; see below
-npm run build:win                                         # → dist/G9-Setup-<version>.exe (2.0.3 now)
+npm run build:win                                         # → dist/G9-Setup-<version>.exe (3.0.1 now; the last one built is 3.0.0)
 ```
 
 * NSIS, assisted, **per user**, no administrator rights, fixed folder. `electron-builder.yml`:
@@ -145,7 +145,7 @@ npm run build:win                                         # → dist/G9-Setup-<v
   "install for all users" page never appears. The folder is electron-builder's per-user default,
   `%LOCALAPPDATA%\Programs\G9`. The installer was built and its payload checked, but it was never
   run on the owner's machine.
-* The last build, of 2026-09-25 (version 2.0.3): `dist/G9-Setup-2.0.3.exe`, 103,591,675 bytes,
+* The last build, of 2026-09-25 (version 3.0.0): `dist/G9-Setup-3.0.0.exe`, 103,620,667 bytes,
   `NotSigned`, built without a feed (no `latest.yml`). Its payload matched the repository file for
   file.
 * The uninstaller removes the program folder only: `G9_HOME` (profiles, runs, settings, the extension

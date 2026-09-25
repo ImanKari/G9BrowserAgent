@@ -8,19 +8,34 @@
  * ## What v2 took out, and why nothing replaced it
  *
  * The four modes and the workspace allowlist are gone (plan D6): attaching a
- * tab gives agents that tab, fully, and Auto-attach does it for every tab. The
- * modes were a product boundary on a local, trusted deployment; the operational
- * safeguards — Stop and the activity log — stay, because they are how a person
- * stays in charge of what is running in their own browser.
+ * tab gives agents that tab, fully. The modes were a product boundary on a
+ * local, trusted deployment; the operational safeguards — Stop and the activity
+ * log — stay, because they are how a person stays in charge of what is running
+ * in their own browser. Bridge discovery is gone too: one daemon, one port.
  *
- * Bridge discovery is gone too. There is one daemon per machine on one port,
- * and a list with one entry in it is a question nobody needs to answer.
+ * ## What v3 changed (V3_UX_PLAN part A)
+ *
+ * - The big "Attach current tab" button is gone (U1): the daemon pins each
+ *   agent's tab on its first call, so its only remaining job was to start
+ *   console/network capture early. "Record from now" says exactly that.
+ * - Auto-attach has three settings, default Project sites (U2): all-tabs
+ *   capture shares one storage quota, enables Runtime on every site and keeps
+ *   the debugging bar up everywhere.
+ * - Pop out and Send to background are offered when they are needed — a toast
+ *   when an agent's tab is hidden (U3) — and otherwise are one line each.
+ * - Agents can be told apart: project and current tab (U4). The daemon line no
+ *   longer names a project: it was whichever session started the daemon.
+ * - The current tab's URL is origin plus a truncated path (U5): a signed URL
+ *   used to fill a third of the panel.
  *
  * Every command used here is in ARCHITECTURE_V2 §13; setup/unit/panel.test.mjs
  * checks that, so a renamed command fails a test instead of a button.
  */
 
-import { api, el, cmd, node, toast, showPanelError, view, setTitle, VERSION } from './ui.js';
+import { displayUrl } from '../lib/sites.js';
+import {
+  el, cmd, node, btn, chip, toast, showPanelError, view, setTitle, VERSION, hm, middle, prefs, copyText, keepFocus,
+} from './ui.js';
 import { renderUpdateNote, noteDaemon } from './about.js';
 
 const DEFAULT_PORT = 8765;
@@ -30,6 +45,18 @@ const TABS_TTL_MS = 5_000;
 const INFO_TTL_MS = 10_000;
 const INPUT_LEVELS = ['off', 'human', 'stealth'];
 const INPUT_NAMES = { off: 'Direct', human: 'Human', stealth: 'Stealth' };
+const AUTO_MODES = ['off', 'project', 'all'];
+const AUTO_NAMES = { off: 'Off', project: 'Project sites', all: 'All tabs' };
+/** One line per auto-attach setting: what it attaches, and for 'all' what it costs. */
+const AUTO_HELP = {
+  off: 'Nothing attaches by itself: an agent attaches the tab it works on, or press Record from now.',
+  project: 'Attaches tabs on connected agents’ project sites, so their console and network are recorded from the first load.',
+  all: 'Attaches every tab you open or load — one shared capture quota, and the debugging bar on every tab.',
+};
+/** Whether the person unfolded the Engines list. */
+const ENGINES_OPEN_KEY = 'g9.enginesOpen';
+/** Blocked-tab toasts the person dismissed, by `${tabId}:${at}`, so a reopened panel does not repeat them. */
+const DISMISSED_KEY = 'g9.blockedDismissed';
 
 /** `listTabs` rows (§4.1 shape), for titles and window states that state alone does not carry. */
 const tabRows = { at: 0, rows: [], pending: null, fromStatus: false };
@@ -46,7 +73,7 @@ const agentsMemo = { key: null, infoStale: false };
 /** What each button-bearing list last painted. See changed(). */
 const painted = new Map();
 /** Buttons whose command is in flight, so a double click is not a second handoff. */
-const busy = { popout: false, handoff: false, input: false, auto: false };
+const busy = { popout: false, handoff: false, input: false, auto: false, record: false };
 
 let refreshing = null;
 let again = false;
@@ -97,13 +124,15 @@ function render(state, status) {
   noteStatusRows(status);
   setTitle(state);
   renderStop(state);
+  renderBlocked(state);
   renderDaemon(state);
   renderAgents(state);
   renderEngines(state);
   renderCurrent(state, status);
+  renderAutoAttach(state);
   renderInput(state);
   renderSessions(state, status);
-  el.snippet.textContent = buildSnippet(state);
+  setText(el.snippet, buildSnippet(state));
   renderLog(state.activity);
   renderUpdateNote(state);
   maybeFetchInfo(state);
@@ -123,11 +152,9 @@ function renderDaemon(state) {
   if (connected) {
     dot = 'on';
     label = 'Daemon connected';
-    hint =
-      `ws://${address}/g9` +
-      (b.engineId ? ` · this browser is ${b.engineId}` : '') +
-      (state.project?.found && state.project.path ? ` · ${projectName(state.project.path)}` : '') +
-      ' — agents can use this browser now.';
+    // No project name here (U4): it was the project of whichever session
+    // started the daemon, unrelated to this browser. Each agent row names its own.
+    hint = `ws://${address}/g9${b.engineId ? ` · ${b.engineId}` : ''}`;
   } else if (b.problem) {
     dot = 'warn';
     label = /v1 bridge/i.test(b.problem) ? 'Port taken by a v1 bridge' : 'Daemon refused this extension';
@@ -150,6 +177,7 @@ function renderDaemon(state) {
   // words would have a screen reader announce "Daemon connected" forever.
   setText(el.daemonLabel, label);
   setText(el.daemonHint, hint);
+  el.daemonHint.title = connected && b.engineId ? `This browser is ${b.engineId} to the daemon` : '';
 
   el.daemonPill.hidden = !(connected && daemonVersion);
   el.daemonPill.textContent = daemonVersion ? `g9d v${daemonVersion}` : '';
@@ -191,9 +219,11 @@ function paintRetry() {
 }
 
 /**
- * Who is connected through the daemon, and which of this browser's tabs each
- * one owns. The daemon pushes the list (`{type:'agents'}`) and the worker keeps
- * the last one in state; tab ids in it are this browser's own.
+ * Who is connected through the daemon: which project each agent works in, and
+ * the tab it is on (U4). The daemon pushes the list (`{type:'agents'}`) and the
+ * worker keeps the last one in state; tab ids in it are this browser's own.
+ * v2 rows carried only `owned`, so three agents rendered as three identical
+ * rows — `project`, `current` and `currentEngine` are what tells them apart.
  */
 function renderAgents(state) {
   const connected = !!state.bridge?.connected;
@@ -204,46 +234,72 @@ function renderAgents(state) {
   el.agentCount.textContent = agents.length ? `${agents.length} connected` : '';
   el.agentEmpty.hidden = agents.length > 0;
 
-  const needed = agents.flatMap(ownedTabs);
+  const needed = agents.flatMap((a) => [...ownedTabs(a), ...(Number.isFinite(a.current) ? [a.current] : [])]);
   if (needed.length) ensureTabRows(needed);
-  const model = {
-    cur: state.currentTabId ?? null,
-    agents: agents.map((a) => [a.id, a.name, !!a.halted, ownedTabs(a).map((t) => [t, rowFor(t)?.title, rowFor(t)?.url])]),
-  };
+  const model = agents.map((a) => [
+    a.id, a.name, a.project, a.cwd, !!a.halted, a.current, a.currentEngine,
+    ownedTabs(a).map((t) => [t, tabTitle(t)]), Number.isFinite(a.current) ? tabTitle(a.current) : null,
+  ]);
   if (!changed('agents', model)) return;
-  el.agentList.replaceChildren();
+  el.agentList.replaceChildren(...agents.map(agentRow));
+}
 
-  for (const a of agents) {
-    const owned = ownedTabs(a);
+function agentRow(a) {
+  const li = node('li', `item agent${a.halted ? ' halted' : ''}`);
+  const main = node('div', 'main');
 
-    const li = document.createElement('li');
-    if (a.halted) li.classList.add('halted');
-    const who = node('div', 'who');
-    who.append(
-      node('div', 'nm', `${a.name || 'agent'}${a.id ? ` · ${a.id}` : ''}${a.halted ? ' · halted' : ''}`),
-      node(
-        'div',
-        'sub',
-        owned.length
-          ? `owns ${owned.length} tab${owned.length === 1 ? '' : 's'} in this browser`
-          : 'owns no tab in this browser',
-      ),
-    );
-    if (owned.length) {
-      const chips = node('div', 'tabchips');
-      for (const tabId of owned) {
-        const r = rowFor(tabId);
-        const chip = node('button', `tabchip${tabId === state.currentTabId ? ' cur' : ''}`, r?.title || r?.url || `tab ${tabId}`);
-        chip.type = 'button';
-        chip.title = `${r?.url || `tab ${tabId}`} — show this tab`;
-        chip.addEventListener('click', () => showTab(tabId));
-        chips.append(chip);
-      }
-      who.append(chips);
-    }
-    li.append(who);
-    el.agentList.append(li);
+  const top = node('div', 'row');
+  const nm = node('div', 'nm', [a.name || 'agent', a.project].filter(Boolean).join(' · '));
+  nm.title = [a.id ? `id ${a.id}` : null, a.cwd ? `working in ${a.cwd}` : null].filter(Boolean).join(' · ');
+  top.append(nm);
+  if (a.halted) top.append(chip('halted', 'err', 'This agent is stopped'));
+  main.append(top);
+
+  // Line two: where it works.
+  const where = node('div', 'where');
+  const owned = ownedTabs(a);
+  if (a.currentEngine === 'extension' && Number.isFinite(a.current)) {
+    where.append(node('span', null, 'on:'), tabChip(a.current, { cur: true }));
+  } else if (a.currentEngine === 'launched') {
+    where.append(node('span', null, 'working in a launched browser'));
+  } else if (a.currentEngine === 'elsewhere') {
+    where.append(node('span', null, 'working in another browser'));
+  } else if (a.currentEngine === null || 'currentEngine' in a) {
+    where.append(node('span', null, 'no tab yet'));
+  } else {
+    // A v2 daemon's row (no currentEngine): what it owns is all there is to say.
+    where.append(node('span', null, owned.length ? `owns ${owned.length} tab${owned.length === 1 ? '' : 's'} here` : 'owns no tab here'));
   }
+  main.append(where);
+
+  // Tabs it holds besides the one it is on, one chip each: a click shows that tab.
+  const others = owned.filter((t) => !(a.currentEngine === 'extension' && t === a.current));
+  if (others.length) {
+    const also = node('div', 'where');
+    const chips = node('div', 'chips');
+    for (const t of others) chips.append(tabChip(t));
+    also.append(node('span', null, a.currentEngine === 'extension' ? 'also:' : 'owns:'), chips);
+    main.append(also);
+  }
+  li.append(main);
+  return li;
+}
+
+/** A tab, by title; a click brings it to the front (focusTab: the person's gesture, allowed under Stop). */
+function tabChip(tabId, { cur = false } = {}) {
+  const r = rowFor(tabId);
+  const title = tabTitle(tabId);
+  const c = btn(title, `chip${cur ? ' cur' : ''}`, () => focusTab(tabId), {
+    title: `${r?.url || `tab ${tabId}`} — show this tab`,
+    key: `tab:${tabId}`,
+  });
+  return c;
+}
+
+function tabTitle(tabId) {
+  const r = rowFor(tabId);
+  const blocked = view.state?.blocked?.[tabId];
+  return r?.title || blocked?.title || r?.url || `tab ${tabId}`;
 }
 
 /**
@@ -288,15 +344,19 @@ function ownedTabs(agent) {
 function renderEngines(state) {
   const engines = Array.isArray(view.daemon?.engines) ? view.daemon.engines : [];
   el.enginesBlock.hidden = !state.bridge?.connected || engines.length === 0;
+  el.engineCount.textContent = engines.length ? String(engines.length) : '';
+  // Folded unless the person opened it — or an engine has something to say.
+  const open = prefs.get(ENGINES_OPEN_KEY, false) || engines.some((e) => e.versionMismatch);
+  el.enginesToggle.setAttribute('aria-expanded', String(open));
+  el.engineList.hidden = !open;
   el.engineList.replaceChildren();
   for (const e of engines) {
     const self = !!e.engineId && e.engineId === state.bridge?.engineId;
-    const li = document.createElement('li');
-    if (self) li.classList.add('self');
+    const li = node('li', `item${self ? ' self' : ''}`);
     const tabs = Array.isArray(e.tabs) ? e.tabs.length : Number.isFinite(e.tabs) ? e.tabs : null;
     const kind = e.kind === 'launched' ? (e.headless === false ? 'launched, headed' : 'launched, headless') : (e.kind ?? null);
-    const who = node('div', 'who');
-    who.append(
+    const main = node('div', 'main');
+    main.append(
       node('div', 'nm', `${e.engineId ?? e.id ?? 'engine'}${self ? ' · this browser' : ''}`),
       node(
         'div',
@@ -313,8 +373,8 @@ function renderEngines(state) {
       ),
     );
     // The daemon compares versions itself and says so; shown where it applies.
-    if (e.versionMismatch) who.append(node('p', 'warn', e.versionMismatch));
-    li.append(who);
+    if (e.versionMismatch) main.append(node('p', 'warn', e.versionMismatch));
+    li.append(main);
     el.engineList.append(li);
   }
 }
@@ -379,70 +439,184 @@ function maybeFetchInfo(state, { force = false } = {}) {
     });
 }
 
+// ------------------------------------------------- an agent blocked by a hidden tab
+
+/**
+ * The toast above the tab bar (A3): an agent's input could not reach its tab
+ * because the tab is hidden — the one failure Pop out and Send to background
+ * exist for. They used to demand foresight; now they are offered in the moment,
+ * naming the agent and the tab. Read from `state.blocked`, so a panel opened
+ * after the fact still shows it; it goes when the worker says the tab is shown,
+ * moved or closed (agentUnblocked), or when the person dismisses it.
+ */
+function renderBlocked(state) {
+  const all = Object.values(state.blocked && typeof state.blocked === 'object' ? state.blocked : {})
+    .filter((e) => e && Number.isFinite(e.tabId))
+    .sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
+  const dismissed = new Set(prefs.get(DISMISSED_KEY, []));
+  // Forget dismissals of entries that are gone, so the list cannot grow for ever.
+  const live = new Set(all.map(blockKey));
+  const kept = [...dismissed].filter((k) => live.has(k));
+  if (kept.length !== dismissed.size) prefs.set(DISMISSED_KEY, kept);
+  const shown = all.filter((e) => !dismissed.has(blockKey(e)));
+
+  const connected = !!state.bridge?.connected;
+  const model = [shown.map((e) => [blockKey(e), e.agent?.name, e.title, e.url, e.tool, e.delivery]), connected, busy.popout, busy.handoff];
+  if (!changed('blocked', model)) return;
+  el.blockedAlerts.hidden = shown.length === 0;
+  const boxes = shown.slice(0, 3).map((e) => blockedAlert(e, connected));
+  if (shown.length > 3) boxes.push(node('p', 'more', `and ${shown.length - 3} more tab${shown.length - 3 === 1 ? '' : 's'} waiting`));
+  // A press on Pop out repaints this (the button disables): the keyboard stays where it was.
+  keepFocus(el.blockedAlerts, () => el.blockedAlerts.replaceChildren(...boxes));
+}
+
+function blockKey(e) {
+  return `${e.tabId}:${e.at ?? 0}`;
+}
+
+function blockedAlert(e, connected) {
+  const box = node('div', 'alert');
+  box.setAttribute('role', 'alert');
+  const who = e.agent?.name || e.agent?.id || 'An agent';
+  const tab = e.title || displayUrl(e.url).host || `tab ${e.tabId}`;
+  const msg = node('p', 'msg');
+  // Strings passed to append() become text nodes: a page title is never markup.
+  msg.append(node('b', null, who), ' cannot reach ', node('b', null, `“${tab}”`),
+    ' — the tab is hidden, so the browser drops its input.');
+  msg.title = [e.url, e.tool, e.delivery ? `delivery: ${e.delivery}` : null, e.at ? `at ${hm(e.at)}` : null]
+    .filter(Boolean).join(' · ');
+  const acts = node('div', 'btnrow');
+  const pop = btn('⧉ Pop out', 'sm primary', () => popout(e.tabId), {
+    title: 'Move that tab into its own window, in front, without reloading it. Do not minimise it.',
+    key: `bpop:${e.tabId}`,
+  });
+  pop.disabled = busy.popout;
+  const hand = btn('⇢ Send to background', 'sm', () => handoff(e.tabId), {
+    title: connected ? 'Continue that tab in a browser G9 launches; the page reloads there' : 'Needs the G9 daemon, which is not connected',
+    key: `bhand:${e.tabId}`,
+  });
+  hand.disabled = busy.handoff || !connected;
+  const dismiss = btn('Dismiss', 'sm ghost', () => {
+    const now = new Set(prefs.get(DISMISSED_KEY, []));
+    now.add(blockKey(e));
+    prefs.set(DISMISSED_KEY, [...now]);
+    if (view.state) renderBlocked(view.state);
+  }, { aria: `Dismiss: ${who} cannot reach ${tab}`, key: `bdis:${e.tabId}` });
+  acts.append(pop, hand, dismiss);
+  box.append(msg, acts);
+  return box;
+}
+
+/** The worker's agentBlocked / agentUnblocked broadcasts: shown at once, then confirmed by a refresh. */
+export function onBlockedMessage(msg) {
+  if (view.state && Number.isFinite(msg?.tabId)) {
+    const blocked = { ...(view.state.blocked ?? {}) };
+    if (msg.type === 'agentBlocked') {
+      const { __g9, type, ...entry } = msg;
+      blocked[msg.tabId] = entry;
+    } else {
+      delete blocked[msg.tabId];
+    }
+    view.state = { ...view.state, blocked };
+    renderBlocked(view.state);
+  }
+  refresh();
+}
+
 // ------------------------------------------------------------ the current tab
 
 function renderCurrent(state, status) {
   const cur = currentFrom(state, status);
+  view.current = cur ? { tabId: cur.tabId, title: cur.title ?? '', url: cur.url ?? '' } : null;
   const attachedCount = Array.isArray(state.attachedTabs) ? state.attachedTabs.length : 0;
   el.attachedCount.textContent = attachedCount ? `${attachedCount} attached` : '';
-
-  if (cur) {
-    // Solid green only for a tab G9 really holds; the dashed frame otherwise.
-    el.attached.className = cur.attached === false ? 'attached' : 'attached live';
-    const parts = [node('div', 'title', cur.title || '(untitled)'), node('div', 'url', cur.url || `tab ${cur.tabId}`)];
-    // A minimised window stops rendering, and input sent to it resolves and
-    // delivers nothing (plan §2.1); a tab that is not its window's active tab
-    // is hidden the same way. The worker says so in `status.warnings`, and it
-    // is shown here, where it is broken, rather than in a tooltip nobody reads.
-    const warnings = Array.isArray(status?.warnings) ? status.warnings : [];
-    for (const w of warnings) parts.push(node('p', 'warn', w));
-    if (!warnings.length && cur.windowState === 'minimized') {
-      parts.push(
-        node('p', 'warn', 'Its window is minimised — the browser stops delivering input to it. Restore the window.'),
-      );
-    }
-    // With nothing attached, the tab a call would act on is simply the one on
-    // screen. Its console and network are not being recorded yet, so "0 errors"
-    // would be a claim, not a count: say what is true instead.
-    if (cur.attached === false) {
-      parts.push(
-        node(
-          'p',
-          'muted sm',
-          'Not attached yet — an agent attaches it on its first action; console and network are recorded from then on.',
-        ),
-      );
-    } else if (cur.health) {
-      parts.push(statsRow(cur.health));
-    }
-    el.attached.replaceChildren(...parts);
-  } else {
-    el.attached.className = 'attached empty';
-    el.attached.replaceChildren(
-      node(
-        'p',
-        'muted',
-        state.autoAttach
-          ? 'No tab yet — open or reload a page and it attaches itself.'
-          : 'No tab attached yet. Open the page to test and press Attach.',
-      ),
-    );
-  }
   // Only when there is something to detach: the current tab may just be the
   // one on screen, which nothing holds yet.
   el.detach.hidden = !(attachedCount || cur?.attached === true);
 
   const connected = !!state.bridge?.connected;
   el.popoutTab.disabled = busy.popout;
-  el.popoutTab.title = cur
-    ? `Move "${cur.title || cur.url || `tab ${cur.tabId}`}" into its own window`
-    : 'Move the current tab into its own window';
   el.handoffTab.disabled = busy.handoff || !connected;
-  el.handoffTab.title = connected
-    ? 'Continue the current tab in a browser the daemon launches in the background'
-    : 'Needs the G9 daemon, which is not connected';
+  el.recordNow.disabled = busy.record;
 
-  if (!busy.auto) el.autoAttach.checked = !!state.autoAttach;
+  const warnings = Array.isArray(status?.warnings) ? status.warnings : [];
+  const since = cur ? (status?.current?.tabId === cur.tabId ? status.current.attachedSince : null) ?? state.attachedSince?.[cur.tabId] ?? null : null;
+  // The path is cut to what fits in two lines at the card's width.
+  const width = el.attached.clientWidth || 300;
+  const model = cur
+    ? [cur.tabId, cur.title, cur.url, cur.attached, cur.windowState, cur.health, warnings, since, Math.round(width / 20)]
+    : [null, !!state.autoAttach, state.autoAttach];
+  if (!changed('current', model)) return;
+
+  if (!cur) {
+    el.attached.className = 'attached empty';
+    el.attached.replaceChildren(
+      node('p', 'muted', 'No tab yet — open the page to test; an agent takes it on its first action.'),
+    );
+    return;
+  }
+
+  // Solid green only for a tab G9 really holds; the dashed frame otherwise.
+  el.attached.className = cur.attached === false ? 'attached' : 'attached live';
+  const parts = [node('div', 'title', cur.title || '(untitled)'), ...urlLines(cur.url, cur.tabId, width)];
+  // A minimised window stops rendering, and input sent to it resolves and
+  // delivers nothing (plan §2.1); a tab that is not its window's active tab
+  // is hidden the same way. The worker says so in `status.warnings`, and it
+  // is shown here, where it is broken, rather than in a tooltip nobody reads.
+  for (const w of warnings) parts.push(node('p', 'warn', w));
+  if (!warnings.length && cur.windowState === 'minimized') {
+    parts.push(node('p', 'warn', 'Its window is minimised — the browser stops delivering input to it. Restore the window.'));
+  }
+  parts.push(captureLine(cur, since));
+  // With nothing attached, "0 errors" would be a claim, not a count: only a
+  // captured tab shows its numbers.
+  if (cur.attached !== false && cur.health) parts.push(statsRow(cur.health));
+  el.attached.replaceChildren(...parts);
+}
+
+/**
+ * The URL as origin (in full, bold) and path (middle-truncated to about two
+ * lines), the query and fragment reduced to a marker (U5). The full URL is in
+ * the title and behind the copy button.
+ */
+function urlLines(url, tabId, width) {
+  const d = displayUrl(url);
+  if (!d.href) return [node('div', 'path', `tab ${tabId}`)];
+  const lines = [];
+  if (d.origin) {
+    const o = node('div', 'origin');
+    const b = node('b', null, d.origin);
+    b.title = d.href;
+    o.append(b, btn('copy', 'link', () => copyText(d.href, 'URL copied'), { title: 'Copy the full URL', aria: 'Copy the full URL', key: 'copyurl' }));
+    lines.push(o);
+  }
+  const rest = `${d.path}${d.query ? '?…' : ''}${d.hash ? '#…' : ''}`;
+  if (rest && rest !== '/') {
+    // ~6.4 px per character of the 10.5 px monospace, two lines.
+    const max = Math.max(40, Math.floor((width - 16) / 6.4) * 2 - 2);
+    const p = node('div', 'path', middle(rest, max));
+    p.title = d.href;
+    lines.push(p);
+  }
+  return lines;
+}
+
+/** Say honestly whether console and network are being recorded, and since when. */
+function captureLine(cur, since) {
+  const line = node('div', 'capture');
+  const d = node('span', 'dot');
+  d.setAttribute('aria-hidden', 'true');
+  if (Number.isFinite(since)) {
+    d.className = 'dot rec';
+    line.append(d, node('span', null, `Recording console and network since ${hm(since)}`));
+  } else if (cur.attached === true) {
+    d.className = 'dot rec';
+    line.append(d, node('span', null, 'Recording console and network'));
+  } else {
+    line.className = 'capture off';
+    line.append(d, node('span', null, 'Not recording — starts on an agent’s first action, or press Record'));
+  }
+  return line;
 }
 
 /**
@@ -531,13 +705,15 @@ function rowFor(tabId) {
   return tabRows.rows.find((r) => (r.tabId ?? r.id) === tabId) ?? null;
 }
 
-async function showTab(tabId) {
-  try {
-    const tab = await api.tabs.update(tabId, { active: true });
-    if (tab?.windowId != null) await api.windows.update(tab.windowId, { focused: true }).catch(() => {});
-  } catch (err) {
-    showPanelError(`Could not show tab ${tabId}: ${err?.message ?? err}`);
-  }
+/**
+ * Bring a tab to the front of its window, and the window to the front
+ * (focusTab, §13). The person's own gesture: it works while Stop is on, and it
+ * clears an agent's "blocked" toast, since the tab is visible now.
+ */
+async function focusTab(tabId) {
+  const res = await cmd({ cmd: 'focusTab', tabId }).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
+  if (!res?.ok) showPanelError(res?.error ?? `Could not show tab ${tabId}.`);
+  refresh();
 }
 
 function statsRow(h) {
@@ -583,12 +759,126 @@ function listText(value) {
   return String(value);
 }
 
+/** Pop a tab out into its own window — the current tab's, or a blocked agent's. */
+async function popout(tabId) {
+  if (busy.popout) return;
+  busy.popout = true;
+  paintBusy();
+  const res = await cmd({ cmd: 'popout', ...(tabId != null ? { tabId } : {}) }).catch((err) => ({
+    ok: false,
+    error: String(err?.message ?? err),
+  }));
+  busy.popout = false;
+  paintBusy();
+  if (!res?.ok) {
+    showResult('bad', 'Could not pop the tab out', [res?.error ?? 'No reason given.']);
+    showPanelError(res?.error ?? 'Could not pop the tab out.');
+  } else {
+    showResult(res.visible === false ? 'bad' : 'good',
+      `Tab ${res.tabId ?? tabId ?? ''} is in its own window${res.windowId != null ? ` (${res.windowId})` : ''}`, [
+        res.note ?? 'It keeps rendering while that window is on screen. Do not minimise it.',
+      ]);
+    toast('Tab popped out');
+  }
+  refresh();
+}
+
+/** Continue a tab in a browser the daemon launches — the current tab's, or a blocked agent's. */
+async function handoff(tabId) {
+  if (busy.handoff) return;
+  busy.handoff = true;
+  paintBusy();
+  const label = el.handoffTab.textContent;
+  el.handoffTab.textContent = 'Sending…';
+  showResult('', 'Sending the tab to a background browser…', ['Starting it can take a few seconds the first time.']);
+  const res = await cmd({ cmd: 'handoff', ...(tabId != null ? { tabId } : {}) }).catch((err) => ({
+    ok: false,
+    error: String(err?.message ?? err),
+  }));
+  busy.handoff = false;
+  el.handoffTab.textContent = label;
+  paintBusy();
+  if (!res?.ok) {
+    showResult('bad', 'Could not send the tab to the background', [res?.error ?? 'No reason given.']);
+    if (view.active !== 'session') showPanelError(res?.error ?? 'Could not send the tab to the background.');
+  } else {
+    const r = res.result ?? {};
+    showResult('good', `Continuing in ${r.engineId ?? 'a launched browser'}${r.tabId != null ? ` as tab ${r.tabId}` : ''}`, [
+      r.url ?? null,
+      listText(r.transferred) ? `Carried over: ${listText(r.transferred)}` : null,
+      listText(r.notTransferred) ? `Left behind: ${listText(r.notTransferred)}` : 'In-page state that was never saved stays behind.',
+    ]);
+    toast('Sent to the background');
+  }
+  refresh();
+}
+
+/** The buttons that start a move, as the in-flight flags say. */
+function paintBusy() {
+  const connected = !!view.state?.bridge?.connected;
+  el.popoutTab.disabled = busy.popout;
+  el.handoffTab.disabled = busy.handoff || !connected;
+  if (view.state) renderBlocked(view.state);
+}
+
+// ---------------------------------------------------------------- auto-attach
+
+/** The stored setting as a mode. A v2 worker kept a boolean: true meant every tab. */
+function autoMode(state) {
+  const v = state.autoAttach;
+  if (v === true) return 'all';
+  if (v === false) return 'off';
+  return AUTO_MODES.includes(v) ? v : 'project';
+}
+
+function renderAutoAttach(state) {
+  const mode = autoMode(state);
+  if (!busy.auto) {
+    for (const r of document.querySelectorAll('input[name="autoAttach"]')) r.checked = r.value === mode;
+  }
+  setText(el.autoAttachHelp, AUTO_HELP[mode]);
+  const domains = Array.isArray(state.projectDomains) ? state.projectDomains.filter((d) => typeof d === 'string') : [];
+  if (mode !== 'project') {
+    el.autoAttachSites.hidden = true;
+    return;
+  }
+  el.autoAttachSites.hidden = false;
+  if (!domains.length) {
+    // Honest about the default: with no project anywhere it attaches nothing. A daemon older than
+    // v3 never sends project sites at all, so say that rather than waiting for an agent.
+    el.autoAttachSites.className = 'warn';
+    const daemonVersion = state.bridge?.daemonVersion ?? null;
+    const oldDaemon = daemonVersion && Number(String(daemonVersion).replace(/^v/, '').split('.')[0]) < 3;
+    setText(el.autoAttachSites, oldDaemon
+      ? `The running daemon (v${daemonVersion}) is too old to send project sites, so this behaves as Off. Restart the daemon after updating G9.`
+      : 'No project sites known yet, so this behaves as Off until an agent whose g9.project.json lists environments connects.');
+    el.autoAttachSites.title = '';
+    return;
+  }
+  el.autoAttachSites.className = 'help';
+  const shown = domains.slice(0, 3).join(', ');
+  setText(el.autoAttachSites, `Sites: ${shown}${domains.length > 3 ? ` +${domains.length - 3} more` : ''}`);
+  const projects = Array.isArray(state.projects) ? state.projects : [];
+  el.autoAttachSites.title = projects.length
+    ? projects.map((p) => `${p?.name ?? 'project'}: ${(Array.isArray(p?.domains) ? p.domains : []).join(', ')}`).join('\n')
+    : domains.join(', ');
+}
+
 // ------------------------------------------------------------------ input level
 
 function renderInput(state) {
-  if (busy.input) return;
   const level = INPUT_LEVELS.includes(state.inputMode) ? state.inputMode : 'human';
-  for (const r of document.querySelectorAll('input[name="inputMode"]')) r.checked = r.value === level;
+  if (!busy.input) {
+    for (const r of document.querySelectorAll('input[name="inputMode"]')) r.checked = r.value === level;
+  }
+  paintInputHelp();
+}
+
+/** The checked option's own words, one line under the control. */
+function paintInputHelp() {
+  const checked = document.querySelector('input[name="inputMode"]:checked');
+  const words = checked?.parentElement?.querySelector('.muted')?.textContent ?? '';
+  setText(el.inputHelp, words);
 }
 
 // --------------------------------------------------------------- named sessions
@@ -600,34 +890,25 @@ function renderSessions(state, status) {
   if (!changed('sessions', sessions)) return;
   el.sessionList.replaceChildren();
   for (const s of sessions) {
-    const li = document.createElement('li');
-    const who = node('div', 'who');
-    who.append(
+    const li = node('li', 'item');
+    const main = node('div', 'main');
+    main.append(
       node('div', 'nm', `${s.session}${s.active ? ' · on screen' : ''}`),
       node('div', 'sub', s.alive ? (s.url || `tab ${s.tabId}`) : 'tab is gone'),
     );
     const acts = node('div', 'acts');
     if (s.alive) {
-      const focus = node('button', '', 'Show');
-      focus.type = 'button';
-      focus.title = 'A browser only delivers clicks to the tab it is showing.';
-      focus.addEventListener('click', async () => {
-        await showTab(s.tabId);
-        refresh();
-      });
-      acts.append(focus);
+      acts.append(btn('Show', 'sm', () => focusTab(s.tabId), {
+        title: 'A browser only delivers clicks to the tab it is showing.',
+        key: `sshow:${s.session}`,
+      }));
     }
-    const end = node('button', 'danger', '✕');
-    end.type = 'button';
-    end.title = 'Forget this session. The tab stays open.';
-    end.setAttribute('aria-label', `Forget the session "${s.session}"`);
-    end.addEventListener('click', async () => {
+    acts.append(btn('✕', 'sm icon', async () => {
       const res = await cmd({ cmd: 'sessionEnd', name: s.session }).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
       if (!res?.ok) showPanelError(res?.error ?? `Could not forget the session "${s.session}".`);
       refresh();
-    });
-    acts.append(end);
-    li.append(who, acts);
+    }, { title: 'Forget this session. The tab stays open.', aria: `Forget the session "${s.session}"` }));
+    li.append(main, acts);
     el.sessionList.append(li);
   }
 }
@@ -681,12 +962,14 @@ function renderStop(state) {
 }
 
 function renderLog(activity = []) {
-  if (!activity.length) {
-    el.log.innerHTML = '<li class="muted pad">Nothing yet. Agent actions will appear here in real time.</li>';
+  const list = Array.isArray(activity) ? activity.slice(0, 120) : [];
+  if (!changed('log', list.map((e) => [e.at, e.detail, e.ok, e.ms, e.kind]))) return;
+  if (!list.length) {
+    el.log.replaceChildren(node('li', 'pad', 'Nothing yet. Agent actions appear here in real time.'));
     return;
   }
   el.log.replaceChildren();
-  for (const e of activity.slice(0, 120)) {
+  for (const e of list) {
     const li = document.createElement('li');
     if (!e.ok) li.classList.add('bad');
     if (e.kind === 'system') li.classList.add('sys');
@@ -719,11 +1002,6 @@ function buildSnippet(state) {
     '// It fills itself in once the daemon is running.',
     config,
   ].join('\n');
-}
-
-function projectName(path) {
-  const parts = String(path).replace(/\\/g, '/').split('/').filter(Boolean);
-  return parts.length > 1 ? parts[parts.length - 2] : (parts[0] ?? 'project');
 }
 
 function capitalise(s) {
@@ -777,18 +1055,30 @@ export function parseAddress(hostInput, portInput) {
 // -------------------------------------------------------------------- wiring
 
 export function wire() {
-  el.attachActive.addEventListener('click', async () => {
-    el.attachActive.disabled = true;
-    const res = await cmd({ cmd: 'attachActive' }).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
-    el.attachActive.disabled = false;
-    const tab = res?.tab ?? res ?? {};
+  // Record from now (A1): start capture on the tab in front of the person, make
+  // it current, lift Stop — and, with the box ticked, reload it so the capture
+  // holds the page load from its first request. One command, one activity line.
+  el.recordNow.addEventListener('click', async () => {
+    if (busy.record) return;
+    const reload = !!el.recordReload.checked;
+    busy.record = true;
+    el.recordNow.disabled = true;
+    const label = el.recordNow.textContent;
+    el.recordNow.textContent = reload ? 'Reloading…' : 'Starting…';
+    const res = await cmd({ cmd: 'recordNow', reload }).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
+    busy.record = false;
+    el.recordNow.disabled = false;
+    el.recordNow.textContent = label;
     if (!res?.ok) {
-      showPanelError(res?.error ?? 'Could not attach the current tab.');
+      showPanelError(res?.error ?? 'Could not start recording on this tab.');
     } else {
-      // Attach after a Stop is the person saying "carry on", and the worker
-      // resumes the agents (sw.js clearHalt). That is too big to happen quietly.
-      const name = tab.title || tab.url || `tab ${tab.tabId ?? tab.id}`;
-      toast(res.resumed ? `Attached ${name} — agents resumed` : `Attached: ${name}`);
+      const name = res.title || res.url || `tab ${res.tabId}`;
+      // Capture is on either way; a failed reload is said, not hidden.
+      if (res.reloadError) showPanelError(`Recording "${name}", but the reload failed: ${res.reloadError}`);
+      // Record after a Stop is the person saying "carry on", and the worker
+      // resumes the agents. That is too big to happen quietly.
+      toast(`Recording ${name}${res.attachedSince ? ` since ${hm(res.attachedSince)}` : ''}` +
+        `${res.reloaded ? ' — page reloaded' : ''}${res.resumed ? ' — agents resumed' : ''}`);
     }
     refresh();
   });
@@ -800,16 +1090,34 @@ export function wire() {
     refresh();
   });
 
-  el.autoAttach.addEventListener('change', async () => {
-    const enabled = el.autoAttach.checked;
+  // Arrow keys move through a radio group AND select. Applying that selection meant ArrowLeft from
+  // Off wrapped to "All tabs" and attached every open tab, which arrowing back does not undo
+  // (v3 review, finding 5). Arrows now only move focus; a click or Space applies.
+  let autoArrowAt = -Infinity;
+  el.autoAttachGroup.addEventListener('keydown', (ev) => {
+    if (/^Arrow(Left|Right|Up|Down)$/.test(ev.key)) autoArrowAt = performance.now();
+  }, true);
+
+  el.autoAttachGroup.addEventListener('change', async (ev) => {
+    const input = ev.target.closest('input[name="autoAttach"]');
+    if (!input) return;
+    if (performance.now() - autoArrowAt < 250) {
+      const current = autoMode(view.state ?? {});
+      for (const r of document.querySelectorAll('input[name="autoAttach"]')) r.checked = r.value === current;
+      setText(el.autoAttachHelp, `Press Space to switch to ${AUTO_NAMES[input.value] ?? input.value}.`);
+      return;
+    }
+    const mode = input.value;
+    const previous = autoMode(view.state ?? {});
     busy.auto = true;
-    const res = await cmd({ cmd: 'setAutoAttach', enabled }).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
+    setText(el.autoAttachHelp, AUTO_HELP[mode] ?? '');
+    const res = await cmd({ cmd: 'setAutoAttach', mode }).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
     busy.auto = false;
     if (!res?.ok) {
-      el.autoAttach.checked = !enabled;
+      for (const r of document.querySelectorAll('input[name="autoAttach"]')) r.checked = r.value === previous;
       showPanelError(res?.error ?? 'Could not change Auto-attach.');
     } else {
-      toast(enabled ? 'Auto-attach on — new and reloaded tabs attach themselves' : 'Auto-attach off');
+      toast(`Auto-attach: ${AUTO_NAMES[res.mode ?? mode] ?? mode}`);
     }
     refresh();
   });
@@ -820,10 +1128,12 @@ export function wire() {
     const mode = input.value;
     const previous = view.state?.inputMode ?? 'human';
     busy.input = true;
+    paintInputHelp();
     const res = await cmd({ cmd: 'setInputMode', mode }).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
     busy.input = false;
     if (!res?.ok) {
       for (const r of document.querySelectorAll('input[name="inputMode"]')) r.checked = r.value === previous;
+      paintInputHelp();
       showPanelError(res?.error ?? 'Could not change the input level.');
     } else {
       toast(`Input: ${INPUT_NAMES[mode] ?? mode}`);
@@ -831,57 +1141,8 @@ export function wire() {
     refresh();
   });
 
-  el.popoutTab.addEventListener('click', async () => {
-    const tabId = currentFrom(view.state ?? {}, lastStatus)?.tabId ?? undefined;
-    busy.popout = true;
-    el.popoutTab.disabled = true;
-    const res = await cmd({ cmd: 'popout', ...(tabId != null ? { tabId } : {}) }).catch((err) => ({
-      ok: false,
-      error: String(err?.message ?? err),
-    }));
-    busy.popout = false;
-    el.popoutTab.disabled = false;
-    if (!res?.ok) {
-      showResult('bad', 'Could not pop the tab out', [res?.error ?? 'No reason given.']);
-    } else {
-      showResult(res.visible === false ? 'bad' : 'good',
-        `Tab ${res.tabId ?? tabId ?? ''} is in its own window${res.windowId != null ? ` (${res.windowId})` : ''}`, [
-          res.note ?? 'It keeps rendering while that window is on screen. Do not minimise it.',
-        ]);
-      toast('Tab popped out');
-    }
-    refresh();
-  });
-
-  el.handoffTab.addEventListener('click', async () => {
-    const tabId = currentFrom(view.state ?? {}, lastStatus)?.tabId ?? undefined;
-    busy.handoff = true;
-    el.handoffTab.disabled = true;
-    const label = el.handoffTab.textContent;
-    el.handoffTab.textContent = 'Sending…';
-    showResult('', 'Sending the tab to a background browser…', [
-      'Starting it can take a few seconds the first time.',
-    ]);
-    const res = await cmd({ cmd: 'handoff', ...(tabId != null ? { tabId } : {}) }).catch((err) => ({
-      ok: false,
-      error: String(err?.message ?? err),
-    }));
-    busy.handoff = false;
-    el.handoffTab.textContent = label;
-    el.handoffTab.disabled = !view.state?.bridge?.connected;
-    if (!res?.ok) {
-      showResult('bad', 'Could not send the tab to the background', [res?.error ?? 'No reason given.']);
-    } else {
-      const r = res.result ?? {};
-      showResult('good', `Continuing in ${r.engineId ?? 'a launched browser'}${r.tabId != null ? ` as tab ${r.tabId}` : ''}`, [
-        r.url ?? null,
-        listText(r.transferred) ? `Carried over: ${listText(r.transferred)}` : null,
-        listText(r.notTransferred) ? `Left behind: ${listText(r.notTransferred)}` : 'In-page state that was never saved stays behind.',
-      ]);
-      toast('Sent to the background');
-    }
-    refresh();
-  });
+  el.popoutTab.addEventListener('click', () => popout(currentFrom(view.state ?? {}, lastStatus)?.tabId ?? undefined));
+  el.handoffTab.addEventListener('click', () => handoff(currentFrom(view.state ?? {}, lastStatus)?.tabId ?? undefined));
 
   // Pop the panel out into its own window.
   //
@@ -940,6 +1201,11 @@ export function wire() {
     setTimeout(refresh, 400);
   });
 
+  el.enginesToggle.addEventListener('click', () => {
+    prefs.set(ENGINES_OPEN_KEY, el.enginesToggle.getAttribute('aria-expanded') !== 'true');
+    if (view.state) renderEngines(view.state);
+  });
+
   el.enginesRefresh.addEventListener('click', () => {
     if (view.state) maybeFetchInfo(view.state, { force: true });
   });
@@ -949,12 +1215,12 @@ export function wire() {
     refresh();
   });
 
-  el.copyGuide.addEventListener('click', async () => {
-    try {
-      await navigator.clipboard.writeText(el.snippet.textContent);
-      toast(view.state?.bridge?.repoRoot ? 'MCP config copied' : 'Copied — but the path is still a placeholder');
-    } catch (err) {
-      showPanelError(`Could not copy: ${err?.message ?? err}`);
-    }
+  el.snippetToggle.addEventListener('click', () => {
+    el.snippet.hidden = !el.snippet.hidden;
+    el.snippetToggle.setAttribute('aria-expanded', String(!el.snippet.hidden));
+    el.snippetToggle.textContent = el.snippet.hidden ? 'show' : 'hide';
   });
+
+  el.copyGuide.addEventListener('click', () =>
+    copyText(el.snippet.textContent, view.state?.bridge?.repoRoot ? 'MCP config copied' : 'Copied — but the path is still a placeholder'));
 }

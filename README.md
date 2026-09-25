@@ -5,24 +5,35 @@ work. They can inspect a page the way DevTools does, act on it with trusted inpu
 person's, record flows, and replay those flows as regression tests that remember what normal looks
 like. Everything runs on the local machine.
 
-**Version 2.0.3.** This README was written on 2026-09-23 against the code in this repository and
+**Version 3.0.1**: the extension's new icon, and `npm run check`, which runs only the tests a change
+needs, several at a time, and says what it is running ([Tests](#choosing-what-to-run)). This README was written on 2026-09-23 against the code in this repository and
 the v2 live rounds. It was revised on 2026-09-24 for 2.0.2, which fixed three defects that flaky
 tests uncovered (the replay quiet window, the evidence prune race, and watch ordering on a launched
-engine) and gave a closing browser 30 s instead of 10 s. It was revised again on 2026-09-25 for
-2.0.3, which fixed the side panel's **Pop out tab**: the new window used to open behind the person's
-own window, where Windows stops rendering it. Those rounds ran on Windows 11 Pro 10.0.26200 with
+engine) and gave a closing browser 30 s instead of 10 s, and on 2026-09-25 for 2.0.3, which fixed
+the side panel's **Pop out tab**: the new window used to open behind the person's own window, where
+Windows stops rendering it. It was revised again on 2026-09-25 for **3.0.0**, the side-panel
+redesign of [V3_UX_PLAN.md](V3_UX_PLAN.md): agents are shown per project, Auto-attach follows the
+project's sites by default, a blocked agent raises an alert with **Pop out** on it, Automation and
+Issues are grouped by site, and the panel has one visual system (see
+[The side panel (v3)](#the-side-panel-v3)). Those rounds ran on Windows 11 Pro 10.0.26200 with
 Edge 153.0.4234.32, Chrome 153.0.8010.53, Chrome for Testing 153.0.8010.52 and Node 22.15.0.
 
-Latest recorded results. Run on the 2.0.3 tree on 2026-09-25:
+On the 3.0.1 tree (2026-09-25), `npm run check:all` ran every offline check (unit 651 tests in 12
+suites, self-test, extension suite, panel render, links) three times: 16 of 16 each time, in 142 s.
+The live suites and the installer were not rebuilt for 3.0.1 (icons, test tooling and docs only).
 
-- unit: 621 tests in 10 suites
+Latest recorded results. Run on the 3.0.0 tree on 2026-09-25:
+
+- unit: 638 tests in 11 suites
 - self-test: 136/136
-- extension suite: 78/78
+- extension suite: 82/82
 - desktop: 14 test files and the packaged build at 7/7
-- Engine 2 live test: 366 passed, 0 failed (322 s)
-- isolated Engine 1 live test on Edge: 196 passed, 0 failed, the real popout included
+- Engine 2 live test: 366 passed, 0 failed (327 s)
+- isolated Engine 1 live test on Edge: 198 passed, 0 failed, the real popout included
+- panel render check (`setup/panel-render.mjs`): every tab at 360 and 1000 px wide, light and dark,
+  no fixture text turned into markup, no `[object Object]` or `NaN` shown
 
-On 2.0.2 (2026-09-24) the same unit suite also passed three times in a row.
+On 2.0.2 (2026-09-24) the unit suite also passed three times in a row.
 
 Run on the 2.0.1 tree on 2026-09-23 and not repeated for 2.0.2, whose changes are correctness fixes
 in replay, evidence pruning, launched-engine watch ordering and browser shutdown:
@@ -36,7 +47,7 @@ in replay, evidence pruning, launched-engine watch ordering and browser shutdown
   headed Edge undetected on the local page, both human controls detected
 
 The installer is not code-signed. `npm run build:win` in `desktop/` writes it as
-`desktop/dist/G9-Setup-<version>.exe`; the last one built and tested is `G9-Setup-2.0.3.exe`
+`desktop/dist/G9-Setup-<version>.exe`; the last one built and tested is `G9-Setup-3.0.0.exe`
 (2026-09-25). For what does not work yet, see [Limits and known gaps](#limits-and-known-gaps).
 
 - [What G9 is](#what-g9-is)
@@ -166,7 +177,7 @@ section is the short version.
 
 ### A. Desktop installer (QA machines)
 
-1. Run `G9-Setup-<version>.exe` (`G9-Setup-2.0.3.exe` for this release). It is built by
+1. Run `G9-Setup-<version>.exe` (`G9-Setup-3.0.0.exe` for this release). It is built by
    `npm run build:win` in `desktop/` and written to `desktop/dist/`.
    - It installs per user into `%LOCALAPPDATA%\Programs\G9` and needs no administrator rights.
    - It is not code-signed, so SmartScreen warns on first run ([Troubleshooting](#troubleshooting)).
@@ -234,7 +245,7 @@ This step is needed for Engine 1 only. Agents can use Engine 2 without it.
 5. Leave the folder where it is. The browser identifies an unpacked extension by its folder.
 
 On first install, a welcome page opens once. The side panel's title then reads
-`G9 Browser Agent v2.0.3`, and its badge `v2.0.3`.
+`G9 Browser Agent v3.0.1`, and its badge `v3.0.1`.
 
 A browser can skip this step only when the extension is installed by enterprise policy
 (`ExtensionInstallForcelist`). G9 does not set that policy up.
@@ -258,6 +269,25 @@ A browser can skip this step only when the extension is installed by enterprise 
   - the 8765–8775 port range and "find bridges";
   - the runner's port rule.
 
+### Upgrading from 2.x to 3.0
+
+- **Reload the extension and restart the daemon.** 3.0 changed both. Reload the extension on the
+  browser's extensions page (or **Update and reload** in the desktop app's Engines page). A 2.x
+  daemon keeps running until it has been idle for `idleExitMinutes` (60 by default); to switch at
+  once, use **Shut down daemon** then **Reconnect** in the desktop app's Settings, or close your AI
+  clients and end the `g9d` node process, then restart your AI client. The panel's Session tab warns
+  while the daemon and the extension report different versions.
+- **Mixed versions still connect.** The daemon refuses only extensions older than 2.0, so a 3.0
+  extension works with a 2.x daemon and the other way round. What a 2.x daemon cannot do is send the
+  project sites: while it runs, **Project sites** behaves as Off, and the panel says the
+  daemon is too old.
+- **Your Auto-attach choice is kept.** 2.x stored it as on or off. On becomes **All tabs** and off
+  becomes **Off**, and the activity log says so once. Only an install that never saved its settings
+  starts with the new default, **Project sites**.
+- **Stored flows and issues need nothing done to them.** The issue index gains site, severity, tags
+  and evidence counts. The first time the list is read, entries written by 2.x are completed from
+  their issue records and attachment metadata in one pass, and later reads find nothing left to do.
+
 ---
 
 ## First use
@@ -266,8 +296,9 @@ A browser can skip this step only when the extension is installed by enterprise 
 
 1. Open the page to test.
 2. Click the G9 toolbar icon. The side panel opens.
-3. Press **Attach current tab**, or turn on **Auto-attach**, which attaches every tab you open or
-   load.
+3. Nothing to attach: an agent takes the tab you are on at its first call and stays on it, even if you
+   switch tabs afterwards. Press **Record from now** only when you want console and network captured
+   before the agent starts; tick **reload to capture page load** to catch errors during the load.
 4. Talk to your agent normally. For example:
    - *"check this page for problems"*
    - *"log in as admin and confirm the orders list loads"*
@@ -303,6 +334,28 @@ Agents are told to call `browser_status` first. It reports:
 - every engine and every connected agent;
 - what the caller owns;
 - whether Stop is pressed.
+
+### The side panel (v3)
+
+- **Session** — the daemon link; each connected agent with its project folder and the tab it is on
+  (click the tab to bring it to the front); the current tab with its origin and whether console and
+  network are being recorded; **Auto-attach** as *Off*, *Project sites* (the default on a new install: tabs on the
+  sites of connected agents' `g9.project.json` environments are captured from their first load) or
+  *All tabs*; **Keep working elsewhere** (Pop out, Send to background); the input level; Stop.
+- When an agent's input is refused because its tab is hidden, an alert above the tabs names the agent
+  and the tab and offers **Pop out** or **Send to background** on the spot.
+- **Automation** — flows grouped by site (the origin of the flow's start URL), then suite. A header
+  says how many flows exist for the site you are on. Filter by site, suite, tag, last verdict, flaky
+  or text. **Run N flows in** *scope* runs only what the filter shows (`@manual` flows are skipped).
+  Each flow opens into a drawer with replay, dry run, the assertion wizard, calibrate, approve,
+  history, push, Playwright export, delete, and its section, suite, tags, covered test cases and
+  start URL.
+- **Issues** — grouped by site, then Open, Filed and Closed; each row shows severity, age, the tracker
+  key and chips for the evidence it holds (screenshots, video, files, console, network, DOM). Filter
+  by site, status, severity, tag or text.
+- Auto-attach *All tabs* is not the default on purpose: it captures every site you browse into one
+  10 MB buffer, turns on the debugger domain every site can detect, and keeps all tabs out of Memory
+  Saver.
 
 ---
 
@@ -1328,13 +1381,15 @@ The extension backlog with evidence and acceptance criteria is
 | Windows Defender Firewall asks about `node.exe` | Probably `node setup/serve.mjs`: the test-page server listens on all interfaces (`0.0.0.0`), so `localhost` and `127.0.0.1` can serve as two origins for the cross-origin frame fixture. The daemon itself binds `127.0.0.1` only and needs no exception. Declining keeps other machines out. |
 | SmartScreen: "Windows protected your PC" on `G9-Setup-<version>.exe` | The installer is not code-signed. Choose **More info** → **Run anyway** if you trust the build's source. For a fleet, sign the installer. |
 | Agent shows no `browser_*` tools | The MCP config path is wrong, or the client was not restarted. MCP servers load at client start. |
-| *"No tab to act on"* | Open one (`browser_tabs action:"open"`) or attach one (panel **Attach current tab**, or `browser_tabs action:"attach"`). |
+| *"No tab to act on"* | Open one (`browser_tabs action:"open"`), attach one (`browser_tabs action:"attach"`), or press **Record from now** in the panel on the tab you want. |
 | *"Tab 7 is owned by agent-2 (cursor)"* | Another agent claimed it. Ask it to release the tab, or use `browser_tabs action:"claim" force:true` when the user asks (logged). |
 | Everything fails with *"The user pressed Stop…"* | Stop is engaged. Press **Resume** in the side panel or the desktop app. Agents cannot. |
 | `[delivery: not-delivered; tab hidden]` | The Engine 1 tab is not showing: a background tab, a minimized window, or an occluded window without the occlusion policy. Use `browser_tabs action:"focus"` (it takes the screen), `"popout"`, or `"handoff"`. |
 | **Pop out tab** or `browser_tabs action:"popout"` moved the tab, but no window is on screen, or the result says `visible:false` | The new window is behind another window. An agent's popout opens unfocused so that you keep the keyboard, and on Windows a window that is covered completely stops rendering (unless the `WindowOcclusionEnabled` policy is off, [docs/INSTALL.md](docs/INSTALL.md#background-policies-hkcu)). Bring it forward: click it in the taskbar, or `browser_tabs action:"focus"`. The side panel's **⧉ Pop out tab** opens the window in front; before 2.0.3 it opened it behind your own window. |
 | `[delivery: missed; hit <…>]` | Something covered the element or moved it. The action was not repeated. Take a new snapshot and check the page before retrying. |
-| `browser_network` shows 0 requests | Capture starts when the tab is attached. Reload the page and read again. |
+| `browser_network` shows 0 requests | Capture starts when the tab is attached. Reload the page and read again, or press **Record from now** with **reload to capture page load** ticked. |
+| Auto-attach is on **Project sites** but a tab on your site shows no capture, and the panel says *"No project sites known yet"* | Project sites are the hosts of the `environments` URLs in the `g9.project.json` of a CONNECTED agent. No agent is connected, or its project folder has no `g9.project.json`, or that file names no environment URL. Start the agent in the project folder, or add the environment, or switch to **All tabs** for now. If the panel says *"The running daemon (v2.x) is too old"*, restart the daemon ([Upgrading from 2.x to 3.0](#upgrading-from-2x-to-30)). |
+| An alert above the panel tabs says an agent *"cannot reach"* a tab | The agent's input was refused because that tab is hidden (a background tab or a minimized window). **Pop out** gives it its own window in front; **Send to background** continues it in a browser G9 launches, headless by default (the page reloads there with its cookies and storage; in-page state that was never saved stays behind); **Dismiss** only hides the alert. The alert also goes by itself when the tab is shown again, the agent's input gets through, the tab closes, the agent disconnects or the daemon link drops. |
 | A call fails after 120 s: *"… may STILL be running on this tab … Likely causes: the page is stuck loading, … or a JavaScript dialog G9 did not see is open"* | Take a `browser_snapshot` before sending that tab more input. Check `browser_status` for dialogs (`browser_dialog` clears them), for a hidden tab, and whether the page is still loading. The causes are a guess, and the action may still have run: verify before repeating it. |
 | *"Tab N is in a browser whose G9 extension is reconnecting"* | The extension's service worker restarted or the extension reloaded. Its tabs are kept for 10 minutes; wait for the reconnect. |
 | A headed launched browser is extremely slow | Its window is minimized (`browser_status` warns). Restore it, or run headless. |
@@ -1348,8 +1403,39 @@ The extension backlog with evidence and acceptance criteria is
 
 ## Tests
 
+### Choosing what to run
+
+Run what the change needs. `npm run check` finds the changed files (`git status`), runs only the
+checks that load or read them, 4 at a time, and prints a line every 15 s saying what is running, so
+a slow check and a stuck one look different:
+
 ```powershell
-npm test                  # = setup/unittest.mjs + setup/selftest.mjs + setup/extensiontest.mjs
+npm run check                      # what the working tree's changes need
+node setup/check.mjs --plan        # the plan and an estimate; runs nothing
+node setup/check.mjs --since HEAD~3 # what the last three commits need
+npm run check:all                  # every offline check, 4 at a time
+npm run check:release              # every offline check and both live suites
+```
+
+Measured on 2026-09-25 (20 threads):
+
+| Change | What runs | Time |
+|---|---|---|
+| a guide (`*.md`) | the link check | ~0.2 s |
+| the side panel's HTML, CSS or scripts | the panel suite and the panel render | ~20 s |
+| a module the tools share (`extension/lib`, `extension/tools`) | every offline suite that loads it; the output names the live suites to run | up to ~2.5 min |
+| a file no check reaches | every offline check, and it says which file caused that | ~2.5 min |
+| `--all` | every offline check | 142 s (the same checks one after another: ~300 s) |
+| live suites (`--live`, or `npm run test:engine2` / `test:live`) | only when `check` names them (input, perception, launching, the seam) and before a release | ~5.5 min + ~3.5 min |
+
+Build the installer (`cd desktop; npm run build:win; npm run test:packaged`) only for a change in
+`desktop/` or a build someone will install. How the plan is made, and what it cannot know:
+[AIGuide §7.0](AIGuide.md#70-choosing-what-to-run-since-301).
+
+### Every suite
+
+```powershell
+npm test                  # = setup/unittest.mjs + setup/selftest.mjs + setup/extensiontest.mjs, one after another
 npm run test:engine2      # Engine 2 end to end through the product path (headless Edge)
 npm run test:live         # isolated Engine 1 live test: private daemon, temp profile, extension copy, headless Edge
 npm run test:stealth      # stealth self-test (add -- --local-only for no network, -- --matrix for the full matrix)
@@ -1381,20 +1467,21 @@ What each test does:
 
 `setup/serve.mjs` also serves `/hang` (accepts, never answers) and `/slow?ms=`.
 
-**Latest recorded results.** Rows and values marked 2.0.2 were run on 2026-09-24 on the 2.0.2 tree;
-the others on 2026-09-23 on the 2.0.1 tree (2.0.2 changed replay, evidence pruning, launched-engine
-watch ordering and browser shutdown, none of which those rows measure differently). 2.0.3 changed
-only the popout (`extension/tools/tabs.js`, the panel, `sw.js`, `mcp/tools.js`) and added its checks
-to the seam suite, so the seam and total unit counts below are 2.0.2's:
+**Latest recorded results.** Rows marked 3.0.0 were run on 2026-09-25 on the 3.0.0 tree. The
+others were run on 2026-09-23 on the 2.0.1 tree and not repeated since: 2.0.2 changed replay,
+evidence pruning, launched-engine watch ordering and browser shutdown, 2.0.3 the popout, and 3.0.0
+the side panel and what the daemon and extension tell it, none of which those rows measure
+differently.
 
 | Suite | Result |
 |---|---|
-| `unittest.mjs` (2.0.3) | 621 tests in 10 suites passed (desktop 181, daemon 97, interaction 77, panel 75, engine 56, humanize 51, platform-cdp 34, world 26, seam 16, version 8) |
-| `selftest.mjs` (2.0.3) | 136/136 |
-| `extensiontest.mjs` (2.0.3) | 78/78 |
-| `desktop`: `test/run.mjs`, `daemon-contract.mjs`, `test:packaged`, `test:render` | 14/14 files (2.0.3), 15/15, 7/7 (2.0.3, on `G9-Setup-2.0.3.exe`), render check passed (4 scenarios, 0 windows on screen, 0 in the foreground) |
-| `engine2-livetest.mjs` (2.0.3) | 366 passed, 0 failed (322 s) |
-| `isolated-livetest.mjs` (headless) | Edge 196 passed, 0 failed (2.0.3, the real popout included); Chrome 196 passed, 0 failed (2.0.1). Harness checks all pass: the tripwire recorded 0 connections to the default port, and neither test profile was ever signed in. |
+| `unittest.mjs` (3.0.0) | 638 tests in 11 suites passed (desktop 181, daemon 100, panel 82, interaction 77, engine 56, humanize 51, platform-cdp 34, world 26, seam 16, version 8, sites 7) |
+| `selftest.mjs` (3.0.0) | 136/136 |
+| `extensiontest.mjs` (3.0.0) | 82/82 |
+| `panel-render.mjs` (3.0.0) | passed: 26 screenshots (every tab, empty states, an issue's detail; 360 and 1000 px; light and dark), no page error, no horizontal overflow at 360 px, no fixture text turned into markup, no `[object Object]` or `NaN`, a malformed stored flow opens, ArrowLeft in Auto-attach does not switch the mode |
+| `desktop`: `test/run.mjs`, `daemon-contract.mjs`, `test:packaged`, `test:render` | 14/14 files (3.0.0), 15/15 (2.0.1), 7/7 (3.0.0, on `G9-Setup-3.0.0.exe`), render check passed (2.0.1; 4 scenarios, 0 windows on screen, 0 in the foreground) |
+| `engine2-livetest.mjs` (3.0.0) | 366 passed, 0 failed (327 s) |
+| `isolated-livetest.mjs` (headless) | Edge 198 passed, 0 failed (3.0.0, the real popout included; daemon, extension and shim all report 3.0.0); Chrome 196 passed, 0 failed (2.0.1). Harness checks all pass: the tripwire recorded 0 connections to the default port, and neither test profile was ever signed in. |
 | `matrix.mjs` | exit 0 — every cell of both engines, both browsers, every state agrees with the page |
 | `bench.mjs` / `endurance.mjs --minutes 10` | 0 failures at 1/4/8/16 contexts, recommendation maxParallel 8; 93 iterations, 0 failures, listeners flat |
 | `stealthtest.mjs --matrix` | 7 configurations, 0 G9 leaks at stealth, headed Edge undetected on the local page, both human controls detected (exit 1 by design while headless is detectable) |
@@ -1414,7 +1501,7 @@ After the final fixes, the Chrome for Testing popout and replay sections passed 
 ```
 g9-browser-agent/
 ├── extension/                Engine 1 (MV3 extension) and the home of the shared tool layer
-│   ├── manifest.json         version 2.0.3, Chrome/Edge 125+
+│   ├── manifest.json         version 3.0.0, Chrome/Edge 125+
 │   ├── sw.js                 service worker: daemon link, panel commands, tool calls via tools/index.js
 │   ├── tools/                the tool modules BOTH engines run; index.js = TOOLS + runTool, events.js = CDP fan-out
 │   ├── humanize/             pure human-input library: plans, profiles, seeded PRNG, calibration
@@ -1433,12 +1520,14 @@ g9-browser-agent/
 ├── bridge/src/server.js      v1 entry point, kept only as a forwarder to mcp/shim.mjs
 ├── setup/                    install.ps1; unittest.mjs + unit/, selftest, extensiontest; live harnesses
 │                             (isolated-livetest + livetest, engine2-livetest, stealthtest, matrix, bench,
-│                             endurance); serve.mjs, testpage.html, fixtures/
+│                             endurance); panel-render (the v3 panel in pictures); check + check-plan (only the
+│                             checks a change needs), doclinks, make-icons.ps1; serve.mjs, testpage.html, fixtures/
 ├── docs/                     ARCHITECTURE_V2 (binding contracts), DAEMON_PROTOCOL, HUMANIZE, STEALTH, INSTALL (operators)
 ├── scripts/                  standalone example automations (documented against v1.7.21, not re-verified on v2)
 ├── g9.project.example.json   project adapter template — belongs in the repo under test, not this one
 ├── package.json              the one version for the whole product; npm scripts
 ├── V2_IMPLEMENTATION_PLAN.md v2 decisions D1–D12 and the phase plan
+├── V3_UX_PLAN.md             v3 side-panel decisions U1–U10, their status, and the icon prompt
 ├── EXTENSION_FIX_BACKLOG.md  extension backlog with evidence and acceptance criteria
 ├── AIGuide.md                build log and architecture reference
 └── README.md                 this file

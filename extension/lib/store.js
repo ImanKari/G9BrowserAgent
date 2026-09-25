@@ -29,6 +29,7 @@
 
 import { platform } from './platform.js';
 import { serialize } from './state.js';
+import { siteOf } from './sites.js';
 
 const BLOB_STORE = 'blobs';
 const FRAME_STORE = 'video-frames';
@@ -113,6 +114,9 @@ export async function putAttachment({ owner, name, mime, bytes, kind = 'file', m
     meta,
     blob,
   });
+  // An issue's evidence chips count its attachments, which arrive AFTER the issue is saved (the
+  // screenshot, the console log, the DOM fragment, a video): its index entry follows each one.
+  await refreshIssueEntry(owner).catch(() => {});
   return { id, owner, name: name || id, mime: type, kind, size, meta };
 }
 
@@ -132,7 +136,9 @@ export async function getAttachment(id, { includeBytes = true } = {}) {
 }
 
 export async function deleteAttachment(id) {
+  const owner = (await platform.blobs.get(BLOB_STORE, id).catch(() => null))?.owner ?? null;
   await platform.blobs.delete(BLOB_STORE, id);
+  if (owner != null) await refreshIssueEntry(owner).catch(() => {});
   return { deleted: id };
 }
 
@@ -248,7 +254,11 @@ export async function saveRecording(recording) {
     tags: record.tags ?? [],
     qaTestCaseIds: record.qaTestCaseIds ?? [],
     platform: record.platform ?? 'web',
-    environment: record.environment?.name ?? record.environment ?? null,
+    // A name, never an object: an environment with variables but no name reached the panel as
+    // "[object Object]" (v3 review, finding 7).
+    environment: typeof record.environment?.name === 'string'
+      ? record.environment.name
+      : typeof record.environment === 'string' ? record.environment : null,
     flaky: record.flaky ?? null,
   });
   return record;
@@ -281,20 +291,109 @@ export async function saveIssue(issue) {
     createdAt: issue.createdAt ?? Date.now(),
   };
   await local().set({ [issueKey(id)]: record });
-  await upsertIndex(ISSUE_INDEX, {
-    id,
-    title: record.title ?? '(untitled)',
-    url: record.context?.url ?? null,
-    status: record.status ?? 'open',
-    filedAs: record.filedAs ?? null,
-    createdAt: record.createdAt,
-    updatedAt: record.updatedAt,
-  });
+  await refreshIssueEntry(id, { front: true });
   return record;
 }
 
-export function listIssues() {
-  return readIndex(ISSUE_INDEX);
+/**
+ * What an issue's attachments and captured context hold, for the list's evidence chips (v3,
+ * V3_UX_PLAN C2) — so the QA sees whether an issue is worth opening without opening it. Counted
+ * from attachment METADATA (kind, mime, name; never the bytes): tools/issues.js files screenshots
+ * as kind 'screenshot', videos as 'video', a person's own files as 'file', and the captured context
+ * as 'evidence' text files (console.log, failed-requests.log, page-context.json and, when the page
+ * had one, page-fragment.html — the DOM around the focused element). console/network also count
+ * the record's current context: a recapture replaces it, and the files of every capture stay.
+ */
+export function issueEvidence(record = {}, attachments = []) {
+  const isEvidence = (a, name) => a.kind === 'evidence' && a.name === name;
+  const count = (fn) => attachments.filter(fn).length;
+  return {
+    screenshots: count((a) => a.kind === 'screenshot'),
+    videos: count((a) => a.kind === 'video'),
+    files: count((a) => a.kind === 'file'),
+    console: (record.context?.console?.entries?.length ?? 0) > 0 || attachments.some((a) => isEvidence(a, 'console.log')),
+    network: (record.context?.failedRequests?.length ?? 0) > 0 || attachments.some((a) => isEvidence(a, 'failed-requests.log')),
+    dom: attachments.some((a) => a.kind === 'evidence' && /^text\/html\b/.test(a.mime ?? '')),
+  };
+}
+
+/**
+ * An issue's index entry: what the Issues list shows and filters on, so listing fifty issues reads
+ * one key. `severity`, `tags` and `site` (origin of the page it was filed on) and `evidence` are
+ * v3 (C1): the list groups by site and status and shows severity, tags and evidence chips.
+ */
+export function issueIndexEntry(record, attachments = []) {
+  const url = record.context?.url ?? null;
+  return {
+    id: record.id,
+    title: record.title ?? '(untitled)',
+    url,
+    site: siteOf(url),
+    status: record.status ?? 'open',
+    severity: typeof record.severity === 'string' && record.severity ? record.severity : 'normal',
+    tags: Array.isArray(record.tags) ? record.tags.filter((t) => typeof t === 'string') : [],
+    filedAs: record.filedAs ?? null,
+    evidence: issueEvidence(record, attachments),
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+/**
+ * Rewrite one issue's index entry from its STORED record and attachment list, as one step of the
+ * write chain: computed from what is on disk at that moment, so a save and an attachment landing
+ * together never leave the entry with the older of the two. `front` moves it to the top (a save,
+ * newest first); otherwise it keeps its place. An owner with no issue record (a recording's
+ * attachment, a deleted issue) changes nothing — and is checked once before taking the chain, so a
+ * recording's attachments do not wait on it.
+ */
+async function refreshIssueEntry(id, { front = false } = {}) {
+  if (id == null) return;
+  if (!front && !(await local().get(issueKey(id)))[issueKey(id)]) return;
+  await serialize(async () => {
+    const record = (await local().get(issueKey(id)))[issueKey(id)];
+    if (!record) return;
+    const entry = issueIndexEntry({ ...record, id }, await listAttachments(id).catch(() => []));
+    const list = await readIndex(ISSUE_INDEX);
+    const at = list.findIndex((e) => e.id === id);
+    const next = front || at < 0
+      ? [entry, ...list.filter((e) => e.id !== id)]
+      : list.map((e, i) => (i === at ? entry : e));
+    await local().set({ [ISSUE_INDEX]: next });
+  });
+}
+
+/**
+ * The index, with entries written before v3 completed once. They lack `severity` (and tags, site,
+ * evidence): each is rebuilt from its record, attachment metadata included, never the bytes. One
+ * serialized pass that rewrites the index once; later reads find nothing to do. An entry whose record
+ * is gone is kept, with the defaults — an index entry is never lost here.
+ */
+export async function listIssues() {
+  const list = await readIndex(ISSUE_INDEX);
+  const complete = (entries) => entries.every((e) => !e || typeof e !== 'object' || 'severity' in e);
+  if (complete(list)) return list;
+  return serialize(async () => {
+    const current = await readIndex(ISSUE_INDEX);
+    if (complete(current)) return current;
+    const next = [];
+    for (const entry of current) {
+      if (!entry || typeof entry !== 'object' || 'severity' in entry) {
+        next.push(entry);
+        continue;
+      }
+      const record = (await local().get(issueKey(entry.id)))[issueKey(entry.id)] ?? null;
+      // The entry's own id and dates win over a record that lacks them: the entry is what the list had.
+      next.push(record
+        ? issueIndexEntry(
+          { ...record, id: entry.id, createdAt: record.createdAt ?? entry.createdAt, updatedAt: record.updatedAt ?? entry.updatedAt },
+          await listAttachments(entry.id).catch(() => []),
+        )
+        : { ...issueIndexEntry({ ...entry, context: { url: entry.url ?? null } }), ...entry });
+    }
+    await local().set({ [ISSUE_INDEX]: next });
+    return next;
+  });
 }
 
 export async function getIssue(id, { withAttachments = true } = {}) {

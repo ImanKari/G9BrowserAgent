@@ -135,42 +135,225 @@ export function wireErrors() {
   el.panelError?.addEventListener('click', () => showPanelError(null, { source: errorSource ?? 'action' }));
 }
 
+/** "5m ago", "3d ago"; a date past a month, when "41d ago" stops meaning anything. */
 export const ago = (t) => {
   const s = Math.round((Date.now() - t) / 1000);
   if (s < 60) return `${Math.max(0, s)}s ago`;
   if (s < 3600) return `${Math.round(s / 60)}m ago`;
   if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  if (s < 31 * 86400) return `${Math.round(s / 86400)}d ago`;
   return new Date(t).toLocaleDateString();
 };
+
+/**
+ * A row's second line: items separated by "·". Each item carries its own
+ * separator, and the line is shifted left by one separator's width inside a
+ * clipping box, so an item that wraps to the start of a line loses its "·"
+ * instead of starting the line with one.
+ */
+export function metaLine(items) {
+  const outer = node('span', 'meta');
+  const inner = node('span');
+  for (const it of items) {
+    if (it == null) continue;
+    const cell = node('span', 'mi');
+    cell.append(it);
+    inner.append(cell);
+  }
+  outer.append(inner);
+  return outer;
+}
 
 export const bytes = (n) =>
   n > 1048576 ? `${(n / 1048576).toFixed(1)}MB` : `${Math.max(1, Math.round(n / 1024))}KB`;
 
-/** A row in one of the lists: name, subtitle, and a few actions. */
-export function row(name, sub, actions, onOpen) {
-  const li = document.createElement('li');
-  const who = node('div', 'who');
-  who.append(node('div', 'nm', name), node('div', 'sub', sub));
-  if (onOpen) {
-    who.style.cursor = 'pointer';
-    who.addEventListener('click', onOpen);
-  }
-  const acts = node('div', 'acts');
-  for (const [label, cls, fn, title] of actions) {
-    const b = node('button', cls, label);
-    b.type = 'button';
-    if (title) {
-      b.title = title;
-      b.setAttribute('aria-label', title);
-    }
+// ------------------------------------------------------- shared components (v3)
+//
+// Every dynamic value on this page — a page title, a URL, a flow name, an issue
+// title, a tag, an agent's name — comes from an arbitrary web page or a person,
+// and this page runs with the extension's debugger privileges. So nothing here
+// builds HTML from strings: elements, textContent and setAttribute only
+// (setup/unit/panel.test.mjs scans for the alternatives).
+
+/** A button. `title` doubles as the accessible name when the label is a glyph. */
+export function btn(label, cls, onClick, { title, aria, key } = {}) {
+  const b = node('button', cls || null, label);
+  b.type = 'button';
+  if (title) b.title = title;
+  if (aria) b.setAttribute('aria-label', aria);
+  if (key) b.dataset.k = key;
+  if (onClick) {
     b.addEventListener('click', (e) => {
       e.stopPropagation();
-      fn();
+      onClick(e);
     });
-    acts.append(b);
   }
-  li.append(who, acts);
-  return li;
+  return b;
+}
+
+export function chip(text, cls, title) {
+  const c = node('span', `chip${cls ? ` ${cls}` : ''}`, text);
+  if (title) c.title = title;
+  return c;
+}
+
+/** A verdict or severity dot. Decorative: the word beside it carries the meaning. */
+export function dot(kind, value) {
+  const d = node('span', 'vd');
+  d.dataset[kind] = value;
+  d.setAttribute('aria-hidden', 'true');
+  return d;
+}
+
+/**
+ * Fill a <select> with [value, label] pairs, keeping `value` selected. Rebuilt
+ * only when the options changed: a rebuild under an open dropdown closes it.
+ */
+export function setOptions(select, options, value) {
+  if (!select) return;
+  const key = JSON.stringify(options);
+  if (select.dataset?.opts !== key) {
+    select.replaceChildren?.(
+      ...options.map(([v, label]) => {
+        const o = document.createElement('option');
+        o.value = v;
+        o.textContent = label;
+        return o;
+      }),
+    );
+    if (select.dataset) select.dataset.opts = key;
+  }
+  select.value = value;
+}
+
+/** "abc…xyz": the start and the end of a long string both carry meaning (a path's leaf, a flow's id). */
+export function middle(text, max) {
+  const s = String(text ?? '');
+  if (s.length <= max || max < 8) return s;
+  const head = Math.ceil((max - 1) * 0.55);
+  return `${s.slice(0, head)}…${s.slice(s.length - (max - 1 - head))}`;
+}
+
+/** 14:03 — the clock time a capture or a run started. */
+export const hm = (t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+
+/** A URL a link may point at: http(s) only, or null. */
+export function safeHref(url) {
+  try {
+    const u = new URL(String(url));
+    return /^https?:$/.test(u.protocol) ? u.href : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A link that leaves the panel. Opens a new tab; the page it opens gets no handle back to this one. */
+export function extLink(url, text) {
+  const href = safeHref(url);
+  if (!href) return null;
+  const a = node('a', null, text ?? href);
+  a.href = href;
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  return a;
+}
+
+/**
+ * Per-viewer conveniences — filters, folded groups, a dismissed notice — in this
+ * page's own storage. Storage can be blocked or empty; losing them costs a click.
+ */
+export const prefs = {
+  get(key, fallback) {
+    try {
+      const raw = globalThis.localStorage?.getItem(key);
+      return raw == null ? fallback : JSON.parse(raw);
+    } catch {
+      return fallback;
+    }
+  },
+  set(key, value) {
+    try {
+      globalThis.localStorage?.setItem(key, JSON.stringify(value));
+    } catch {
+      /* blocked: it just does not survive a reopen */
+    }
+  },
+};
+
+let groupSeq = 0;
+
+/**
+ * A collapsible group: a header button (aria-expanded) and its body. What the
+ * person chose is remembered per `store` ({ key: open }), so a group stays as
+ * they left it across polls and reopens; `open` is the default until they do.
+ */
+export function group({ store, key, title, count, level = 1, titleAttr, open: byDefault = true }) {
+  const chosen = foldState(store);
+  const open = key in chosen ? !!chosen[key] : byDefault;
+  const wrap = node('section', `grp l${level}`);
+  const bodyId = `grp-${++groupSeq}`;
+  const head = node('button', 'grp-h');
+  head.type = 'button';
+  head.dataset.k = `grp:${key}`;
+  head.setAttribute('aria-expanded', String(open));
+  head.setAttribute('aria-controls', bodyId);
+  if (titleAttr) head.title = titleAttr;
+  const chev = node('span', 'chev', '▾');
+  chev.setAttribute('aria-hidden', 'true');
+  head.append(chev, node('span', 'grp-t', title), node('span', 'grp-n', count != null ? String(count) : ''));
+  const body = node('div', 'grp-b');
+  body.id = bodyId;
+  body.hidden = !open;
+  head.addEventListener('click', () => {
+    const opening = head.getAttribute('aria-expanded') !== 'true';
+    prefs.set(store, { ...foldState(store), [key]: opening });
+    head.setAttribute('aria-expanded', String(opening));
+    body.hidden = !opening;
+  });
+  wrap.append(head, body);
+  return { wrap, body };
+}
+
+function foldState(store) {
+  const v = prefs.get(store, {});
+  return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+}
+
+/**
+ * Repaint a list without losing the keyboard: the focused control's `data-k`
+ * is found again in the new DOM and focused. A poll that rebuilt the list under
+ * someone's focus used to drop them back to the top of the page.
+ */
+export function keepFocus(container, paint) {
+  const active = document.activeElement;
+  const k = active && container?.contains?.(active) ? active.dataset?.k : null;
+  // A field being typed in keeps what was typed, and where the caret was.
+  const typing = k && /^(INPUT|TEXTAREA)$/.test(active.tagName ?? '')
+    ? { value: active.value, start: active.selectionStart, end: active.selectionEnd }
+    : null;
+  paint();
+  if (!k) return;
+  const again = [...container.querySelectorAll('[data-k]')].find((n) => n.dataset.k === k);
+  if (!again) return;
+  if (typing && 'value' in again) {
+    again.value = typing.value;
+    try {
+      again.setSelectionRange?.(typing.start, typing.end);
+    } catch {
+      /* not a text field */
+    }
+  }
+  again.focus?.();
+}
+
+/** Copy text; say so, or say why not. */
+export async function copyText(text, done) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(done);
+  } catch (err) {
+    showPanelError(`Could not copy: ${err?.message ?? err}`);
+  }
 }
 
 export function fileToBase64(file) {
@@ -227,4 +410,6 @@ export const view = {
   state: null,
   /** Last `daemonInfo` answer, shared by the Session and About views. */
   daemon: null,
+  /** The tab agents act on, as the Session view last showed it ({tabId, title, url}) — Automation's "this site". */
+  current: null,
 };

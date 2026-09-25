@@ -794,15 +794,24 @@ async function main() {
       title: document.title,
       tabs: document.querySelectorAll('button[data-tab]').length,
       sessionBody: !!document.querySelector('[data-body="session"]'),
-      attachControl: !!document.getElementById('attachActive'),
+      // v3 (V3_UX_PLAN A1-A3): Record from now replaces the Attach button; auto-attach has three
+      // settings; the blocked-agent toast has its place above the tab bar.
+      recordControl: !!document.getElementById('recordNow') && !document.getElementById('attachActive'),
+      autoModes: [...document.querySelectorAll('input[name="autoAttach"]')].map((r) => r.value).join(','),
+      autoChecked: document.querySelector('input[name="autoAttach"]:checked')?.value ?? null,
+      blockedToast: !!document.getElementById('blockedAlerts'),
       modeButtons: document.querySelectorAll('[data-mode]').length,
       error: document.getElementById('panelError')?.hidden === false ? document.getElementById('panelError').textContent : '',
       overflow: document.documentElement.scrollWidth > innerWidth,
     })`);
     const expectedTitle = 'G9 Browser Agent v' + VERSION;
-    identity.title === expectedTitle && identity.tabs >= 4 && identity.sessionBody && identity.attachControl
+    identity.title === expectedTitle && identity.tabs >= 4 && identity.sessionBody && identity.recordControl && identity.blockedToast
       ? ok('panel rendered its session UI', `title "${identity.title}", ${identity.tabs} section tabs`)
       : bad('panel did not render its session UI', JSON.stringify(identity));
+    // livetest.mjs section 18 leaves auto-attach on its default, Project sites.
+    identity.autoModes === 'off,project,all' && identity.autoChecked === 'project'
+      ? ok('auto-attach offers Off / Project sites / All tabs', `selected "${identity.autoChecked}"`)
+      : bad('auto-attach control', JSON.stringify({ modes: identity.autoModes, checked: identity.autoChecked }));
     identity.modeButtons === 0 ? ok('no v1 mode buttons in the panel') : bad('v1 mode buttons still rendered', String(identity.modeButtons));
     identity.error ? bad('panel shows an error', identity.error) : ok('panel shows no error');
     identity.overflow ? bad('panel overflows horizontally at 420px') : ok('no horizontal overflow at 420px');

@@ -554,6 +554,8 @@ export const TOOLS = [
         suite: str('Suite name for update.'),
         folder: str('Folder path for update.'),
         tags: { type: 'array', items: { type: 'string' }, description: 'Recording tags for update.' },
+        startUrl: str('For update: the http(s) URL the flow starts on; its origin is the flow\'s site in the panel. An empty string clears it.'),
+        qaTestCaseIds: { type: 'array', items: { type: 'string' }, description: 'For update: the manual test-case ids this flow covers (they appear in qa-automation-status.json).' },
         environment: { type: 'object', description: 'Named environment profile with an optional variables object.' },
         parameters: { type: 'object', description: 'Data parameter defaults or descriptors.' },
         includeAttachments: bool('For export — inline attachment bytes.', true),

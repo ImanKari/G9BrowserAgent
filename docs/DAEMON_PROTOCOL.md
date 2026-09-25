@@ -6,14 +6,15 @@ WebSocket each. Messages are single JSON objects in text frames. Maximum frame (
 message): 64 MiB. Implementation: `daemon/` (entry `daemon/g9d.mjs`), shim `mcp/shim.mjs`, Node client
 `lib/ws-client.mjs`.
 
-**Synced with the code on 2026-09-25 (v2.0.3, the popout fix).** Every message, field and
+**Synced with the code on 2026-09-25 (v3.0.1; 3.0.0 was the side panel of V3_UX_PLAN.md, 3.0.1 changed no message).** Every message, field and
 default below was re-read from `daemon/`, `mcp/shim.mjs`, `extension/sw.js` and `extension/lib/transport.js`.
 Text marked ***(as built)*** records something the implementation has that this document did not say;
-the rest was already accurate or has been corrected in place.
+the rest was already accurate or has been corrected in place. Text marked ***(v3)*** was added for the
+v3 side panel (V3_UX_PLAN.md): the `projects` message and the richer `agents` rows (§5).
 
 ## 1. Transport
 
-* `GET /health` → `200 {"ok":true,"name":"g9d","version":"2.0.3","pid":123,"port":8765,"home":"…",
+* `GET /health` → `200 {"ok":true,"name":"g9d","version":"3.0.1","pid":123,"port":8765,"home":"…",
   "engines":2,"agents":3,"extension":true,"launched":1,"activeRuns":[{"runId":"…","kind":"schedule",
   "label":"…","startedAt":…}],"startedAt":…,"uptimeMs":…}`. `engines` counts extension and launched
   engines; `launched` only launched ones (a restart would close them); `activeRuns` is every evidence run
@@ -57,7 +58,7 @@ Close codes the daemon uses:
 First frame from the client, within 10 s:
 
 ```json
-{ "type": "hello", "role": "agent" | "engine" | "ui", "version": "2.0.3",
+{ "type": "hello", "role": "agent" | "engine" | "ui", "version": "3.0.1",
   "client": { "name": "claude-code", "pid": 4242, "browser": "Edg/153.0…", "cwd": "G:/proj", "project": null } }
 ```
 
@@ -87,7 +88,8 @@ browser whose G9 extension is reconnecting …"; `browser_tabs list` lists its t
 * `role: "runner"` is accepted as an alias of `agent` (the runner is an agent like any other).
 * An agent's `client.cwd` (and optional `client.project`, the value of `G9_PROJECT`) selects the
   project adapter (`g9.project.json`) reported to that agent in `welcome` and `browser_status` — one
-  daemon serves agents working in different repositories.
+  daemon serves agents working in different repositories. ***(v3)*** Its environments' hosts reach
+  the extensions in the `projects` push, and its folder name in the `agents` rows (§5).
 
 A v1 extension sends `{"type":"hello","role":"extension",…}`; the daemon treats `extension` as
 `engine`, and if the version major is < 2 it answers `{"type":"welcome", …, "problem":"…"}` and closes
@@ -96,7 +98,7 @@ the socket with code 4001 and a reason naming the fix (reload the v2 extension).
 Reply:
 
 ```json
-{ "type": "welcome", "version": "2.0.3", "daemonPid": 123, "bootId": "4f2c…", "startedAt": 1758…,
+{ "type": "welcome", "version": "3.0.1", "daemonPid": 123, "bootId": "4f2c…", "startedAt": 1758…,
   "id": "agent-3",
   "repoRoot": "G:/…", "project": { "found": true, "path": "…", "environments": {}, "flowsDir": "…" },
   "halted": { "global": false }, "port": 8765, "home": "C:/Users/…/AppData/Local/G9" }
@@ -318,7 +320,7 @@ Extension → daemon requests (answered with `{type:'response', id, ok, result|e
 |---|---|---|
 | `flowlib` | `{ op: list\|read\|write\|remove\|status\|suite, flowId?, … }` | the flow library on disk — sent as `{type:'flowlib', id, op, flowId?, …}` → `{type:'flowlibResult', id, ok, result\|error}`. F5: `id` is only the sender's correlation id, echoed on the result; the flow `read`/`remove` are about is `flowId`. A v1-shaped message without `flowId` named the flow in `id`, and only then is `id` read as the flow. As a request the sub-op travels as `flowOp` (***(as built)*** `sub` is accepted too) and the flow as `flowId` (never `id`); an unknown op is refused by name |
 | `handoff` | `{ tabId }` (Chrome id) | the panel's "Send to background" (caller: `side panel`, refused while halted) |
-| `info` | — | `{ version, port, pid, agents:[{id,name,owned:[Chrome ids],halted}], engines, halted }` for the panel (***(as built)*** `engines` are the rows of §3.1 without `argv`; `halted` is the global `{halted, by, at}`) |
+| `info` | — | `{ version, port, pid, agents:[…], engines, halted }` for the panel (***(as built)*** `engines` are the rows of §3.1 without `argv`; `halted` is the global `{halted, by, at}`; `agents` are the rows of the `agents` push below, v3 fields included) |
 
 Daemon → extension:
 
@@ -326,7 +328,8 @@ Daemon → extension:
 |---|---|
 | `{type:'halt', halted}` | mirror the global halt into the panel |
 | `{type:'reload'}` | the extension folder was updated; call `chrome.runtime.reload()` when idle. Sent only when no relayed call is in flight (waits up to 60 s) |
-| `{type:'agents', agents:[{id,name,owned:[tabId…],halted}]}` | for the panel's agent list (Chrome tab ids of that browser); pushed on every change (debounced 100 ms) |
+| `{type:'agents', agents:[{id,name,owned:[tabId…],halted,project,cwd,current,currentEngine}]}` | for the panel's agent list (Chrome tab ids of that browser); pushed on every change — a connect or disconnect, a claim or release, a rename, a halt, ***(v3)*** a change of an agent's current tab and a closed tab — at most once per 100 ms. ***(v3)*** `project`: the folder name of the agent's project (the folder holding its `g9.project.json`), else of its `client.cwd`, else `null`; `cwd`: `client.cwd` or `null`; `current`: the agent's current tab as THIS browser's Chrome tab id, or `null`; `currentEngine`: `'extension'` (that tab is in this browser), `'launched'` (an Engine 2 tab — `current` is `null`, and no title or URL is sent: engine rows carry none), `'elsewhere'` (a tab of another browser's extension — `current` is `null`) or `null` (no current tab) |
+| `{type:'projects', domains:[host…], projects:[{name, path, domains:[host…], agents:[agentId…]}]}` | ***(v3)*** the connected agents' project sites, for the panel's auto-attach "Project sites". Each project is one `g9.project.json` (`path`; `name` = its folder name) with the agents working in it; its `domains` are the hosts (`host[:port]`, lower case, default ports omitted) of its `environments` URLs — a string per environment, or the string values of an object per environment (`{dev:{baseUrl:"https://…"}}`); anything not an `http(s)` URL is ignored, and a project with no such URL is not listed. `domains` is the de-duplicated union over CONNECTED agents only (an agent without `cwd`/`project` has the daemon's default project, as in its `welcome`). Sent right after the welcome and whenever an agent connects or disconnects (at most once per 100 ms). A capture filter in the extension, never an access boundary |
 | `{type:'watch', tabId, on:boolean}` | start/stop streaming frames + pointer for a tab; re-sent (`on:true`) for every watched tab when a parked extension resumes (D-c) |
 
 Daemon → UI: `{type:'event', topic, data}`:

@@ -15,7 +15,7 @@
 
 import { platform } from '../lib/platform.js';
 import { getState, setState, updateState, logActivity, broadcast, noteDialog, forgetDialog } from '../lib/state.js';
-import { sendOnLiveSession, forgetTab } from '../lib/cdp.js';
+import { sendOnLiveSession, forgetTab, forgetAttached } from '../lib/cdp.js';
 import { clearRefs } from '../lib/refs.js';
 import * as frames from '../lib/frames.js';
 import * as world from '../lib/world.js';
@@ -156,7 +156,8 @@ export async function onDetach(source, reason) {
   await issues.cancelVideo(tabId).catch(() => {});
   await framesCleared;
   // Read and written as one step (lib/state.js updateState): a concurrent attach must not be lost.
-  const state = await updateState((s) => ({ attachedTabs: s.attachedTabs.filter((id) => id !== tabId) }));
+  // Its capture start time (attachedSince) goes too: a re-attach starts a new capture.
+  const state = await updateState((s) => forgetAttached(s, [tabId]));
   await logActivity({ kind: 'detach', tabId, ok: false, detail: reason });
   if (tabId === state.currentTabId) {
     broadcast({ type: 'detached', tabId, reason });
@@ -186,7 +187,7 @@ export async function onTabRemoved(tabId) {
     const patch = {};
     if (wasCurrent) patch.currentTabId = null;
     if (forgotten.length) patch.sessions = Object.fromEntries(Object.entries(state.sessions ?? {}).filter(([, id]) => id !== tabId));
-    if (state.attachedTabs.includes(tabId)) patch.attachedTabs = state.attachedTabs.filter((id) => id !== tabId);
+    if (state.attachedTabs.includes(tabId) || (state.attachedSince ?? {})[tabId] != null) Object.assign(patch, forgetAttached(state, [tabId]));
     return Object.keys(patch).length ? patch : null;
   });
   // A closed tab's dialog is gone with it (another tab's stays in force).

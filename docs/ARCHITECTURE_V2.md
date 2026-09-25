@@ -5,11 +5,12 @@ This file is the **binding contract** between the modules of G9 v2. It refines
 module boundaries, function signatures, message formats and file locations. Every implementer codes
 against the signatures below; if a signature has to change, change it here in the same change set.
 
-Version for everything in this release: **2.0.3**, read from the root `package.json`. (2.0.0 was the first complete build, 2.0.1 added the
+Version for everything in this release: **3.0.0**, read from the root `package.json`. (2.0.0 was the first complete build, 2.0.1 added the
 adversarial review's 40 fixes, 2.0.2 fixed three defects that flaky tests uncovered and sized the browser close budget from a
-measurement, and 2.0.3 fixed the side panel's popout.)
+measurement, 2.0.3 fixed the side panel's popout, and 3.0.0 is the side-panel redesign of V3_UX_PLAN.md,
+marked ***(v3)*** below.)
 
-**Synced with the code on 2026-09-25 (v2.0.3, the popout fix).** Signatures, messages, fields
+**Synced with the code on 2026-09-25 (v3.0.1; 3.0.0 was the side panel of V3_UX_PLAN.md, 3.0.1 changed no contract).** Signatures, messages, fields
 and defaults below were re-read from the implementation. Text marked ***(as built)*** records something
 the code has that the original contract did not (an addition, or a behaviour that changed after the
 contract was written); everything else was already accurate or has been corrected in place. The wire
@@ -23,7 +24,7 @@ protocol is in [DAEMON_PROTOCOL.md](DAEMON_PROTOCOL.md), synced the same day.
 |---|---|---|
 | `humanize/` at the repo root | **`extension/humanize/`** | An unpacked extension cannot import a file outside its own folder. The daemon imports it from there, exactly as it imports `extension/tools/*`. One copy, two consumers. |
 | `bridge/` deleted | `bridge/` deleted **except** `bridge/src/server.js`, a 9-line forwarder to `mcp/shim.mjs` | Every QA machine's MCP config written by v1's `install.ps1` points at `bridge/src/server.js`. The forwarder keeps those configs working; nothing else lives there. |
-| Seven intermediate versions 1.8.0 … 1.14.0 | One release, **2.0.0**, now at **2.0.3**: 2.0.1 the review fixes, 2.0.2 the flaky-test round, 2.0.3 the popout fix | The owner asked for the whole plan in one phase; every change after it bumps the version (D12). |
+| Seven intermediate versions 1.8.0 … 1.14.0 | One release, **2.0.0**, then 2.0.1 the review fixes, 2.0.2 the flaky-test round, 2.0.3 the popout fix; now **3.0.0**, the side panel (V3_UX_PLAN.md) | The owner asked for the whole plan in one phase; every change after it bumps the version (D12). |
 | "No origin games beyond 127.0.0.1" | The daemon still refuses WebSocket upgrades whose `Origin` is `http(s)://…` | A web page in the QA's own browser is not local; without this any site could drive every tab. Extension origins and origin-less native clients (shim, desktop, runner) are accepted with no token. This restricts nothing the owner asked for. |
 | `visual.js` decodes screenshots with OffscreenCanvas | Image work goes through `platform.image` | Node has no image decoder and v2 has no dependencies. Engine 2 decodes inside the launched browser itself. |
 | §P2.2: no `AutomationControlled` switch, ever | **Decision D-a.** At stealth level `stealth` only, `stealth.launchArgsFor('stealth')` = `['--disable-blink-features=AutomationControlled']`; `launchBrowser` accepts it there and still refuses it in `extraArgs` at `off`/`human`, and refuses `--enable-automation` always. Every **headless** launch, at every level, also gets `--screen-info={W×H workAreaBottom=48}` — the screen is `windowSize`, with a Windows taskbar — and a `--window-size` that fills the work area, W×(H−48) ***(as built: the taskbar was added after live round 2)***. | Measured on Edge 153, Chrome 153 and CfT 153: `--remote-debugging-pipe` itself makes `navigator.webdriver === true`; only this switch clears it (`Emulation.setAutomationOverride` does not). Headless otherwise reports an 800×600 screen inside a 1920×1080 window, and no work area (`availHeight === height`, 30/30 headless runs). The owner requires stealth runs to be undetectable. `off`/`human` keep telling the truth, and `launchWarnings()` says so. |
@@ -58,7 +59,7 @@ extension/sw.js (Engine 1) ───────────WS /g9────�
 
 ## 2. Root package and version
 
-* `package.json` at the repo root: `{ "name": "g9-browser-agent", "version": "2.0.3", "private": true,
+* `package.json` at the repo root: `{ "name": "g9-browser-agent", "version": "3.0.1", "private": true,
   "type": "module", "engines": { "node": ">=22" }, "scripts": { … } }`. No dependencies.
 * `extension/manifest.json.version` **must equal** it; `desktop/package.json.version` **must equal** it.
   `setup/unit/version.test.mjs` enforces both ***(as built)*** and also compares the version in
@@ -368,7 +369,8 @@ export function tagDelivery(error: Error): Error                    // runTool c
   `targetError` (never another tab in its place). Without it, the engine's own current tab. Other fields:
   `engine`, `version`, `browser` (extension: the user agent), connection hook fields, `halted`, `dialogOpen`,
   `dialogs` (when more than one is open), `tabs:{count, rows}` (at most 25 rows), `sessions`, `inputMode`,
-  `autoAttach`, `attachedCount`, `warnings?`, `hint`. The daemon passes the tab its status is about (§8).
+  `autoAttach`, `attachedCount`, `warnings?`, `hint`. ***(v3)*** `current.attachedSince` (epoch ms, or null),
+  `autoAttachMode` (`'off'|'project'|'all'`, extension only); `autoAttach` stays a boolean (§13). The daemon passes the tab its status is about (§8).
   ***(as built)*** `warnings` name a minimized window, an extension tab that is not the active tab of its window
   (hidden: reads work, input may not), and a launched tab that is BEHIND another tab in its real window. The
   connection hook adds `{connected, reconnecting}` in the extension and `{engine:'launched', engineId,
@@ -426,6 +428,13 @@ status, openerTabId, session? }` — tab identity is always the key **`tabId`**,
   `unpinTab`, `requireTabControl` are gone. ***(as built, 2.0.3)*** `popout(tabId, { width, height, left,
   top, focus = false })` and `popoutGeometry(source, { width, height, left, top })` → `{ width, height,
   left, top }` (§4.2).
+* ***(v3)*** `lib/sites.js` (new, pure, R2): `siteOf(url)` → origin or null (opaque origins are null),
+  `parseDomain(domain)`, `hostMatches(url, domains)` (exact host or subdomain; a domain's port must match
+  when given; http(s) only), `displayUrl(url)` → `{ origin, host, path, query, hash, href }`. `lib/cdp.js`:
+  `attach(tabId, { log = true })` (`log:false` leaves the activity line to the caller), `forgetAttached(state,
+  tabIds)` (the `attachedTabs`/`attachedSince` patch without those tabs). `tools/tabs.js`: `attachTab(tabId,
+  { clearHalt, log })`. `lib/state.js`: `AUTO_ATTACH_MODES`, `autoAttachMode(value)`. `lib/store.js`:
+  `issueIndexEntry(record, attachments)`, `issueEvidence(record, attachments)`.
 * `tools/record.js`: `recordingTabs()` (every tab recording now), `inputSamplesOf`, `calibrateFromRecording`;
   `startRecording` REFUSES a tab that is already recording (v1 silently replaced the session and leaked the
   first one's scripts). `interact.witnessExpression` is exported for the tests.
@@ -819,7 +828,9 @@ Summary of the protocol (full text in DAEMON_PROTOCOL.md):
   the start; the watcher and its run are undone first (DAEMON_PROTOCOL §6).
 * Daemon → extension: `{type:'halt', halted}`, `{type:'reload'}`, `{type:'agents', agents}`, `{type:'watch', tabId, on}`
   (re-sent for watched tabs when a parked extension comes back), ***(as built)*** `{type:'cancel', id}` (stop a
-  relayed call: its deadline, a dialog on its tab, or the user stopping that agent). The extension also sends the
+  relayed call: its deadline, a dialog on its tab, or the user stopping that agent), ***(v3)*** `{type:'projects',
+  domains, projects}` (the connected agents' project sites; the `agents` rows also carry `project`, `cwd`,
+  `current`, `currentEngine` — DAEMON_PROTOCOL §5). The extension also sends the
   event `reloadDeferred` `{reasons}` when a `reload` has to wait (an agent call, a panel operation, a recording,
   an issue video or a replay still running).
   `/health` and the welcome also carry `bootId` (the welcome `startedAt` too) — DAEMON_PROTOCOL §2.
@@ -960,9 +971,11 @@ Added:
 | cmd | request | response |
 |---|---|---|
 | `setInputMode` | `{ mode: 'off'\|'human'\|'stealth' }` | `{ ok }` |
-| `setAutoAttach` | `{ enabled: boolean }` | `{ ok }` |
-| `popout` | `{ tabId? }` | `{ ok, tabId, windowId, focused, visible, title?, note }` — ***(as built, 2.0.3)*** the person's own button: `tools/tabs.js popout(tab, {focus:true})`, so the window comes up in front; it works while Stop is on |
-| `handoff` | `{ tabId? }` | `{ ok, result }` — asks the daemon (`{type:'request', op:'handoff', tabId}`) |
+| `setAutoAttach` | ***(v3)*** `{ mode: 'off'\|'project'\|'all' }`; the v2 form `{ enabled: boolean }` still works (`true` → `'all'`, `false` → `'off'`) | `{ ok, mode }`; an unknown mode → `{ ok:false, error }`. Logs one line ("Auto-attach: Project sites"); with a mode other than `'off'` every open tab is judged again after the answer |
+| `recordNow` | ***(v3)*** `{ tabId?, reload?: boolean }` — no `tabId`: the active tab, as `attachActive` | `{ ok, tabId, title, url, attachedSince, reloaded, reloadError?, resumed? }`. "Record from now": exactly `attachActive`/`attachTab` (`tools/tabs.js attachTab(tabId, {clearHalt:true})` — capture starts, the tab becomes current, Stop is lifted and the resume reported to the daemon as `{type:'event', event:'halt', data:{halted:false, by:'panel'}}`), then with `reload:true` `tools/navigate.js reload(tabId)` — `browser_navigate action:"reload"`'s own path, load wait and post-load idle included. ONE activity line (`kind:'attach'`, detail "Record from now[ — page reloaded to capture its load][; Stop lifted]"). A failed reload leaves capture on: `reloaded:false`, `reloadError`, the line `ok:false`. An internal page (`edge://…`) is refused as `attachTab` refuses it |
+| `focusTab` | ***(v3)*** `{ tabId }` (Chrome id, required) | `{ ok, tabId, windowId }` — `tools/tabs.js focusTab`: the tab becomes the active tab of its window and the window is focused (an agent's tab chip in the Agents list). The person's own gesture: it works while Stop is on. A tab that does not exist → `{ ok:false, error }` |
+| `popout` | `{ tabId? }` | `{ ok, tabId, windowId, focused, visible, title?, note }` — ***(as built, 2.0.3)*** the person's own button: `tools/tabs.js popout(tab, {focus:true})`, so the window comes up in front; it works while Stop is on. ***(v3)*** clears `blocked[tabId]` |
+| `handoff` | `{ tabId? }` | `{ ok, result }` — asks the daemon (`{type:'request', op:'handoff', tabId}`). ***(v3)*** clears `blocked[tabId]` once it succeeded |
 | `daemonInfo` | — | `{ ok, daemon: { version, port, agents:[…], engines:[…] } \| null }` |
 | `about` | — | `{ ok, version, previousVersion, updatedAt, browser }` |
 
@@ -974,10 +987,56 @@ pushed by the daemon), `updatedAt`, ***(as built)*** `project` (the project adap
 found, path, environments, defaultEnvironment, flowsDir, problems — not persisted). `getState()` also returns
 `status` (tools/index.js `status()`).
 
+***(v3)*** State fields added for the v3 panel (all in `storage.session` except `autoAttach`, a durable setting):
+
+* `autoAttach`: `'off' | 'project' | 'all'` (was a boolean). Default `'project'` for an install that never
+  stored the setting. A stored v2 boolean is read as `true` → `'all'`, `false` → `'off'` and rewritten once
+  as the string by `migrateLegacySettings()` (logged), so an existing install keeps its choice
+  (`lib/state.js autoAttachMode`, `AUTO_ATTACH_MODES`). `'all'` attaches every attachable tab (v2's `true`);
+  `'project'` only tabs whose URL matches `projectDomains` (`lib/sites.js hostMatches`: the host or a
+  subdomain of it, and the port when the domain names one), judged on startup, on creation, on every
+  navigation and whenever `projectDomains` changes — and with no project domains, nothing. Auto-attach
+  never detaches anything and is never an access boundary (D6/D7: a tab attached by hand or by an agent
+  stays attached; every tab stays reachable). `status()` (so `browser_status`) keeps `autoAttach` a
+  boolean — `true` for `'all'`, or `'project'` with project domains known — and adds `autoAttachMode`
+  (the extension only; a launched engine attaches every tab it has).
+* `projectDomains: string[]`, `projects: [{name, path, domains, agents}]`: the daemon's last
+  `{type:'projects'}` (DAEMON_PROTOCOL §5), re-sent on every connect; kept across a disconnect, as `agents` is.
+* `attachedSince: { [tabId]: epochMs }`: when the debugger session capturing that tab's console and
+  network began (`lib/cdp.js attach`, only when a session really starts; a session found still attached
+  after a worker restart keeps its time). Removed on detach (`detachMany`, `events.onDetach`) and on tab
+  close (`events.onTabRemoved`), each inside the one serialized `updateState` step that already edits
+  `attachedTabs`. Also on `status().current.attachedSince` (null when that tab is not captured) and in
+  `recordNow`'s answer.
+* `blocked: { [tabId]: { tabId, agent:{id, name}, reason:'hidden', at, title, url, tool, delivery } }`: an
+  agent's input could not reach that tab because it is hidden. Set by `sw.js` when a call the daemon
+  relayed (`caller.relayed`) fails with `hidden === true` (the `[delivery: not-delivered|partial; …; tab
+  hidden]` errors of `lib/humanize.js`/`interact.js`) — unless the tab is by then the active tab of a
+  focused window. Cleared when the tab closes, becomes the active tab of a focused, non-minimized window
+  (`tabs.onActivated`, `windows.onFocusChanged`, the `focusTab` command), is popped out or handed off
+  (panel commands, or an agent's relayed `browser_tabs` `popout`/`focus`/`handoff_export`), when a later
+  relayed `browser_interact` on it succeeds, and when the daemon's `agents` push no longer lists its agent.
+
+***(v3)*** Broadcasts to the panel (`platform.runtime.broadcast`, besides `state`/`activity`/`dialog`/
+`detached`): `{ type:'agentBlocked', tabId, agent:{id, name}, reason:'hidden', at, title, url, tool,
+delivery }` when `blocked[tabId]` is set, and `{ type:'agentUnblocked', tabId }` when it is cleared.
+
 `recStatus` answers `{ ok, status, elsewhere:[{tabId, name, startedAt}], recordings }` — `elsewhere` = the
 other tabs recording now (F8: the panel's Record button is disabled, with the reason shown, while the
 current tab records, because `startRecording` refuses a tab that is already recording; "Stop and save" is
 a separate button).
+
+***(v3)*** `issueList` answers `{ ok, issues, usage }`; each `issues` row is the issue index entry
+(`lib/store.js issueIndexEntry`): `{ id, title, url, site, status, severity, tags, filedAs, evidence:{
+screenshots, videos, files, console, network, dom }, createdAt, updatedAt }` — `site` is the origin of the
+page it was filed on (`lib/sites.js siteOf`, null for an opaque URL), `severity` defaults to `'normal'`,
+`evidence` counts attachments by kind (`screenshot`, `video`, `file`) and says whether console errors,
+failed requests (the captured context, or its `console.log`/`failed-requests.log` evidence files) and a DOM
+fragment (`page-fragment.html`) are held. The entry is rewritten, as one serialized step from the stored
+record, on every save and whenever an attachment is added to or removed from the issue. Entries written
+before v3 lack `severity`: the first `listIssues()` that finds one rebuilds each such entry from its record
+(attachment metadata, never the bytes) and rewrites the index once; an entry whose record is gone is kept,
+with the defaults.
 
 ---
 

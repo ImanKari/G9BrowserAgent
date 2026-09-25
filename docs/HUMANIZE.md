@@ -184,7 +184,7 @@ the aim point. Samples that did not move are dropped — a mouse reports movemen
 **The pixel grid.** A real mouse moves in whole *device* pixels, so on a 125 % display its CSS
 coordinates are multiples of 0.8, never 101.0 (= 126.25 device px). Every coordinate is snapped to
 1/dpr of the viewport passed in (`viewport.dpr`, or `devicePixelRatio`/`deviceScaleFactor`);
-without it, integers. **G9 2.0.3 does not pass it yet:** `tools/interact.js` `layoutViewport()`
+without it, integers. **G9 3.0.1 does not pass it yet:** `tools/interact.js` `layoutViewport()`
 returns `{ width, height }` only, so delivered coordinates are whole CSS pixels. That is correct only
 at 100 % display scaling. The change was left out on purpose, because it alters replay determinism
 and the unit baselines.
@@ -505,7 +505,7 @@ notch size), and the recorder's exact sample shape is read correctly.
    - **Fitted from a recording in the extension:** saved in the extension's store **and** the
      launched-engine store, so the name works in both.
    - **Fitted from a recording in a launched engine:** saved in the launched-engine store only. G9
-     2.0.3 has no message that installs it into the extension, so `humanize:"team-qa"` in the
+     3.0.1 has no message that installs it into the extension, so `humanize:"team-qa"` in the
      person's own browser fails with "Unknown humanize profile".
 
    Without `name`, the fitted profile is returned and nothing is saved. A name must be 1–64 letters,
@@ -520,7 +520,7 @@ notch size), and the recorder's exact sample shape is read correctly.
 ```
 
 `resolveProfile(thatObject)` validates it and fills the rest from the base. There is no tool that
-saves a hand-written profile in 2.0.3: the MCP `humanize` argument takes only a level or a saved
+saves a hand-written profile in 3.0.1: the MCP `humanize` argument takes only a level or a saved
 name. Code that runs inside an engine can call `saveProfile(name, thatObject)`, which validates the
 profile and stores it where `levelFor` finds it. Do not add team profiles to `profiles.js`:
 `PROFILES` is the three built-in levels of the contract, and a team's hands are data, not code.
@@ -639,7 +639,7 @@ agent every ~100 ms, the same seeded human click took 941–1016 ms, against 938
   500 or 1000 Hz) and the browser coalesces. The page sees exactly one `pointermove` per dispatched
   move, and `getCoalescedEvents()` always has length 1 (live round 3, 14/14 runs): a weak CDP-class
   signal that no public detector was seen to use. The pointer grid is only right when the dispatcher
-  passes the page's `dpr`, which 2.0.3 does not (see "The pixel grid"). No pointer-acceleration curve
+  passes the page's `dpr`, which 3.0.1 does not (see "The pixel grid"). No pointer-acceleration curve
   is modelled.
 - **Dispatch precision is not ours.** A plan says "at 1234 ms"; the dispatcher's timers, a busy
   service worker and each CDP round trip add latency, so the delivered timing is the planned timing

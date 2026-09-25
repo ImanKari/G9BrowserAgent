@@ -246,8 +246,44 @@ export async function updateRecording(id, patch = {}) {
   const recording = await getRecording(id);
   if (!recording) throw new Error('No recording with id "' + id + '".');
   const next = { ...recording };
-  for (const key of ['name', 'suite', 'folder', 'tags', 'environment', 'parameters']) {
+  // `qaTestCaseIds` was missing from this list, so the panel's "Covers (TC ids)" field said Saved
+  // and stored nothing (found by the v3 panel stage). `startUrl` is here so a flow recorded
+  // without one can be given its site afterwards — v3 groups flows by the origin of startUrl.
+  for (const key of ['name', 'suite', 'folder', 'tags', 'environment', 'parameters', 'qaTestCaseIds']) {
     if (key in patch) next[key] = patch[key];
+  }
+  // A string where a list belongs froze the panel's Automation list: the drawer's
+  // `.join(', ')` threw on every repaint (v3 review, finding 4). The MCP server does not
+  // enforce schemas, so the boundary is here. A single string is taken as a one-item list.
+  for (const key of ['tags', 'qaTestCaseIds']) {
+    if (!(key in patch)) continue;
+    const value = patch[key];
+    if (value == null) {
+      next[key] = [];
+      continue;
+    }
+    const list = typeof value === 'string' ? value.split(',') : value;
+    if (!Array.isArray(list) || list.some((item) => typeof item !== 'string')) {
+      throw new Error(`${key} must be a list of strings.`);
+    }
+    next[key] = list.map((item) => item.trim()).filter(Boolean);
+  }
+  if ('startUrl' in patch) {
+    const value = patch.startUrl == null ? '' : String(patch.startUrl).trim();
+    if (value === '') {
+      next.startUrl = null;
+    } else {
+      let parsed;
+      try {
+        parsed = new URL(value);
+      } catch {
+        throw new Error(`startUrl "${value}" is not a URL.`);
+      }
+      if (!/^https?:$/.test(parsed.protocol)) {
+        throw new Error(`startUrl must be an http(s) URL; got ${parsed.protocol} .`);
+      }
+      next.startUrl = parsed.href;
+    }
   }
   return saveRecording(next);
 }

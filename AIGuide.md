@@ -2,13 +2,18 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v2.0.3, 2026-09-25. Two engines (the extension in the person's own browser, and real
+**Status:** v3.0.1, 2026-09-25. Two engines (the extension in the person's own browser, and real
 Edge/Chrome/Chrome for Testing that the daemon launches), one local daemon `g9d`, one MCP shim per
 agent, fifteen tools, a pure human-input library, three stealth levels, an Electron desktop shell and a
-per-user installer that is **not code-signed**. 2.0.3 changed only the popout (§9). On 2026-09-25,
-on 2.0.3: unit 621/621 in 10 suites, self-test 136/136, extension suite 78/78, desktop 14/14 files, the
-packaged build 7/7 (`G9-Setup-2.0.3.exe`), Engine 2 live test 366/0 and the isolated Engine 1 live test
-196/0 on Edge with the real popout. On 2026-09-24, on 2.0.2, the unit suite passed three times in a row.
+per-user installer that is **not code-signed**. 3.0.0 is the side-panel redesign of
+[V3_UX_PLAN.md](V3_UX_PLAN.md) (§6.10, §9): agents per project, project-scoped auto-attach, a
+blocked-agent alert, Automation and Issues grouped by site, one visual system. 3.0.1 adds the owner's
+icon and `setup/check.mjs`, which runs only the checks a change needs, several at a time (§7). On
+2026-09-25, on 3.0.1: every offline check through `check.mjs --all` (unit 651 in 12 suites, self-test,
+extension suite, panel render, links) in 142 s. On 3.0.0: unit 638/638 in 11 suites, self-test 136/136, extension suite 82/82, desktop 14/14 files, the
+packaged build 7/7 (`G9-Setup-3.0.0.exe`), Engine 2 live test 366/0, the isolated Engine 1 live test
+198/0 on Edge with the real popout, and the panel render check clean. On 2026-09-24, on 2.0.2, the
+unit suite passed three times in a row.
 On 2026-09-23, on 2.0.1 (the final pass): daemon contract 15/15, render check 4/4 scenarios, the
 isolated Engine 1 live test 196/0 on Chrome, the background-state matrix exit 0, bench 0 failures at
 1/4/8/16 contexts, 10-minute endurance 93 iterations 0 failures, and the stealth matrix over 7
@@ -16,8 +21,8 @@ configurations with the public detector pages. The measured numbers are in §7 a
 for 2.0.1 and 2.0.2. What is still open is in §8; nothing there is fixed by being listed.
 **Created:** 2026-08-31
 
-**Reading order:** §§1–8c describe v2.0.3 as built (v2.0.0, plus the review fixes and final pass of 2.0.1, the three
-flaky-test defects and the browser close budget of 2.0.2, and the popout fix of 2.0.3). §9 is history: entries dated before 2026-09-21
+**Reading order:** §§1–8c describe v3.0.0 as built (v2.0.0, plus the review fixes and final pass of 2.0.1, the three
+flaky-test defects and the browser close budget of 2.0.2, the popout fix of 2.0.3, and the side panel of 3.0.0). §9 is history: entries dated before 2026-09-21
 describe v1 (a bridge, four control modes, a workspace allowlist) and are superseded wherever §§1–8
 say otherwise. The binding module contracts are [docs/ARCHITECTURE_V2.md](docs/ARCHITECTURE_V2.md)
 (signatures, message shapes, file locations) and [docs/DAEMON_PROTOCOL.md](docs/DAEMON_PROTOCOL.md)
@@ -176,9 +181,9 @@ on the owner's workstation on 2026-09-21/22 (Windows 11 Pro 10.0.26200, Edge 153
 
 ```
 g9-browser-agent/
-├── package.json                  the ONE version (2.0.3) for the whole product; no dependencies; node >=22
+├── package.json                  the ONE version (3.0.0) for the whole product; no dependencies; node >=22
 ├── extension/                    Engine 1 (MV3), and the HOME of the shared tool code
-│   ├── manifest.json             2.0.3; minimum_chrome_version 125; permissions in §5
+│   ├── manifest.json             3.0.1; minimum_chrome_version 125; permissions in §5
 │   ├── sw.js                     service worker: lifecycle, transport to g9d, panel commands; calls tools/index.js
 │   ├── lib/
 │   │   ├── platform.js           THE SEAM: exports platform-extension or platform-cdp (rule R2)
@@ -197,6 +202,7 @@ g9-browser-agent/
 │   │   ├── signature.js          journey signature, known world, surprise detector (§8c)
 │   │   ├── flowspec.js           canonical, Git-diffable FlowSpec
 │   │   ├── visual.js             fingerprint + structure map + diff image (through platform.image)
+│   │   ├── sites.js              (v3) pure URL helpers: siteOf (origin), parseDomain, hostMatches, displayUrl
 │   │   └── transport.js          WebSocket client to g9d (extension only)
 │   ├── humanize/                 PURE human-input library (no I/O, no timers, seeded): prng, profiles, profile,
 │   │                             plan, mouse, wheel, keys, calibrate, index
@@ -207,8 +213,9 @@ g9-browser-agent/
 │   │   ├── snapshot.js  interact.js  inspect.js  observe.js  navigate.js  capture.js  diagnose.js
 │   │   ├── emulate.js   record.js    replay.js   qa.js       netpin.js   netrules.js  downloads.js
 │   │   └── issues.js
-│   └── panel/                    side panel: Session (daemon, agents, input level, Stop, activity), Automation,
-│                                 Issues, About; welcome.html/.js (the version, on install and update)
+│   └── panel/                    side panel (v3): Session (daemon, agents + their tabs, current tab and capture,
+│                                 auto-attach, keep working elsewhere, input level, Stop, activity), Automation
+│                                 (site → suite → flow), Issues (site → status), About; welcome.html/.js
 ├── engine/                       Engine 2 (Node): find.js, cft.js, launch.js, pipe-cdp.js, profile.js,
 │                                 stealth.js, firewall.js, manager.js (EngineManager, owned by the daemon), versions.json,
 │                                 README.md
@@ -224,20 +231,24 @@ g9-browser-agent/
 │                                 test/, build/, scripts/, electron-builder.yml, dist/ (built installer)
 ├── docs/                         ARCHITECTURE_V2.md, DAEMON_PROTOCOL.md, STEALTH.md, HUMANIZE.md, INSTALL.md (operators)
 ├── setup/
-│   ├── unittest.mjs + unit/      10 unit suites (§7), one child process each
+│   ├── check.mjs + check-plan.mjs (3.0.1) only the checks a change reaches, several at a time (§7.0)
+│   ├── doclinks.mjs              (3.0.1) relative links and anchors in the Markdown files
+│   ├── unittest.mjs + unit/      12 unit suites (§7), one child process each
 │   ├── selftest.mjs              real daemon + two real shims + a fake extension, no browser
 │   ├── extensiontest.mjs         extension modules through the real seam over a chrome stub
 │   ├── engine2-livetest.mjs      Engine 2 through the product path, real headless Edge
 │   ├── isolated-livetest.mjs     Engine 1: private daemon + temp profile + extension copy; runs livetest.mjs
 │   ├── livetest.mjs              the Engine 1 live checks (an MCP client)
+│   ├── panel-render.mjs          (v3) the side panel over a stubbed chrome, rendered to PNGs by headless Edge (a dev harness)
 │   ├── stealthtest.mjs           stealth self-test / pre-suite gate (+ stealth-pages.json, fixtures/stealth-local.html)
 │   ├── matrix.mjs  bench.mjs  endurance.mjs   P8 background-state matrix, parallelism, endurance
 │   ├── serve.mjs  testpage.html  crossframe.html  birthday.html  postcard.html  fixtures/
 │   ├── install.ps1               install from a clone: Node 22 check, unit/self/extension tests, MCP config → mcp/shim.mjs
+│   ├── make-icons.ps1            (3.0.1) extension/panel/icon16/32/48/128.png from the owner's artwork
 │   └── mcp.example.json          committed template (mcp.json is generated, gitignored)
 ├── scripts/                      standalone MCP automations and their README
 ├── g9.project.example.json       project adapter template
-├── README.md  AIGuide.md  V2_IMPLEMENTATION_PLAN.md  EXTENSION_FIX_BACKLOG.md
+├── README.md  AIGuide.md  V2_IMPLEMENTATION_PLAN.md  V3_UX_PLAN.md  EXTENSION_FIX_BACKLOG.md
 ```
 
 `G9_HOME` (default `%LOCALAPPDATA%\G9`, else `~/.g9`) holds `daemon.json`, `daemon.lock`, `settings.json`,
@@ -587,7 +598,7 @@ Supply chain: **zero npm dependencies** in `extension/`, `engine/`, `daemon/`, `
 dependencies (electron, electron-builder, electron-updater). The installer is **not code-signed**
 (no certificate available; SmartScreen warns on first run).
 
-Extension permissions (manifest 2.0.3, `minimum_chrome_version` 125 — flat child sessions):
+Extension permissions (manifest 3.0.1, `minimum_chrome_version` 125 — flat child sessions):
 
 | Permission | Reason |
 |---|---|
@@ -859,6 +870,48 @@ electron-updater 6.8.9. Pages under test are never loaded here.
 
 ---
 
+### 6.10 `extension/panel/` — the side panel (v3)
+
+The panel is a client of the same service-worker commands an agent's calls end in (ARCHITECTURE_V2
+§13): a QA and an agent must never get different results from one button. v3 (V3_UX_PLAN.md) changed
+what it shows, not what the engine does.
+
+- **No Attach button.** The daemon pins each agent's tab on its first call (`daemon/router.js`
+  `#defaultTab` → `registry.setCurrent`), so the v1 button's job no longer exists. What was left —
+  starting console/network capture before the agent's first action — is **Record from now**
+  (`recordNow`: `attachTab` with `clearHalt`, optionally a reload, ONE activity line). The card
+  reads `attachedSince` to say "Recording … since HH:MM".
+- **Auto-attach is three-state** (`autoAttach: 'off'|'project'|'all'`, fresh installs `'project'`; a
+  stored boolean migrates once, `true→'all'`, `false→'off'`, preserving existing installs' choice).
+  *Project sites* matches tabs against `projectDomains`, the union of connected agents' project
+  environment hosts the daemon pushes as `{type:'projects'}`. It is a CAPTURE filter only: it never
+  detaches a tab attached by hand or by an agent and never refuses access (v2 D6/D7). *All tabs* is not
+  the default because it shares one 10 MB `storage.session` quota across every site browsed, enables
+  `Runtime` everywhere (a debugger any site can detect), and keeps every tab out of Memory Saver.
+  `browser_status.autoAttach` stays a boolean for agent code; the string is `autoAttachMode`.
+- **Agents are told apart.** `#agentsFor` rows carry `project`, `cwd`, `current` (this browser's
+  Chrome tab id) and `currentEngine` (`extension`/`launched`/`elsewhere`/null); the tab chip calls
+  `focusTab`, the person's own gesture, allowed while Stop is on. The daemon line no longer shows a
+  project name: it was the folder of whichever session started the daemon.
+- **Popout/handoff in the moment of need.** A relayed call refused because its tab is hidden records
+  `blocked[tabId]` and broadcasts `agentBlocked`; the panel shows an alert above the tabs with Pop
+  out / Send to background / Dismiss. It clears on `agentUnblocked` (tab closed, focused, popped out,
+  handed off, a later delivered call, or the agent gone).
+- **Automation** groups by site (origin of `startUrl`, with a "No start URL" bucket) then suite; the
+  filter row (site, suite, tag, verdict, flaky, search) is built from values already in the index and
+  persists in `localStorage` (wrapped in try/catch); "Run N flows in <scope>" runs only the filtered
+  set. The drawer keeps every per-flow action and edits section, suite, tags, covered test cases and
+  start URL (`qa.updateRecording` validates http(s); `qaTestCaseIds` was silently dropped before v3).
+- **Issues** group by site then status; the issue index now carries `site`, `severity`, `tags` and an
+  `evidence` summary, backfilled once and serialized for issues saved before v3.
+- **Rendering rule:** the panel shows strings from arbitrary pages (titles, URLs, flow and issue names,
+  agent names). Build DOM with `createElement`/`textContent` only; `innerHTML` is allowed solely to
+  clear (`''`) or with a static literal, and `panel.test.mjs` scans for it. Links validate http(s)
+  and carry `rel="noopener noreferrer"`.
+- **Looking at it:** `node setup/panel-render.mjs --out <dir>` serves the panel with a stubbed `chrome`
+  and realistic fixtures (hostile titles included), screenshots every tab at 360 and 1000 px in light
+  and dark, and fails on any page exception, console error or horizontal overflow at 360 px.
+
 ## 7. Testing
 
 Every harness uses a fresh temp `G9_HOME`, temp browser profiles and random ports in 18000–18999,
@@ -867,27 +920,66 @@ check. Headed windows, where a harness uses them at all, are created at −32000
 activation. Unset `ELECTRON_RUN_AS_NODE` in the shell before running (`env -u ELECTRON_RUN_AS_NODE …`):
 some agent hosts export it, and it turns `npx electron` into Node.
 
-| Command | What it covers | Latest recorded (marked 2.0.2: 2026-09-24, on the 2.0.2 tree; the rest 2026-09-23, on 2.0.1 — the final pass). 2.0.3 changed only the popout and added seam checks for it |
+### 7.0 Choosing what to run (since 3.0.1)
+
+Run what the change needs, not everything. Measured on the owner's machine on 2026-09-25 (20
+threads):
+
+| Tier | Command | Time | When |
+|---|---|---|---|
+| What changed | `npm run check` (`node setup/check.mjs`) | a docs edit ~0.2 s; a panel change ~20 s; a shared-module change up to ~2.5 min | after every change, while working |
+| Every offline check | `npm run check:all` | **142 s** (4 at a time; the same checks one after another take ~300 s: unit 240 s, of which interaction 141 s, self-test 10 s, extension suite 30 s, panel render 15 s) | before handing over a change that touched several areas |
+| Live suites | `node setup/check.mjs --live`, or `npm run test:engine2` (~5.5 min) / `npm run test:live` (~3.5 min) | ~9 min together | when `check` names them: input, perception, launching, the seam, the suites' own pages. Before a release |
+| Release | `npm run check:release`, then `cd desktop && npm run build:win && npm run test:packaged` | ~12 min, plus the build | a build the owner will install, or a change in `desktop/` |
+| Measurement | `stealthtest`, `matrix`, `bench`, `endurance` | minutes to hours | only when the change is about what they measure |
+
+How `check.mjs` decides (`setup/check-plan.mjs`): a check runs when a changed file is among the files
+it imports, followed transitively, plus file names in its string literals (tests load modules
+through helpers such as `extUrl('tools/interact.js')`), plus the globs it reads or spawns, listed by
+hand (`reads`: the seam suite's source scan, the panel suite's text reads, the self-test's spawned
+daemon). This over-approximates, which only runs a check too many. A changed file no check
+reaches runs **every** offline check. Files nothing automated covers (PowerShell, the measurement
+harnesses, templates) are named in `NO_CHECK` with the reason, and the run says so. Markdown counts only
+for the checks that read it: the link check (`setup/doclinks.mjs`), and the panel suite for
+ARCHITECTURE_V2.md. `setup/unit/check.test.mjs` keeps this honest. It fails when a unit suite has no
+check, and when a tracked file is reached by nothing and not named in NO_CHECK (or FULL_RUN, the unit
+runner). While checks run, a line every 15 s names each running check, its time and its PASS count,
+and flags one silent for 90 s, so a slow check and a stuck one look different. `unittest.mjs` prints
+the same kind of line for a suite running past 15 s.
+
+Why this exists: the v3 task took about 5 hours. About 37 minutes of that was tests; the rest was
+sub-agents writing the change. For a small change, though, the full battery was the whole wait:
+about 4 min of unit suites, 9 min of live suites and an installer build, for a README edit or an
+icon. The interaction suite is slow on purpose: its tests wait on real, human-paced timers and
+real deadlines (the slowest, a slow server against `goto`'s deadline, takes 21 s). Faking the clock
+would test less, so it runs in parallel with the rest instead.
+
+| Command | What it covers | Latest recorded (marked 3.0.0: 2026-09-25, on the 3.0.0 tree; marked 2.0.2: 2026-09-24; the rest 2026-09-23, on 2.0.1 — the final pass) |
 |---|---|---|
-| `node setup/unittest.mjs` | every `setup/unit/*.test.mjs` in its own process (suites stub `chrome` before importing, and `platform.js` chooses at load). `G9_UNIT_NO_BROWSER=1` skips the `live:` tests; a filter argument runs matching files only. | **621 passed, 10 suites** (2.0.3, 2026-09-25; 620 three times in a row on 2.0.2) |
-| · `daemon.test.mjs` | registry, router, handles/rewrites, ownership, queues, halts, D-c parking, settings, scheduler, storage, evidence, handoff helpers, the desktop timeout table cross-check, launched-engine watch ordering | 96 (2.0.2; 95 on 2.0.1) |
+| `node setup/unittest.mjs` | every `setup/unit/*.test.mjs` in its own process (suites stub `chrome` before importing, and `platform.js` chooses at load). `G9_UNIT_NO_BROWSER=1` skips the `live:` tests; a filter argument runs matching files only. | **651 passed, 12 suites** (3.0.1, 2026-09-25, three runs through `check.mjs --all`; 638 in 11 on 3.0.0; 620 three times in a row on 2.0.2). One after another: 240 s, interaction 141 s of it |
+| · `daemon.test.mjs` | registry, router, handles/rewrites, ownership, queues, halts, D-c parking, settings, scheduler, storage, evidence, handoff helpers, the desktop timeout table cross-check, launched-engine watch ordering; (v3) environmentHosts/projectLabel, the `{type:"projects"}` push (after each welcome, coalesced on agent connect/disconnect), agent rows with project and current tab | 100 (3.0.0; 97 on 2.0.3) |
 | · `desktop.test.mjs` | runs `desktop/test/run.mjs` without `ELECTRON_RUN_AS_NODE`; SKIPs when `desktop/node_modules` is absent | 181 |
 | · `engine.test.mjs` | pipe framing, launch args and refusals, CfT zip/lock/versions, profiles, find; `live:` Edge, system Chrome and cached CfT headless (D-a webdriver per level, the headless screen with its taskbar) | 56 |
 | · `humanize.test.mjs` | determinism, bounds over 2000 random plans, every planner, calibration round trip | 51 |
 | · `interaction.test.mjs` | the witness expression in `node:vm`, delivery states, re-timing, hidden checks, dispatcher timing (80 % rule), levels | 77 |
-| · `panel.test.mjs` | panel/welcome source checks, every §13 command, transport with fake socket/fetch/clock | 75 |
+| · `panel.test.mjs` | panel/welcome source checks, every §13 command, transport with fake socket/fetch/clock; (v3) no Attach button and Record from now, the three auto-attach settings, the blocked toast above the tab bar and agent rows, the no-HTML-from-strings scan (and http(s)-only links with `noopener noreferrer`), the pure helpers (flow filter and run scope, issue filter, evidence chips, `NO_SUITE`/`NO_SITE`), a lost daemon link forgetting project sites and blocked alerts | 82 (3.0.0; 75 on 2.0.3) |
 | · `platform-cdp.test.mjs` | registration, sessions, held targets, F1, tabs, cookies, downloads attribution; `live:` headless Edge | 34 |
-| · `seam.test.mjs` | R2 source scan, no top-level await, Node smoke through platform-cdp, `sw.js` boot and its panel and daemon commands over a stubbed `chrome` — since 2.0.3 also the popout's two callers (the panel's window focused and not buried, an agent's unfocused) and its default geometry | 16 (2.0.2; 2.0.3 adds the popout checks) |
+| · `seam.test.mjs` | R2 source scan, no top-level await, Node smoke through platform-cdp, `sw.js` boot and its panel and daemon commands over a stubbed `chrome` — since 2.0.3 also the popout's two callers (the panel's window focused and not buried, an agent's unfocused) and its default geometry; since 3.0.0 the auto-attach modes and their migration, Project sites attaching only project tabs, `focusTab` under Stop, `recordNow`, `attachedSince`, and the blocked-agent bookkeeping (set only by a relayed hidden refusal; cleared when shown, reached, popped out, disconnected or closed) | 16 (3.0.0: the v3 checks sit inside the existing tests) |
 | · `world.test.mjs` | isolated world guard and invalidation over a vm-based fake browser | 26 |
-| · `version.test.mjs` | one version in package.json, manifest, desktop, `lib/version.mjs` — compared, never pinned | 8 (2.0.2; 7 on 2.0.1) |
-| `node setup/selftest.mjs` | a real daemon, two real shims (two agents), a fake extension over a real WebSocket: /health, Origin rule and version refusal, status composition, relay and id rewriting, ownership, queues, Stop from panel and desktop, extension requests/watch/update, dialogs, delivery tags, disconnects, D-c reconnect, protocol robustness, the v1 forwarder, shim auto-start, a v1 bridge named, idle exit, escaping in injected code | **136/136** (2.0.2) |
-| `node setup/extensiontest.mjs` | extension modules through the real seam over an asynchronous `chrome` stub with a tab/window model; recording, replay, network, downloads, video (write-chain deadlock as behaviour), tab resolution, legacy cleanup, flow library, `/health` CORS, one daemon port, version skew, runner selection; fixture `setup/fixtures/tasks-browse-and-open.flow.json` (EXT-16) | **78/78** (2.0.2) |
-| `cd desktop && node test/run.mjs` / `node test/daemon-contract.mjs` / `npm run build:win` + `npm run test:packaged` / `npm run test:render` | renderer in a fake DOM, main process against a fake Electron API, updater/policies/registration with fakes (never the real registry or configs); the real daemon's admin contract; the built `win-unpacked` with no `node` on PATH (shim starts the packaged daemon); the real window off-screen | **14/14 files (2.0.3; 22.6 s on 2.0.1); contract 15/15 (2.0.1); build OK (`G9-Setup-2.0.3.exe`, 103,591,675 bytes, 2026-09-25, unsigned, `resources/app-update.yml` present, payload identical to the repository); packaged 7/7 (2.0.3); render check PASS (2.0.1)** — 4 scenarios (empty and populated × dark and light), 23 pictures per populated run, 171 window samples in the last one, 0 ever on screen, 0 ever in the foreground |
-| `node setup/engine2-livetest.mjs [--only …]` | Engine 2 through the product path (daemon + shims + headless Edge), every check against what the page, server or disk saw: tabs, snapshot, interact at three levels, frames, console, inspect, screenshots, emulate, dialogs, downloads (sha256), popups, HAR, recording/replay, video, agents/ownership, reads during actions, slots, 4 parallel contexts, watch, halt, handoff (fake Engine 1 payload), stealth, locale persona, downloads hub, stop | **366 passed, 0 failed** (2.0.2: 325 s; on 2.0.1: 330 s, and 352 s on the tree before its bump) |
-| `node setup/isolated-livetest.mjs` | Engine 1 in a real headless browser: private daemon, temp profile, extension copy with `dev-daemon.json` and a tripwire in place of its built-in default port; runs `setup/livetest.mjs` (27 sections: tabs, snapshot, levels, hidden tabs, witness, scroll settle, stealth screenshots, recording, regression memory, issue video, watch, cross-origin frame, popout, handoff, auto-attach, version/welcome, Stop, main-world diff) and renders the panel. `G9_BROWSER` picks Chrome/CfT; `G9_LIVE_SECTIONS` narrows | **196 passed, 0 failed** on Edge 153.0.4234.32 (2.0.2) **and 196 passed, 0 failed on system Chrome 153.0.8010.53** (2.0.1, `G9_BROWSER=chrome`), each with the harness checks (tripwire 0 hits, profile never signed in); CfT sections 12+16 ×20: 20/20 (earlier round) |
+| · `version.test.mjs` | one version in package.json, manifest, desktop, `lib/version.mjs` — compared, never pinned | 8 (3.0.0; 7 on 2.0.1) |
+| · `check.test.mjs` | (3.0.1) `setup/check-plan.mjs` and `setup/doclinks.mjs` on the real repository: globs, the import graph through test helpers, docs-only / panel / input / unknown / NO_CHECK / live-only changes, `--all`, every unit suite has a check, every tracked file is reached or named, the estimate, GitHub slugs and broken links, `check.mjs --plan` running nothing | 13 (3.0.1) |
+| · `sites.test.mjs` | (v3) `extension/lib/sites.js`: siteOf (origin, none for opaque), parseDomain, hostMatches (exact host or subdomain, port rules, http(s) only), displayUrl, and a purity scan (rule R2) | 7 (3.0.0) |
+| `node setup/selftest.mjs` | a real daemon, two real shims (two agents), a fake extension over a real WebSocket: /health, Origin rule and version refusal, status composition, relay and id rewriting, ownership, queues, Stop from panel and desktop, extension requests/watch/update, dialogs, delivery tags, disconnects, D-c reconnect, protocol robustness, the v1 forwarder, shim auto-start, a v1 bridge named, idle exit, escaping in injected code | **136/136** (3.0.0) |
+| `node setup/extensiontest.mjs` | extension modules through the real seam over an asynchronous `chrome` stub with a tab/window model; recording, replay, network, downloads, video (write-chain deadlock as behaviour), tab resolution, legacy cleanup, flow library, `/health` CORS, one daemon port, version skew, runner selection; fixture `setup/fixtures/tasks-browse-and-open.flow.json` (EXT-16); (v3) the issue index's severity/tags/site/evidence following the attachments, the one-time serialized completion of a pre-v3 index, `recUpdate` storing TC ids and only an http(s) start URL, an environment indexed only as a name | **82/82** (3.0.0; 78 on 2.0.2) |
+| `cd desktop && node test/run.mjs` / `node test/daemon-contract.mjs` / `npm run build:win` + `npm run test:packaged` / `npm run test:render` | renderer in a fake DOM, main process against a fake Electron API, updater/policies/registration with fakes (never the real registry or configs); the real daemon's admin contract; the built `win-unpacked` with no `node` on PATH (shim starts the packaged daemon); the real window off-screen | **14/14 files (3.0.0; 22.6 s on 2.0.1); contract 15/15 (2.0.1); build OK (`G9-Setup-3.0.0.exe`, 103,620,667 bytes, 2026-09-25, unsigned, `resources/app-update.yml` present, payload identical to the repository); packaged 7/7 (3.0.0); render check PASS (2.0.1)** — 4 scenarios (empty and populated × dark and light), 23 pictures per populated run, 171 window samples in the last one, 0 ever on screen, 0 ever in the foreground |
+| `node setup/engine2-livetest.mjs [--only …]` | Engine 2 through the product path (daemon + shims + headless Edge), every check against what the page, server or disk saw: tabs, snapshot, interact at three levels, frames, console, inspect, screenshots, emulate, dialogs, downloads (sha256), popups, HAR, recording/replay, video, agents/ownership, reads during actions, slots, 4 parallel contexts, watch, halt, handoff (fake Engine 1 payload), stealth, locale persona, downloads hub, stop | **366 passed, 0 failed** (3.0.0: 327 s; 2.0.3: 322 s; 2.0.2: 325 s; on 2.0.1: 330 s) |
+| `node setup/isolated-livetest.mjs` | Engine 1 in a real headless browser: private daemon, temp profile, extension copy with `dev-daemon.json` and a tripwire in place of its built-in default port; runs `setup/livetest.mjs` (27 sections: tabs, snapshot, levels, hidden tabs, witness, scroll settle, stealth screenshots, recording, regression memory, issue video, watch, cross-origin frame, popout, handoff, auto-attach in its three settings, version/welcome, Stop, main-world diff) and renders the panel. `G9_BROWSER` picks Chrome/CfT; `G9_LIVE_SECTIONS` narrows | **198 passed, 0 failed** on Edge 153.0.4234.32 (3.0.0, daemon, extension and shim all reporting 3.0.0; 196 on 2.0.2 and 2.0.3) **and 196 passed, 0 failed on system Chrome 153.0.8010.53** (2.0.1, `G9_BROWSER=chrome`), each with the harness checks (tripwire 0 hits, profile never signed in); CfT sections 12+16 ×20: 20/20 (earlier round) |
 | `node setup/stealthtest.mjs [--matrix] [--local-only] [--configs …] [--repeat N]` | the plan §6.6 gate: local detector page (webdriver, Runtime probe, main-world globals/nodes/calls, listener stacks, untrusted events, cross-site frame, popup, worker, read-tool sweep, press/typing/wheel timing, screen, locale, EME, tabs at end, profile sign-in) + public pages (`stealth-pages.json`); human-level controls must be detected | 2026-09-23, both runs: **0 G9 leaks in every stealth configuration**, both human controls detected. Local page, final tree, 7 configurations: **edge-headed-stealth UNDETECTED**; the rest detected only by browser-inherent signals (the HeadlessChrome UA; CfT's missing Widevine). With the public pages (one full matrix): headed Edge stealth flagged by pixelscan alone (“Automated behavior detected”) and passed by sannysoft, creepjs, browserscan, fingerprint-bot-detection and rebrowser; headed CfT stealth flagged by rebrowser (its brand) alone; every headless stealth run flagged by sannysoft, creepjs, browserscan, pixelscan and fingerprint-bot-detection. Exit 1 by design while headless is detectable |
 | `node setup/matrix.mjs` | P8 background-state matrix, Engine 1 (real extension) and Engine 2, per state: does input/screenshot/screencast reach the page, and does G9's report agree | **exit 0, every cell agrees** (2026-09-23, the full default set: Engine 1 × Edge and Chrome × active/background/minimized/offscreen/hidemid/hidemidheaded, with and without the occlusion switch, and Engine 2 × active/background/popup/minimized/offscreen). The partial-delivery cells report themselves as partial and match the page |
 | `node setup/bench.mjs` / `node setup/endurance.mjs --minutes N` | parallelism (1–24 contexts, CPU/RAM per process tree, per-step latency, maxParallel rule) / the flow in a loop with memory and listener sampling after `gc()` | **2026-09-23: 0 failures at every level.** Bench 1/4/8/16 contexts × 5 iterations, flow p50/p95 11,599/12,211 → 12,668/14,233 ms, recommendation maxParallel 8; endurance 10 min, 93 iterations, 0 failures, daemon +0.39 MB/min, browser +1.79 MB/min, listeners flat. Full tables in §9 2.0.1 |
+| `node setup/panel-render.mjs --out <dir>` | (v3) a dev harness, not a suite: the panel served over local http with a stubbed `chrome` and realistic fixtures (three agents in two projects, flows on three sites, issues with evidence, a blocked agent, a malformed stored flow, markup in titles), rendered by headless Edge at 360 and 1000 px, light and dark. Fails on a page error, console error, dialog, horizontal overflow at 360 px, fixture text turned into markup, `[object Object]` or `NaN` on screen, the toast not leaving on `agentUnblocked`, the malformed flow not opening, or ArrowLeft switching Auto-attach | **PASS, 26 pictures** (3.0.0) |
+| `node setup/check.mjs [--all] [--live] [--release] [--plan] [--since ref] [--files …]` | (3.0.1) runs the checks above that the changed files reach, 4 at a time, longest first; live suites one at a time after them and only when asked; progress every 15 s; full output in a temp log (§7.0) | `--all`: **16/16 checks in 142 s**, three runs (3.0.1) |
+| `node setup/doclinks.mjs [files]` | (3.0.1) every relative link and `#anchor` in the Markdown files git knows, with GitHub slugs | 14 files, 0 broken (3.0.1) |
 | `node setup/livetest.mjs` by hand | against your own daemon and browser (`G9_PORT=…`); without the `G9_LIVE_*` variables the browser-level checks SKIP | — |
 
 `setup/testpage.html` + `serve.mjs` keep v1's deliberate defects (2 load-time console errors + an
@@ -967,11 +1059,33 @@ by being written down.
   stealth matrix including the public pages, the background-state matrix, bench and a 10-minute
   endurance run. Numbers in the §9 2.0.1 entry. **Re-run on 2.0.2 (2026-09-24):** unit, self-test,
   extension, desktop files, the packaged build, Engine 2 live and isolated Engine 1 live on Edge (§7).
-  2.0.3 changed only the popout; its checks are in the seam suite.
+  2.0.3 changed only the popout; its checks are in the seam suite. **Re-run on 3.0.0 (2026-09-25):**
+  unit, self-test, extension, desktop files, the packaged build, Engine 2 live, isolated Engine 1 live
+  on Edge, and the new panel render harness. Not re-run on 3.0.0: the daemon contract, the desktop
+  render check, isolated Engine 1 on Chrome, the stealth and background-state matrices, bench and
+  endurance — 3.0.0 changed no launch switch, stealth rule, input path or desktop code, only the side
+  panel and what the daemon and the extension tell it.
+- **The v3 panel (3.0.0).** Checked by source scans, the seam and extension suites, the isolated live
+  test's panel section and `setup/panel-render.mjs` (a stubbed `chrome`, looked at in pictures). Not
+  checked: a screen reader, high-contrast or forced-colors mode, right-to-left page titles, and a
+  real Windows desktop with the panel detached. **Project sites** depends on the connected agents'
+  `g9.project.json` environments; with no agent connected it attaches nothing, which the panel says.
+- **The icon (3.0.1).** The extension's icons come from the owner's artwork through
+  `setup/make-icons.ps1`; the source PNG is not in the repository (keep it to regenerate). The 16 px
+  size is a crop, the browser window with "G9", because the whole drawing is a blur at 16 px; not
+  looked at in a real toolbar here (the harnesses are headless). The desktop app's icons (tray,
+  window, installer) are still drawn in code by `desktop/lib/icon.mjs`, coloured by state.
+- **What `check.mjs` does not know (3.0.1).** It maps a change to checks by the files each check
+  imports or reads, not by behaviour. A change that alters behaviour only through data a check never
+  loads, or through the browser (Chromium, Edge) itself, is not detected — the live suites and the
+  matrices are for that. Its guard test only keeps every tracked file reachable or named; it cannot
+  prove the `reads` lists complete.
 - **Version rule.** The owner's standing rule is "bump on every change". 2.0.0 was released under a
   fixed-2.0.0 contract; the first change after it — the 40 review fixes and the final pass — is
-  **2.0.1**, then **2.0.2** (three flaky-test defects and the close budget) and **2.0.3** (the
-  popout). No test pins a literal version any more: `version.test.mjs`, `panel.test.mjs`,
+  **2.0.1**, then **2.0.2** (three flaky-test defects and the close budget), **2.0.3** (the
+  popout) and **3.0.0** (the side panel of V3_UX_PLAN; a major bump because the panel, the
+  auto-attach setting and the issue index changed shape — a 3.x extension and a 2.x daemon still
+  connect to each other). No test pins a literal version any more: `version.test.mjs`, `panel.test.mjs`,
   `desktop/test/static.test.mjs` and `desktop/test/smoke.test.mjs` all compare the files with each
   other and with `lib/version.mjs`, so a bump is one edit in each of four JSON files: `package.json`,
   `extension/manifest.json`, `desktop/package.json` and `desktop/package-lock.json` (the lock file is
@@ -1327,6 +1441,153 @@ after every step of a forty-step flow doubles the run for evidence nobody reads.
 Entries below describe what was believed or tested at the time. Current capability claims and
 unresolved findings are in §§4, 7 and 8, which supersede historical assertions. Entries dated before
 2026-09-21 describe v1 (the bridge, the four control modes, the workspace allowlist).
+
+### 2026-09-25 — v3.0.1: the owner's icon, and checks that fit the change
+
+**The icon (V3_UX_PLAN Part E).** The owner generated the artwork (1254×1254, transparent: a browser
+window with "G9", a robot, a cursor, an orbit). The new `setup/make-icons.ps1 -Source <png>` writes
+`extension/panel/icon16/32/48/128.png`. It crops to the drawing, halves the image step by step, and
+finishes with one bicubic resize in premultiplied alpha, so transparent edges stay clean. Looked at
+in a preview sheet on light and dark: 128, 48 and 32 px read well. At 16 px the whole scene was a blur,
+so 16 px uses a crop of the browser window with "G9" (three crops were compared). The manifest gained
+a 32 px icon, which the toolbar uses on high-DPI screens. The desktop app's icons, drawn in code and
+coloured by state, are unchanged.
+
+**Why a change waited so long, measured.** The owner asked why tasks take hours with no sign of
+progress. The session log answered it (tool calls against their results' timestamps, and the
+sub-agents' own logs). The v3 task ran about 5 hours: stage 1 (daemon and worker) 42 min, stage 2
+(the panel) 94 min, the review 35 min, then fixes, full test rounds and the docs. Only about 37 minutes
+of it was tests. Inside the sub-agents, 7, 3 and 2 minutes of tool time against 35, 91 and 33 minutes
+of writing code. So tests were not the main cost of a large task. They were the whole cost of a small
+one, because every change got the full battery: unit 240 s (interaction 141 s of it, one suite after
+another), self-test 10 s, extension suite 30 s, desktop, 9 minutes of live suites, and an installer
+build. Nothing said what was running: the unit runner printed nothing during a suite, and a live suite
+redirected to a file looked the same as a hang.
+
+**What changed.**
+- `setup/check.mjs` and `setup/check-plan.mjs` (§7.0): only the checks the changed files reach, 4
+  at a time, longest first, with a progress line every 15 s and a warning after 90 s of silence. Live
+  suites are only named unless asked for. `--plan` shows the plan and an estimate. npm scripts `check`,
+  `check:all`, `check:release`.
+- `setup/doclinks.mjs`: the link check a documentation-only change runs (0.2 s for 14 files).
+- `setup/unittest.mjs` prints a progress line every 15 s while a suite runs.
+- New unit suite `setup/unit/check.test.mjs` (13): the plan never skips what a change reaches, and a
+  new module no check reaches fails the suite instead of silently running everything each time.
+- AIGuide rule 6 and §7.0 say what to run when; the README's Tests section says the same.
+- Not changed, on purpose: the interaction suite's real timers (faking the clock would test less) and
+  `npm test` (install.ps1 and the docs name it; it keeps running everything, one suite after another).
+
+**Found while building it.** File names in comments are written in backticks, so the first literal
+scan counted every comment that named a file as a dependency, and a test page pulled in half the
+extension. Literals are now quotes only. The planner's own test names paths as strings, so the planner
+counts those as references too. The tests look past that one-second over-approximation instead of
+hiding it.
+
+**Runs on 3.0.1 (2026-09-25).** `check.mjs --all` three times: 16 of 16 checks, 651 unit tests in
+12 suites, in 142 s. The same checks one after another take ~300 s. The interaction suite took
+142 s in parallel and 141 s alone, so no timing test felt the load. Not re-run for 3.0.1: live
+suites, the installer build (the last one is still `G9-Setup-3.0.0.exe`), because the change touched
+icons, test tooling and docs only.
+
+Version 3.0.1 in `package.json`, `extension/manifest.json`, `desktop/package.json` and
+`desktop/package-lock.json`.
+
+### 2026-09-25 — v3.0.0: the side panel earns its place (V3_UX_PLAN)
+
+**Why.** The owner asked what Attach current tab, Auto-attach, Pop out tab and Send to background do,
+and whether the panel could be better. Reading the code answered most of it: the daemon pins each
+agent's tab at its first call, so **Attach** had no job left but early capture; three agents showed as
+three identical rows; Pop out and Send to background prevent one failure, a hidden tab, but asked the
+person to foresee it; Automation and Issues were flat lists that used none of the index fields already
+stored. [V3_UX_PLAN.md](V3_UX_PLAN.md) set ten decisions (U1–U10); the owner approved all of them. No
+engine capability, tool semantics, ownership or halt rule changed.
+
+**Daemon and protocol.** `daemon/daemon.js` pushes `{type:'projects', domains, projects}` to extension
+engines (DAEMON_PROTOCOL §5): the hosts of the `environments` URLs in each CONNECTED agent's
+`g9.project.json`, one row per project file naming its agents, sent after each engine's welcome and
+coalesced (≤ 100 ms) on agent connect and disconnect. `#agentsFor` rows now carry `project`, `cwd`,
+`current` (this browser's Chrome tab id) and `currentEngine` (`'extension'`, `'launched'`, or
+`'elsewhere'` for a tab in another browser's extension), pushed again when an agent's current tab
+changes. The daemon line in the panel no longer names a project.
+
+**Extension.** `extension/lib/sites.js` (new, pure): `siteOf` (origin), `parseDomain`, `hostMatches`
+(the exact host or a subdomain, never a look-alike; a port only when the domain names one; http(s)
+only), `displayUrl`. `state.js`: `autoAttach` is `'off' | 'project' | 'all'`, default `'project'`; a
+stored v2 boolean becomes `'all'` or `'off'` once, with one activity line, so an existing install
+keeps its choice. `sw.js`: Project sites attaches only tabs on `projectDomains` and never detaches a
+tab; new panel commands `focusTab` (allowed while Stop is on: the person's own gesture), `recordNow`
+(attach, optionally reload to capture the load, one activity line) and `setAutoAttach {mode}` (the
+legacy `{enabled}` still accepted); an agent's input refused because its tab is hidden is recorded in
+`state.blocked` and broadcast as `agentBlocked`, cleared (`agentUnblocked`) when the tab is shown, a
+later call reaches it, it is popped out, handed off or closed, or its agent disconnects. `cdp.js`
+records `attachedSince`. `store.js`: the issue index carries `site`, `severity`, `tags` and `evidence`
+counts (from attachment metadata, never bytes) and follows each attachment added or removed; an index
+written before v3 is completed once, serialized, the first time it is read, and never loses an
+entry. `browser_status.autoAttach` stays a boolean (true only when auto-attach captures something), and
+the mode is the new `autoAttachMode`, so `if (status.autoAttach)` in an agent keeps meaning what it did.
+
+**Panel** (`extension/panel/`, rewritten; §6.10). Session: no Attach button, **Record from now** with
+*reload to capture page load*; Auto-attach as three radios; agents per project with a clickable tab
+chip; the current tab as origin plus a middle-truncated path; Pop out and Send to background folded
+into one **Keep working elsewhere** row and offered in a toast above the tab bar when an agent is
+blocked. Automation: site → suite → flow, an affinity header for the site in front of the person,
+filters (site, suite, tag, verdict, flaky, text), **Run N flows in** *scope* over exactly what the
+filter shows, and a drawer per flow with its run history and editable section, suite, tags, test
+cases and start URL. Issues: site → status, severity, age, tracker key and evidence chips, filters,
+the editor restyled. One token and component system in `panel.css`, light and dark. No script builds
+HTML from strings; links are http(s) only and open with `noopener noreferrer`.
+
+**Independent review, then fixes.** A read-only review of the finished change found no security
+problem and eight defects, all fixed with a test each:
+1. The version had not been bumped (now 3.0.0, and the manifest's `default_title` names v3).
+2. Project sites outlived the daemon, and 3. blocked-agent alerts outlived their agents after a daemon
+   restart (agent ids restart at `agent-1`): `transport.js forgetDaemonState()` clears
+   `projectDomains`, `projects` and `blocked` when the link closes or is dropped, and tells the panel.
+4. One malformed flow froze the Automation list: `recUpdate` now requires lists of strings for `tags`
+   and `qaTestCaseIds` (a comma string becomes a list, anything else is refused), and the panel reads
+   stored strings as lists.
+5. Arrow keys in the Auto-attach group switched the mode (native radios): an arrow key now only
+   moves focus, and the panel says to press Space to switch.
+6. Some hidden-tab refusals raised no alert: `interact.js noInputError()` marks every such error
+   `hidden = true`, including the witnessed and `select` paths.
+7. An environment with variables but no name showed as `[object Object]`: the recording index keeps
+   an environment only as a name.
+8. A suite named "none" merged into "No suite": the panel's no-suite key is now a value no suite can
+   have (`NO_SUITE`).
+
+Found while fixing: `recUpdate` dropped the `qaTestCaseIds` the panel sent (it was missing from the
+allow-list), and a flow had no way to get a start URL, so it could never leave "No start URL". Both
+fixed: `qaTestCaseIds` and `startUrl` (http(s) only; an empty value clears it) are accepted, the MCP
+schema of `browser_recording` lists them, and the drawer has a Start URL field.
+
+**Deviations from the plan, on purpose.** `browser_status.autoAttach` stays a boolean beside the new
+`autoAttachMode` (above). `currentEngine` has a third value, `'elsewhere'`. An agent working in a
+launched engine is shown as "working in a launched browser", with no title or URL, as the plan asked. The migration keeps a v2 install's
+choice (off → Off) instead of moving everyone to Project sites; only an install that never saved its
+settings gets the new default. Verdict labels are short ("Product fail", "Test fail"). The dark
+theme's accent is `#9d97f5` for contrast. **Part E (the icon) is not done:** it waits for the owner's
+artwork from the plan's prompt; the v2 icons are unchanged.
+
+**Tests.** New suite `setup/unit/sites.test.mjs` (7). Daemon 97 → 100 (projects push, agent rows,
+environment hosts), panel 75 → 82 (v3 structure, the no-HTML scan, pure helpers, the transport
+forgetting daemon state), extension suite 78 → 82 (issue index and its one-time completion, `recUpdate`
+lists and start URL, environment as a name), seam checks inside the existing tests (auto-attach modes
+and migration, project-only attach, `focusTab` under Stop, `recordNow`, `attachedSince`, the blocked
+bookkeeping), interaction (the `hidden` flag), and the isolated live test's section 18 now drives the
+three settings. New dev harness `setup/panel-render.mjs`: the panel with a stubbed `chrome` and
+realistic fixtures, 26 pictures at 360 and 1000 px in light and dark, failing on page errors, overflow,
+injected markup, `[object Object]`/`NaN`, a malformed flow that will not open, or an arrow key that
+switches Auto-attach. Looking at those pictures is how the "none" and malformed-flow defects were
+confirmed fixed.
+
+**Runs on 3.0.0 (2026-09-25).** `unittest.mjs` 638 in 11 suites, `selftest.mjs` 136, `extensiontest.mjs`
+82, desktop 14 files, `engine2-livetest.mjs` 366/0 (327 s), `isolated-livetest.mjs` 198/0 on Edge
+(daemon, extension and shim all report 3.0.0), `panel-render.mjs` clean, and the installer
+`G9-Setup-3.0.0.exe` (103,620,667 bytes, unsigned) with `test:packaged` 7/7 and a payload identical to
+the repository.
+
+Version 3.0.0 in `package.json`, `extension/manifest.json`, `desktop/package.json` and
+`desktop/package-lock.json`; the docs that name the release moved with it.
 
 ### 2026-09-25 — v2.0.3: the popped-out window that opened behind the person's own
 
@@ -4391,7 +4652,7 @@ When you change anything:
 3. Update the affected section of this file (architecture, component reference, gaps). When a signature or a message changes, update [docs/ARCHITECTURE_V2.md](docs/ARCHITECTURE_V2.md) or [docs/DAEMON_PROTOCOL.md](docs/DAEMON_PROTOCOL.md) in the same change.
 4. The version is one string, in `package.json`, mirrored in `extension/manifest.json` and `desktop/package.json` (and `desktop/package-lock.json`); `setup/unit/version.test.mjs` fails when they disagree. Bump it on every change — that is how the owner knows a reload took effect. No test pins a literal number: they all compare the files with each other and with `lib/version.mjs`, so a bump is four JSON edits and nothing else (the lock file is compared too, since `npm ci` in desktop/ installs from it).
 5. Adding a tool means **four** edits: `extension/tools/index.js` (`TOOLS`), `mcp/tools.js` (schema; and `daemon/router.js` if the daemon answers it itself), the README table, and §4.4/§6 here. Prefer a new action on an existing tool.
-6. Run `npm test` (`setup/unittest.mjs`, `setup/selftest.mjs`, `setup/extensiontest.mjs`) and the live suites that cover what changed (§7). The self-test asserts the tool count, so it fails until everything is updated. Update the assertion last, deliberately — not reflexively.
+6. Run what the change needs (§7.0): `npm run check` runs the offline checks the changed files reach and names the live suites the change calls for. Run those live suites (`--live`) when it names them for input, perception, launching or the seam, and before a release; `npm run check:all` before handing over a change that touched several areas; the installer build (`cd desktop && npm run build:win && npm run test:packaged`) only for a change in `desktop/` or a build the owner will install. A new module a check cannot reach makes `check.test.mjs` fail: add it to that check's `reads` or to NO_CHECK in `setup/check-plan.mjs`. The self-test asserts the tool count, so it fails until everything is updated. Update the assertion last, deliberately — not reflexively. Before a step that takes more than a minute, say what it is and how long it should take.
 7. Test safely: a temp `G9_HOME`, temp profiles, random ports in 18000–18999, never port 8765, never a person's browser profile, registry or MCP client config, no on-screen windows, and kill only processes the test started.
 8. If you remove a deliberate omission from §8, say so and explain what changed.
 

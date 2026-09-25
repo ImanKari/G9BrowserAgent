@@ -577,6 +577,9 @@ await test('not-delivered: a tab that becomes hidden as the input goes out is st
       assert.match(err.message, /HIDDEN/);
       assert.match(err.message, /never received it/);
       assert.equal(err.delivery, 'not-delivered');
+      // v3 review, finding 6: the flag the side panel's alert keys on. Without it this path gave
+      // the hidden-tab sentence with hidden:false on the wire, and no alert.
+      assert.equal(err.hidden, true, 'the error is marked hidden, so sw.js raises the agentBlocked alert');
       return true;
     });
   } finally {

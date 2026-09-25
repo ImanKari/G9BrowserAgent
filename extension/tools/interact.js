@@ -659,6 +659,24 @@ async function explainNoInput(tabId, action, sessionId = null) {
 }
 
 /**
+ * The error for input the page never received, marked `hidden` when the page reports it is hidden.
+ *
+ * Five paths built this message with `new Error(await explainNoInput(…))` and none set `hidden`,
+ * so a tab hidden DURING delivery produced the hidden-tab sentence with `hidden:false` on the wire
+ * and no alert in the side panel (v3 review, finding 6). The flag is what sw.js keys the alert on.
+ */
+async function noInputError(tabId, action, sessionId = null) {
+  const page = await inWorld(
+    tabId,
+    '({ hidden: document.hidden, state: document.visibilityState })',
+    { sessionId },
+  ).catch(() => null);
+  const error = new Error(await explainNoInput(tabId, action, sessionId));
+  if (page?.hidden) error.hidden = true;
+  return error;
+}
+
+/**
  * Dispatch, then require proof the page saw it.
  *
  * `verify` is an optional last word: some actions can observe their own OUTCOME
@@ -697,7 +715,7 @@ async function witnessed(tabId, expect, action, run, { verify = null, node = nul
     throw error;
   }
   if (seen.delivery === 'not-delivered') {
-    const error = new Error(await explainNoInput(tabId, action, list[0] ?? null));
+    const error = (await noInputError(tabId, action, list[0] ?? null));
     error.delivery = 'not-delivered';
     throw error;
   }
@@ -1721,7 +1739,7 @@ async function reachByWheel(tabId, hz, rng, node, label, { beforeInput = null } 
     // (`hidden`: the action that asked — a click, a scroll — words it, hiddenMidAction.)
     const hidden = await inWorld(tabId, 'document.hidden', { sessionId: node.sessionId ?? null }).catch(() => false);
     if (hidden) {
-      const error = new Error(await explainNoInput(tabId, 'scroll wheel', node.sessionId ?? null));
+      const error = (await noInputError(tabId, 'scroll wheel', node.sessionId ?? null));
       error.delivery = 'not-delivered';
       error.hidden = true;
       throw error;
@@ -2675,7 +2693,7 @@ async function directScroll(tabId, { ref, direction = 'down', amount = 400, x, y
   // Only accuse the browser when the page also could not have received it.
   // A page already at its edge legitimately does not move.
   if (!movedAtAll && saw.delivery !== 'delivered' && after?.hidden) {
-    const error = new Error(await explainNoInput(tabId, 'scroll', sessionId));
+    const error = (await noInputError(tabId, 'scroll', sessionId));
     error.delivery = 'not-delivered';
     throw error;
   }
@@ -2771,7 +2789,7 @@ async function humanScroll(tabId, { ref, direction = 'down', amount = 400, x, y,
   const { after, moved, movedAtAll, settled } = await settledScroll(tabId, node, before);
   const saw = movedAtAll ? (witness.release(), { delivery: 'delivered' }) : await witness.settle();
   if (!movedAtAll && saw.delivery !== 'delivered' && after?.hidden) {
-    const error = new Error(await explainNoInput(tabId, 'scroll', node?.sessionId ?? null));
+    const error = (await noInputError(tabId, 'scroll', node?.sessionId ?? null));
     error.delivery = 'not-delivered';
     error.hidden = true;
     throw error;
@@ -3145,7 +3163,7 @@ export async function select(tabId, opts = {}) {
     // were never delivered and the page is blameless. Ask before accusing.
     const seen = await sawKeys.settle();
     if (seen.delivery === 'not-delivered') {
-      const error = new Error(await explainNoInput(tabId, 'selection', sessionId));
+      const error = (await noInputError(tabId, 'selection', sessionId));
       error.delivery = 'not-delivered';
       throw error;
     }

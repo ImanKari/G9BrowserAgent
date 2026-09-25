@@ -2605,6 +2605,133 @@ test('contract gap: launch lines in engine-versions.log use cft.js\'s one format
   assert.doesNotMatch(manager, /\\tlaunch\\t/, 'no second hand-rolled line format');
 });
 
+// ------------------------------------------------------------------ v3: projects push, agent rows
+
+/** A folder with a g9.project.json holding these environments (none: no file at all). */
+function projectDir(root, name, environments) {
+  const dir = path.join(root, name);
+  fs.mkdirSync(dir, { recursive: true });
+  if (environments !== undefined) fs.writeFileSync(path.join(dir, 'g9.project.json'), JSON.stringify({ environments }));
+  return dir;
+}
+
+const engineHello = (instanceId, tabs) => ({ type: 'hello', role: 'engine', version: '2.0.3', client: { name: 'extension', instanceId, loadId: 'load-1', tabs } });
+const agentHello = (name, cwd) => ({ type: 'hello', role: 'agent', version: '2.0.3', client: { name, ...(cwd ? { cwd } : {}) } });
+
+test('v3: environmentHosts and projectLabel — hosts of http(s) environment URLs; the project folder, else the cwd folder', async () => {
+  const { environmentHosts, projectLabel } = await import('../../daemon/daemon.js');
+  assert.deepEqual(environmentHosts({
+    test1: 'https://Test1.Shop.test/app',
+    dev: { baseUrl: 'http://localhost:3000/', api: 'https://api.shop.test:443/', label: 'not a url', nested: { url: 'https://deep.test/' } },
+    ftp: 'ftp://files.shop.test/',
+    dup: 'https://test1.shop.test/other',
+    list: ['https://listed.test/'],
+  }), ['test1.shop.test', 'localhost:3000', 'api.shop.test'], 'one level deep, http(s) only, de-duplicated, default port omitted');
+  assert.deepEqual(environmentHosts(undefined), []);
+  assert.deepEqual(environmentHosts({}), []);
+  assert.equal(projectLabel({ found: true, root: 'G:/work/shop' }, 'G:/work/shop/sub'), 'shop');
+  assert.equal(projectLabel({ found: false, root: null }, 'C:\\work\\plain\\'), 'plain', 'Windows separators and a trailing one');
+  assert.equal(projectLabel(null, null), null);
+});
+
+test('v3: {type:"projects"} — the CONNECTED agents\' project sites, after each welcome and coalesced on connect/disconnect', async () => {
+  const root = fs.mkdtempSync(path.join(TMP, 'projects-'));
+  const shop = projectDir(root, 'shop', { test1: 'https://Test1.Shop.test/', dev: { baseUrl: 'http://localhost:3000/app', note: 'not a url' } });
+  const admin = projectDir(root, 'admin', { staging: 'https://admin.shop.test', same: 'https://test1.shop.test/x' });
+  const bare = projectDir(root, 'bare', {});
+  const { d, connect } = inProcessDaemon('projects', { cwd: projectDir(root, 'home') });
+  const ext = connect(engineHello('inst-projects-1', []));
+  assert.deepEqual(ext.of('projects'), [{ type: 'projects', domains: [], projects: [] }], 'sent right after the welcome, empty without agents');
+
+  const a1 = connect(agentHello('claude-code', shop));
+  const a2 = connect(agentHello('cursor', shop));
+  const a3 = connect(agentHello('codex', admin));
+  connect(agentHello('bare-agent', bare));
+  const id = (c) => c.of('welcome')[0].id;
+  await waitUntil(() => ext.of('projects').length === 2);
+  await sleep(250);
+  assert.equal(ext.of('projects').length, 2, 'four agents connecting together cost one push');
+  const msg = ext.of('projects')[1];
+  assert.deepEqual([...msg.domains].sort(), ['admin.shop.test', 'localhost:3000', 'test1.shop.test'], 'the de-duplicated union');
+  const shopRow = msg.projects.find((p) => p.name === 'shop');
+  assert.deepEqual(shopRow.domains, ['test1.shop.test', 'localhost:3000']);
+  assert.deepEqual(shopRow.agents, [id(a1), id(a2)], 'one row per project file, naming its agents');
+  assert.match(shopRow.path, /\/shop\/g9\.project\.json$/);
+  assert.deepEqual(msg.projects.find((p) => p.name === 'admin').agents, [id(a3)]);
+  assert.equal(msg.projects.some((p) => p.name === 'bare'), false, 'a project without environment URLs contributes nothing');
+
+  a3.drop();
+  await waitUntil(() => ext.of('projects').length === 3);
+  assert.deepEqual([...ext.of('projects')[2].domains].sort(), ['localhost:3000', 'test1.shop.test'], 'a disconnected agent\'s sites leave the union');
+
+  // A second browser gets the list as it stands, right after its welcome.
+  const ext2 = connect(engineHello('inst-projects-2', []));
+  assert.deepEqual([...ext2.of('projects')[0].domains].sort(), ['localhost:3000', 'test1.shop.test']);
+  assert.equal(d.projectsPayload().projects.length, 1);
+  await d.stop('test over').catch(() => {});
+});
+
+test('v3: agent rows name each agent\'s project and its current tab — this browser\'s Chrome id, or where it is instead', async () => {
+  const root = fs.mkdtempSync(path.join(TMP, 'agentrows-'));
+  const shop = projectDir(root, 'shop', { test1: 'https://test1.shop.test/' });
+  const plain = projectDir(root, 'plain-folder');
+  const { d, connect } = inProcessDaemon('agentrows', { cwd: projectDir(root, 'home') });
+  const tabs = [{ tabId: 101, url: 'https://a.test/' }, { tabId: 102, url: 'https://b.test/' }];
+  const ext = connect(engineHello('inst-rows-one', tabs));
+  ext.say({ type: 'event', event: 'tabs', data: { tabs } });
+  const other = connect(engineHello('inst-rows-two', [{ tabId: 101, url: 'https://c.test/' }]));
+  other.say({ type: 'event', event: 'tabs', data: { tabs: [{ tabId: 101, url: 'https://c.test/' }] } });
+  const extId = ext.of('welcome')[0].id;
+  const otherId = other.of('welcome')[0].id;
+  const a = connect(agentHello('claude-code', shop));
+  const b = connect(agentHello('cursor', plain));
+  const c = connect(agentHello('runner', null));
+  const [aId, bId, cId] = [a, b, c].map((x) => x.of('welcome')[0].id);
+  await waitUntil(() => d.registry.handleForChrome(extId, 101, { create: false }) != null && d.registry.handleForChrome(otherId, 101, { create: false }) != null);
+  const here = d.registry.handleForChrome(extId, 101, { create: false });
+  const there = d.registry.handleForChrome(otherId, 101, { create: false });
+  d.registry.addLaunchedEngine({ engineId: 'launched-9' });
+  const launched = d.registry.allocHandle();
+  d.registry.bindHandle(launched, 'launched-9');
+  await sleep(250); // every push the connections caused has gone out
+
+  const before = ext.of('agents').length;
+  for (let i = 0; i < 20; i++) d.registry.setCurrent(aId, i % 2 ? here : there); // a busy agent
+  d.registry.setCurrent(aId, here);
+  d.registry.setCurrent(bId, launched);
+  d.registry.setCurrent(cId, there);
+  await waitUntil(() => ext.of('agents').length > before);
+  await sleep(250);
+  const pushes = ext.of('agents').slice(before);
+  assert.equal(pushes.length, 1, 'a burst of current-tab changes costs one push');
+  const row = (list, agentId) => list.find((r) => r.id === agentId);
+  const rows = pushes[0].agents;
+  assert.deepEqual(row(rows, aId), {
+    id: aId, name: 'claude-code', owned: [], halted: false, project: 'shop', cwd: shop, current: 101, currentEngine: 'extension',
+  }, 'every v2 field kept; the project folder; this browser\'s Chrome tab id');
+  assert.deepEqual([row(rows, bId).project, row(rows, bId).current, row(rows, bId).currentEngine], ['plain-folder', null, 'launched'],
+    'no project file: the cwd folder; an Engine 2 tab has no Chrome id here');
+  assert.deepEqual([row(rows, cId).project, row(rows, cId).cwd, row(rows, cId).current, row(rows, cId).currentEngine], [null, null, null, 'elsewhere'],
+    'a tab in ANOTHER browser is not shown as a tab of this one');
+  // The other browser sees the same agents from its side.
+  await waitUntil(() => row(other.of('agents').at(-1).agents, cId)?.current === 101);
+  assert.equal(row(other.of('agents').at(-1).agents, aId).currentEngine, 'elsewhere');
+
+  // A tab that closes takes the agent's current pointer with it, and the rows say so.
+  d.registry.dropHandle(here, 'the tab closed');
+  await waitUntil(() => row(ext.of('agents').at(-1).agents, aId).current === null);
+  assert.equal(row(ext.of('agents').at(-1).agents, aId).currentEngine, null);
+
+  // The panel's `info` request carries the same rows.
+  ext.say({ type: 'request', id: 77, op: 'info' });
+  await waitUntil(() => ext.of('response').some((m) => m.id === 77));
+  const info = ext.of('response').find((m) => m.id === 77);
+  assert.equal(info.ok, true, info.error);
+  assert.equal(row(info.result.agents, bId).project, 'plain-folder');
+  assert.equal(row(info.result.agents, bId).currentEngine, 'launched');
+  await d.stop('test over').catch(() => {});
+});
+
 // ------------------------------------------------------------------ run
 
 try {

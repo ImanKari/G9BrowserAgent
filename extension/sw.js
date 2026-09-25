@@ -17,10 +17,12 @@
 
 import { platform } from './lib/platform.js';
 import {
-  getState, setState, logActivity, clearActivity, migrateLegacySettings, getAbout, setAbout,
+  getState, setState, updateState, logActivity, clearActivity, migrateLegacySettings, getAbout, setAbout, broadcast,
+  autoAttachMode, AUTO_ATTACH_MODES,
 } from './lib/state.js';
 import * as transport from './lib/transport.js';
 import { attach, detachAll, applyStealthLevel, runtimeEnabledTabs, asPerson } from './lib/cdp.js';
+import { hostMatches } from './lib/sites.js';
 import * as screencast from './lib/screencast.js';
 import * as pointer from './lib/pointer.js';
 import { toFlowSpec, fromFlowSpec, canonicalJson, validateFlowSpec } from './lib/flowspec.js';
@@ -33,6 +35,7 @@ import * as record from './tools/record.js';
 import * as replay from './tools/replay.js';
 import * as issues from './tools/issues.js';
 import * as qa from './tools/qa.js';
+import * as navigate from './tools/navigate.js';
 
 const api = globalThis.browser ?? globalThis.chrome;
 
@@ -69,6 +72,7 @@ platform.tabs.onRemoved((tabId) => {
   // forgot the screencast, without talking to a tab that no longer exists).
   watchers.get(tabId)?.();
   watchers.delete(tabId);
+  unblock(tabId).catch(() => {});
   scheduleTabsEvent();
 });
 platform.tabs.onCreated((tab) => {
@@ -88,6 +92,13 @@ platform.tabs.onUpdated((tabId, change, tab) => {
 // tools/tabs.js `getActiveTab`.
 platform.windows.onFocusChanged((windowId) => {
   tabsTool.rememberFocus(windowId).catch(() => {});
+  // A focused window shows its active tab: an agent blocked on it can drive it now.
+  unblockShownIn(windowId).catch(() => {});
+});
+// The same when a tab becomes the active one of its window (platform.tabs has no onActivated: the
+// seam never needed it, and this is the extension's own panel bookkeeping, not a tool's).
+api.tabs.onActivated?.addListener?.(({ tabId, windowId }) => {
+  unblockIfShown(tabId, windowId).catch(() => {});
 });
 
 transport.onMessage(handleDaemonMessage);
@@ -202,7 +213,7 @@ async function doBootstrap() {
   maybeReload().catch(() => {});
 
   const state = await getState();
-  if (state.autoAttach) attachAllEligible().catch(() => {});
+  if (state.autoAttach !== 'off') attachAllEligible().catch(() => {});
 }
 
 /**
@@ -261,17 +272,33 @@ function openWelcome({ updated }) {
 
 const REPORTED_KEY = 'g9:autoattach:reported';
 
-/** Attach a tab when the panel's auto-attach is on. Quiet on success, one line per ineligible kind of page. */
+/** How the panel and the activity log name each auto-attach mode. */
+const AUTO_ATTACH_LABEL = { off: 'Off', project: 'Project sites', all: 'All tabs' };
+
+/**
+ * Attach a tab when auto-attach says so (v3: 'off' | 'project' | 'all'). Called on startup, on
+ * creation, on every navigation and whenever the project sites change. Quiet on success, one line
+ * per ineligible kind of page.
+ *
+ * 'project' attaches only a connected agent's project sites (state.projectDomains, the daemon's
+ * `projects` push) and, with none known, nothing. It is a filter on what G9 CAPTURES by itself,
+ * never on what can be reached (v2 D6/D7 stand: a tab attached by hand or by an agent is attached,
+ * and every tab stays reachable) — so nothing here ever detaches a tab, whatever the mode or the
+ * domains become.
+ */
 async function autoAttachTab(tab) {
   if (!tab || tab.id == null) return;
   const state = await getState();
-  if (!state.autoAttach || state.halted) return;
+  const mode = state.autoAttach;
+  if (mode === 'off' || state.halted) return;
   const url = tab.url || tab.pendingUrl || '';
   if (!url) return; // nothing to judge yet; the URL arrives with onUpdated
   if (!tabsTool.isAttachable(url)) {
-    await reportIneligible(url);
+    // Only "All tabs" promised every tab; a browser page is never a project site.
+    if (mode === 'all') await reportIneligible(url);
     return;
   }
+  if (mode === 'project' && !hostMatches(url, state.projectDomains)) return;
   if (state.attachedTabs.includes(tab.id)) return;
   try {
     await attach(tab.id);
@@ -305,6 +332,120 @@ async function attachAllEligible() {
   for (const tab of tabs) await autoAttachTab(tab).catch(() => {});
 }
 
+/**
+ * The daemon's `{type:'projects'}` (DAEMON_PROTOCOL §5): the connected agents' project sites.
+ * Stored as projectDomains/projects; when the domains changed and auto-attach is "Project sites",
+ * every open tab is judged again (tabs that no longer match are left as they are — never detached).
+ */
+async function onProjects(msg) {
+  const domains = [...new Set((Array.isArray(msg.domains) ? msg.domains : []).filter((d) => typeof d === 'string' && d))];
+  const projects = Array.isArray(msg.projects) ? msg.projects.filter((p) => p && typeof p === 'object') : [];
+  let changed = false;
+  const next = await updateState((s) => {
+    const was = [...(s.projectDomains ?? [])].sort().join('\n');
+    changed = was !== [...domains].sort().join('\n');
+    return { projectDomains: domains, projects };
+  });
+  if (changed && next.autoAttach === 'project') await attachAllEligible();
+}
+
+// ------------------------------------------------------ an agent blocked by a hidden tab
+
+/**
+ * (v3, V3_UX_PLAN A3) An agent's input failed because its tab is HIDDEN — the one failure the panel's
+ * Pop out and Send to background exist for. They used to demand foresight; now the moment is
+ * recorded in state.blocked (a panel opened later still sees it) and announced as
+ * {type:'agentBlocked'} for a toast that offers them. Only calls the daemon relayed (an agent's):
+ * the person acting in the panel can see their own tab.
+ */
+async function noteBlocked(tabId, caller, tool, err) {
+  let entry = null;
+  await updateState(async (s) => {
+    const tab = await platform.tabs.get(tabId).catch(() => null);
+    if (!tab) return null; // closed meanwhile: nothing left to offer
+    // Shown again before this ran (the person switched to it): no stale toast.
+    if (tab.active && (await shownWindow(tab.windowId))) return null;
+    entry = {
+      tabId,
+      agent: { id: caller?.agentId ?? null, name: caller?.name ?? null },
+      reason: 'hidden',
+      at: Date.now(),
+      title: tab.title ?? '',
+      url: tab.url ?? '',
+      tool,
+      delivery: err?.delivery ?? null,
+    };
+    return { blocked: { ...(s.blocked ?? {}), [tabId]: entry } };
+  });
+  if (entry) broadcast({ type: 'agentBlocked', ...entry });
+}
+
+/** The tab is no longer blocked (shown, popped out, handed off, closed, or input reached it). */
+async function unblock(tabId) {
+  if (tabId == null) return;
+  let had = false;
+  await updateState((s) => {
+    if (!s.blocked?.[tabId]) return null;
+    had = true;
+    const blocked = { ...s.blocked };
+    delete blocked[tabId];
+    return { blocked };
+  });
+  if (had) broadcast({ type: 'agentUnblocked', tabId });
+}
+
+/** A focused, not minimized window: its active tab is visible. */
+async function shownWindow(windowId) {
+  if (windowId == null) return false;
+  const win = await platform.windows.get(windowId).catch(() => null);
+  return !!win?.focused && win.state !== 'minimized';
+}
+
+async function unblockIfShown(tabId, windowId) {
+  const { blocked } = await getState();
+  if (!blocked?.[tabId]) return;
+  if (await shownWindow(windowId)) await unblock(tabId);
+}
+
+async function unblockShownIn(windowId) {
+  if (windowId == null || windowId === platform.windows.WINDOW_ID_NONE) return;
+  const { blocked } = await getState();
+  if (!Object.keys(blocked ?? {}).length) return;
+  const [active] = await platform.tabs.query({ active: true, windowId }).catch(() => []);
+  if (active) await unblockIfShown(active.id, windowId);
+}
+
+/**
+ * What a relayed call's outcome says about a blocked tab: a hidden refusal blocks it; input that
+ * landed (browser_interact succeeded), or the agent moving it into view or away (popout, focus,
+ * handoff_export), clears it. Runs after the result is sent, so it never delays an answer.
+ */
+function afterRelayedCall(tool, args, caller, err) {
+  const tabId = Number.isInteger(args?.tabId) ? args.tabId : null;
+  if (tabId == null) return;
+  if (err) {
+    if (err.hidden === true) noteBlocked(tabId, caller, tool, err).catch(() => {});
+    return;
+  }
+  if (tool === 'browser_interact' || (tool === 'browser_tabs' && ['popout', 'focus', 'handoff_export'].includes(args.action))) {
+    unblock(tabId).catch(() => {});
+  }
+}
+
+/** Blocked entries of agents the daemon no longer lists (disconnected, or a restarted daemon's numbering). */
+async function pruneBlocked(agents) {
+  const live = new Set(agents.map((a) => a?.id));
+  const gone = [];
+  await updateState((s) => {
+    const entries = Object.entries(s.blocked ?? {});
+    const keep = entries.filter(([, e]) => live.has(e?.agent?.id));
+    if (keep.length === entries.length) return null;
+    for (const [id, e] of entries) if (!live.has(e?.agent?.id)) gone.push(e?.tabId ?? Number(id));
+    return { blocked: Object.fromEntries(keep) };
+  });
+  for (const tabId of gone) broadcast({ type: 'agentUnblocked', tabId });
+}
+
 // ------------------------------------------------------------ tab list events
 
 let tabsTimer = null;
@@ -331,7 +472,7 @@ function scheduleTabsEvent() {
 let inFlight = 0;
 /** The side panel's own long operations (a replay, a calibration, an issue recapture) running now. */
 let panelOps = 0;
-const PANEL_LONG_OPS = new Set(['recReplay', 'recCalibrate', 'issueRecapture', 'issueCreate', 'issueShot', 'recStop', 'videoStart', 'videoStop']);
+const PANEL_LONG_OPS = new Set(['recReplay', 'recCalibrate', 'issueRecapture', 'issueCreate', 'issueShot', 'recStop', 'videoStart', 'videoStop', 'recordNow']);
 /**
  * An update reload the G9 app asked for and that has not happened yet. In storage.session, not a
  * variable: MV3 stops an idle worker after ~30 s, and a reload deferred behind a long recording
@@ -426,13 +567,21 @@ async function handleDaemonMessage(msg) {
       await platform.storage.session.set({ [RELOAD_KEY]: { at: Date.now(), reason: 'update from the G9 app' } }).catch(() => {});
       await maybeReload();
       return undefined;
-    case 'agents':
-      await setState({ agents: Array.isArray(msg.agents) ? msg.agents : [] });
+    case 'agents': {
+      const agents = Array.isArray(msg.agents) ? msg.agents : [];
+      await setState({ agents });
       // The daemon pushes its agent list right after it welcomes this engine,
       // and the transport keeps the welcome to itself — so this is the first
       // moment the daemon can take our tab list. Debounced, so the later pushes
       // (an agent claiming a tab) cost one list at most.
       scheduleTabsEvent();
+      // An agent that is gone is blocked on nothing: its toast would name someone who left.
+      await pruneBlocked(agents).catch(() => {});
+      return undefined;
+    }
+    case 'projects':
+      // (v3) The connected agents' project sites, for auto-attach "Project sites" (DAEMON_PROTOCOL §5).
+      await onProjects(msg);
       return undefined;
     case 'watch':
       if (msg.tabId == null) return undefined;
@@ -450,6 +599,7 @@ async function handleCall(msg) {
   try {
     const result = await runTool(tool, args ?? {}, caller ? { ...caller, signal: controller.signal } : { signal: controller.signal });
     transport.send({ type: 'result', id, ok: true, result });
+    if (caller?.relayed === true) afterRelayedCall(tool, args, caller, null);
   } catch (err) {
     // The delivery state of an input error travels as fields too (DAEMON_PROTOCOL §4), not only as
     // the [delivery: …] tag runTool put in the message.
@@ -457,6 +607,7 @@ async function handleCall(msg) {
       type: 'result', id, ok: false, error: String(err?.message ?? err),
       ...(typeof err?.delivery === 'string' ? { delivery: err.delivery, hit: err.hit ?? null, hidden: err.hidden === true } : {}),
     });
+    if (caller?.relayed === true) afterRelayedCall(tool, args, caller, err);
   } finally {
     callControllers.delete(id);
     inFlight -= 1;
@@ -611,6 +762,58 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         });
         break;
       }
+      case 'recordNow': {
+        // (v3) "Record from now" (V3_UX_PLAN A1): exactly attachActive/attachTab — start capture on
+        // this tab, make it current, lift Stop (the person's own gesture) and tell the daemon — then,
+        // with reload:true, reload the tab through browser_navigate's own reload path (and its load
+        // wait), so the capture holds the page load from its first request. One gesture, one
+        // activity line: the attach is not logged on its own.
+        const attached = await tabsTool.attachTab(msg.tabId ?? null, { clearHalt: true, log: false });
+        if (attached.resumed) transport.send({ type: 'event', event: 'halt', data: { halted: false, by: 'panel' } });
+        const tabId = attached.tabId;
+        let reloaded = false;
+        let reloadError = null;
+        if (msg.reload === true) {
+          try {
+            await navigate.reload(tabId, {});
+            reloaded = true;
+          } catch (err) {
+            // Capture is on either way; the answer says the reload did not happen, and why.
+            reloadError = String(err?.message ?? err);
+          }
+        }
+        const tab = await platform.tabs.get(tabId).catch(() => null);
+        const { attachedSince } = await getState();
+        await logActivity({
+          kind: 'attach', tabId, ok: !reloadError,
+          detail: 'Record from now' +
+            (reloaded ? ' — page reloaded to capture its load' : '') +
+            (reloadError ? ` — the reload failed: ${reloadError}` : '') +
+            (attached.resumed ? '; Stop lifted' : ''),
+        });
+        sendResponse({
+          ok: true,
+          tabId,
+          title: tab?.title ?? attached.title ?? '',
+          url: tab?.url ?? attached.url ?? '',
+          attachedSince: attachedSince?.[tabId] ?? null,
+          reloaded,
+          ...(reloadError ? { reloadError } : {}),
+          ...(attached.resumed ? { resumed: true } : {}),
+        });
+        break;
+      }
+      case 'focusTab': {
+        // (v3) An agent's tab chip in the panel: bring that tab to the front of its window and the
+        // window to the front. The person's own gesture — works while Stop is on (it is what they
+        // could do by hand, and no page is touched).
+        const tabId = Number(msg.tabId);
+        if (!Number.isInteger(tabId)) throw new Error('focusTab needs the tabId of a tab in this browser.');
+        const tab = await tabsTool.focusTab(tabId);
+        await unblock(tabId); // the active tab of a focused window now
+        sendResponse({ ok: true, tabId: tab.id, windowId: tab.windowId ?? null });
+        break;
+      }
       case 'detach': {
         const t0 = Date.now();
         const results = await tabsTool.detachAllTabs();
@@ -649,13 +852,17 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         break;
       }
       case 'setAutoAttach': {
-        const enabled = !!msg.enabled;
-        await setState({ autoAttach: enabled });
-        await logActivity({ kind: 'system', ok: true, detail: `Auto-attach ${enabled ? 'on' : 'off'}` });
-        sendResponse({ ok: true });
+        // v3 takes {mode}; a v2 panel's {enabled:boolean} still works (true → 'all', false → 'off').
+        const mode = 'mode' in msg ? autoAttachMode(msg.mode) : 'enabled' in msg ? autoAttachMode(!!msg.enabled) : null;
+        if (!mode) {
+          throw new Error(`setAutoAttach needs mode: ${AUTO_ATTACH_MODES.map((m) => `"${m}"`).join(', ')} (or the v2 form enabled:true|false).`);
+        }
+        await setState({ autoAttach: mode });
+        await logActivity({ kind: 'system', ok: true, detail: `Auto-attach: ${AUTO_ATTACH_LABEL[mode]}` });
+        sendResponse({ ok: true, mode });
         // After answering: attaching every open tab can take a while, and the
         // toggle should not look stuck while it does.
-        if (enabled) attachAllEligible().catch(() => {});
+        if (mode !== 'off') attachAllEligible().catch(() => {});
         break;
       }
       case 'popout': {
@@ -663,12 +870,14 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         // would refuse), so the tab is picked the way the panel shows it.
         // The person asked to see it: in front, focused (tabs.js popout, "two callers").
         const result = await tabsTool.popout(await panelTarget(msg.tabId ?? null), { focus: true });
+        await unblock(result.tabId); // in its own window, in front: an agent blocked on it can drive it
         sendResponse({ ok: true, ...result });
         break;
       }
       case 'handoff': {
         const tabId = await panelTarget(msg.tabId ?? null);
         const result = await transport.request('handoff', { tabId });
+        await unblock(tabId); // the agent works in the launched copy now
         sendResponse({ ok: true, result });
         break;
       }

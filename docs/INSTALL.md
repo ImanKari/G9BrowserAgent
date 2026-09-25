@@ -1,4 +1,4 @@
-# Installing and operating G9 2.0.3
+# Installing and operating G9 3.0.1
 
 This is the operator guide: how G9 gets onto a machine, what it changes there, how to keep it
 running with nobody at the keyboard, how to update it and how to take it off again. It covers
@@ -43,9 +43,9 @@ access once to download Chrome for Testing. No administrator rights, no Node, no
 
 ## Desktop install
 
-The installer is `desktop/dist/G9-Setup-<version>.exe` (`G9-Setup-2.0.3.exe` for this release), built
-with `cd desktop && npm run build:win`. The last build, `G9-Setup-2.0.3.exe` of 2026-09-25, is
-103,591,675 bytes, and `Get-AuthenticodeSignature` reports `NotSigned` for it (and for
+The installer is `desktop/dist/G9-Setup-<version>.exe` (`G9-Setup-3.0.0.exe` for this release), built
+with `cd desktop && npm run build:win`. The last build, `G9-Setup-3.0.0.exe` of 2026-09-25, is
+103,620,667 bytes, and `Get-AuthenticodeSignature` reports `NotSigned` for it (and for
 `win-unpacked\G9.exe` and `resources\elevate.exe`).
 
 It is an NSIS installer that installs **per user**: the manifest asks for `asInvoker`, and
@@ -229,7 +229,7 @@ Edge may show a prompt about extensions in developer mode. Keep them on: G9 is o
 
 On a managed (domain or Entra-joined) machine, IT can install the extension with the
 `ExtensionInstallForcelist` policy and a self-hosted CRX and update URL, instead of Load unpacked
-(plan §8). G9 2.0.3 ships no CRX or update manifest for that. **Not verified here.**
+(plan §8). G9 3.0.1 ships no CRX or update manifest for that. **Not verified here.**
 
 ---
 
@@ -338,6 +338,31 @@ G9 does not set it: it would also change the person's own Edge, and it was not t
 - The wizard recognises a v1 `g9-browser` MCP entry (`bridge/src/server.js`) and offers to replace
   it. A config that still points at `bridge/src/server.js` keeps working in a repository checkout,
   because that file now starts `mcp/shim.mjs`.
+
+---
+
+## Upgrading from G9 2.x to 3.0
+
+3.0 changed the side panel, the extension's auto-attach setting and issue index, and two messages
+from the daemon (V3_UX_PLAN.md). Nothing changed in the MCP entry, the policies, the profiles or the
+engines.
+
+- **Installed app.** After the app updates itself it refreshes `G9_HOME\extension` and reloads the
+  extension (see [The extension](#the-extension-load-once-updated-by-reload)), and restarts an older
+  daemon once it is idle. Quit the AI clients before installing: shims run as `G9.exe`, and the
+  installer may close them mid-session.
+- **Repository checkout.** Reload the extension on `edge://extensions` or `chrome://extensions`. A
+  2.x daemon keeps running until it has been idle for `idleExitMinutes` (60 by default); to switch at
+  once, close the AI clients and end the `g9d` node process (the panel's About tab and `/health` name
+  its pid), then restart an AI client, whose shim starts the new daemon.
+- **Mixed versions.** The daemon refuses only extensions whose major version is below 2, so a 3.0
+  extension and a 2.x daemon still connect, and the Session tab warns that the versions differ. A
+  2.x daemon sends no project sites, so the new **Project sites** auto-attach setting behaves as Off
+  until the daemon is 3.0, and the panel says so.
+- **Settings and data.** A stored 2.x auto-attach choice is kept: on becomes **All tabs**, off becomes
+  **Off** (one line in the activity log). Only an install that never saved its settings starts at
+  **Project sites**. Recorded flows and issues need nothing: the issue index is completed from the
+  stored issues the first time it is read.
 
 ---
 
@@ -462,9 +487,10 @@ git clone <repo> g9-browser-agent; cd g9-browser-agent
 `install.ps1`:
 1. checks for Node 22+;
 2. runs `setup\unittest.mjs`, `setup\selftest.mjs` and `setup\extensiontest.mjs`, and stops at the
-   first failure. Their last recorded run (2.0.3, 2026-09-25) passed 621 tests in 10 suites, 136 and
-   78. The unit suites include real headless launches of Edge and the cached CfT;
-   `G9_UNIT_NO_BROWSER=1` skips them;
+   first failure. Their last recorded run (3.0.1, 2026-09-25) passed 651 tests in 12 suites, 136 and
+   82. The unit suites include real headless launches of Edge and the cached CfT;
+   `G9_UNIT_NO_BROWSER=1` skips them. That takes about 5 minutes; `npm run check:all` runs the same
+   checks 4 at a time in about 2.5 (README, [Tests](../README.md#choosing-what-to-run));
 3. writes an MCP entry `g9-browser` → `node <repo>/mcp/shim.mjs` with `G9_HOST`/`G9_PORT`. It goes to
    `setup\mcp.json`, and with `-WriteProjectConfig` also to `.mcp.json`. A v1 `.mcp.json` is backed
    up to `.mcp.json.v1.bak`; any other existing `.mcp.json` is left alone;

@@ -275,7 +275,30 @@ export function disconnect() {
   // must not also be handed to the next connect() as "already connecting".
   inflight = null;
   teardown();
-  return setState({ bridge: { connected: false, lastError: null } }).catch(() => {});
+  return forgetDaemonState()
+    .then(() => setState({ bridge: { connected: false, lastError: null } }))
+    .catch(() => {});
+}
+
+/**
+ * Drop what only the daemon's word made true (v3 review, findings 2 and 3).
+ *
+ * `projectDomains`/`projects` come from the daemon's {type:'projects'} push and describe the agents
+ * connected to THAT daemon. Kept across a disconnect, "Project sites" went on auto-attaching a
+ * departed project's hosts with no agent connected, and the panel listed sites instead of saying the
+ * mode behaves as Off. `blocked` entries name agents by the daemon's per-process ids (`agent-1` …),
+ * which restart at 1 with a new daemon — a stale alert could then be credited to a stranger. Both are
+ * re-sent by the daemon after the next welcome, so forgetting them costs nothing.
+ */
+async function forgetDaemonState() {
+  let stale = {};
+  try {
+    stale = (await getState())?.blocked ?? {};
+  } catch {
+    stale = {};
+  }
+  await setState({ projectDomains: [], projects: [], blocked: {} }).catch(() => {});
+  for (const tabId of Object.keys(stale)) broadcast({ type: 'agentUnblocked', tabId: Number(tabId) });
 }
 
 /**
@@ -703,6 +726,7 @@ async function onClose(ws, event) {
     reason = blocked;
   }
   rejectAll(`The daemon connection closed before it answered (${reason}).`);
+  await forgetDaemonState();
 
   if (blocked) {
     await setState({ bridge: { connected: false, lastError: blocked, ...(refusedNow ? { problem: blocked } : {}) } });

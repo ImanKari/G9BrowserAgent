@@ -1117,6 +1117,7 @@ async function extensionSide() {
   const calls = {
     setTitle: [], created: [], updated: [], reloaded: [], removed: [], attached: [], commands: [], runtimeReload: 0,
     sidePanel: 0, alarms: [], windowUpdates: [], windowsCreated: [], windowCreateAttempts: [], rejectWindowCreates: 0,
+    broadcasts: [],
   };
   const dlItems = new Map();
   const tabs = [
@@ -1127,10 +1128,13 @@ async function extensionSide() {
   const debuggerAttached = new Set();
   // What document.visibilityState answers in G9's world (the live-watch watchdog reads it).
   let pageVisibility = 'visible';
+  // Whether document.readyState answers "complete" (a reload's load wait); off by default, so the
+  // tests that never needed it keep their timing.
+  let answerReadyState = false;
   const ev = {
     startup: makeEvent(), installed: makeEvent(), message: makeEvent(), alarm: makeEvent(),
     dbgEvent: makeEvent(), dbgDetach: makeEvent(), tabRemoved: makeEvent(), tabCreated: makeEvent(), tabUpdated: makeEvent(),
-    focus: makeEvent(), dlCreated: makeEvent(), dlChanged: makeEvent(),
+    focus: makeEvent(), dlCreated: makeEvent(), dlChanged: makeEvent(), tabActivated: makeEvent(),
   };
   const session = makeArea();
   const local = makeArea();
@@ -1144,7 +1148,11 @@ async function extensionSide() {
       getManifest: () => ({ version: '2.0.0' }),
       getURL: (p) => `chrome-extension://g9test/${p}`,
       reload: () => { calls.runtimeReload += 1; },
-      sendMessage: () => Promise.resolve(),
+      // The panel's broadcasts; only the v3 agentBlocked/agentUnblocked are kept (state ones are many).
+      sendMessage: (m) => {
+        if (m?.type === 'agentBlocked' || m?.type === 'agentUnblocked') calls.broadcasts.push(m);
+        return Promise.resolve();
+      },
     },
     debugger: {
       onEvent: ev.dbgEvent, onDetach: ev.dbgDetach,
@@ -1161,11 +1169,14 @@ async function extensionSide() {
         if (method === 'Runtime.evaluate' && /document\.visibilityState\s*$/.test(String(params.expression))) {
           return { result: { type: 'string', value: pageVisibility } };
         }
+        if (answerReadyState && method === 'Runtime.evaluate' && /(^|\n)document\.readyState\s*$/.test(String(params.expression))) {
+          return { result: { type: 'string', value: 'complete' } };
+        }
         return {};
       },
     },
     tabs: {
-      onRemoved: ev.tabRemoved, onCreated: ev.tabCreated, onUpdated: ev.tabUpdated,
+      onRemoved: ev.tabRemoved, onCreated: ev.tabCreated, onUpdated: ev.tabUpdated, onActivated: ev.tabActivated,
       async get(id) { const t = tabs.find((x) => x.id === id); if (!t) throw new Error(`No tab with id: ${id}.`); return { ...t }; },
       async query(info = {}) {
         let list = tabs;
@@ -1272,8 +1283,9 @@ async function extensionSide() {
   const s0 = await state.getState();
   assert.ok(s0.activity.some((a) => /Removed the v1 control mode \("workspace"\)/.test(a.detail ?? '')), 'migration logged');
   assert.equal(s0.inputMode, 'human');
-  assert.equal(s0.autoAttach, false);
+  assert.equal(s0.autoAttach, 'project', 'v3: nothing stored → "Project sites"');
   assert.equal(s0.version, '2.0.0');
+  assert.equal(calls.attached.length, 0, '"Project sites" with no project known attaches nothing at startup');
   ok('v1 settings.mode removed once, logged; durable settings are host/port/inputMode/autoAttach');
 
   // --- install / update / same-version reload ---------------------------------
@@ -1593,6 +1605,225 @@ async function extensionSide() {
     pageVisibility = 'visible';
   }
   ok('watch of a hidden tab emits watchStatus {state:"hidden"} and stops checking when the watch ends');
+
+  // --- v3: auto-attach three-state, the migration, setAutoAttach ----------------
+  {
+    // A v2 boolean on disk becomes its mode, once: true → "All tabs", false → "Off".
+    const saved = (await local.get('settings')).settings;
+    await local.set({ settings: { ...saved, autoAttach: true } });
+    assert.match(await state.migrateLegacySettings(), /"on", became "All tabs"/);
+    assert.equal((await local.get('settings')).settings.autoAttach, 'all');
+    assert.equal(await state.migrateLegacySettings(), null, 'once: a second run finds nothing to do');
+    await local.set({ settings: { ...saved, autoAttach: false } });
+    assert.match(await state.migrateLegacySettings(), /"off", became "Off"/);
+    assert.equal((await local.get('settings')).settings.autoAttach, 'off');
+    await local.set({ settings: saved });
+    // Session state written by a v2 worker (a worker restart keeps storage.session) reads as its mode.
+    await state.serialize(async () => {
+      const live = (await session.get('state')).state;
+      await session.set({ state: { ...live, autoAttach: true } });
+      assert.equal((await state.getState()).autoAttach, 'all');
+      await session.set({ state: { ...live, autoAttach: false } });
+      assert.equal((await state.getState()).autoAttach, 'off');
+      await session.set({ state: live });
+    });
+  }
+  assert.deepEqual(await cmd({ cmd: 'setAutoAttach', mode: 'off' }), { ok: true, mode: 'off' });
+  assert.equal((await local.get('settings')).settings.autoAttach, 'off', 'durable, as the string');
+  assert.equal((await cmd({ cmd: 'setAutoAttach', enabled: true })).mode, 'all', 'the v2 form: enabled:true → "all"');
+  assert.equal((await cmd({ cmd: 'setAutoAttach', enabled: false })).mode, 'off', 'enabled:false → "off"');
+  const badMode = await cmd({ cmd: 'setAutoAttach', mode: 'everything' });
+  assert.equal(badMode.ok, false);
+  assert.match(badMode.error, /"off", "project", "all"/);
+  assert.equal((await cmd({ cmd: 'getState' })).state.autoAttach, 'off', 'a refused mode changes nothing');
+  ok('auto-attach: a v2 boolean migrates once (true → all, false → off); setAutoAttach takes the mode, and the v2 {enabled}');
+
+  // --- v3: "Project sites" attaches only project tabs, and never detaches ------
+  await tick(150); // the "all" above attached in the background; let it finish before letting go
+  await cmd({ cmd: 'detach' });
+  assert.deepEqual((await state.getState()).attachedSince, {}, 'a detach forgets every capture start time');
+  const handTab = await chrome.tabs.create({ url: 'https://elsewhere.test/', active: false });
+  assert.equal((await cmd({ cmd: 'attachTab', tabId: handTab.id })).ok, true, 'attached by hand');
+  const projTab = await chrome.tabs.create({ url: 'https://app.proj.example.test/orders', active: false });
+  const laterTab = await chrome.tabs.create({ url: 'https://later.test/', active: false });
+  calls.attached.length = 0;
+  assert.equal((await cmd({ cmd: 'setAutoAttach', mode: 'project' })).mode, 'project');
+  await tick(150);
+  assert.deepEqual(calls.attached, [], 'with no project known, "Project sites" attaches nothing');
+  const projects = [{ name: 'shop', path: 'G:/shop/g9.project.json', domains: ['proj.example.test'], agents: ['agent-1'] }];
+  ws.deliver({ type: 'projects', domains: ['proj.example.test'], projects });
+  await until(() => calls.attached.includes(projTab.id), 'the project tab, once the daemon names the project sites');
+  const withProjects = await state.getState();
+  assert.deepEqual(withProjects.projectDomains, ['proj.example.test']);
+  assert.deepEqual(withProjects.projects, projects);
+  await tick(100);
+  assert.ok(!calls.attached.includes(laterTab.id), 'another site is not attached');
+  assert.ok(!calls.attached.includes(11), 'nor a look-alike (shop.example.test is not under proj.example.test)');
+  const deep = await chrome.tabs.create({ url: 'https://deep.app.proj.example.test/', active: false });
+  await until(() => calls.attached.includes(deep.id), 'a new tab on a subdomain');
+  const later = tabs.find((t) => t.id === laterTab.id);
+  later.url = 'https://proj.example.test/login';
+  ev.tabUpdated.fire(later.id, { url: later.url }, { ...later });
+  await until(() => calls.attached.includes(later.id), 'a navigation onto a project site');
+  const beta = await chrome.tabs.create({ url: 'https://beta.test/', active: false });
+  await tick(100);
+  assert.ok(!calls.attached.includes(beta.id));
+  ws.deliver({ type: 'projects', domains: ['beta.test'], projects: [{ ...projects[0], domains: ['beta.test'] }] });
+  await until(() => calls.attached.includes(beta.id), 'open tabs judged again when the project sites change');
+  const afterChange = await state.getState();
+  for (const id of [handTab.id, projTab.id, deep.id]) {
+    assert.ok(debuggerAttached.has(id) && afterChange.attachedTabs.includes(id), `tab ${id} stays attached`);
+  }
+  await cmd({ cmd: 'setAutoAttach', mode: 'off' });
+  assert.ok(debuggerAttached.has(handTab.id), 'turning auto-attach off detaches nothing either');
+  const agentStatus = (await cmd({ cmd: 'getState' })).status;
+  assert.equal(agentStatus.autoAttach, false, 'browser_status: still a boolean for agents');
+  assert.equal(agentStatus.autoAttachMode, 'off');
+  ok('"Project sites" attaches only project tabs (subdomains, navigations, changed domains) and never detaches one attached by hand');
+
+  // --- v3: focusTab — the person's own gesture, allowed while Stop is on ------
+  assert.equal((await cmd({ cmd: 'halt' })).ok, true);
+  calls.updated.length = 0;
+  calls.windowUpdates.length = 0;
+  const focused = await cmd({ cmd: 'focusTab', tabId: projTab.id });
+  assert.equal(focused.ok, true, focused.error);
+  assert.deepEqual([focused.tabId, focused.windowId], [projTab.id, 1]);
+  assert.ok(calls.updated.some((u) => u.id === projTab.id && u.active === true), 'the tab is brought to the front');
+  assert.ok(calls.windowUpdates.some((u) => u.id === 1 && u.focused === true), 'and its window');
+  assert.equal((await state.getState()).halted, true, 'focusTab does not lift Stop');
+  assert.equal((await cmd({ cmd: 'focusTab' })).ok, false, 'a tabId is required');
+  assert.equal((await cmd({ cmd: 'focusTab', tabId: 99999 })).ok, false, 'a tab that does not exist is refused');
+  tabs.find((t) => t.id === projTab.id).active = false; // the stub does not deactivate the others
+  ok('focusTab brings the tab and its window to the front while Stop is on, and leaves Stop on');
+
+  // --- v3: Record from now — attachActive's behaviour, one activity line --------
+  const newest = async () => (await state.getState()).activity;
+  const linesSince = (list, topId) => list.slice(0, list.findIndex((a) => a.id === topId));
+  const recTab = await chrome.tabs.create({ url: 'https://rec.test/', active: false });
+  let top = (await newest())[0].id;
+  const resumesBefore = ws.sent.filter((m) => m.event === 'halt' && m.data.halted === false).length;
+  const rec = await cmd({ cmd: 'recordNow', tabId: recTab.id });
+  assert.equal(rec.ok, true, rec.error);
+  assert.deepEqual([rec.tabId, rec.url, rec.title, rec.reloaded, rec.resumed], [recTab.id, 'https://rec.test/', '', false, true]);
+  assert.equal(typeof rec.attachedSince, 'number');
+  const afterRec = await state.getState();
+  assert.equal(afterRec.halted, false, 'Stop is lifted, as the Attach button lifts it');
+  assert.equal(ws.sent.filter((m) => m.event === 'halt' && m.data.halted === false && m.data.by === 'panel').length, resumesBefore + 1,
+    'and the resume is reported to the daemon');
+  assert.equal(afterRec.currentTabId, recTab.id, 'the tab becomes current');
+  assert.equal(afterRec.attachedSince[recTab.id], rec.attachedSince, 'attachedSince in state');
+  let lines = linesSince(afterRec.activity, top);
+  assert.equal(lines.length, 1, `one activity line: ${JSON.stringify(lines)}`);
+  assert.equal(lines[0].kind, 'attach');
+  assert.match(lines[0].detail, /^Record from now; Stop lifted$/);
+  assert.ok(!calls.commands.some((c) => c.method === 'Page.reload' && c.tabId === recTab.id), 'no reload unless asked');
+  const panelView = await cmd({ cmd: 'getState' });
+  assert.equal(panelView.status.current.tabId, recTab.id);
+  assert.equal(panelView.status.current.attachedSince, rec.attachedSince, 'status().current carries it too');
+
+  await cmd({ cmd: 'setInputMode', mode: 'off' }); // no post-load human idle in a unit test
+  answerReadyState = true;
+  try {
+    top = (await newest())[0].id;
+    const reloaded = await cmd({ cmd: 'recordNow', tabId: recTab.id, reload: true });
+    assert.equal(reloaded.ok, true, reloaded.error);
+    assert.equal(reloaded.reloaded, true);
+    assert.equal(reloaded.reloadError, undefined);
+    assert.equal(reloaded.attachedSince, rec.attachedSince, 'already capturing: the start time stays');
+    assert.ok(calls.commands.some((c) => c.method === 'Page.reload' && c.tabId === recTab.id), 'reloaded through browser_navigate\'s reload path');
+    lines = linesSince((await state.getState()).activity, top);
+    assert.equal(lines.length, 1, `one activity line for attach + reload: ${JSON.stringify(lines)}`);
+    assert.match(lines[0].detail, /^Record from now — page reloaded to capture its load$/);
+  } finally {
+    answerReadyState = false;
+    await cmd({ cmd: 'setInputMode', mode: 'human' });
+  }
+  assert.equal((await cmd({ cmd: 'recordNow', tabId: 12 })).ok, false, 'a browser page is refused, as attachTab refuses it');
+  ok('recordNow: attach + current + Stop lifted and reported, optionally a reload with its load wait — one activity line each');
+
+  // --- v3: attachedSince follows the debugger session ---------------------------
+  ev.dbgDetach.fire({ tabId: recTab.id }, 'canceled_by_user');
+  await until(async () => (await state.getState()).attachedSince[recTab.id] == null, 'attachedSince gone with the session');
+  debuggerAttached.delete(recTab.id);
+  await cmd({ cmd: 'attachTab', tabId: recTab.id });
+  const again = (await state.getState()).attachedSince[recTab.id];
+  assert.ok(again >= rec.attachedSince, 'a new session, a new start time');
+  await chrome.tabs.remove(recTab.id);
+  await until(async () => (await state.getState()).attachedSince[recTab.id] == null, 'attachedSince gone with the tab');
+  ok('attachedSince is set when a session starts and removed on detach and on tab close');
+
+  // --- v3: an agent blocked by a hidden tab --------------------------------------
+  const hiddenTab = await chrome.tabs.create({ url: 'https://later.test/admin', active: false });
+  tabs.find((t) => t.id === hiddenTab.id).status = 'complete'; // loaded: a popout settles at once
+  const agentCaller = { agentId: 'agent-1', name: 'claude-code', relayed: true };
+  let nextCall = 300;
+  const blockOnce = async () => {
+    const id = nextCall++;
+    pageVisibility = 'hidden';
+    try {
+      ws.deliver({ type: 'call', id, tool: 'browser_interact', args: { action: 'key', key: 'Enter', tabId: hiddenTab.id }, caller: agentCaller });
+      const refusedCall = await reply(id);
+      assert.equal(refusedCall.ok, false);
+      assert.equal(refusedCall.hidden, true);
+      assert.match(refusedCall.error, /^\[delivery: not-delivered; tab hidden\]/);
+    } finally {
+      pageVisibility = 'visible';
+    }
+    await until(async () => (await state.getState()).blocked[hiddenTab.id], 'state.blocked');
+  };
+  const unblocked = async (what) => {
+    await until(async () => (await state.getState()).blocked[hiddenTab.id] == null, what);
+    await until(() => calls.broadcasts.some((m) => m.type === 'agentUnblocked' && m.tabId === hiddenTab.id), `${what}: agentUnblocked`);
+    calls.broadcasts.length = 0;
+  };
+  calls.broadcasts.length = 0;
+  // The panel's own call on a hidden tab (not relayed by the daemon) blocks no agent.
+  pageVisibility = 'hidden';
+  try {
+    ws.deliver({ type: 'call', id: 399, tool: 'browser_interact', args: { action: 'key', key: 'Enter', tabId: hiddenTab.id } });
+    assert.equal((await reply(399)).hidden, true);
+  } finally {
+    pageVisibility = 'visible';
+  }
+  await tick(100);
+  assert.equal((await state.getState()).blocked[hiddenTab.id], undefined, 'not relayed: nobody is blocked');
+  assert.equal(calls.broadcasts.length, 0);
+  await blockOnce();
+  const entry = (await state.getState()).blocked[hiddenTab.id];
+  assert.deepEqual(
+    { ...entry, at: typeof entry.at },
+    { tabId: hiddenTab.id, agent: { id: 'agent-1', name: 'claude-code' }, reason: 'hidden', at: 'number', title: '', url: 'https://later.test/admin', tool: 'browser_interact', delivery: 'not-delivered' },
+  );
+  const told = calls.broadcasts.find((m) => m.type === 'agentBlocked');
+  assert.equal(told?.tabId, hiddenTab.id, 'the panel is told');
+  assert.deepEqual(told.agent, { id: 'agent-1', name: 'claude-code' });
+  // Cleared when the tab becomes the active tab of a focused window…
+  ev.tabActivated.fire({ tabId: hiddenTab.id, windowId: 1 });
+  await unblocked('shown');
+  // …when a later relayed call brings it into view…
+  await blockOnce();
+  ws.deliver({ type: 'call', id: 398, tool: 'browser_tabs', args: { action: 'focus', tabId: hiddenTab.id }, caller: agentCaller });
+  assert.equal((await reply(398)).ok, true);
+  await unblocked('relayed focus');
+  tabs.find((t) => t.id === hiddenTab.id).active = false;
+  // …when the panel pops it out…
+  await blockOnce();
+  answerReadyState = true;
+  try {
+    assert.equal((await cmd({ cmd: 'popout', tabId: hiddenTab.id })).ok, true);
+  } finally {
+    answerReadyState = false;
+  }
+  await unblocked('popped out');
+  // …when its agent is no longer connected…
+  await blockOnce();
+  ws.deliver({ type: 'agents', agents: [{ id: 'agent-2', name: 'other', owned: [] }] });
+  await unblocked('agent gone');
+  // …and when the tab closes.
+  await blockOnce();
+  await chrome.tabs.remove(hiddenTab.id);
+  await unblocked('closed');
+  ok('agentBlocked: a relayed hidden refusal is recorded and announced; shown, focused, popped out, agent gone or tab closed clears it');
 
   // --- reload waits for the call in flight -----------------------------------
   ws.deliver({ type: 'call', id: 10, tool: 'browser_navigate', args: { action: 'wait', selector: '#never', timeoutMs: 600, tabId: 11 } });

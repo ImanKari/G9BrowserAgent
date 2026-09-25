@@ -122,7 +122,13 @@ export class Daemon {
     this.ws.on('rejected', ({ origin, path: p, code, reason }) => this.log(`[ws] refused ${code} ${reason} (origin "${origin || '-'}", path ${p})`));
     this.ws.on('protocolError', ({ reason }) => this.log(`[ws] dropped a connection: ${reason}`));
 
+    // 'agents' also fires when an agent's current tab changes (registry.setCurrent): the panel's
+    // agent rows name that tab (v3). #schedulePush coalesces, so a busy agent costs one push per 100 ms.
     this.registry.on('agents', () => this.#schedulePush());
+    // (v3) The connected agents' project sites, for the extension's auto-attach "Project sites".
+    this.registry.on('clients', ({ role }) => {
+      if (role === 'agent') this.#scheduleProjects();
+    });
     this.registry.on('engines', () => this.broadcastUi('engines', { engines: this.router.engineRows() }));
     this.registry.on('halt', (data) => this.broadcastUi('halt', { global: this.registry.global, ...data }));
     // A per-agent Stop stops that agent's calls already running too (the global Stop reaches every
@@ -141,6 +147,8 @@ export class Daemon {
     this.registry.on('tabGone', ({ tabId, reason }) => {
       this.#stopWatching(tabId).catch(() => {});
       this.broadcastUi('tabs', { gone: tabId, reason });
+      // A closed tab takes every agent's "current" pointer to it along (registry.dropHandle), silently.
+      this.#schedulePush();
     });
     this.settings.onChange((_s, patch) => {
       if ('humanize' in patch || 'stealth' in patch) this.engines.reconfigure();
@@ -364,6 +372,7 @@ export class Daemon {
     if (role === 'engine') {
       if (this.registry.global.halted) conn.send({ type: 'halt', halted: true });
       this.#pushAgents();
+      this.#pushProjects(client);
       // Live views of this engine's tabs lived in the old worker's memory; ask again.
       if (client.resumed) {
         for (const handle of this.watchers.keys()) {
@@ -629,13 +638,38 @@ export class Daemon {
     for (const ui of this.registry.byRole('ui')) ui.send({ type: 'event', topic, data });
   }
 
+  /**
+   * The agent rows ONE extension's panel shows (DAEMON_PROTOCOL §5), tab ids as that browser's
+   * Chrome ids. v3 adds who each agent is and where it works: v2 sent only `owned`, so three agents
+   * rendered as three identical rows (V3_UX_PLAN U4).
+   * - `project`: the folder name of the agent's project (g9.project.json's folder), else of its cwd;
+   * - `current`: its current tab as THIS browser's Chrome tab id, or null;
+   * - `currentEngine`: 'extension' (that tab is in this browser), 'launched' (an Engine 2 tab: no
+   *   Chrome id to show — engine rows carry no tab titles, so none is sent), 'elsewhere' (a tab of
+   *   ANOTHER browser's extension), or null (no current tab).
+   */
   #agentsFor(ext) {
-    return this.registry.agentRows().map((a) => ({
-      id: a.id,
-      name: a.name,
-      owned: a.owned.map((h) => this.registry.chromeTabOf(h, ext.id)).filter((n) => n != null),
-      halted: a.halted,
-    }));
+    return this.registry.agentRows().map((a) => {
+      const client = this.registry.getClient(a.id);
+      let current = null;
+      let currentEngine = null;
+      if (a.current != null) {
+        const engineId = this.registry.engineOf(a.current);
+        const kind = this.registry.engineKind(engineId);
+        if (engineId === ext.id) current = this.registry.chromeTabOf(a.current, ext.id);
+        currentEngine = current != null ? 'extension' : kind === 'launched' ? 'launched' : kind === 'extension' ? 'elsewhere' : null;
+      }
+      return {
+        id: a.id,
+        name: a.name,
+        owned: a.owned.map((h) => this.registry.chromeTabOf(h, ext.id)).filter((n) => n != null),
+        halted: a.halted,
+        project: projectLabel(client?.project, client?.cwd),
+        cwd: client?.cwd ?? null,
+        current,
+        currentEngine,
+      };
+    });
   }
 
   #pushAgents() {
@@ -650,6 +684,47 @@ export class Daemon {
       this.#pushAgents();
     }, 100);
     this.pushTimer.unref?.();
+  }
+
+  /**
+   * (v3) `{type:'projects', domains, projects}` for extension engines (DAEMON_PROTOCOL §5): the sites
+   * of every CONNECTED agent's project — the hosts (host[:port]) of its `environments` URLs — for
+   * the panel's auto-attach "Project sites". One row per project file, naming the agents in it; a
+   * project whose environments name no URL contributes nothing. `domains` is the de-duplicated
+   * union. A capture filter in the extension, never an access boundary (v2 D6/D7).
+   */
+  projectsPayload() {
+    const byPath = new Map();
+    for (const agent of this.registry.agents()) {
+      const project = agent.project;
+      if (!project?.found || !project.path) continue;
+      const domains = environmentHosts(project.environments);
+      if (!domains.length) continue;
+      let row = byPath.get(project.path);
+      if (!row) {
+        row = { name: projectLabel(project, null), path: project.path, domains, agents: [] };
+        byPath.set(project.path, row);
+      }
+      row.agents.push(agent.id);
+    }
+    const projects = [...byPath.values()];
+    return { type: 'projects', domains: [...new Set(projects.flatMap((p) => p.domains))], projects };
+  }
+
+  /** To one engine (right after its welcome) or to every extension engine. */
+  #pushProjects(only = null) {
+    const msg = this.projectsPayload();
+    for (const ext of only ? [only] : this.registry.extensionEngines()) ext.send(msg);
+  }
+
+  /** Coalesced like #schedulePush: a runner starting four agents at once costs one push. */
+  #scheduleProjects() {
+    if (this.projectsTimer) return;
+    this.projectsTimer = setTimeout(() => {
+      this.projectsTimer = null;
+      this.#pushProjects();
+    }, 100);
+    this.projectsTimer.unref?.();
   }
 
   #onEngine2Event(event, data = {}) {
@@ -786,6 +861,37 @@ export function adminArgs(msg) {
   if (entry !== undefined && entry !== null) merged.id = entry;
   else delete merged.id;
   return merged;
+}
+
+/**
+ * (v3) The hosts (host[:port], lower case, default ports omitted) of a project's `environments`:
+ * `{ "test1": "https://test1.example.internal" }`, or an object per environment whose string values
+ * are URLs (`{ "dev": { "baseUrl": "https://dev.x.test" } }`, one level deep). Anything that is not
+ * an http(s) URL is ignored — a typo in one environment must not take the others with it.
+ */
+export function environmentHosts(environments) {
+  const urls = [];
+  for (const value of Object.values(environments && typeof environments === 'object' ? environments : {})) {
+    if (typeof value === 'string') urls.push(value);
+    else if (value && typeof value === 'object' && !Array.isArray(value)) {
+      for (const inner of Object.values(value)) if (typeof inner === 'string') urls.push(inner);
+    }
+  }
+  const hosts = [];
+  for (const raw of urls) {
+    try {
+      const u = new URL(raw.trim());
+      if (/^https?:$/.test(u.protocol) && u.host) hosts.push(u.host.toLowerCase());
+    } catch { /* not a URL */ }
+  }
+  return [...new Set(hosts)];
+}
+
+/** An agent's project as the panel names it: its project folder, else its working folder, else null. */
+export function projectLabel(project, cwd) {
+  const base = (p) => String(p ?? '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || null;
+  if (project?.found && project.root) return base(project.root);
+  return cwd ? base(cwd) : null;
 }
 
 function requireArg(msg, key, wireName = key) {

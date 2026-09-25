@@ -301,8 +301,10 @@ export async function listSessions() {
  * panel and an agent calling browser_tabs. A Stop is a user decision and only a
  * user gesture lifts it: an agent that could un-halt itself with one attach
  * call would make the Stop button self-defeating (the v1 pin bug).
+ *
+ * `log: false` leaves the activity line to the caller (sw.js recordNow: one gesture, one line).
  */
-export async function attachTab(tabId = null, { clearHalt = false } = {}) {
+export async function attachTab(tabId = null, { clearHalt = false, log = true } = {}) {
   const tab = tabId != null ? await platform.tabs.get(tabId).catch(() => null) : await getActiveTab();
   if (!tab) {
     throw new Error(tabId != null ? `Tab ${tabId} does not exist.` : 'No active tab to attach.');
@@ -321,7 +323,7 @@ export async function attachTab(tabId = null, { clearHalt = false } = {}) {
         `the extension gallery. This is not a setting.\n\nSwitch to the page you want to test and attach again.`,
     );
   }
-  await attach(tab.id);
+  await attach(tab.id, { log });
   const wasHalted = (await getState()).halted;
   await setState({ currentTabId: tab.id, ...(clearHalt ? { halted: false } : {}) });
   return {

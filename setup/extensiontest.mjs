@@ -2544,4 +2544,168 @@ await test("another extension's traffic is not this product's behaviour", () => 
   }
 });
 
+await test('v3 (C1): the issue index carries severity, tags, site and evidence, and follows the attachments', async () => {
+  const store = await import('../extension/lib/store.js');
+  const bytes = new TextEncoder().encode('x');
+  const issue = await store.saveIssue({
+    title: 'Totals wrong', severity: 'high', tags: ['checkout', 7], status: 'open',
+    context: { url: 'https://Shop.test:8443/cart?coupon=1', console: { entries: [{ level: 'error', text: 'boom' }] }, failedRequests: [] },
+  });
+  const entryOf = async (id) => (await store.listIssues()).find((e) => e.id === id);
+  let entry = await entryOf(issue.id);
+  assert.deepEqual(entry, {
+    id: issue.id, title: 'Totals wrong', url: 'https://Shop.test:8443/cart?coupon=1', site: 'https://shop.test:8443', status: 'open',
+    severity: 'high', tags: ['checkout'], filedAs: null,
+    evidence: { screenshots: 0, videos: 0, files: 0, console: true, network: false, dom: false },
+    createdAt: issue.createdAt, updatedAt: issue.updatedAt,
+  }, 'the shape of an index entry (v3)');
+  // Attachments arrive after the save (tools/issues.js createIssue): the entry follows each one.
+  await store.putAttachment({ owner: issue.id, name: 'screenshot.png', mime: 'image/png', kind: 'screenshot', bytes });
+  await store.putAttachment({ owner: issue.id, name: 'failed-requests.log', mime: 'text/plain', kind: 'evidence', bytes });
+  await store.putAttachment({ owner: issue.id, name: 'page-fragment.html', mime: 'text/html', kind: 'evidence', bytes });
+  await store.putAttachment({ owner: issue.id, name: 'page-context.json', mime: 'application/json', kind: 'evidence', bytes });
+  const video = await store.putAttachment({ owner: issue.id, name: 'capture.g9frames.json', mime: 'application/json', kind: 'video', bytes });
+  await store.putAttachment({ owner: issue.id, name: 'pointer-track.json', mime: 'application/json', kind: 'pointer-track', bytes });
+  await store.putAttachment({ owner: issue.id, name: 'repro.csv', mime: 'text/csv', kind: 'file', bytes });
+  entry = await entryOf(issue.id);
+  assert.deepEqual(entry.evidence, { screenshots: 1, videos: 1, files: 1, console: true, network: true, dom: true });
+  await store.deleteAttachment(video.id);
+  assert.equal((await entryOf(issue.id)).evidence.videos, 0, 'a removed attachment is uncounted');
+  // Defaults for what an issue does not say.
+  const plain = await store.saveIssue({ title: 'plain' });
+  assert.deepEqual(await entryOf(plain.id), {
+    id: plain.id, title: 'plain', url: null, site: null, status: 'open', severity: 'normal', tags: [], filedAs: null,
+    evidence: { screenshots: 0, videos: 0, files: 0, console: false, network: false, dom: false },
+    createdAt: plain.createdAt, updatedAt: plain.updatedAt,
+  });
+  // A save moves the entry to the top and keeps the counts.
+  await store.saveIssue({ ...(await store.getIssue(issue.id, { withAttachments: false })), status: 'filed', filedAs: 'JIRA-9' });
+  const top = (await store.listIssues())[0];
+  assert.deepEqual([top.id, top.status, top.filedAs, top.evidence.screenshots], [issue.id, 'filed', 'JIRA-9', 1]);
+  // A recording's attachment is not an issue's: the issue index is untouched.
+  const before = JSON.stringify(await store.listIssues());
+  await store.putAttachment({ owner: 'rec_not_an_issue', name: 'diff.png', mime: 'image/png', kind: 'diff', bytes });
+  assert.equal(JSON.stringify(await store.listIssues()), before);
+  await store.deleteIssue(issue.id);
+  await store.deleteIssue(plain.id);
+});
+
+await test('v3 (C1): an issue index written before v3 is completed once, serialized, and never loses an entry', async () => {
+  const store = await import('../extension/lib/store.js');
+  // A v2 world: records carry severity and tags, the index does not; an attachment is already there.
+  localData.set('g9:issue:old-1', {
+    id: 'old-1', title: 'Old one', severity: 'critical', tags: ['legacy'], status: 'filed', filedAs: 'JIRA-1',
+    context: { url: 'https://old.test/a?b=1', console: { entries: [] }, failedRequests: [{ method: 'GET', url: 'https://old.test/api', status: 500 }] },
+    createdAt: 1, updatedAt: 2,
+  });
+  localData.set('g9:issue:old-2', { id: 'old-2', title: 'No context', status: 'open', createdAt: 3, updatedAt: 4 });
+  await platform.blobs.put('blobs', {
+    id: 'att_old_shot', owner: 'old-1', name: 'screenshot.png', mime: 'image/png', kind: 'screenshot', size: 1, at: 1, meta: {},
+    blob: new Blob([new Uint8Array([1])], { type: 'image/png' }),
+  });
+  localData.set('g9:issues', [
+    { id: 'old-2', title: 'No context', url: null, status: 'open', filedAs: null, createdAt: 3, updatedAt: 4 },
+    { id: 'gone-1', title: 'Its record was lost', url: 'https://gone.test/x', status: 'open', filedAs: null, createdAt: 2, updatedAt: 2 },
+    { id: 'old-1', title: 'Old one', url: 'https://old.test/a?b=1', status: 'filed', filedAs: 'JIRA-1', createdAt: 1, updatedAt: 2 },
+  ]);
+
+  // Two lists and a save at once: one backfill, the new issue kept, nothing lost.
+  const [first, saved, second] = await Promise.all([
+    store.listIssues(), store.saveIssue({ title: 'Filed during the backfill' }), store.listIssues(),
+  ]);
+  for (const list of [first, second]) {
+    assert.deepEqual(list.filter((e) => e.id !== saved.id).map((e) => e.id), ['old-2', 'gone-1', 'old-1'], 'order kept, no entry lost');
+    assert.ok(list.every((e) => 'severity' in e), 'every entry complete');
+  }
+  const stored = localData.get('g9:issues');
+  assert.deepEqual(stored.map((e) => e.id).sort(), ['gone-1', 'old-1', 'old-2', saved.id].sort(), 'written back, the new issue included');
+  const byId = Object.fromEntries(stored.map((e) => [e.id, e]));
+  assert.deepEqual(byId['old-1'], {
+    id: 'old-1', title: 'Old one', url: 'https://old.test/a?b=1', site: 'https://old.test', status: 'filed', severity: 'critical',
+    tags: ['legacy'], filedAs: 'JIRA-1', evidence: { screenshots: 1, videos: 0, files: 0, console: false, network: true, dom: false },
+    createdAt: 1, updatedAt: 2,
+  }, 'rebuilt from its record and attachment metadata; its dates unchanged');
+  assert.equal(byId['old-2'].severity, 'normal');
+  assert.equal(byId['old-2'].site, null);
+  assert.deepEqual(byId['gone-1'], {
+    id: 'gone-1', title: 'Its record was lost', url: 'https://gone.test/x', site: 'https://gone.test', status: 'open', severity: 'normal',
+    tags: [], filedAs: null, evidence: { screenshots: 0, videos: 0, files: 0, console: false, network: false, dom: false },
+    createdAt: 2, updatedAt: 2,
+  }, 'an entry whose record is gone is kept, with the defaults');
+
+  // Once: a later list writes nothing.
+  const realSet = chrome.storage.local.set;
+  let indexWrites = 0;
+  chrome.storage.local.set = async (values) => {
+    if ('g9:issues' in values) indexWrites += 1;
+    return realSet(values);
+  };
+  try {
+    await store.listIssues();
+    await store.listIssues();
+  } finally {
+    chrome.storage.local.set = realSet;
+  }
+  assert.equal(indexWrites, 0, 'the backfill ran once');
+  for (const id of ['old-1', 'old-2', 'gone-1', saved.id]) await store.deleteIssue(id);
+});
+
+await test('recUpdate stores the TC ids the panel sends, and a start URL only when it is http(s)', async () => {
+  // "Covers (TC ids)" said Saved and stored nothing: updateRecording's field list lacked
+  // qaTestCaseIds (found by the v3 panel stage). startUrl is new in v3 — a flow's site is
+  // the origin of its start URL, so a flow recorded without one needs a way to get it.
+  const store = await import('../extension/lib/store.js');
+  const saved = await store.saveRecording({ name: 'tc and start', steps: [] });
+  try {
+    await qa.updateRecording(saved.id, { qaTestCaseIds: ['TC-06-01', 'TC-06-02'] });
+    let rec = await store.getRecording(saved.id);
+    assert.deepEqual(rec.qaTestCaseIds, ['TC-06-01', 'TC-06-02']);
+    const row = (await store.listRecordings()).find((r) => r.id === saved.id);
+    assert.deepEqual(row.qaTestCaseIds, ['TC-06-01', 'TC-06-02'], 'the index the panel lists carries them too');
+
+    await qa.updateRecording(saved.id, { startUrl: '  https://admin.example.test/orders?x=1  ' });
+    rec = await store.getRecording(saved.id);
+    assert.equal(rec.startUrl, 'https://admin.example.test/orders?x=1', 'trimmed and normalised');
+
+    await assert.rejects(qa.updateRecording(saved.id, { startUrl: 'javascript:alert(1)' }), /http\(s\)/);
+    await assert.rejects(qa.updateRecording(saved.id, { startUrl: 'not a url' }), /not a URL/);
+    rec = await store.getRecording(saved.id);
+    assert.equal(rec.startUrl, 'https://admin.example.test/orders?x=1', 'a refused value changes nothing');
+
+    await qa.updateRecording(saved.id, { startUrl: '' });
+    rec = await store.getRecording(saved.id);
+    assert.equal(rec.startUrl, null, 'an empty value clears it');
+
+    // v3 review, finding 4: a string where a list belongs froze the panel's Automation list.
+    await qa.updateRecording(saved.id, { tags: 'smoke, orders ', qaTestCaseIds: 'TC-9' });
+    rec = await store.getRecording(saved.id);
+    assert.deepEqual(rec.tags, ['smoke', 'orders'], 'a comma string becomes a list');
+    assert.deepEqual(rec.qaTestCaseIds, ['TC-9']);
+    await assert.rejects(qa.updateRecording(saved.id, { tags: [1, 2] }), /list of strings/);
+    await assert.rejects(qa.updateRecording(saved.id, { qaTestCaseIds: { a: 1 } }), /list of strings/);
+    await qa.updateRecording(saved.id, { tags: null });
+    assert.deepEqual((await store.getRecording(saved.id)).tags, [], 'null clears a list');
+  } finally {
+    await store.deleteRecording(saved.id);
+  }
+});
+
+await test('the recording index keeps an environment only as a name, never as an object', async () => {
+  // v3 review, finding 7: an environment with variables and no name reached the panel as
+  // "[object Object]".
+  const store = await import('../extension/lib/store.js');
+  const a = await store.saveRecording({ name: 'env object', steps: [], environment: { variables: { a: 1 } } });
+  const b = await store.saveRecording({ name: 'env named', steps: [], environment: { name: 'staging', variables: {} } });
+  const c = await store.saveRecording({ name: 'env string', steps: [], environment: 'test1' });
+  try {
+    const rows = await store.listRecordings();
+    const envOf = (id) => rows.find((r) => r.id === id)?.environment;
+    assert.equal(envOf(a.id), null);
+    assert.equal(envOf(b.id), 'staging');
+    assert.equal(envOf(c.id), 'test1');
+  } finally {
+    for (const r of [a, b, c]) await store.deleteRecording(r.id);
+  }
+});
+
 console.log('\n' + passed + ' passed, 0 failed\n');

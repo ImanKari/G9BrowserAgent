@@ -552,8 +552,10 @@ export async function status(args = {}) {
     halted: state.halted,
     dialogOpen: state.dialogOpen ?? null,
     ...(Object.keys(state.dialogs ?? {}).length > 1 ? { dialogs: Object.values(state.dialogs) } : {}),
+    // attachedSince (v3): when this tab's console/network capture began (lib/cdp.js attach), null when
+    // it is not captured — the panel's "recording since 14:03", read from here.
     current: target
-      ? { tabId: target.id, title: target.title ?? '', url: target.url ?? '', active: !!target.active }
+      ? { tabId: target.id, title: target.title ?? '', url: target.url ?? '', active: !!target.active, attachedSince: state.attachedSince?.[target.id] ?? null }
       : null,
     ...(asked != null && own && own.id !== target?.id
       ? { engineCurrent: { tabId: own.id, title: own.title ?? '', url: own.url ?? '', active: !!own.active } }
@@ -563,7 +565,12 @@ export async function status(args = {}) {
     tabs: { count: tabs.length, rows: tabs.slice(0, 25) },
     sessions,
     inputMode: state.inputMode,
-    autoAttach: !!state.autoAttach,
+    // (v3) Still a boolean for agents — "does auto-attach capture anything": the mode 'all', or
+    // 'project' with project sites known. The mode itself ('off'|'project'|'all') is autoAttachMode
+    // (the extension's only: a launched engine attaches every tab it has); as `autoAttach` the string
+    // 'off' would read as true to any `if (status.autoAttach)`.
+    autoAttach: state.autoAttach === 'all' || (state.autoAttach === 'project' && (state.projectDomains ?? []).length > 0),
+    ...(platform.name === 'extension' ? { autoAttachMode: state.autoAttach } : {}),
     attachedCount: held.length,
     ...(warnings.length ? { warnings } : {}),
     hint: state.halted
