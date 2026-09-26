@@ -65,6 +65,9 @@ async function loadAll(announce) {
     api.admin('engines.versions'),
     api.admin('profiles.list'),
     api.call('browser_engine', { action: 'list' }),
+    // The tab titles and addresses under each engine come from the state's tab list, which only a
+    // browser_tabs list refreshes: without it a tab opened since then showed as "Untitled", no URL.
+    api.call('browser_tabs', { action: 'list' }),
   ]);
   if (!root) return;
   if (versions.status === 'fulfilled') renderVersions(normalizeVersions(versions.value));

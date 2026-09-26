@@ -219,8 +219,8 @@ async function main() {
     return r;
   };
   const act = (action, r, extra = {}) => agent.call('browser_interact', { action, ref: r, tabId: tab.tabId, ...extra });
-  await act('click', ref('button', 'Add to cart', 0)); // the desk lamp
-  await act('click', ref('button', 'Add to cart', 4)); // the small plant
+  await act('click', ref('button', 'Add Desk lamp to cart'));
+  await act('click', ref('button', 'Add Small plant to cart'));
   await act('type', ref('textbox', 'Full name'), { text: 'Alex Example' });
   await act('type', ref('textbox', 'Email'), { text: 'alex@example.com' });
   await act('click', ref('button', 'Place order'));
@@ -288,7 +288,7 @@ async function main() {
         if (!o) return null;
         sel.value = o.value;
         sel.dispatchEvent(new Event('change', { bubbles: true }));
-        [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Watch')?.click();
+        [...document.querySelectorAll('button.btn.primary')].find((b) => b.textContent.trim() === 'Watch')?.click();
         return o.textContent;
       })()`), 15_000);
       log(`watching: ${picked}`);
@@ -296,15 +296,15 @@ async function main() {
         .catch((err) => log(`watch: ${err.message}`));
       const t2 = await agent.call('browser_snapshot', { tabId: opened.tabId });
       const txt2 = typeof t2 === 'string' ? t2 : (t2.snapshot ?? t2.tree ?? t2.text ?? JSON.stringify(t2));
-      const add = [...txt2.matchAll(/- button "Add to cart" \[ref=(e\d+)\]/g)].map((m) => m[1]);
+      const add = [...txt2.matchAll(/- button "Add [^"]+ to cart" \[ref=(e\d+)\]/g)].map((m) => m[1]);
       if (add[1]) await agent.call('browser_interact', { action: 'click', ref: add[1], tabId: opened.tabId }).catch(() => {});
       const name = /- textbox "Full name" \[ref=(e\d+)\]/.exec(txt2)?.[1];
       if (name) await agent.call('browser_interact', { action: 'hover', ref: name, tabId: opened.tabId }).catch(() => {});
       await delay(1500);
     });
     await view('runs', 'desktop-runs.png', async () => {
-      // Open the newest run, as a person does.
-      await waitFor('a run in the list', async () => cdp.eval("(() => { const r = document.querySelector('.runs-layout tbody tr'); r?.click(); return !!r; })()"), 20_000)
+      // Open the checkout replay (the Watch session above is a run too), as a person does.
+      await waitFor('a run in the list', async () => cdp.eval("(() => { const r = [...document.querySelectorAll('.runs-layout tbody tr')].find((x) => /Checkout/.test(x.textContent)); r?.click(); return !!r; })()"), 20_000)
         .catch((err) => log(`runs: ${err.message}`));
       await delay(2500);
     });

@@ -947,7 +947,10 @@ into view first"). Model limits are in §8.
   `daemon/g9d.mjs` detached and hidden and retries for 8 s; a non-g9d `/health` (a v1 bridge) makes
   every tool fail naming its pid and the fix while MCP itself keeps working; a dropped daemon fails the
   calls in flight and the next call reconnects. Resources `g9://guide`, `g9://status`. stdout is MCP
-  only; diagnostics go to stderr.
+  only; diagnostics go to stderr. It connects to the daemon after the client's `initialize` (or 2 s
+  after start, whichever comes first), so the daemon learns the client's name at hello; connecting at
+  start registered agents as "mcp-agent" in a race (3.1.0). How it starts the daemon (node, the app in
+  Node mode, or an AppImage through the bootstrap) is `lib/runtime.mjs`.
 - **`mcp/mcp.js`** — hand-written MCP (`initialize`, `ping`, `tools/*`, `resources/*`; protocol
   versions 2025-06-18, 2025-03-26, 2024-11-05); tool failures are `isError:true` results, never
   JSON-RPC errors; `dataBase64` results become image blocks; remembers `clientInfo.name`.
@@ -957,6 +960,15 @@ into view first"). Model limits are in §8.
   fails when the manifest or `desktop/package.json` disagree. **`lib/ws-client.mjs`** — the shim's
   WebSocket (not Node's global one: under `ELECTRON_RUN_AS_NODE` the Node is Electron's, and a native
   client must send no Origin). **`lib/ws-codec.mjs`** — the shared frame codec, 64 MiB cap.
+  **`lib/runtime.mjs`** (3.1.0) — how a G9 script is started by whatever runs G9: plain `node`, the
+  packaged app with `ELECTRON_RUN_AS_NODE=1`, or a Linux AppImage. An AppImage runs from a mount that
+  vanishes when it exits, so nothing may name a path inside it: the command is
+  `<$APPIMAGE> <G9_HOME>/bin/g9-run.mjs <script> --no-sandbox`, the bootstrap (`BOOTSTRAP_SOURCE`,
+  written by `ensureBootstrap`) resolves the script in the current mount and drops `--no-sandbox`,
+  which the AppImage's AppRun injects on systems without unprivileged user namespaces and Node
+  rejects ("bad option", exit 9). Also `installId` (the install a daemon or app belongs to: the
+  AppImage file, else the resource root) and `cleanChildEnv` (a launched browser gets no
+  `ELECTRON_RUN_AS_NODE` and none of the AppImage's own variables).
 - **`bridge/src/server.js`** — prints a note to stderr and imports `mcp/shim.mjs`, so MCP configs
   written by v1's `install.ps1` keep working (self-test section 14).
 
@@ -985,11 +997,16 @@ timeouts mirroring DAEMON_PROTOCOL §3 — a copy, checked by
 Claude Desktop, backing up first and never overwriting a `g9-browser` entry silently; policies — HKCU
 `WindowOcclusionEnabled=0`, `HighEfficiencyModeEnabled=0`, `IntensiveWakeUpThrottlingEnabled=0`,
 `BackgroundTabFreezingEnabled=0`, `DeveloperToolsAvailability=1`, recorded first for Undo, one UAC
-prompt when HKCU\Software\Policies is not user-writable; updater — electron-updater generic feed from
-the daemon's `updateUrl`/`updateChannel`, restarting the daemon only when no run is active and no
-launched engine is open; wizard). Packaging: `electron-builder.yml` (NSIS, per-user,
-`asInvoker`), `scripts/build-win.mjs`. Versions installed: electron 44.4.3, electron-builder 26.15.3,
-electron-updater 6.8.9. Pages under test are never loaded here.
+prompt when HKCU\Software\Policies is not user-writable, Windows only; updater — electron-updater
+from the official GitHub releases by default (`updateMode` official/custom/off), `installMode` auto
+on Windows and an AppImage and manual on macOS and a .deb, restarting the daemon only when no run is
+active and no launched engine is open; wizard). Packaging (3.1.0): `electron-builder.yml` (Windows
+NSIS per-user `asInvoker`; macOS DMG + ZIP, arm64 and x64, ad-hoc signed; Linux `G9-x86_64.AppImage`
+and a .deb; `publish: github ImanKari/G9BrowserAgent`), `scripts/build.mjs --win|--mac|--linux`
+(host only; `--as-version`/`--out` for the update test's older build), `scripts/verify-artifacts.mjs`
+(every file `latest*.yml` lists, and every production dependency inside each `app.asar`),
+`test/update-e2e.mjs` (real install and update). Versions installed: electron 44.4.5,
+electron-builder 26.15.3, electron-updater 6.8.9. Pages under test are never loaded here.
 
 ---
 
@@ -1066,6 +1083,18 @@ never port 8765 (the owner's v1 bridge lives there), and ends with a leftover-pr
 check. Headed windows, where a harness uses them at all, are created at −32000,−32000 without
 activation. Unset `ELECTRON_RUN_AS_NODE` in the shell before running (`env -u ELECTRON_RUN_AS_NODE …`):
 some agent hosts export it, and it turns `npx electron` into Node.
+
+**The release pipeline (3.1.0, `azure-pipelines.yml`).** Azure DevOps is the source of truth; GitHub is
+a mirror. Stages: **Validate** (Windows: `check.mjs --all`, every offline check including the live
+`live:` unit tests on the hosted Edge; Linux and macOS: the portable unit suites, self-test, extension
+suite and desktop suite, with `G9_UNIT_NO_BROWSER=1`), **Package** (on each system: build the
+packages, build the same source as an older version, and run `desktop/test/update-e2e.mjs` from the
+older to the new — Windows and Linux through the local feed's full scenario set, macOS the manual
+notice), **Release** (all packages together: `verify-artifacts --expect win,mac,linux`,
+`SHA256SUMS.txt`, the release notes from this guide's change-log entry), and only on `main`
+**Publish** (tag `v<version>` in Azure, mirror to GitHub, create the GitHub Release as a draft,
+upload and verify every asset's size and SHA-256, publish, then check that `/releases/latest` and
+the `latest*.yml` files name this version). A run on any other branch stops after Release.
 
 ### 7.0 Choosing what to run (since 3.0.1)
 
@@ -1189,16 +1218,21 @@ by being written down.
 
 ### 8.3 Product, installer, measurement coverage
 
-- **Installer and updates.** Unsigned (SmartScreen warns). Not exercised: a real install on this
-  machine, the real UAC prompt, an update server (the updater is tested with a fake), and installing an
-  update while AI clients run shims as `G9.exe` — the installer may close those shims mid-session and a
-  shim may respawn the old daemon while files are replaced (design-level, not fixed). `docs/INSTALL.md` is the operator guide; policies are also applied and documented by the
+- **Installer and updates (3.1.0).** No package is signed (SmartScreen and Gatekeeper warn; macOS and
+  the .deb update by hand, §9 3.1.0). The update is tested end to end with real packages on Windows,
+  macOS and Linux (`desktop/test/update-e2e.mjs`, in the pipeline for every build) and against the
+  published GitHub release. Not exercised: an install into the default Windows folder on the owner's
+  machine, the real UAC prompt, SmartScreen and Gatekeeper themselves (a CI download carries no
+  quarantine mark), a .deb upgrade, and installing an update while AI clients run shims as the app's
+  executable — the installer may close those shims mid-session and a shim may respawn the old daemon
+  while files are replaced (design-level, not fixed). `docs/INSTALL.md` is the operator guide; policies are also applied and documented by the
   desktop (`desktop/README.md`, `lib/policies.mjs`); `BackgroundTabFreezingEnabled` is read by Chrome only from
   155 (an unknown name is ignored).
 - **maxParallel default is 8.** Live round 3's data put the rule at 12 on this machine class (§9
   v2.0.0); the default was not changed.
-- **Not measured:** an 8-hour endurance run (only 10-minute runs), macOS/Linux (not in v2.0; POSIX
-  paths untested), the `HTTPS_PROXY` tunnel, zip64, two real processes racing one CfT install, new
+- **Not measured:** an 8-hour endurance run (only 10-minute runs), the live matrices on macOS/Linux
+  (3.1.0 runs the portable suites, the desktop suite and the update test there, not the live
+  browser matrices, bench, endurance or stealth), the `HTTPS_PROXY` tunnel, zip64, two real processes racing one CfT install, new
   headed Engine 2 windows copying bounds, headed CfT after the round-3 fixes, a full clone + `install.ps1`
   on another directory (EXT-16's last criterion).
 - **Re-run on the 2.0.1 tree (2026-09-23, the final pass):** every suite. Unit, self-test, extension, desktop
@@ -1232,7 +1266,9 @@ by being written down.
   **2.0.1**, then **2.0.2** (three flaky-test defects and the close budget), **2.0.3** (the
   popout) and **3.0.0** (the side panel, U1–U10 in §6.10; a major bump because the panel, the
   auto-attach setting and the issue index changed shape — a 3.x extension and a 2.x daemon still
-  connect to each other). No test pins a literal version any more: `version.test.mjs`, `panel.test.mjs`,
+  connect to each other), **3.0.1**, **3.0.2** and **3.1.0** (packages for three systems and updates
+  from the official releases). Since 3.1.0 a version is released by merging to `main`: the pipeline
+  tags it and publishes it, and refuses a tag that already names another commit. No test pins a literal version any more: `version.test.mjs`, `panel.test.mjs`,
   `desktop/test/static.test.mjs` and `desktop/test/smoke.test.mjs` all compare the files with each
   other and with `lib/version.mjs`, so a bump is one edit in each of four JSON files: `package.json`,
   `extension/manifest.json`, `desktop/package.json` and `desktop/package-lock.json` (the lock file is
@@ -1678,6 +1714,88 @@ after every step of a forty-step flow doubles the run for evidence nobody reads.
 Entries below describe what was believed or tested at the time. Current capability claims and
 unresolved findings are in §§4, 7 and 8, which supersede historical assertions. Entries dated before
 2026-09-21 describe v1 (the bridge, the four control modes, the workspace allowlist).
+
+### 2026-09-26 — v3.1.0: Windows, macOS and Linux packages, updates from the official releases
+
+**Why.** G9 is published on GitHub, so a person should be able to download it for their system, and
+an installed G9 should find and install new versions by itself — with nothing to configure, never
+in the middle of a run, and with the browser extension following the app.
+
+**Packages.** `desktop/scripts/build.mjs` (replacing `build-win.mjs`) builds for the system it runs on:
+Windows `G9-Setup-<v>.exe` (NSIS, per user, as before); macOS `G9-<v>-mac-{arm64,x64}.dmg` and `.zip`
+(the ZIP is the updater's format); Linux `G9-x86_64.AppImage` and `G9_<v>_amd64.deb`, each with its
+`latest*.yml`. What was Windows-only, found by reading every platform branch: the background policies
+(registry; now reported as not applicable elsewhere), the browser search (App Paths in the registry;
+macOS and Linux got their own candidate lists), the MCP config folders (`%APPDATA%`; now the system's
+own), the extension picker's wording, the login item (Linux has none in Electron; G9 writes an XDG
+autostart entry), the app menu (macOS needs one for Cmd+Q and editing shortcuts) and the Chrome for
+Testing pin (now pinned for win64, mac-x64, mac-arm64 and linux64).
+
+- **macOS is unsigned** (the owner's choice: no Apple Developer ID yet). It is signed ad hoc so it
+  runs on Apple silicon, Gatekeeper asks once, and — because Squirrel.Mac installs only into a
+  Developer-ID-signed app — updates are *manual*: G9 checks, downloads nothing, and says where the
+  release is. An app started from a disk image or Downloads runs translocated; the wizard refuses to
+  write that path into MCP configs.
+- **The AppImage keeps one name.** electron-updater's `AppImageUpdater` (read in its source) replaces
+  `$APPIMAGE` in place only when the file name has no version; otherwise it writes a new versioned
+  file and deletes the old one — breaking every MCP entry that named it. So the AppImage is published
+  as `G9-x86_64.AppImage`.
+- **An AppImage cannot be named from inside.** It runs from a mount that vanishes when it exits, so
+  MCP entries, the daemon and scheduled runs start `$APPIMAGE <G9_HOME>/bin/g9-run.mjs <script>` in
+  Node mode (`lib/runtime.mjs`). **Found in a clean Ubuntu container:** the AppImage's AppRun adds
+  `--no-sandbox` in front of the arguments when unprivileged user namespaces are off (Ubuntu 24.04,
+  containers), and Node then exits "bad option: --no-sandbox" (9). G9 passes `--no-sandbox` after the
+  script instead, where AppRun leaves it, and the bootstrap drops it.
+- **The .deb** installs to `/opt/G9`; replacing it needs root, so it is updated by hand too.
+
+**Updates.** The default source is now the official releases (`updateMode: 'official'`,
+electron-updater's `github` provider on `ImanKari/G9BrowserAgent`: `releases.atom`, `/releases/latest`,
+then that tag's `latest*.yml`, read from github.com, not the rate-limited API). `custom` keeps the old
+https feed (a 3.0.x settings file with a URL and no mode stays on it); `off` never checks. New in the
+prompt and in Settings: **Skip this version** (never downloaded again) and **Install when I quit G9**;
+a manual install mode (macOS, .deb) with **Open the release page**. A 404 or an empty release list now
+reads "no G9 release is published at the official releases yet" instead of a stack trace.
+
+**The extension follows the app, and now always.** The daemon and its clients carry an `installId` (the
+AppImage file or the resource folder) beside the version, so "same version, different install" is seen
+too. **Found by the real update test:** after an update the app refreshed `G9_HOME/extension`, but the
+extension was reconnecting at that moment, so the reload was sent to nobody (`reloadSent: 0`) and the
+browser kept the old version. The daemon now catches it up: when an extension older than the daemon
+says hello and `G9_HOME/extension` already holds the daemon's version, it asks that extension once to
+reload, after its calls in flight (at most 60 s); never in a loop (`daemon.test`).
+
+**The real update test** (`desktop/test/update-e2e.mjs`, no fakes). It installs an older build of the
+same source (built with `--as-version`), gives it a temporary `G9_HOME` and a random port, serves the new
+packages from a local feed that can corrupt or cut off a download, and drives the running app through
+its own window over the DevTools protocol. Scenarios: corrupt download refused by SHA-512; a download
+cut off 50 times still completes; skip; a busy daemon (a launched browser) defers the install; install
+when I quit; the new version starts with a new daemon, `G9_HOME/extension` refreshed and reloaded, no
+mismatch; the reload waits for a call in flight; macOS's manual notice; and, against GitHub, a fresh
+install with no update settings finds, downloads and installs the published release. **Windows, on the
+owner's workstation: 3.0.1 → 3.1.0, 20 of 20 checks** (installed silently into a temporary folder,
+uninstalled at the end). **Linux AppImage, in a clean Ubuntu container: 13 of 13.** It also found:
+`build.mjs` staging `node_modules` through a junction lost `electron-updater`'s dependencies in the
+packed app (`fs-extra`; the older build could not update at all) — now copied, and
+`verify-artifacts.mjs` checks every production dependency is inside each `app.asar`; and `main.mjs`
+loaded Electron when run by plain Node (the smoke test printed two lines).
+
+**CI/CD.** `azure-pipelines.yml` (§7): Validate on Windows, Linux and macOS; Package and the real update
+test on each; Release (checks, SHA-256 sums, notes from this entry); on `main` only, Publish: tag in
+Azure, mirror to GitHub, and a GitHub Release whose assets are verified before and after it is made
+public (`setup/github-release.mjs`).
+
+**Also.** The desktop Engines view refreshes the tab list when it opens, so a tab opened since no
+longer shows as "Untitled" (seen in the README pictures). The MCP shim connects after `initialize` (an agent was
+registered as "mcp-agent" in a race, seen as a flaky self-test on CI). `.gitattributes` makes every text
+file LF: the extension suite compared file text and failed on a Windows checkout with `autocrlf`. The
+unit runner's PASS counter had a control character where `\b` was meant, and counted nothing. The live
+`window.open` test waits for the first paint before it clicks (a hosted CI machine received the click
+before the button was hit-testable). The README is new, for people who use G9, in English and Persian
+(`README.fa.md`), with pictures from a real run (`setup/docs-screenshots.mjs`, `docs/assets/`); the
+technical reference moved to `docs/REFERENCE.md`. License: MIT (`LICENSE`).
+
+Version 3.1.0 in `package.json`, `extension/manifest.json`, `desktop/package.json` and
+`desktop/package-lock.json`.
 
 ### 2026-09-26 — v3.0.2: ready for a public repository
 

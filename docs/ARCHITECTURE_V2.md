@@ -871,11 +871,15 @@ G9_HOME/
   settings.json             daemon/settings.js DEFAULTS: port 8765, defaultBrowser 'auto', headless true,
                             humanize 'human', stealth 'off', maxParallel 8, evidence { maxFrames 3000,
                             maxBytes 300 MiB, keepRuns 200, quality 60, maxWidth 1280, maxHeight 800 },
-                            idleExitMinutes 60, updateUrl '', updateChannel 'stable', schedule [] (F6:
-                            updateChannel 'stable'|'beta'; updateUrl https:// (http:// only on localhost,
-                            127.0.0.1 or ::1) or empty — a file:// feed is refused: electron-updater cannot use
-                            it). Unknown keys are kept.
-  desktop.json              the desktop app's own state (window, wizard, the update URL it updates from)
+                            idleExitMinutes 60, updateMode 'official', updateUrl '', updateChannel 'stable',
+                            schedule [] (3.1.0: updateMode 'official'|'custom'|'off', 'custom' needs updateUrl;
+                            a file with updateUrl and no updateMode loads as 'custom'. F6: updateChannel
+                            'stable'|'beta'; updateUrl https:// (http:// only on localhost, 127.0.0.1 or ::1) or
+                            empty — a file:// feed is refused: electron-updater cannot use it). Unknown keys
+                            are kept.
+  desktop.json              the desktop app's own state (window, wizard, the update source it updates from)
+  bin/g9-run.mjs            (3.1.0, Linux AppImage only) the stable bootstrap lib/runtime.mjs writes: MCP
+                            entries, the daemon and scheduled runs start `$APPIMAGE bin/g9-run.mjs <script>`
   engine-versions.log
   engines/cft-<version>/    Chrome for Testing
   engines/log/<engineId>.json
@@ -912,10 +916,12 @@ zero-dependency `lib/ws-client.mjs`, not Node's global `WebSocket`: it also runs
 
 Electron shell, never an engine (no `BrowserView`/`webview` of pages under test; the watch window
 shows JPEG frames from the daemon on a `<canvas>` with the cursor drawn from pointer samples).
-Talks to the daemon as role `ui` over the same WebSocket. Owns: installer (electron-builder NSIS,
-per-user), first-run wizard, MCP client registration, HKCU policy apply/undo, extension folder
-management + reload, update check (electron-updater, generic provider URL and channel from the daemon's
-`updateUrl`/`updateChannel` settings; disabled with a visible reason when no URL is configured), scheduler
+Talks to the daemon as role `ui` over the same WebSocket. Owns: packages (3.1.0: electron-builder NSIS
+per-user on Windows, DMG + ZIP on macOS, AppImage + .deb on Linux), first-run wizard, MCP client
+registration, HKCU policy apply/undo (Windows only), extension folder management + reload, update
+check (electron-updater: `updateMode` 'official' → the `github` provider on the official repository,
+'custom' → the `generic` provider on `updateUrl`, 'off' → none; install mode 'auto' on Windows and an
+AppImage, 'manual' — check and notify, never download — on macOS and a .deb), scheduler
 UI, runs/evidence/approvals views. An update restarts the daemon, so it waits until the daemon is idle:
 connected, `runs.list {active:true}` + the engine list; not connected, `/health` `activeRuns` + `launched`
 (F6) — an open `watch` run (the app's own live view) never blocks. The activity view shows each agent call
@@ -924,7 +930,10 @@ once (the daemon drops engines' `relayed` echoes, F7). Its tests live in `deskto
 DAEMON_PROTOCOL §3 (`desktop/lib/daemon-client.mjs callTimeoutMs`); `setup/unit/daemon.test.mjs` checks that
 they never end a call before the daemon's own deadline.
 Packaged resources: `extension/`, `engine/`, `daemon/`, `mcp/`, `runner/`, `lib/`, `package.json`.
-`G9.exe` with `ELECTRON_RUN_AS_NODE=1` runs Node scripts (shim, runner) so a QA machine needs no Node.
+The app's executable (`G9.exe`, `G9.app/Contents/MacOS/G9`, `g9`) with `ELECTRON_RUN_AS_NODE=1` runs
+Node scripts (daemon, shim, runner) so a QA machine needs no Node; how a script is started — node, the
+app, or a Linux AppImage through `G9_HOME/bin/g9-run.mjs` — is `lib/runtime.mjs scriptCommand`, shared by
+the shim, the desktop launcher and the MCP registration.
 
 ---
 

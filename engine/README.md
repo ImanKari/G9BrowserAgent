@@ -155,7 +155,10 @@ puts GNU `tar` first, which cannot read a zip.
 ## Chrome for Testing: pinned, verified, installed once
 
 - **Pin:** `versions.json` → `chrome-for-testing.version` (153.0.8010.52, Stable on 2026-09-21) and
-  `downloads.win64 { url, size: 205149043, sha256: df4854428c50…94fbe1, serverMd5 }`.
+  one entry per platform under `downloads`: `win64 { url, size: 205149043, sha256: df4854428c50…94fbe1,
+  serverMd5 }`, and since 3.1.0 `mac-x64`, `mac-arm64` and `linux64`, pinned the same way
+  (`node engine/cft.js pin --platform <key>`; the default is this machine's platform). On macOS and
+  Linux the zip holds `chrome-mac-*/Google Chrome for Testing.app` and `chrome-linux64/chrome`.
 - **Trust on first use.** Google publishes no sha256 for CfT. The pinned hash was computed by
   `node engine/cft.js pin` from the first download; that transfer was checked against the MD5 Google
   storage declares in `x-goog-hash` (the same `zpBayjQjVXGHNOpRyiRcpw==` a separate `HEAD` returned),

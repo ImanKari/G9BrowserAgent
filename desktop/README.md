@@ -8,8 +8,9 @@ for Testing that the daemon (`g9d`) launches; the Watch view shows their screenc
 
 The app talks to the daemon exactly like an agent does, over one WebSocket
 (`ws://127.0.0.1:${G9_PORT:-8765}/g9`, role `ui`, [DAEMON_PROTOCOL.md](../docs/DAEMON_PROTOCOL.md)).
-If nothing listens it starts the daemon (packaged: `G9.exe` with `ELECTRON_RUN_AS_NODE=1` runs
-`resources/daemon/g9d.mjs`; development: `node ../daemon/g9d.mjs`), detached, so the daemon keeps
+If nothing listens it starts the daemon (packaged: the app's own executable with
+`ELECTRON_RUN_AS_NODE=1` runs `resources/daemon/g9d.mjs` — on a Linux AppImage through the stable
+bootstrap `G9_HOME/bin/g9-run.mjs`, see `lib/runtime.mjs`; development: `node ../daemon/g9d.mjs`), detached, so the daemon keeps
 serving agents after the window closes. If the port is held by something else, such as the v1
 bridge, the app names it and leaves it alone.
 
@@ -17,11 +18,11 @@ bridge, the app names it and leaves it alone.
 
 ```powershell
 cd desktop
-npm install        # electron, electron-builder, electron-updater: the only npm dependencies in G9
+npm ci             # electron, electron-builder, electron-updater: the only npm dependencies in G9
 npm start          # the app (scripts/start.mjs clears ELECTRON_RUN_AS_NODE first, see below)
 npm test           # every test/*.test.mjs, plain node, no window, no browser, never port 8765
 npm run test:daemon  # the live contract: this repo's real g9d on a temp G9_HOME and a port in 18000-18999
-npm run test:packaged  # after build:win: dist/win-unpacked driven as a QA machine would (no Node needed)
+npm run test:packaged  # after build:win: dist/win-unpacked driven as a QA machine would (no Node needed; Windows)
 npm run test:render  # the real window, off-screen: every view as PNGs in dark and light, for a person to look at
 ```
 
@@ -71,7 +72,7 @@ Flags of `main.mjs`:
 | Engines | Running engines (the extension in your browser and the browsers the daemon launched), with contexts and tabs; a launch form (browser, headless, profile, human input, stealth, locale, time zone, proxy) that starts at the daemon's defaults; Stop for launched engines (asks first); Reload for the extension, or Update and reload when the daemon reports it runs another version; the browsers installed here and the pinned Chrome for Testing with an Install button; profiles with "Warm (open headed)" to sign in once. |
 | Watch | Pick a tab, see it live: JPEG frames scaled to fit, a cursor sprite interpolated between pointer samples, a ring on each press. View only. Watching pauses while the window is hidden or minimized. When the daemon could not start the stream (the tab closed or navigated during the start, or an unwatch overtook it), the view says "That tab is not being watched" with the daemon's reason (or, when it gives none, asks you to pick the tab again) instead of waiting for a first frame (2.0.2). |
 | Runs | Every run the daemon recorded (replays, calibrations, scheduled suites, watch sessions): verdict, steps (a scheduled run lists each flow of the runner's report, with Open report for its `report.html`, opened by Windows in your default browser), surprises, and a replay of the frames with the cursor. Export video records that replay into `runs/<runId>/video.webm`. |
-| Approvals | Flows whose last run has surprises, with what differed. Approve calls `browser_recording action:"approve"` with `by` = your Windows user name, supplied by the main process. Nothing approves on its own; every approval asks once more. |
+| Approvals | Flows whose last run has surprises, with what differed. Approve calls `browser_recording action:"approve"` with `by` = your sign-in user name, supplied by the main process. Nothing approves on its own; every approval asks once more. |
 | Schedule | Suites the daemon runs by itself: daily at a time or every N minutes, with engine options. Every option the form shows becomes an explicit runner flag, so a later change of the defaults never changes a scheduled suite — except a browser left at "auto", which passes no `--browser` and so follows the daemon's `defaultBrowser`. Run now, Remove (addressed by `entryId`). The last result is the suite's worst verdict. In an installed app, a warning appears while there is an entry and G9 does not start at sign-in, because after a restart nothing else starts the daemon. |
 | Settings | The daemon's settings (`settings.get` / `settings.set`), the raw JSON for everything else, the updater, the daemon connection, "Start G9 when I sign in" (installed builds: a login item with `--hidden`), and this app's folders. **Shut down daemon** stops it and the app does not start it again by itself: **Reconnect** brings it back (an agent's next call also starts it). |
 | Setup | The first-run wizard, runnable again at any time. |
@@ -98,7 +99,8 @@ Everything the wizard does is written to `G9_HOME/logs/install.log`.
    (`docs/INSTALL.md`).
 2. **Automation profile.** Lists profiles; "Open the automation profile" asks the daemon to open it
    headed (`profiles.warm`) so you can sign in once. Unattended runs then start signed in.
-3. **Background policies.** Per-user browser policies that keep a covered or locked window drawing:
+3. **Background policies** (Windows only; on macOS and Linux the step reports that there is nothing
+   to set, and Apply/Undo refuse). Per-user browser policies that keep a covered or locked window drawing:
    `WindowOcclusionEnabled=0`, `HighEfficiencyModeEnabled=0`, `IntensiveWakeUpThrottlingEnabled=0`,
    `BackgroundTabFreezingEnabled=0`, `DeveloperToolsAvailability=1`, under
    `HKCU\Software\Policies\Microsoft\Edge` and `HKCU\Software\Policies\Google\Chrome`. Never HKLM.
@@ -118,77 +120,108 @@ Everything the wizard does is written to `G9_HOME/logs/install.log`.
    **not verified**: the policies were never applied on the owner's machine, and apply/undo were
    tested with a fake `reg` runner. The table in `docs/INSTALL.md` has the details.
 4. **AI clients.** Claude Code (`~/.claude.json`, `mcpServers`), Cursor (`~/.cursor/mcp.json`),
-   VS Code (`%APPDATA%\Code\User\mcp.json`, `servers`) and Claude Desktop
-   (`%APPDATA%\Claude\claude_desktop_config.json`). The entry is `g9-browser`: `G9.exe` with
-   `ELECTRON_RUN_AS_NODE=1` and `resources/mcp/shim.mjs` when installed, `node <repo>/mcp/shim.mjs`
-   in development. The file is backed up (`<file>.g9-backup-<time>`) before any write; everything
+   VS Code (`<config>/Code/User/mcp.json`, `servers`) and Claude Desktop
+   (`<config>/Claude/claude_desktop_config.json`), where `<config>` is `%APPDATA%`,
+   `~/Library/Application Support` or `$XDG_CONFIG_HOME` (`~/.config`). The entry is `g9-browser`: the
+   app's executable with `ELECTRON_RUN_AS_NODE=1` and `resources/mcp/shim.mjs` when installed (a Linux
+   AppImage: the `.AppImage` file, `G9_HOME/bin/g9-run.mjs`, `mcp/shim.mjs`, `--no-sandbox`),
+   `node <repo>/mcp/shim.mjs` in development. On macOS the step refuses while the app runs from a disk
+   image or a translocated copy, because that path is gone at the next start. The file is backed up (`<file>.g9-backup-<time>`) before any write; everything
    else in it is kept; a *different* existing `g9-browser` entry (for example v1's
    `bridge/src/server.js`) is shown as a diff and replaced only when you confirm; a file with
    comments asks before they are dropped; a file that does not parse is never written. **Remove**
    takes the `g9-browser` entry out again, after the same backup. Registration was tested on
    temporary files only.
 5. **Extension.** The daemon copies the bundled extension to `G9_HOME/extension` (`extension.install`),
-   the path goes on the clipboard, and the button opens `edge://extensions` (`msedge.exe
-   edge://extensions`) or `chrome://extensions`. Then the three clicks: Developer mode, Load unpacked,
-   paste the path. The folder never moves, because the browser knows the extension by its folder.
+   the path goes on the clipboard, and the button opens `edge://extensions` or `chrome://extensions` by
+   starting the browser's executable with that page (Windows: the registry's App Paths; macOS:
+   `/Applications` and `~/Applications`; Linux: the usual `/usr/bin` and `/opt` names). Then the three
+   clicks: Developer mode, Load unpacked, paste the path (the wording follows the system's folder
+   picker). The folder never moves, because the browser knows the extension by its folder.
 
-## Installer and updates
+## Packages and updates
 
-```powershell
-$env:G9_UPDATE_URL = 'https://updates.example.com/g9/'   # optional; see below
-npm run build:win                                         # → dist/G9-Setup-<version>.exe (3.0.1 now; the last one built is 3.0.0)
+```bash
+npm run build:win     # on Windows → dist/G9-Setup-<version>.exe (+ .blockmap) and latest.yml
+npm run build:mac     # on macOS   → dist/G9-<version>-mac-{arm64,x64}.{dmg,zip} and latest-mac.yml
+npm run build:linux   # on Linux   → dist/G9-x86_64.AppImage, dist/G9_<version>_amd64.deb and latest-linux.yml
+npm run verify:artifacts   # every file latest*.yml lists: present, its size, its SHA-512
 ```
 
-* NSIS, assisted, **per user**, no administrator rights, fixed folder. `electron-builder.yml`:
-  `perMachine: false`, `allowElevation: false`, `allowToChangeInstallationDirectory: false`,
-  `requestedExecutionLevel: asInvoker`. `build/installer.nsh` forces the per-user mode, so the
-  "install for all users" page never appears. The folder is electron-builder's per-user default,
-  `%LOCALAPPDATA%\Programs\G9`. The installer was built and its payload checked, but it was never
-  run on the owner's machine.
-* The last build, of 2026-09-25 (version 3.0.0): `dist/G9-Setup-3.0.0.exe`, 103,620,667 bytes,
-  `NotSigned`, built without a feed (no `latest.yml`). Its payload matched the repository file for
-  file.
-* The uninstaller removes the program folder only: `G9_HOME` (profiles, runs, settings, the extension
-  folder, CfT) is outside it and never touched, and `deleteAppDataOnUninstall: false` keeps
-  Electron's own data folder (`%APPDATA%\G9`) too. `docs/INSTALL.md` "Uninstall" lists what to undo
-  first (policies, MCP entries, the login item) and what stays behind.
+`scripts/build.mjs` builds only for the system it runs on (electron-builder cannot build a DMG off
+macOS, and the release pipeline builds each on its own machine). It refuses to run when one of the
+bundled folders is missing or when the four version files disagree (ARCHITECTURE_V2 §2), makes the
+icons, builds, and then checks every `app.asar` it produced: each production dependency in
+`package-lock.json` must be inside it (an older build once shipped `electron-updater` without
+`fs-extra`). `--as-version <v> --out <dir>` builds the same source under another version into
+another folder: the "older build" the update test installs first.
+
+* **Windows:** NSIS, assisted, **per user**, no administrator rights, fixed folder
+  (`%LOCALAPPDATA%\Programs\G9`). `electron-builder.yml`: `perMachine: false`, `allowElevation: false`,
+  `allowToChangeInstallationDirectory: false`, `requestedExecutionLevel: asInvoker`;
+  `build/installer.nsh` forces the per-user mode. The uninstaller removes the program folder only:
+  `G9_HOME` is outside it, and `deleteAppDataOnUninstall: false` keeps `%APPDATA%\G9`.
+* **macOS:** a DMG to install from and a ZIP for the updater, for `arm64` and `x64`. Signed ad hoc
+  only (`identity: '-'`, hardened runtime off): not notarized, so Gatekeeper asks on the first start.
+  `CSC_IDENTITY_AUTO_DISCOVERY=false` keeps a build machine's own certificates out of it.
+* **Linux:** an AppImage named without a version, `G9-x86_64.AppImage`, because electron-updater
+  replaces an AppImage in place only when its name carries no version (otherwise it writes a new
+  versioned file and deletes the old one, and every MCP entry naming the old file breaks); and a .deb
+  (`/opt/G9`, command `g9`, package `g9-desktop`).
 * `resources/` carries `extension/`, `engine/`, `daemon/`, `mcp/`, `runner/`, `lib/` and the root
   `package.json`, so a QA machine needs no Node, no git and no npm.
-* The build refuses to run when one of those folders is missing or when `desktop/package.json` and the
-  root `package.json` disagree on the version (ARCHITECTURE_V2 §2).
-* **Updates** use electron-updater's generic provider. The URL and channel are set in Settings →
-  Updates, which writes the daemon settings `updateUrl` and `updateChannel` (stable or beta) and the
-  app's own copy in `desktop.json`. The app updates only from its own copy: a different URL that
-  arrives through the daemon's settings (any local client can write them) is used only after a dialog
-  that names the new host. With no URL the app says
-  "Updates: not configured" and never checks anywhere. With a URL it checks on start (as soon as the
-  daemon has told it the URL, and again at once when Settings changes the URL or channel) and every
-  6 hours, downloads by itself, then asks: install now, install when you quit G9, not now, or skip
-  this version. Installing restarts the
-  daemon, so it waits until the daemon reports no run in progress and no launched browser open; a
-  busy daemon defers it (re-checked every minute), and quitting while busy leaves the update for the
-  next quit. When `G9_UPDATE_URL` is set at build time the build also writes `latest.yml`; upload it
-  with the installer and its `.blockmap` to that folder. The URL must be `https://` (`http://` only
-  on `localhost`, `127.0.0.1` or `::1`, for a test feed): the installer is unsigned, so TLS to the
-  feed host is what authenticates it. `file://` URLs are refused too, because electron-updater
-  downloads over http(s) only.
-* **Channels.** `stable` reads `latest.yml` and `beta` reads `beta.yml`. The build script only ever
-  writes `latest.yml`, so nothing in the repository produces a beta feed yet.
-* **The updater was tested with a fake `autoUpdater` only.** No update server exists, so a real
-  download and install has not been exercised.
-* **Known gap:** MCP shims run as `G9.exe`, and connected agents do not count as busy. The installer
-  may close them mid-session, so quit the AI clients before installing an update.
-* After an update the app refreshes `G9_HOME/extension` (`extension.install`), which makes the
-  extension reload, and restarts an older daemon once it is idle.
-* Code signing: none configured. When the installer arrives as a download, Windows SmartScreen may
-  warn on first run ("More info" → "Run anyway"). A locally built copy has no download mark, so this
-  was **not seen** on the owner's machine. Sign the installer for a fleet.
+* **Code signing:** none. Windows SmartScreen and macOS Gatekeeper ask once; see
+  `docs/INSTALL.md`.
+
+**Updates** (`lib/updater.mjs`, electron-updater; the full description is in `docs/INSTALL.md`,
+"Updates and update hosting"):
+
+* **Source** — the daemon setting `updateMode`, mirrored in this app's `desktop.json`: `official`
+  (the default: the `github` provider on `ImanKari/G9BrowserAgent`, nothing to configure), `custom`
+  (`updateUrl`, an `https://` folder; `http://` only on the loopback address, for a test feed) or
+  `off`. The app updates only from its own copy: a different custom URL that arrives through the
+  daemon's settings (any local client can write them) is used only after a dialog naming the new
+  host. `updateChannel` `beta` also takes prereleases.
+* **Install mode** (`installMode`) — `auto` on Windows and a Linux AppImage: it checks on start and
+  every 6 hours, downloads by itself (SHA-512 checked), then asks: install now, install when you quit
+  G9, not now, or skip this version (a skipped version is never downloaded again). `manual` on macOS
+  (Squirrel.Mac installs only into a Developer-ID-signed app) and a .deb (needs root): the same check,
+  no download, a notification once per version, and **Open the release page**.
+* **Never mid-run** — installing restarts the daemon, so it waits until the daemon reports no run in
+  progress and no launched browser; a busy daemon defers it (re-checked every minute), and quitting
+  while busy leaves it for the next quit. `autoInstallOnAppQuit` is off, because the installer closes
+  every G9 process it finds.
+* **After an update** the app refreshes `G9_HOME/extension` (`extension.install`), the extension
+  reloads once idle, and an older daemon is restarted once it is idle. A daemon that sees an older
+  extension connect while `G9_HOME/extension` already holds the new version asks it to reload, once.
+* **Known gap:** MCP shims run as the app's executable, and connected agents do not count as busy.
+  The installer may close them mid-session, so quit the AI clients before installing an update.
+
+**The update, end to end** (`test/update-e2e.mjs`) — real packages, no fakes: it installs an older
+build (Windows: the NSIS installer silently into a temporary folder; Linux: the AppImage under its
+published name; macOS: the app from the ZIP), gives it a temporary `G9_HOME` and a random port,
+serves the new packages from a local feed that can corrupt or cut off a download, and drives the
+running app through its own window over the DevTools protocol:
+
+```bash
+node desktop/test/update-e2e.mjs --old <dir of the older build> --new desktop/dist [--browser chrome] [--only corrupt,skip] [--report out.json]
+node desktop/test/update-e2e.mjs --old <dir of an older build> --new <dir> --feed official   # against the published GitHub release
+```
+
+Scenarios: `corrupt` (a wrong SHA-512 is refused, nothing installed), `interrupted` (a download cut
+off again and again still completes), `skip`, `busy` (a launched browser defers the install),
+`install` (install when I quit, the new version starts, a new daemon, `G9_HOME/extension` refreshed,
+the extension reloads, no version mismatch), `reload-busy` (the reload waits for a call in flight),
+`manual` (macOS: the notice, nothing downloaded), and with `--feed official`, `official` (a fresh
+install with no update settings finds, downloads and installs the published release). The release
+pipeline runs it on Windows, macOS and Ubuntu for every build; everything it started is stopped
+and uninstalled at the end.
 
 ## Files
 
 | file | written by | what |
 |---|---|---|
-| `G9_HOME/desktop.json` | this app | window size, last view, wizard progress, the version that last ran, the update URL and channel this app updates from |
+| `G9_HOME/desktop.json` | this app | window size, last view, wizard progress, the version that last ran, the update source (mode, URL, channel) this app updates from |
 | `G9_HOME/logs/install.log` | this app | every setup action and its outcome |
 | `G9_HOME/logs/desktop.log` | this app | connection, daemon starts, updates |
 | `G9_HOME/logs/policies.json` | this app | the previous registry values, for Undo |
@@ -208,11 +241,13 @@ lib/policies.mjs    HKCU policy apply/undo with a record, elevation batch, read-
 lib/mcp-register.mjs    client detection, entry, plan/diff, backup, atomic write, verify
 lib/extension-install.mjs, lib/wizard.mjs, lib/updater.mjs, lib/settings.mjs, lib/paths.mjs,
 lib/runs-store.mjs (frames and cursor track from disk), lib/icon.mjs (tray/app icon, drawn in code)
-scripts/            start.mjs, build.mjs (win/mac/linux), verify-artifacts.mjs, make-icons.mjs
+scripts/            start.mjs, build.mjs (win/mac/linux), verify-artifacts.mjs (latest*.yml and app.asar checks),
+                    make-icons.mjs
 test/               *.test.mjs + run.mjs; fake-daemon.mjs is a fake g9d, fake-dom.mjs a fake DOM for the
                     views; daemon-contract.mjs is the live check against the real g9d (npm run test:daemon);
                     packaged.mjs checks dist/win-unpacked (npm run test:packaged); render-check.mjs drives
-                    the real window off-screen (npm run test:render)
+                    the real window off-screen (npm run test:render); update-e2e.mjs installs and updates
+                    real packages
 ```
 
 Security shape: `contextIsolation`, `sandbox`, no Node in the page, a Content-Security-Policy that
