@@ -1,7 +1,7 @@
 /**
  * Schedule: suites the daemon runs by itself (daemon/scheduler.js) — daily at a time, or every
  * N minutes — through the runner on a launched engine, with no window and no one at the desk.
- * A locked Windows session is fine; a logged-off one runs nothing (plan §9).
+ * A locked Windows session is fine; a logged-off one runs nothing (docs/INSTALL.md, "Unattended machines").
  */
 
 import { h, replace, icon } from '../lib/dom.js';

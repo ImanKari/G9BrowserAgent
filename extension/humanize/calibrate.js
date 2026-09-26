@@ -1,5 +1,5 @@
 /**
- * Calibration: fit a profile from recordings of a real person (plan §6.7).
+ * Calibration: fit a profile from recordings of a real person (docs/HUMANIZE.md, Calibration).
  *
  * The defaults in profiles.js are literature numbers. A team's own QA people
  * move, type and scroll in their own way, and a profile fitted from them is

@@ -1,7 +1,7 @@
 /**
  * Handoff: move a tab from the person's browser (Engine 1) to a launched
  * browser (Engine 2) so the run continues while they minimise, lock the screen
- * or go home (plan P3.5, D3).
+ * or go home (ARCHITECTURE_V2 §7, D3).
  *
  * What travels, and what honestly cannot:
  *

@@ -1,10 +1,10 @@
 // engine/stealth.js — what each stealth level changes in Engine 2, and what it deliberately does not.
 //
-// Plan D10: stealth is a per-profile level, not a global mode. `off` / `human` / `stealth`.
+// Decision D10 (AIGuide §2.0): stealth is a per-profile level, not a global mode. `off` / `human` / `stealth`.
 //   off      direct CDP input (v1 behaviour), every convenience domain enabled
 //   human    human-like input (extension/humanize/), same domains as off
 //   stealth  human input AND an environment a detector cannot tell from a person's browser:
-//            the Runtime domain is never enabled (plan R4, §6.4), nothing lives in the main world
+//            the Runtime domain is never enabled (rule R4, AIGuide §2.9), nothing lives in the main world
 //
 // The one rule this file encodes above all: consistency beats spoofing (§6.4). A real Chrome/Edge
 // binary with a real profile is already a real browser. Every "stealth switch" people pass to
@@ -53,12 +53,12 @@ export function isDomainAllowed(level, domain) {
 export const WEBDRIVER_SWITCH = '--disable-blink-features=AutomationControlled';
 
 /**
- * Launch switches a level adds on top of plan §P2.2's list.
+ * Launch switches a level adds on top of the designed list (engine/README.md).
  *
  * off / human: nothing. stealth: exactly one switch, WEBDRIVER_SWITCH.
  *
  * OWNER DECISION D-a (2026-09-22, made under the owner's explicit requirement that stealth runs must
- * be undetectable; supersedes plan §P2.2's ban for the `stealth` level only):
+ * be undetectable; supersedes the designed list's ban for the `stealth` level only):
  * MEASURED on Edge 153.0.4234.32, Chrome 153.0.8010.50 and CfT 153.0.8010.52: `--remote-debugging-pipe`
  * ITSELF turns Blink's AutomationControlled runtime feature on, so every Engine 2 page reports
  * navigator.webdriver === true — headless or headed, with no --enable-automation anywhere. Headless
@@ -120,7 +120,7 @@ export function launchWarnings({ level = 'off', headless = true, kind = null } =
       'userAgentData say HeadlessChrome, and the window\'s outer size can read 0×0 at the load event. ' +
       'Public detectors flagged every headless stealth run in G9\'s own test (docs/STEALTH.md). On a ' +
       'machine without a GPU, a software GL renderer string is a further tell. Run stealth-critical ' +
-      'suites headed on a dedicated desktop (plan §6.4).',
+      'suites headed on a dedicated desktop (docs/STEALTH.md).',
     );
   }
   if (kind === 'cft') {
@@ -137,7 +137,7 @@ export function launchWarnings({ level = 'off', headless = true, kind = null } =
   return out;
 }
 
-// ─── locale / timezone / Accept-Language consistency (plan §6.4) ─────────────────────────────
+// ─── locale / timezone / Accept-Language consistency (STEALTH.md) ────────────────────────────
 
 function hostTimezone() {
   try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { return null; }

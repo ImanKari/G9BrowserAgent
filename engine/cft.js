@@ -3,7 +3,7 @@
 // Why Chrome for Testing at all: installed Edge/Chrome update themselves whenever they like (Chrome
 // ships a major every two weeks since 153), so "the suite passed on Tuesday" and "the suite passed
 // on Thursday" may be two different browsers. CfT is a stock Chrome build at a version WE choose,
-// exempt from the Chrome 136 rule that ignores remote debugging on the default profile (plan §2.1),
+// exempt from the Chrome 136 rule that ignores remote debugging on the default profile (AIGuide §2.8.1),
 // with no auto-updater. The pinned version and its hash live in engine/versions.json.
 //
 //   pinned()                    → { version, platform, sha256, size, url, … } from versions.json

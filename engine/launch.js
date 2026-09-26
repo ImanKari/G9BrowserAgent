@@ -1,12 +1,12 @@
 // engine/launch.js — start a real Edge/Chrome/CfT with a private CDP pipe, and stop it cleanly.
 //
-// Engine 2 (plan D2/D3) is a stock browser process that G9 starts and owns. It is driven over
+// Engine 2 (decisions D2/D3, AIGuide §2.0) is a stock browser process that G9 starts and owns. It is driven over
 // --remote-debugging-pipe: the browser's fd 3/4 carry CDP, so there is no debugging port for
 // anything else on the machine to find, and the browser identifies no differently from one a person
 // started (no --enable-automation, ever). Headless by default: `--headless=new` is the full browser
 // with no platform window, so none of the states that make Chromium stop rendering and silently
 // drop input on a person's desktop — minimized, covered, locked, another virtual desktop — exist
-// (plan §2.1).
+// (AIGuide §2.8.1).
 //
 // launchBrowser(opts) → { pid, conn, argv, args, browser, profileDir, …, exited, close() }
 // Every switch and why it is there: engine/README.md.
@@ -22,7 +22,7 @@ import { profileInUse } from './profile.js';
 import { noteFirewallLaunch } from './firewall.js';
 
 /**
- * Plan §P2.2's list, plus ONE deliberate addition: `msImplicitSignin`. Features merged with any
+ * The designed list (engine/README.md), plus ONE deliberate addition: `msImplicitSignin`. Features merged with any
  * --disable-features in extraArgs (Chrome keeps only the LAST such switch).
  *
  * Why msImplicitSignin (live round 2, 2026-09-22, Edge 153.0.4234.32 on the owner's Windows
@@ -48,7 +48,7 @@ export const DISABLED_FEATURES = Object.freeze([
 ]);
 
 /**
- * Plan §P2.2's fixed switches, plus `--disable-sync`: the second barrier behind msImplicitSignin
+ * The designed fixed switches, plus `--disable-sync`: the second barrier behind msImplicitSignin
  * above. Measured on Edge 153: with it, a profile that is (or becomes) signed in never sets up
  * sync — no passwords, history, tabs or extensions arrive, nothing is uploaded, and no
  * sync-confirmation dialog opens (without it, edge://sync-confirmation-dialog/ and two extension
@@ -68,7 +68,7 @@ export const FIXED_SWITCHES = Object.freeze([
 
 /**
  * `--disable-component-update` is left out at stealth "stealth" (and for a profile being warmed) —
- * a deviation from plan §P2.2, recorded like msImplicitSignin and --disable-sync above.
+ * a deviation from the designed list, recorded like msImplicitSignin and --disable-sync above.
  *
  * Edge and Chrome get the Widevine CDM through the component updater. With the switch, no
  * G9-launched Edge or Chrome ever had Widevine — not even on a warmed profile that had already
@@ -248,7 +248,7 @@ function checkLang(lang) {
 
 /**
  * The exact argument list (without the executable) for a launch. Pure; exported for tests and for
- * the daemon's engine.json. Order: plan §P2.2 (+ `--screen-info` for headless, decision D-a), then
+ * the daemon's engine.json. Order: the designed list (+ `--screen-info` for headless, decision D-a), then
  * stealth.launchArgsFor(level) and extraArgs (feature lists merged), then the start URL.
  */
 export function buildArgs({

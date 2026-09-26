@@ -2,7 +2,7 @@
  * The built-in input profiles: off, human, stealth.
  *
  * Rule R9: every timing and threshold lives here, never in the planners. The
- * numbers are the defaults of V2_IMPLEMENTATION_PLAN §6.1–§6.3 — defaults, not
+ * numbers are the defaults documented in docs/HUMANIZE.md — defaults, not
  * laws; a calibrated team profile (§6.7, calibrate.js) replaces them with
  * values fitted from real people.
  *
@@ -24,10 +24,10 @@ const HUMAN = {
   // true only for `off`: planners then emit v1's direct dispatch (one event
   // per intent, no path, no pauses) and ignore every number below.
   direct: false,
-  description: 'Human-like input: Fitts-timed curved paths, dwell before press, log-normal typing with rare corrected typos (plan §6.1–§6.3 defaults).',
+  description: 'Human-like input: Fitts-timed curved paths, dwell before press, log-normal typing with rare corrected typos (docs/HUMANIZE.md defaults).',
 
   mouse: {
-    // The plan's "speed factor": MULTIPLIES the Fitts time (higher = slower).
+    // The "speed factor": MULTIPLIES the Fitts time (higher = slower).
     durationScale: 1.0,
     // MT = a + b·log2(D/W + 1), clamped to [minMs, maxMs] before scaling.
     fitts: { a: 120, b: 150, minMs: 150, maxMs: 1200 },
@@ -39,7 +39,7 @@ const HUMAN = {
     jitterPx: 0.7,
     // Cubic Bézier control points: `along1`/`along2` are fractions of the
     // segment, `offset` a fraction of its length applied perpendicular.
-    // sameSideChance 0.5 == the plan's "independent random signs".
+    // sameSideChance 0.5 == "independent random signs".
     curvature: { along1: [0.30, 0.40], along2: [0.60, 0.70], offset: [0.10, 0.25], sameSideChance: 0.5 },
     // Long moves overshoot along the path direction, then correct.
     overshoot: { minDistance: 400, chance: 0.6, fraction: [0.03, 0.08], correctionMs: [80, 200] },

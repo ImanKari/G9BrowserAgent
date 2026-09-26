@@ -125,7 +125,7 @@ export function clampToViewport(p, viewport, grid = 1) {
 
 /**
  * The first pointer position on a tab that has never been touched: a random
- * point in the middle 60 % of the viewport (plan §6.1). The dispatcher calls
+ * point in the middle 60 % of the viewport (docs/HUMANIZE.md, Pointer). The dispatcher calls
  * this once per tab and persists the result; planners use it when a caller
  * passes no `from`.
  */
@@ -274,7 +274,7 @@ export function sequence(plans, { gapMs = 0 } = {}) {
 }
 
 /**
- * A "think time" gap between actions (plan §6.1): 200–900 ms by default,
+ * A "think time" gap between actions (docs/HUMANIZE.md): 200–900 ms by default,
  * 600–1500 ms after a navigation completed, 80–250 ms between the keys of one
  * form. Returned as a plan holding one pause step, so it can be sequenced.
  */

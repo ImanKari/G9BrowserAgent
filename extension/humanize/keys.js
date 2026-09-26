@@ -388,7 +388,7 @@ function classify(token, def) {
 /**
  * planType(rng, profile, { text, field:{password, numericMask}, typos?, from?, delayMs? }) → Plan
  *
- * Human levels (plan §6.3): a think pause, then per-character key events with
+ * Human levels (docs/HUMANIZE.md, Keyboard): a think pause, then per-character key events with
  * log-normal inter-key intervals (×1.6 after space/punctuation, ×2.0 before a
  * character that needs a fresh Shift press), Shift pressed and released around
  * shifted characters (held across a run of them, on the opposite hand's side),

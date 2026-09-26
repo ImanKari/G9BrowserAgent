@@ -27,7 +27,7 @@
  *   as checkboxes, that becomes a thirty-second job. A weak assertion someone
  *   consciously accepted is a decision; one a tool added quietly is a blind spot.
  *
- * ## What changed in v3 (V3_UX_PLAN part B)
+ * ## What changed in v3 (U6, AIGuide §6.10)
  *
  * The index always carried startUrl, suite, folder, tags, lastRun, flaky,
  * assertionCount and environment; the list used none of them and rendered one

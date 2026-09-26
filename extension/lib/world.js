@@ -9,7 +9,7 @@
  * `getEventListeners`-style probes in the page, and the page cannot tamper
  * with G9's helpers. v1 evaluated in the main world and left `__g9loc`,
  * `__g9target`, `__g9rec` and the recorder binding on the page's `window`,
- * where any MutationObserver or bot detector could find them (plan R4).
+ * where any MutationObserver or bot detector could find them (rule R4, AIGuide §2.9).
  *
  * `browser_console action:"evaluate"` is the one deliberate exception: there
  * the agent asks about the PAGE's JavaScript, so that stays in the main world

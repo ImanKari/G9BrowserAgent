@@ -10,7 +10,7 @@
  *                result.json      the outcome, written last
  *
  * Why the cursor is a track and not a picture: a DOM overlay is visible to the
- * page and to its MutationObservers (plan D9, rule R4). A track beside the
+ * page and to its MutationObservers (D9 and rule R4, AIGuide §2). A track beside the
  * frames is invisible to the page and lets every viewer — the desktop watch
  * window, report.html — draw the same moving cursor.
  *

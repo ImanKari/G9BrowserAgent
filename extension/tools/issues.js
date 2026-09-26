@@ -308,7 +308,7 @@ export async function attachFile(id, { name, mime, dataBase64, note }) {
  * after it is durable.
  *
  * The cursor is not in the frames — CDP input moves no real cursor, and
- * drawing one into the page would be visible to it (plan D9). Instead every
+ * drawing one into the page would be visible to it (decision D9). Instead every
  * stored frame carries `pointer: {x, y, buttons}`, the pointer at the moment
  * the frame arrived, and stopVideo attaches the whole track as
  * `pointer-track.json`, so any viewer can draw the cursor over the frames.

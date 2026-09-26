@@ -26,7 +26,7 @@ Edge, Chrome or Chrome for Testing, headless by default (the daemon setting `hea
 with `--headed`, with its own profile under
 `G9_HOME\profiles`. It never touches the person's own browser. A headless launched browser has no
 window, so a minimised or covered window, or someone working in their own browser, does not affect
-it. That is the reason Engine 2 exists (V2 plan §2.1, D3). By the same design a locked session
+it. That is the reason Engine 2 exists (AIGuide §2.8.1, D3). By the same design a locked session
 should not affect it either — and disconnecting RDP puts the session in exactly that state (see
 docs/INSTALL.md, "Unattended machines"). **That was not measured.** A logged-off user runs nothing,
 because every G9 process lives in the user's session.

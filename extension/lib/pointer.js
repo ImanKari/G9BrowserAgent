@@ -9,10 +9,10 @@
  *
  * - the POSITION, persisted in platform.storage.session under
  *   `pointer:<tabId>`, so every humanized action starts where the last one
- *   ended (plan §6.1 "never teleport"), across service-worker restarts;
+ *   ended (docs/HUMANIZE.md, "never teleport"), across service-worker restarts;
  * - the TRACK, a timestamped ring buffer of every dispatched mouse event, which
  *   the video recorder, the live watch stream and the exporter use to draw a
- *   cursor over the frames. The cursor is never drawn in the page (plan D9):
+ *   cursor over the frames. The cursor is never drawn in the page (decision D9):
  *   a DOM overlay is visible to the page and to its MutationObservers.
  *
  * All coordinates are CSS pixels in the TOP-LEVEL viewport of the tab, the

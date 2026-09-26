@@ -229,7 +229,8 @@ Edge may show a prompt about extensions in developer mode. Keep them on: G9 is o
 
 On a managed (domain or Entra-joined) machine, IT can install the extension with the
 `ExtensionInstallForcelist` policy and a self-hosted CRX and update URL, instead of Load unpacked
-(plan §8). G9 3.0.1 ships no CRX or update manifest for that. **Not verified here.**
+(the other option is an unlisted Chrome Web Store / Edge Add-ons listing, which the browser
+updates itself). G9 3.0.1 ships no CRX or update manifest for that. **Not verified here.**
 
 ---
 
@@ -344,7 +345,7 @@ G9 does not set it: it would also change the person's own Edge, and it was not t
 ## Upgrading from G9 2.x to 3.0
 
 3.0 changed the side panel, the extension's auto-attach setting and issue index, and two messages
-from the daemon (V3_UX_PLAN.md). Nothing changed in the MCP entry, the policies, the profiles or the
+from the daemon (decisions U1–U10, AIGuide §6.10). Nothing changed in the MCP entry, the policies, the profiles or the
 engines.
 
 - **Installed app.** After the app updates itself it refreshes `G9_HOME\extension` and reloads the
@@ -381,7 +382,7 @@ unlocked, un-minimized desktop. In the P8 matrix, a minimized headed Engine 2 wi
    Autologon, which stores the password encrypted), turn off the screen lock and the screen saver
    for that account, and never use a person's own desktop. This follows Microsoft's guidance for UI
    test agents (learn.microsoft.com/azure/devops/pipelines/test/ui-testing-considerations), which
-   plan §2.5 cites. **Not verified here.**
+   AIGuide §2.8.5 cites. **Not verified here.**
 2. **Leaving an RDP session without locking it.** Disconnecting RDP locks the session — the state
    that was never measured, for headless runs too (the design says a headless browser has no window
    and so cannot be affected; nobody proved it on this machine). For headed runs, move the session

@@ -1,6 +1,6 @@
 /**
  * Per-user browser policies that keep Engine 1 (the extension in the QA's own browser) working
- * when its window is covered or its tab is in the background (V2 plan §P0.4, §2.1, §P7.3c).
+ * when its window is covered or its tab is in the background (docs/INSTALL.md "Background policies (HKCU)", AIGuide §2.8.1).
  *
  * Rules this module keeps, and why:
  *   - HKCU ONLY. Every key is asserted to start with HKCU\ before any command is built; HKLM is
@@ -19,7 +19,7 @@
  *     unelevated read. If the approval ran as a DIFFERENT Windows account, that read will not see
  *     the values, and we say so instead of reporting success.
  *   - A browser ignores a policy name it does not know (edge://policy lists it as unknown). The list
- *     is applied to both browsers as the plan specifies; which ones took effect is visible on the
+ *     is applied to both browsers as designed; which ones took effect is visible on the
  *     browser's policy page, and the view says so.
  */
 

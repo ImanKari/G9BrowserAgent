@@ -43,7 +43,7 @@ const DEFAULTS = {
    * 'off' | 'project' (only tabs on a connected agent's project sites, `projectDomains`) |
    * 'all' (every attachable tab — v2's `true`). 'project' is the default: all-tabs capture shares
    * one 10 MB storage.session quota, enables Runtime on every site and keeps the debugger bar up
-   * everywhere (V3_UX_PLAN U2). A capture filter, never an access boundary. See autoAttachMode.
+   * everywhere (U2, AIGuide §6.10). A capture filter, never an access boundary. See autoAttachMode.
    */
   autoAttach: 'project',
   /**
@@ -154,7 +154,7 @@ export const AUTO_ATTACH_MODES = Object.freeze(['off', 'project', 'all']);
 /**
  * A stored or requested auto-attach value as a v3 mode, or null when it is not one.
  *
- * v2 stored a boolean. The approved plan (V3_UX_PLAN A2) maps it: `true` → 'all' (what it meant:
+ * v2 stored a boolean. Decision U2 (AIGuide §6.10) maps it: `true` → 'all' (what it meant:
  * every attachable tab), `false` → 'off'. That keeps the choice of an install that ever wrote its
  * settings; only an install that never did gets the new default, 'project'. The mapping is applied
  * on every read, so the worker agrees with itself before migrateLegacySettings() has rewritten the

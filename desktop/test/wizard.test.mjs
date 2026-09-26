@@ -72,7 +72,7 @@ function wizard(over = {}) {
   return { w, clip, spawned };
 }
 
-t.test('five steps in the plan\'s order, none done at first', () => {
+t.test('five steps in the documented order, none done at first', () => {
   const { w } = wizard();
   assert.deepEqual(STEP_IDS, ['browsers', 'profile', 'policies', 'mcp', 'extension']);
   assert.equal(WIZARD_STEPS.length, 5);

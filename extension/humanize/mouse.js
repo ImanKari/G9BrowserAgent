@@ -1,7 +1,7 @@
 /**
  * Pointer planning: where on a target to aim, the path there, and the press.
  *
- * The model (plan §6.1), in the order a hand does it:
+ * The model (docs/HUMANIZE.md, Pointer), in the order a hand does it:
  *
  *   idle → curved, bell-velocity move (Fitts-timed, sometimes overshooting)
  *        → dwell on arrival (sometimes a 1–3 px settle) → press → hold → release
@@ -17,7 +17,7 @@
  *   scaling, multiples of 1/dpr otherwise — plan.js gridOf), a little Gaussian
  *   tremor on intermediate samples, and the final sample EXACTLY on the target.
  * - A target outside the viewport is refused (RangeError), never reached by a
- *   jump from the edge: scroll it into view first (plan §6.1, wheel.js).
+ *   jump from the edge: scroll it into view first (docs/HUMANIZE.md, wheel.js).
  * - Press and release land on the same point (≤ 1 px): any more and the
  *   browser starts a drag instead of a click.
  *
@@ -127,7 +127,7 @@ function aimRegion(profile, box, viewport) {
  * one device pixel has no grid point inside it).
  *
  * A box with nothing visible yields its (off-screen) centre, which the
- * planners then refuse: scrolling it into view is the caller's job (plan §6.1 —
+ * planners then refuse: scrolling it into view is the caller's job (docs/HUMANIZE.md —
  * by wheel, never scrollIntoView in the human levels).
  * Direct (off): the centre, unrounded — v1's pointFor.
  */

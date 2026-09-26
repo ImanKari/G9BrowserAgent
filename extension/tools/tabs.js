@@ -490,7 +490,7 @@ export async function waitForTab({ url, title, openerTabId, timeoutMs = 15_000 }
  * the debugger session all survive — which is what makes this safe mid-flow.
  * The point is visibility: a tab that is not the active one in its window is
  * hidden, and Chromium stops rendering it and silently drops CDP input
- * (plan §2.1). In its own window it stays the active tab, and with the
+ * (AIGuide §2.8.1). In its own window it stays the active tab, and with the
  * WindowOcclusionEnabled policy off it keeps rendering even when covered.
  * The one rule left is the one Chromium enforces for any window: do not
  * minimize it.

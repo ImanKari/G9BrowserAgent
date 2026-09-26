@@ -99,7 +99,7 @@ export function readFrame(runsDir, runId, file) {
   return fs.readFileSync(path.join(runDir(runsDir, runId), 'frames', name));
 }
 
-/** Save the exported video (canvas + MediaRecorder in the renderer, plan §P6.3). */
+/** Save the exported video (canvas + MediaRecorder in the renderer, ARCHITECTURE_V2 §11). */
 export function saveVideo(runsDir, runId, bytes, { maxBytes = 2 * 1024 * 1024 * 1024 } = {}) {
   const buf = Buffer.from(bytes);
   if (!buf.length) throw new Error('The recorder produced no data.');

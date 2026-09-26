@@ -1171,7 +1171,7 @@ const clampPoint = (p, vp) => ({
 
 /**
  * Where the pointer starts: where the last action left it, or — the first time
- * on a tab — a random point in the middle 60% of the viewport (plan §6.1).
+ * on a tab — a random point in the middle 60% of the viewport (docs/HUMANIZE.md).
  * "Never teleport": the first path starts there, as if the hand had been
  * resting on the mouse.
  */
@@ -1465,7 +1465,7 @@ async function dispatchKey(tabId, { key: name, modifiers = 0, repeat = 1 } = {})
 /**
  * A run of key presses at a human level as ONE plan: each press planned by
  * planKeyPress, separated by the short gap a person leaves between the keys
- * of one form (plan §6.1, 80–250 ms). Back-to-back plans with no gap put the
+ * of one form (docs/HUMANIZE.md, 80–250 ms). Back-to-back plans with no gap put the
  * next keydown on the very millisecond the previous keyup went out. Null at
  * level off (v1 dispatches directly).
  */
@@ -1665,7 +1665,7 @@ async function documentAnchor(tabId, rng, viewport, from, need) {
 /**
  * Bring an element into view the way a person does: with the wheel.
  *
- * No scrollIntoView at the human levels (plan §6.1) — a page can see a scroll
+ * No scrollIntoView at the human levels (docs/HUMANIZE.md) — a page can see a scroll
  * that no wheel produced. If the wheel cannot get there (a container that does
  * not scroll under the wheel, a page at its end), `human` falls back to a
  * programmatic scroll and SAYS so in the result; `stealth` refuses and says
@@ -2104,7 +2104,7 @@ async function humanHover(tabId, { ref, x, y, url } = {}, hz) {
 /**
  * What the page says about a field, for the typing planner and the stealth
  * focus check. A typo is never planned into a password field or a masked
- * numeric field (plan §6.3): a person's slip there is corrected, but a masked
+ * numeric field (docs/HUMANIZE.md, Keyboard): a person's slip there is corrected, but a masked
  * field reformats as you go and a wrong key can re-shuffle the whole value.
  */
 /** Page-side: the typing facts of one element (`el`), shared by both callers below. */
@@ -2131,7 +2131,7 @@ const FIELD_FACTS = `(el) => {
 /**
  * Facts that could not be read. `unknown` makes the typist plan NO typos: a
  * field G9 cannot see may be a password field, and "never in a password
- * field" (plan §6.3) does not become "unless the read failed".
+ * field" (docs/HUMANIZE.md, Keyboard) does not become "unless the read failed".
  */
 const UNKNOWN_FIELD = Object.freeze({ focused: false, password: false, numericMask: false, editable: true, unknown: true });
 
@@ -2777,7 +2777,7 @@ async function humanScroll(tabId, { ref, direction = 'down', amount = 400, x, y,
   const witness = await armWitness(tabId, ['wheel'], WITNESS_TIMEOUT_MS + plan.durationMs, node ? [node.sessionId ?? null] : [null]);
   try {
     // A stalled wheel throws here and is REPORTED: at these levels it is never
-    // replaced by a programmatic scroll (plan §6.2).
+    // replaced by a programmatic scroll (docs/HUMANIZE.md, Wheel).
     await perform(tabId, plan);
   } catch (err) {
     witness.release();

@@ -88,7 +88,7 @@ t.test('settings form: coercion errors name the field', () => {
   const browser = SETTINGS_FIELDS.find((f) => f.key === 'browser');
   assert.throws(() => coerceField(browser, 'firefox'), /choose one of auto, edge, chrome, cft/);
   assert.equal(coerceField(SETTINGS_FIELDS.find((f) => f.key === 'headless'), 'on'), true);
-  // Human input takes a level or a calibrated profile's name (plan §6.7) — kept, never coerced to a level.
+  // Human input takes a level or a calibrated profile's name (docs/HUMANIZE.md, Calibration) — kept, never coerced to a level.
   const humanize = SETTINGS_FIELDS.find((f) => f.key === 'humanize');
   assert.equal(coerceField(humanize, 'team-qa'), 'team-qa');
   assert.equal(coerceField(humanize, ' stealth '), 'stealth');

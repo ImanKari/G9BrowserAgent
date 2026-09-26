@@ -352,7 +352,7 @@ async function onProjects(msg) {
 // ------------------------------------------------------ an agent blocked by a hidden tab
 
 /**
- * (v3, V3_UX_PLAN A3) An agent's input failed because its tab is HIDDEN — the one failure the panel's
+ * (v3, U3) An agent's input failed because its tab is HIDDEN — the one failure the panel's
  * Pop out and Send to background exist for. They used to demand foresight; now the moment is
  * recorded in state.blocked (a panel opened later still sees it) and announced as
  * {type:'agentBlocked'} for a toast that offers them. Only calls the daemon relayed (an agent's):
@@ -763,7 +763,7 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         break;
       }
       case 'recordNow': {
-        // (v3) "Record from now" (V3_UX_PLAN A1): exactly attachActive/attachTab — start capture on
+        // (v3) "Record from now" (U1): exactly attachActive/attachTab — start capture on
         // this tab, make it current, lift Stop (the person's own gesture) and tell the daemon — then,
         // with reload:true, reload the tab through browser_navigate's own reload path (and its load
         // wait), so the capture holds the page load from its first request. One gesture, one

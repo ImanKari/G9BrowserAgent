@@ -9,7 +9,7 @@
  *                                    │
  *   admin (ui) ──▶ settings, schedule, runs, extension install, watch, halt, shutdown
  *
- * Why one daemon and not one bridge per agent (plan D5): v1's extension could
+ * Why one daemon and not one bridge per agent (D5, AIGuide §2.0): v1's extension could
  * talk to exactly one bridge, so the second editor window, the runner and any
  * second agent all fought over one port and one browser. Here every agent's
  * shim is a client of the same process, which owns every engine and decides —
@@ -641,7 +641,7 @@ export class Daemon {
   /**
    * The agent rows ONE extension's panel shows (DAEMON_PROTOCOL §5), tab ids as that browser's
    * Chrome ids. v3 adds who each agent is and where it works: v2 sent only `owned`, so three agents
-   * rendered as three identical rows (V3_UX_PLAN U4).
+   * rendered as three identical rows (U4, AIGuide §6.10).
    * - `project`: the folder name of the agent's project (g9.project.json's folder), else of its cwd;
    * - `current`: its current tab as THIS browser's Chrome tab id, or null;
    * - `currentEngine`: 'extension' (that tab is in this browser), 'launched' (an Engine 2 tab: no

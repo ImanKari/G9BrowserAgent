@@ -117,7 +117,7 @@ function stealthLevel(tabId) {
  * Which input profile an action runs with, and its seed.
  *
  * `args.humanize` may be a level ('off' | 'human' | 'stealth'), the name of a
- * calibrated profile saved by `saveProfile` (plan §6.7), or a profile object.
+ * calibrated profile saved by `saveProfile` (docs/HUMANIZE.md, Calibration), or a profile object.
  * Absent, the engine's per-tab default applies (the panel's input mode in the
  * extension, the context's setting on a launched engine).
  *

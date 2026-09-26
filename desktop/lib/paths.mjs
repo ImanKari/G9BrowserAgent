@@ -9,7 +9,7 @@
  *     live. Packaged: `process.resourcesPath` (electron-builder extraResources). Dev: the repo root,
  *     one level above desktop/. Both have the same layout, so nothing else branches on it.
  *
- * Keep this path-agnostic: no hard-coded backslashes (plan §P7.6); `path` does the joining.
+ * Keep this path-agnostic: no hard-coded backslashes (macOS/Linux are not supported yet, AIGuide §8.3); `path` does the joining.
  */
 
 import os from 'node:os';

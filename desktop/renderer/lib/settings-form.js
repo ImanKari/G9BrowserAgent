@@ -15,7 +15,7 @@
 
 export const LEVELS = ['off', 'human', 'stealth'];
 /**
- * A calibrated humanize profile is used by its name (plan §6.7: humanize:"team-qa"), so the
+ * A calibrated humanize profile is used by its name (docs/HUMANIZE.md, Calibration: humanize:"team-qa"), so the
  * human-input fields take a level OR such a name. The pattern is the one profile files are saved
  * under; anything else is refused by name rather than quietly replaced with a level.
  */

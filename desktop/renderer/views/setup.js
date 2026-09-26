@@ -1,5 +1,5 @@
 /**
- * Setup: the first-run wizard (plan §9), five steps, each re-runnable. The main process does the
+ * Setup: the first-run wizard (docs/INSTALL.md, "The setup wizard"), five steps, each re-runnable. The main process does the
  * work (lib/wizard.mjs); this view shows what it found, asks before anything is changed, and
  * shows the install log.
  */

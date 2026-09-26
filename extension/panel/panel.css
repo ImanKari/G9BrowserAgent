@@ -1,5 +1,5 @@
 /*
- * The side panel's one visual system (v3, V3_UX_PLAN U8).
+ * The side panel's one visual system (v3, U8 in AIGuide §6.10).
  *
  * Tokens first, then components, then the few view-specific rules. The rule
  * that held since v1.7 still holds: colour comes from the tokens, never from a

@@ -5,7 +5,7 @@
  * launched (engine/launch.js) and drives over a CDP pipe. The tools that run on
  * it are NOT a second implementation: they are the very `extension/tools/*.js`
  * modules the extension runs, imported here with `platform-cdp` selected
- * (no `chrome` global in Node). One tool layer, two engines (plan D2).
+ * (no `chrome` global in Node). One tool layer, two engines (decision D2).
  *
  * This file is the glue that makes that true:
  *   - configures platform-cdp: daemon-wide tab handles (`allocTabId` from the
@@ -464,7 +464,7 @@ export class EngineManager {
     const browser = opts.browser ?? s.defaultBrowser ?? 'auto';
     const { launch, profile, stealth: stealthMod } = await this.#engineModules();
 
-    // A profile is a PERSONA (plan §6.4 "keep one profile per persona and reuse it"): a locale or
+    // A profile is a PERSONA (docs/STEALTH.md: "keep one profile per persona"): a locale or
     // timezone given at launch is saved into its metadata, and a launch that gives none uses the
     // saved ones. It has to be this way round, because the languages below are written into the
     // profile's own Preferences and stay there: a German launch followed by a plain one would
@@ -981,7 +981,7 @@ export class EngineManager {
   }
 
   /**
-   * Per-target defaults (plan P2.4): focus emulation always — a headless page
+   * Per-target defaults (as Playwright does, AIGuide §2.8.1): focus emulation always — a headless page
    * otherwise reports no focus, and focus-dependent UI behaves unlike a
    * person's browser; locale/timezone only when the context asked for them
    * (setting them "to the default" is itself a fingerprint).
@@ -1555,7 +1555,7 @@ export class EngineManager {
   // ------------------------------------------------------------ handoff
 
   /**
-   * Receive a tab from Engine 1 (ARCHITECTURE §7, plan P3.5): cookies into a
+   * Receive a tab from Engine 1 (ARCHITECTURE §7): cookies into a
    * context, one-shot storage seeding in G9's isolated world, navigate, remove
    * the seeding script after load.
    */

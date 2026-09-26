@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Stealth self-test — the pre-suite gate of V2_IMPLEMENTATION_PLAN §6.6.
+ * Stealth self-test — the pre-suite gate (docs/STEALTH.md, "Running the self-test").
  *
  *   node setup/stealthtest.mjs                      one run: Edge (auto), headless, stealth
  *   node setup/stealthtest.mjs --headed             headed, window parked off-screen
@@ -86,7 +86,7 @@
  * browser profiles (unless --home is passed explicitly), headed browsers only off-screen
  * (--window-position=-32000,-32000) so a window can never take the keyboard from a person.
  *
- * Profiles: stealth runs never start on a fresh profile (plan §6.4 "warm profile"). Unless --no-warm,
+ * Profiles: stealth runs never start on a fresh profile (docs/STEALTH.md, "warm profile"). Unless --no-warm,
  * each browser kind's persona profile is warmed first in a separate launch (a few ordinary pages,
  * cookies and history written to disk), stopped, and then reused by every configuration.
  *

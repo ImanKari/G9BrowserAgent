@@ -1,7 +1,7 @@
 # Stealth — what G9 can hide, what it cannot, and how to check
 
-This is the owner-facing guide that plan §6.8 asks for (V2_IMPLEMENTATION_PLAN §6.8, P5 item 6). The
-specification is plan §6. The code is:
+This is the owner-facing guide to the stealth levels (decision D10, AIGuide §2.0), and their
+specification. The code is:
 - `engine/stealth.js` and `engine/launch.js`: the environment;
 - `extension/lib/humanize.js` and `extension/humanize/`: behaviour (see `docs/HUMANIZE.md`);
 - `setup/stealthtest.mjs`: the self-test.
@@ -28,7 +28,7 @@ every site. An install upgraded from 2.x keeps its setting.
 | **this guide's run** | `node setup/stealthtest.mjs --local-only --browser edge`: 1 run of `edge-headless-stealth` on the final code, 14:51–14:53 UTC. |
 | **final pass (2.0.1)** | 2026-09-23, on the 2.0.1 code: `setup/stealthtest.mjs --matrix` over all 7 configurations, twice — once on the local page alone, once with the public pages — with the same verdicts both times (AIGuide §9, the 2.0.1 entry). |
 
-## First, the five things to know (plan §6.8)
+## First, the five things to know
 
 1. **Behaviour can be made indistinguishable; environment can only be made consistent. Both are
    needed.** A human-like mouse in a browser that says "HeadlessChrome" is still caught.
@@ -183,7 +183,7 @@ Host facts that show on every run and are not G9's:
 - `navigator.connection` varied between slow-2g and 4g.
 
 **So headless is detected by every public detector; run stealth-critical suites headed**, on a
-dedicated desktop (plan §6.4). The measured headed windows were parked off-screen at −32000, so
+dedicated desktop ([the environment checklist](#the-environment-checklist)). The measured headed windows were parked off-screen at −32000, so
 `screenX/Y` read −32000. That is the harness's choice, not something to copy into a real run.
 
 ### What no level removes (inherent)
@@ -277,7 +277,7 @@ How the popup and frame fixes work:
 
 ## Profiles: warm, per persona, and NOT signed in to a browser account
 
-- **Never start a stealth run on a fresh profile** (plan §6.4). Warm it once:
+- **Never start a stealth run on a fresh profile** (the environment checklist, point 4). Warm it once:
   `browser_engine action:"warm" profile:"<name>"` opens it headed, and a person signs in to the
   **sites** the runs need and closes the window.
 - **One profile per persona.**
@@ -319,8 +319,8 @@ the browser with the G9 extension against the same browser without it:
   `155ms:1256x763, 165ms:1256x760`. All 15 G9-driven loads showed it.
 
 This is the browser's doing, not a G9 command, and G9 cannot remove it. A person's browser does not
-run with the switch that hides the infobar (`--silent-debugger-extension-api`). Plan §8 expects a
-policy-installed (`ExtensionInstallForcelist`) extension to avoid the infobar; that was **not
+run with the switch that hides the infobar (`--silent-debugger-extension-api`). A
+policy-installed (`ExtensionInstallForcelist`) extension should avoid the infobar (AIGuide §2.8.2); that was **not
 measured**.
 
 So **`stealth` on Engine 1 means stealth INPUT rules and not a clean environment**:
@@ -396,7 +396,7 @@ node setup/stealthtest.mjs --only sannysoft,creepjs
 - `1`: anything else, which includes every headless stealth run, because of its user agent;
 - `2`: the harness could not run.
 
-A broken extractor for a public page is a warning, while a detected verdict is a failure (plan §6.6).
+A broken extractor for a public page is a warning, while a detected verdict is a failure.
 
 **Options:**
 

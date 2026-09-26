@@ -794,7 +794,7 @@ async function main() {
       title: document.title,
       tabs: document.querySelectorAll('button[data-tab]').length,
       sessionBody: !!document.querySelector('[data-body="session"]'),
-      // v3 (V3_UX_PLAN A1-A3): Record from now replaces the Attach button; auto-attach has three
+      // v3 (U1–U3): Record from now replaces the Attach button; auto-attach has three
       // settings; the blocked-agent toast has its place above the tab bar.
       recordControl: !!document.getElementById('recordNow') && !document.getElementById('attachActive'),
       autoModes: [...document.querySelectorAll('input[name="autoAttach"]')].map((r) => r.value).join(','),

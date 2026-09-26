@@ -15,7 +15,7 @@
  *   for the capture: the page got 1–2 `resize` events, and in 27 of 50 runs
  *   saw a transient innerWidth × innerHeight of 1 × 1.
  * - the element path called `scrollIntoView` — a programmatic scroll no wheel
- *   produced, which plan §6.1 rules out at the human levels — and left the
+ *   produced, which docs/HUMANIZE.md rules out at the human levels — and left the
  *   page scrolled there (0 → 656 → 1411 → 656), changing what the next action
  *   saw.
  *

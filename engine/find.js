@@ -1,6 +1,6 @@
 // engine/find.js — which real browsers are on this machine, where, and which version.
 //
-// Engine 2 drives stock Edge, Chrome or Chrome for Testing (plan D1). This module answers three
+// Engine 2 drives stock Edge, Chrome or Chrome for Testing (decision D1, AIGuide §2.0). This module answers three
 // questions without touching any browser profile and without starting a browser (the one
 // exception, a last-resort `--version` probe for CfT, runs headless on a throwaway profile):
 //   findBrowsers()        every installed candidate, with its version
@@ -373,7 +373,7 @@ export async function resolveBrowser(kind = 'auto', { home, env = process.env } 
 
 /**
  * The browsers' DEFAULT user-data directories on this machine. Engine 2 never launches on one of
- * these (plan §2.1: Chrome 136+ ignores --remote-debugging-pipe on the default dir anyway, and
+ * these (AIGuide §2.8.1: Chrome 136+ ignores --remote-debugging-pipe on the default dir anyway, and
  * App-Bound Encryption means a person's cookies are useless to another process), and never on a
  * directory inside one.
  */

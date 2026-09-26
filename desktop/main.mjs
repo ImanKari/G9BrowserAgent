@@ -1,5 +1,5 @@
 /**
- * G9 desktop — the Electron main process (ARCHITECTURE_V2 §11, V2 plan §P7).
+ * G9 desktop — the Electron main process (ARCHITECTURE_V2 §11).
  *
  * The shell, never the engine (D4, R5): Electron's Chromium only ever loads this app's own renderer
  * files, served from the private `g9app://app/` scheme. There is no BrowserView, no <webview>, no
@@ -127,7 +127,7 @@ async function startApp() {
     // G9_CHECK_THEME=light|dark renders the check in that scheme regardless of the OS setting.
     if (['light', 'dark'].includes(process.env.G9_CHECK_THEME)) nativeTheme.themeSource = process.env.G9_CHECK_THEME;
     // The check window sits off-screen and transparent; keep Chromium painting it anyway
-    // (the same occlusion rules the plan's §2.1 is about, applied to our own window).
+    // (the same occlusion rules as AIGuide §2.8.1, applied to our own window).
     app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
     app.commandLine.appendSwitch('disable-renderer-backgrounding');
     app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');

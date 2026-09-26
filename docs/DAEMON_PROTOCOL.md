@@ -6,11 +6,11 @@ WebSocket each. Messages are single JSON objects in text frames. Maximum frame (
 message): 64 MiB. Implementation: `daemon/` (entry `daemon/g9d.mjs`), shim `mcp/shim.mjs`, Node client
 `lib/ws-client.mjs`.
 
-**Synced with the code on 2026-09-25 (v3.0.1; 3.0.0 was the side panel of V3_UX_PLAN.md, 3.0.1 changed no message).** Every message, field and
+**Synced with the code on 2026-09-25 (v3.0.1; 3.0.0 was the side panel, U1–U10 in AIGuide §6.10; 3.0.1 changed no message).** Every message, field and
 default below was re-read from `daemon/`, `mcp/shim.mjs`, `extension/sw.js` and `extension/lib/transport.js`.
 Text marked ***(as built)*** records something the implementation has that this document did not say;
 the rest was already accurate or has been corrected in place. Text marked ***(v3)*** was added for the
-v3 side panel (V3_UX_PLAN.md): the `projects` message and the richer `agents` rows (§5).
+v3 side panel (U1–U10, AIGuide §6.10): the `projects` message and the richer `agents` rows (§5).
 
 ## 1. Transport
 

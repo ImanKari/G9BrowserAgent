@@ -1,5 +1,5 @@
 /**
- * The first-run wizard (V2 plan §9, §P7.3) — five steps, each re-runnable from the Setup view:
+ * The first-run wizard (docs/INSTALL.md, "The setup wizard") — five steps, each re-runnable from the Setup view:
  *
  *   1. browsers   detect Edge/Chrome; offer the pinned Chrome for Testing (admin engines.installCft)
  *   2. profile    ensure the 'automation' profile and open it headed once for sign-in (profiles.warm)

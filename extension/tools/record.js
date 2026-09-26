@@ -45,7 +45,7 @@
  * script buffers events emitted before its binding exists and hands them over
  * when it appears, so the first click on a fresh page is not lost to that gap.
  *
- * ## Raw input samples, for humanize calibration (plan §6.7)
+ * ## Raw input samples, for humanize calibration (docs/HUMANIZE.md)
  *
  * Alongside the step events the script samples the person's hand: pointer
  * movement (≈60 Hz), presses and releases with the target's size, wheel
@@ -666,7 +666,7 @@ export async function inputSamplesOf(recordingId) {
 
 /**
  * Fit a humanize profile from one or more recordings of a real person
- * (plan §6.7) and, when `name` is given, save it so actions can use it with
+ * (docs/HUMANIZE.md, Calibration) and, when `name` is given, save it so actions can use it with
  * `humanize: "<name>"`. Never fabricates: a parameter without enough samples
  * keeps the base profile's value, and the report says which.
  */

@@ -2,7 +2,7 @@
 //
 // A profile is a browser user-data-dir that G9 owns. It is never a person's own browser profile:
 // Chrome 136+ refuses remote debugging on the default dir, and App-Bound Encryption (Chrome 127+)
-// makes a person's cookies undecryptable by any other process or copy (plan §2.1). So a site login
+// makes a person's cookies undecryptable by any other process or copy (AIGuide §2.8.1). So a site login
 // for Engine 2 is made ONCE, by a person, in a headed window on the G9 profile — warm() — and then
 // reused by every run on that profile. The same fact means a profile copied to another machine
 // loses its cookies; profiles are per machine.
@@ -214,7 +214,7 @@ export function deepMerge(base, patch) {
  * Merge `prefs` into <profile>/Default/Preferences (creating it for a fresh profile; Chrome reads
  * a pre-seeded file on first start). → the merged Preferences object.
  *
- * Useful prefs (plan P2.6): `intl.accept_languages`, `download.default_directory`,
+ * Useful prefs: `intl.accept_languages`, `download.default_directory`,
  * `download.prompt_for_download`, `spellcheck.dictionaries`,
  * `profile.default_content_setting_values.notifications` (2 = block), `credentials_enable_service`,
  * `translate.enabled`. Prefs that Chrome protects with a MAC in "Secure Preferences" (homepage,
@@ -236,7 +236,7 @@ export async function applyPreferences(name, prefs, { home = g9Home() } = {}) {
   }
   const merged = deepMerge(current, expandPrefs(prefs));
   await writeJsonAtomic(file, merged);
-  // The engine manager checks locale / timezone / Accept-Language for consistency (plan §6.4) from
+  // The engine manager checks locale / timezone / Accept-Language for consistency (docs/STEALTH.md) from
   // the profile's METADATA — it cannot open Preferences while the browser runs. Keep the language
   // list there too, so what the check sees is what the browser sends.
   const acceptLanguage = merged?.intl?.accept_languages;

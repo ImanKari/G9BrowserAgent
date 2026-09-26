@@ -1,5 +1,5 @@
 /**
- * One version for the whole product (ARCHITECTURE §2, plan D12).
+ * One version for the whole product (ARCHITECTURE §2, D12).
  *
  * v1 announced its version in three places and they drifted (v1.7.13): the
  * bridge warned people to reload an extension that was already correct. The

@@ -5,7 +5,7 @@
  * site below — a form held open while the page moves on underneath it collects
  * a screenshot of the aftermath.
  *
- * ## v3 (V3_UX_PLAN part C)
+ * ## v3 (U7, AIGuide §6.10)
  *
  * The index now carries site, severity, tags and what evidence each issue holds
  * (lib/store.js issueIndexEntry), so the list is grouped by site then status,
@@ -39,7 +39,7 @@ const SEVERITIES = ['blocker', 'major', 'normal', 'minor'];
 const SEVERITY_NAMES = { blocker: 'Blocker', major: 'Major', normal: 'Normal', minor: 'Minor' };
 const NO_SITE = 'none';
 
-// An entry written before v3 has no severity: it reads as "normal" (plan C1).
+// An entry written before v3 has no severity: it reads as "normal" (U7).
 const severityOf = (i) => (SEVERITIES.includes(i?.severity) ? i.severity : 'normal');
 const statusOf = (i) => (typeof i?.status === 'string' && i.status ? i.status : 'open');
 const siteKeyOf = (i) => i?.site ?? siteOf(i?.url) ?? NO_SITE;

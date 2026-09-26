@@ -1,5 +1,5 @@
 /**
- * Wheel scrolling (plan §6.2).
+ * Wheel scrolling (docs/HUMANIZE.md, Wheel).
  *
  * A person scrolls a notched wheel: whole notches (100 px each in Chrome on
  * Windows at the default 3-line setting), flicked in bursts of 2–5 with

@@ -1,16 +1,16 @@
 # G9 v2 — Architecture and internal contracts
 
 This file is the **binding contract** between the modules of G9 v2. It refines
-[V2_IMPLEMENTATION_PLAN.md](../V2_IMPLEMENTATION_PLAN.md): where the two disagree, this file wins for
+the design recorded in [AIGuide.md](../AIGuide.md) §2 (decisions D1–D12, rules R1–R9): where the two disagree, this file wins for
 module boundaries, function signatures, message formats and file locations. Every implementer codes
 against the signatures below; if a signature has to change, change it here in the same change set.
 
 Version for everything in this release: **3.0.0**, read from the root `package.json`. (2.0.0 was the first complete build, 2.0.1 added the
 adversarial review's 40 fixes, 2.0.2 fixed three defects that flaky tests uncovered and sized the browser close budget from a
-measurement, 2.0.3 fixed the side panel's popout, and 3.0.0 is the side-panel redesign of V3_UX_PLAN.md,
+measurement, 2.0.3 fixed the side panel's popout, and 3.0.0 is the side-panel redesign (U1–U10, AIGuide §6.10),
 marked ***(v3)*** below.)
 
-**Synced with the code on 2026-09-25 (v3.0.1; 3.0.0 was the side panel of V3_UX_PLAN.md, 3.0.1 changed no contract).** Signatures, messages, fields
+**Synced with the code on 2026-09-25 (v3.0.1; 3.0.0 was the side panel, U1–U10 in AIGuide §6.10; 3.0.1 changed no contract).** Signatures, messages, fields
 and defaults below were re-read from the implementation. Text marked ***(as built)*** records something
 the code has that the original contract did not (an addition, or a behaviour that changed after the
 contract was written); everything else was already accurate or has been corrected in place. The wire
@@ -18,20 +18,20 @@ protocol is in [DAEMON_PROTOCOL.md](DAEMON_PROTOCOL.md), synced the same day.
 
 ---
 
-## 0. Deviations from the plan (and why)
+## 0. Deviations from the design (and why)
 
-| Plan said | v2 does | Why |
+| The design said | v2 does | Why |
 |---|---|---|
 | `humanize/` at the repo root | **`extension/humanize/`** | An unpacked extension cannot import a file outside its own folder. The daemon imports it from there, exactly as it imports `extension/tools/*`. One copy, two consumers. |
 | `bridge/` deleted | `bridge/` deleted **except** `bridge/src/server.js`, a 9-line forwarder to `mcp/shim.mjs` | Every QA machine's MCP config written by v1's `install.ps1` points at `bridge/src/server.js`. The forwarder keeps those configs working; nothing else lives there. |
-| Seven intermediate versions 1.8.0 … 1.14.0 | One release, **2.0.0**, then 2.0.1 the review fixes, 2.0.2 the flaky-test round, 2.0.3 the popout fix; now **3.0.0**, the side panel (V3_UX_PLAN.md) | The owner asked for the whole plan in one phase; every change after it bumps the version (D12). |
+| Seven intermediate versions 1.8.0 … 1.14.0 | One release, **2.0.0**, then 2.0.1 the review fixes, 2.0.2 the flaky-test round, 2.0.3 the popout fix; now **3.0.0**, the side panel (U1–U10) | The owner asked for the whole design in one release; every change after it bumps the version (D12). |
 | "No origin games beyond 127.0.0.1" | The daemon still refuses WebSocket upgrades whose `Origin` is `http(s)://…` | A web page in the QA's own browser is not local; without this any site could drive every tab. Extension origins and origin-less native clients (shim, desktop, runner) are accepted with no token. This restricts nothing the owner asked for. |
 | `visual.js` decodes screenshots with OffscreenCanvas | Image work goes through `platform.image` | Node has no image decoder and v2 has no dependencies. Engine 2 decodes inside the launched browser itself. |
 | §P2.2: no `AutomationControlled` switch, ever | **Decision D-a.** At stealth level `stealth` only, `stealth.launchArgsFor('stealth')` = `['--disable-blink-features=AutomationControlled']`; `launchBrowser` accepts it there and still refuses it in `extraArgs` at `off`/`human`, and refuses `--enable-automation` always. Every **headless** launch, at every level, also gets `--screen-info={W×H workAreaBottom=48}` — the screen is `windowSize`, with a Windows taskbar — and a `--window-size` that fills the work area, W×(H−48) ***(as built: the taskbar was added after live round 2)***. | Measured on Edge 153, Chrome 153 and CfT 153: `--remote-debugging-pipe` itself makes `navigator.webdriver === true`; only this switch clears it (`Emulation.setAutomationOverride` does not). Headless otherwise reports an 800×600 screen inside a 1920×1080 window, and no work area (`availHeight === height`, 30/30 headless runs). The owner requires stealth runs to be undetectable. `off`/`human` keep telling the truth, and `launchWarnings()` says so. |
 | Input level = the call's `humanize` (else the default) | **Decision D-b.** The effective level is the STRICTER of the humanize level and the tab's `platform.settings.stealthFor(tabId)` (off < human < stealth). | A stealth context with `humanize:"human"` fell back to `DOM.focus` and programmatic scrolling — the shortcuts stealth promises never to use. ***(as built)*** In the extension `humanizeFor` is the panel's Input setting (the DEFAULT level) and `stealthFor` is `'stealth'` only when the panel says Stealth, else `'off'`: only Stealth is a floor there — at Human or Direct an agent's `humanize:"off"` gives direct input. |
 | An engine is its socket | **Decision D-c.** The extension sends a random `instanceId` (generated once, `storage.local`); the daemon keeps a disconnected extension's engine id, handles, claims, sessions and current tabs for 10 minutes and gives them back when the same `instanceId` reconnects. | MV3 restarts the worker when it likes and the desktop reloads the extension after every update: each reshuffled every handle, and agents lost their tabs mid-task. |
-| Launch switches: exactly plan §P2.2 | ***(as built)*** Also `msImplicitSignin` in `--disable-features` and `--disable-sync`; `--disable-component-update` is left out at stealth `stealth` and when a profile is warmed; `--disable-frame-rate-limit` for Chrome for Testing only (`engine/launch.js` `DISABLED_FEATURES`, `FIXED_SWITCHES`, `fixedSwitchesFor`, `KIND_SWITCHES`). | Measured on Edge 153: fresh profiles signed themselves into the Windows account and synced it (passwords, history, extensions); `--disable-component-update` removed Widevine, a classic automation tell; CfT 153's renderer ran at 10 Hz (100 ms between frames and mouse events), re-confirmed 2026-09-23 in an interleaved A/B (100.5 ms in 8/8 launches without the switch, 17.4 ms in 12/12 with it). |
-| Browser-level auto-attach with `waitForDebuggerOnStart:false` (plan §P2.3) | ***(as built)*** `waitForDebuggerOnStart:true`: every new target is held, prepared (`prepareTab`/`prepareChild`, §3.2) and then resumed. | A `window.open()` popup under browser-level auto-attach wedged its opener (18/18, Edge and Chrome 153); a page-opened tab and a cross-site iframe need the persona and the tool layer's domains before their first script. |
+| Launch switches: exactly the designed list | ***(as built)*** Also `msImplicitSignin` in `--disable-features` and `--disable-sync`; `--disable-component-update` is left out at stealth `stealth` and when a profile is warmed; `--disable-frame-rate-limit` for Chrome for Testing only (`engine/launch.js` `DISABLED_FEATURES`, `FIXED_SWITCHES`, `fixedSwitchesFor`, `KIND_SWITCHES`). | Measured on Edge 153: fresh profiles signed themselves into the Windows account and synced it (passwords, history, extensions); `--disable-component-update` removed Widevine, a classic automation tell; CfT 153's renderer ran at 10 Hz (100 ms between frames and mouse events), re-confirmed 2026-09-23 in an interleaved A/B (100.5 ms in 8/8 launches without the switch, 17.4 ms in 12/12 with it). |
+| Browser-level auto-attach with `waitForDebuggerOnStart:false` | ***(as built)*** `waitForDebuggerOnStart:true`: every new target is held, prepared (`prepareTab`/`prepareChild`, §3.2) and then resumed. | A `window.open()` popup under browser-level auto-attach wedged its opener (18/18, Edge and Chrome 153); a page-opened tab and a cross-site iframe need the persona and the tool layer's domains before their first script. |
 | Later tabs of a context join its window, as a person's would (F1) | ***(as built)*** Every page G9 opens (`createTab`) gets a window of its own; a page the PAGE opens still joins its opener's window, and a tab left behind another in its real window is brought forward on a headless engine (`tabs.ensureFront`). | A tab behind another in its window is rendered about once per 1.5 s even headless: a humanized click took 85 s, a screenshot 46 s (P8 matrix, round 2); after the change, 4.3 s and 83–115 ms (round 3). |
 
 ---
@@ -629,7 +629,7 @@ validateProfile(obj): string[]                                // also: level and
 // QWERTY_NEIGHBOURS, MIN_SAMPLES, PROFILE_SCHEMA, LEVELS, notchesFor, hashSeed, BUTTONS, buttonName, shiftedOf
 ```
 
-Profile values are the §6 defaults of the plan, stored in `extension/humanize/profiles.js`
+Profile values are the defaults of [HUMANIZE.md](HUMANIZE.md), stored in `extension/humanize/profiles.js`
 (`off` = single-event plans that reproduce v1's direct dispatch exactly — including v1's 12 ms
 per-character typing delay, `keyboard.directDelayMs`, and its 12-move drag; `delayMs:0` for none).
 
@@ -662,7 +662,7 @@ appendVersionLog({ home, event, kind, version, sha256?, trigger?, ...key=value }
 // additive: status({ checkLatest }), acquireLock, LOCK_TIMING, crc32, crc32Js; (as built) also pin, uninstall,
 // latestStable, downloadUrl, download (ranged resume; the other address family is retried on HTTP 403),
 // hashFile, systemTar, listZip, extractZip, extractZipJs, cachedZipPath, ENDPOINTS. versions.json is richer than
-// the plan's sketch: { 'chrome-for-testing': { channel, version, revision, pinnedAt, trust, source,
+// the design's sketch: { 'chrome-for-testing': { channel, version, revision, pinnedAt, trust, source,
 // downloads: { win64: { url, size, sha256, serverMd5 } } } }
 
 // engine/pipe-cdp.js
@@ -700,7 +700,7 @@ screenInfoSwitch({ width, height }, { workAreaBottom = 0 } = {}): '--screen-info
 // --disable-blink-features naming AutomationControlled at off/human (decision D-a: accepted, and merged, at stealth).
 // additive: commandLineUsesProfile, findProfileProcesses, killTree, normalizeProxy, parseProduct; (as built, 2.0.2)
 // GRACEFUL_EXIT_MS (30 000)
-// (as built) DISABLED_FEATURES (plan list + 'msImplicitSignin'), FIXED_SWITCHES (plan list + '--disable-sync'),
+// (as built) DISABLED_FEATURES (designed list + 'msImplicitSignin'), FIXED_SWITCHES (designed list + '--disable-sync'),
 // COMPONENT_UPDATE_SWITCH, fixedSwitchesFor({ componentUpdate }), DEFAULT_WINDOW (1920×1080),
 // KIND_SWITCHES ({ cft: ['--disable-frame-rate-limit'] }), HEADLESS_TASKBAR (48 on Windows, else 0),
 // headlessGeometry(size) → { screen, window, workAreaBottom }
@@ -774,7 +774,7 @@ class EngineManager {
 // except the waits (holdsSlot).
 ```
 
-***(as built)*** Launch switches are plan §P2.2 with the changes of §0: `msImplicitSignin` added to
+***(as built)*** Launch switches are the designed list ([engine/README.md](../engine/README.md)) with the changes of §0: `msImplicitSignin` added to
 `--disable-features`, `--disable-sync` added, `--disable-component-update` omitted at stealth `stealth` and
 when warming, `--disable-frame-rate-limit` for CfT only, the headless geometry (`--window-size` = the work
 area, `--screen-info={W×H workAreaBottom=48}`), and `stealth.launchArgsFor(level)` (decision D-a).

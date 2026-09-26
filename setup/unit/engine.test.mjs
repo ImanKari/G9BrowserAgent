@@ -565,7 +565,7 @@ test('stealth: checkConsistency — consistent settings pass, each kind of contr
 
 // ─── launch (pure parts) ─────────────────────────────────────────────────────────────────────
 
-test('launch: the switch list is exactly plan §P2.2 (+ the Edge sign-in guards, + stealth, + extraArgs, + start URL)', () => {
+test('launch: the switch list is exactly the designed list (+ the Edge sign-in guards, + stealth, + extraArgs, + start URL)', () => {
   const dir = path.join(TEMP_ROOT, 'p');
   const args = launch.buildArgs({ profileDir: dir });
   const taskbar = launch.HEADLESS_TASKBAR;

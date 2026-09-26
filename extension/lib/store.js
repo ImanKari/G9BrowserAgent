@@ -297,7 +297,7 @@ export async function saveIssue(issue) {
 
 /**
  * What an issue's attachments and captured context hold, for the list's evidence chips (v3,
- * V3_UX_PLAN C2) — so the QA sees whether an issue is worth opening without opening it. Counted
+ * U7, AIGuide §6.10) — so the QA sees whether an issue is worth opening without opening it. Counted
  * from attachment METADATA (kind, mime, name; never the bytes): tools/issues.js files screenshots
  * as kind 'screenshot', videos as 'video', a person's own files as 'file', and the captured context
  * as 'evidence' text files (console.log, failed-requests.log, page-context.json and, when the page

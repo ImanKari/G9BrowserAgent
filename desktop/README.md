@@ -1,7 +1,7 @@
 # G9 desktop
 
 The G9 v2 desktop app: a tray icon, a window to watch and steer what the agents do, the first-run
-setup, the installer and the updater. It is **the shell, never an engine** (plan D4, R5): Electron's
+setup, the installer and the updater. It is **the shell, never an engine** (D4 and R5, AIGuide §2): Electron's
 Chromium only ever shows this app's own screens. Pages under test run in real Edge, Chrome or Chrome
 for Testing that the daemon (`g9d`) launches; the Watch view shows their screencast frames on a
 `<canvas>` and draws the cursor from the pointer track. Nothing you click there reaches the page.
@@ -77,7 +77,7 @@ Flags of `main.mjs`:
 | Setup | The first-run wizard, runnable again at any time. |
 
 Human input (Settings, the launch form, the schedule form) takes a level (`off`, `human`, `stealth`)
-or the name of a calibrated profile (plan §6.7, e.g. `team-qa`); a stored name is shown and kept.
+or the name of a calibrated profile (docs/HUMANIZE.md, Calibration; e.g. `team-qa`); a stored name is shown and kept.
 
 The Agents view's activity log shows each call once: the daemon's record, with the agent's name and
 what it did. An engine's own copy of an agent's call is dropped; a person's own action in the side

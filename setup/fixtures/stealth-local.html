@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Stealth self-test - local detector</title>
 <!--
-  The local half of the stealth self-test (V2_IMPLEMENTATION_PLAN §6.6, setup/stealthtest.mjs).
+  The local half of the stealth self-test (docs/STEALTH.md, setup/stealthtest.mjs).
 
   This page is a detector written against G9 itself: it looks for what G9 controls and could leak
   (a global or DOM helper in the main world, the Runtime-domain console side channel, main-world
@@ -471,7 +471,7 @@
   // ---- checks ------------------------------------------------------------------------------------
   // status: pass | fail | warn | info. cls says who could fix a failure:
   //   g9        something G9 does or could do (a leak, a broken promise)
-  //   headless  inherent to headless Chromium (plan §6.4: run stealth-critical suites headed)
+  //   headless  inherent to headless Chromium (docs/STEALTH.md: run stealth-critical suites headed)
   //   cdp       inherent to CDP input on this Chromium build
   //   host      a fact of this machine (its timezone, its devices)
   //   harness   caused by how the self-test launched the browser (off-screen window)
@@ -698,7 +698,7 @@
       check('screenXY-vs-window', plausible ? 'pass' : 'fail', 'cdp', { screenMinusClient: offsetList, windowScreenX: win.screenX, windowScreenY: win.screenY, outerMinusInner: [uiW, uiH] },
         plausible ? '' : 'mouse event screenX/Y minus clientX/Y does not match where the window and its UI are');
       // The cadence of the hand while it moves: every gap between consecutive mousemoves except the
-      // idle between two actions (> 250 ms). Plan §6.1 samples every 8-16 ms and Chromium delivers
+      // idle between two actions (> 250 ms). docs/HUMANIZE.md samples every 8-16 ms and Chromium delivers
       // at most one mousemove per frame, so a person's mouse on a 60 Hz screen shows ~16-17 ms; a
       // median far above that means each move lands in a bigger jump than a hand makes.
       const intervals = [];
@@ -707,7 +707,7 @@
       const pct = (a, p) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(p * s.length))]; };
       summary.moveIntervalMs = { median: round(median(intervals)), p10: round(pct(intervals, 0.1)), p90: round(pct(intervals, 0.9)), max: intervals.length ? round(Math.max(...intervals)) : null, n: intervals.length, zeroGaps };
       const mi = median(intervals);
-      check('move-interval', !intervals.length ? 'info' : (mi >= 4 && mi <= 30 ? 'pass' : 'warn'), 'g9', summary.moveIntervalMs, mi > 30 ? 'the pointer moves in bigger, slower jumps than a hand at 60 Hz (plan §6.1: a sample every 8-16 ms)' : '');
+      check('move-interval', !intervals.length ? 'info' : (mi >= 4 && mi <= 30 ? 'pass' : 'warn'), 'g9', summary.moveIntervalMs, mi > 30 ? 'the pointer moves in bigger, slower jumps than a hand at 60 Hz (a sample every 8-16 ms)' : '');
       const pmoves = ev.filter((e) => e.ty === 'pointermove' && e.co != null);
       summary.coalescedMin = pmoves.length ? Math.min(...pmoves.map((e) => e.co)) : null;
       // How many raw moves each delivered pointermove stood for: a mouse polled faster than the
@@ -759,7 +759,7 @@
       summary.pointerPressMs = pd && pu ? round(pu.t - pd.t) : null;
       check('press-duration', summary.pressMs != null && summary.pressMs >= 30 && summary.pressMs <= 400 ? 'pass' : 'fail', 'g9',
         { timeStampMs: summary.pressMs, handlerMs: summary.pressHandlerMs, pointerMs: summary.pointerPressMs, downQueuedMs: down && down.hd != null ? round(down.hd - down.t) : null, upQueuedMs: up && up.hd != null ? round(up.hd - up.t) : null },
-        'mousedown to mouseup (event timeStamps, ms); plan §6.1 holds 60-140 ms');
+        'mousedown to mouseup (event timeStamps, ms); a hand holds 60-140 ms');
       // The approach: moves since the previous non-move action.
       let startIdx = 0;
       for (let i = downIdx - 1; i >= 0; i--) {
@@ -770,7 +770,7 @@
       check('moves-before-click', approach.length >= 5 ? 'pass' : 'fail', 'g9', approach.length, 'mousemove events on the way to the button');
       if (approach.length) {
         // Dwell = arrival to press. "Arrival" is the last move more than 3 px from where the button
-        // went down: plan §6.1 allows a 1-3 px settle drift during the dwell, which may come late.
+        // went down: the model allows a 1-3 px settle drift during the dwell, which may come late.
         const arrival = [...approach].reverse().find((m) => Math.hypot(m.cx - down.cx, m.cy - down.cy) > 3) ?? approach[0];
         summary.dwellMs = round(down.t - arrival.t);
         summary.lastMoveToPressMs = round(down.t - approach[approach.length - 1].t);

@@ -1,5 +1,5 @@
 /**
- * Registering the G9 MCP shim with the AI clients on this machine (V2 plan §P7.2, §9 step 1).
+ * Registering the G9 MCP shim with the AI clients on this machine (docs/INSTALL.md, "AI clients (MCP registration)").
  *
  * The entry is always named 'g9-browser' (the name v1's install.ps1 used, so a v1 entry is
  * recognised and offered for replacement rather than duplicated).
@@ -27,7 +27,7 @@ import { writeTextAtomic } from './jsonfile.mjs';
 
 export const ENTRY_NAME = 'g9-browser';
 
-/** The four clients the plan names, with where their user-level config lives. Pure. */
+/** The four clients G9 registers with, with where their user-level config lives. Pure. */
 export function mcpClients({ home = os.homedir(), appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming') } = {}) {
   return [
     {

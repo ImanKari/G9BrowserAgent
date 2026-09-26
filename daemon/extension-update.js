@@ -1,5 +1,5 @@
 /**
- * Keeping the unpacked extension current (plan §8, "Extension (unpacked)").
+ * Keeping the unpacked extension current (docs/INSTALL.md, "The extension: load once, updated by reload").
  *
  * The extension a QA loads with "Load unpacked" lives at a STABLE path,
  * `G9_HOME/extension`: an unpacked extension's id is derived from its folder

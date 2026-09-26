@@ -424,7 +424,7 @@ await test('every element the scripts reach for exists, once', () => {
   }
   assert.match(panelHtml, /Do not minimise it/);
   assert.match(panelHtml, /reloads there with its cookies and storage/);
-  // Stealth's real cost (plan §6.8 point 4) is named where it is chosen.
+  // Stealth's real cost (docs/STEALTH.md, the five things to know, point 4) is named where it is chosen.
   assert.match(panelHtml, /<b>Stealth<\/b>[^<]*<span class="muted">[^<]*console capture off/);
   // Decision D-b in the person's own browser: only Stealth is a floor; Human and
   // Direct are defaults an agent's humanize can change. Each option says which.

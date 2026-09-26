@@ -44,7 +44,7 @@ async function resetPageState(tabId) {
 }
 
 /**
- * The post-load human idle (plan §6.4): a person looks at a page that has just
+ * The post-load human idle (docs/HUMANIZE.md, Gaps between actions): a person looks at a page that has just
  * loaded before they act on it, and an action at millisecond 0 after
  * `load` is one of the cheapest automation signals there is. At the `human`
  * and `stealth` levels the navigation returns only after a pause drawn from

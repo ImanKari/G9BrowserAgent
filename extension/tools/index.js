@@ -390,7 +390,7 @@ export const TOOLS = {
         }
         case 'calibrate_humanize':
           // Fit a human-input profile from the raw pointer/key samples a person
-          // produced while recording (plan §6.7); with `name` it is saved and
+          // produced while recording (docs/HUMANIZE.md, Calibration); with `name` it is saved and
           // usable as humanize:"<name>". One recording (id) or several (ids).
           return record.calibrateFromRecording(
             Array.isArray(args.ids) && args.ids.length ? args.ids : requireId(args),

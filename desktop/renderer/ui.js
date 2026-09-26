@@ -177,7 +177,7 @@ export function select(options, value, props = {}) {
 
 /**
  * A text input with suggestions (a <datalist>): for values that are usually one of a few words but
- * may be a name — human input takes a level or a calibrated profile's name (plan §6.7). A plain
+ * may be a name — human input takes a level or a calibrated profile's name (docs/HUMANIZE.md, Calibration). A plain
  * <select> would show a stored profile name as its first option and save that instead.
  */
 let comboSeq = 0;

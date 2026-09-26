@@ -1,4 +1,4 @@
-# G9 desktop installer (V2 plan §P7.3, §8; ARCHITECTURE_V2 §11).
+# G9 desktop installer (docs/INSTALL.md; ARCHITECTURE_V2 §11).
 # Build with `npm run build:win` (scripts/build-win.mjs), which draws the icon first and drops
 # `publish` when G9_UPDATE_URL is not set — see that script for why.
 

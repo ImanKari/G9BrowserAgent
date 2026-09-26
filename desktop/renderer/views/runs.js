@@ -1,7 +1,7 @@
 /**
  * Runs: every flow run the daemon recorded (runs.list / runs.get), with the verdict, the steps,
  * the surprises, and a replay of the run's frames with the cursor drawn from its pointer track.
- * "Export video" records that replay (canvas + MediaRecorder, plan §P6.3) into
+ * "Export video" records that replay (canvas + MediaRecorder) into
  * runs/<runId>/video.webm.
  */
 

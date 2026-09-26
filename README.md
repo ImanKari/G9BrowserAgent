@@ -12,7 +12,7 @@ tests uncovered (the replay quiet window, the evidence prune race, and watch ord
 engine) and gave a closing browser 30 s instead of 10 s, and on 2026-09-25 for 2.0.3, which fixed
 the side panel's **Pop out tab**: the new window used to open behind the person's own window, where
 Windows stops rendering it. It was revised again on 2026-09-25 for **3.0.0**, the side-panel
-redesign of [V3_UX_PLAN.md](V3_UX_PLAN.md): agents are shown per project, Auto-attach follows the
+redesign (decisions U1–U10, [AIGuide.md](AIGuide.md) §6.10): agents are shown per project, Auto-attach follows the
 project's sites by default, a blocked agent raises an alert with **Pop out** on it, Automation and
 Issues are grouped by site, and the panel has one visual system (see
 [The side panel (v3)](#the-side-panel-v3)). Those rounds ran on Windows 11 Pro 10.0.26200 with
@@ -139,7 +139,7 @@ bridge port hunting and the runner's "port rule" are gone.
   a hidden tab, and pointer input sent to it over CDP does not arrive. The v2 matrix measured this
   for background tabs, minimized windows and occluded windows ([table](#what-works-in-which-state-measured)).
   So an extension in a person's browser cannot run unattended. Engine 2 exists for that.
-- **Stock browsers.** Engine 2 is a stock browser (plan decision D1: no Chromium fork), and Electron
+- **Stock browsers.** Engine 2 is a stock browser (decision D1: no Chromium fork), and Electron
   is only the desktop shell (D4). A result on Engine 2 is therefore a result on the browser your
   users run.
 - **Your own profile stays yours.** Chrome 136+ ignores remote debugging on the default profile, and
@@ -147,7 +147,8 @@ bridge port hunting and the runner's "port rule" are gone.
   never uses a person's profile: `launchBrowser` refuses the default user-data folders. Handoff
   copies cookies instead.
 
-The design and its twelve decisions are in [V2_IMPLEMENTATION_PLAN.md](V2_IMPLEMENTATION_PLAN.md).
+The design, its twelve decisions (D1–D12) and the verified facts they rest on are in
+[AIGuide.md](AIGuide.md) §2.
 The binding module contracts are in [docs/ARCHITECTURE_V2.md](docs/ARCHITECTURE_V2.md), and the wire
 protocol in [docs/DAEMON_PROTOCOL.md](docs/DAEMON_PROTOCOL.md).
 
@@ -880,7 +881,7 @@ it exactly as to an agent; there is no back door.
   not exercised.
 - **Not measured in v2:** a scheduled or launched run while the Windows session is **locked**, or
   on **another virtual desktop**. Headless Engine 2 has no window, so by design neither state
-  applies to it (plan §2.1, D3). A logged-off session runs nothing.
+  applies to it (AIGuide §2.8.1, D3). A logged-off session runs nothing.
 
 `--platform agripad` drives an AgriPad device over adb instead of a browser, with the same flow
 format, verdicts and reports.
@@ -1091,7 +1092,7 @@ The product always turns native occlusion off, and asking it to turn occlusion o
 | Headless, agent's tab behind a tab the **page** opened (`target=_blank`) | visible | delivered. Click 4.9 s, type 5.1 s, screenshot 100 ms. | `browser_status` warns `BEHIND`, and a headless engine brings the tab to the front before input. Before this fix: click 20.9 s, screenshots 24–46 s. |
 | Headed, off-screen | visible | delivered | |
 | Headed, **minimized** | "visible", but rendered at about 1 frame per 1.5 s | delivered but slow: click 28–29 s, screenshot 33–46 s | `browser_status` warns (3 of 3), and the capture note names "minimized". Do not minimize headed engines. |
-| Locked session, other virtual desktop | **not measured** | | Headless has no window, so by design these states do not apply (plan §2.1). |
+| Locked session, other virtual desktop | **not measured** | | Headless has no window, so by design these states do not apply (AIGuide §2.8.1). |
 
 ---
 
@@ -1364,9 +1365,8 @@ the version string and comments changed after them.
 - display scaling above 100%;
 - runs longer than 10 minutes.
 
-The extension backlog with evidence and acceptance criteria is
-[EXTENSION_FIX_BACKLOG.md](EXTENSION_FIX_BACKLOG.md). The full architecture record is
-[AIGuide.md](AIGuide.md).
+What is still open — the v1 backlog items EXT-01 … EXT-17 and the owner's open decisions — is in
+[AIGuide.md](AIGuide.md) §8.5 and §8.6. The full architecture record is [AIGuide.md](AIGuide.md).
 
 ---
 
@@ -1526,10 +1526,7 @@ g9-browser-agent/
 ├── scripts/                  standalone example automations (documented against v1.7.21, not re-verified on v2)
 ├── g9.project.example.json   project adapter template — belongs in the repo under test, not this one
 ├── package.json              the one version for the whole product; npm scripts
-├── V2_IMPLEMENTATION_PLAN.md v2 decisions D1–D12 and the phase plan
-├── V3_UX_PLAN.md             v3 side-panel decisions U1–U10, their status, and the icon prompt
-├── EXTENSION_FIX_BACKLOG.md  extension backlog with evidence and acceptance criteria
-├── AIGuide.md                build log and architecture reference
+├── AIGuide.md                design decisions, build log and architecture reference
 └── README.md                 this file
 ```
 

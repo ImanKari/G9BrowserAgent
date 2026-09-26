@@ -7,8 +7,8 @@ signature. This library plans the same actions the way a hand does them, and pla
 **reproducibly**: the same seed, profile and intent always give the same plan, to the millisecond and
 the pixel, so a failing run can be replayed with identical motion.
 
-It implements ARCHITECTURE_V2 §6 with the defaults of V2_IMPLEMENTATION_PLAN §6.1–§6.3 and the
-calibration of §6.7. Environment (fingerprint, `Runtime`, headless tells) is a different problem and is
+It implements ARCHITECTURE_V2 §6 and decision D8 (AIGuide §2.0); the defaults below and the calibration are its
+specification. Environment (fingerprint, `Runtime`, headless tells) is a different problem and is
 covered in `docs/STEALTH.md`; this file is only about behaviour.
 
 - [Where it lives and who calls it](#where-it-lives-and-who-calls-it)
@@ -158,7 +158,11 @@ generator derived from the current state
 (the parent does not advance). Plans consume the generator they are given, so the order of planning
 is part of the seed's meaning: plan a run's actions in the same order and the run replays exactly.
 
-### Pointer (plan §6.1)
+### Pointer
+
+**Where the pointer starts** — it never teleports. Each tab keeps a pointer position
+(`extension/lib/pointer.js`, across service-worker restarts); on first use it is a random point in the
+middle 60 % of the viewport (`plan.js`), and every action starts where the last one ended.
 
 **Where to aim** — `pickTargetPoint`. Not the centre: a 2-D Gaussian around the centre with
 σ = 15 % of the box's width/height, truncated to the inner 70 % of the box and to its part inside the
@@ -167,12 +171,12 @@ with nothing visible cannot be aimed at: the planners refuse it (below).
 
 **The path** — a cubic Bézier from the pointer to the aim point. Control points sit 30–40 % and
 60–70 % of the way along, pushed perpendicular by 10–25 % of the distance; each side is chosen at
-random (`sameSideChance` 0.5 = the plan's independent signs), so paths are arcs and gentle S-curves,
+random (`sameSideChance` 0.5 = independent signs), so paths are arcs and gentle S-curves,
 never straight lines.
 
 **How long** — Fitts' law, `MT = a + b·log2(D/W + 1)` with a = 120 ms, b = 150 ms/bit and W the
 smaller side of the target (24 px when unknown), clamped to 150–1200 ms, then × the profile's
-`durationScale` (the plan's "speed factor": human 1.0, stealth 1.1) × uniform(0.85, 1.15). Far and
+`durationScale` (the "speed factor": human 1.0, stealth 1.1) × uniform(0.85, 1.15). Far and
 small is slow; near and large is quick.
 
 **How it unfolds in time** — minimum jerk, `s(τ) = 10τ³ − 15τ⁴ + 6τ⁵`: the bell-shaped velocity of a
@@ -209,11 +213,11 @@ sweeping past the drop zone would fire `dragenter`/`dragleave` on its neighbours
 **Off-screen targets are refused.** A path to a point outside the viewport would have to jump from the
 edge — exactly the teleport this library exists to prevent. `planMove`/`planClick`/`planHover`/
 `planDrag`/`planScroll` throw a `RangeError` ("… is outside the viewport … scroll it into view first
-(planScroll)"). Plan §6.1: off-screen targets are reached by scrolling first, never by
+(planScroll)"). The rule: off-screen targets are reached by scrolling first, never by
 `scrollIntoView` at the human levels. A remembered pointer position that is outside the viewport
 (the window shrank) starts at the nearest edge instead: the pointer re-enters the page there.
 
-### Wheel (plan §6.2) — `planScroll`
+### Wheel — `planScroll`
 
 Whole notches of `notchPx` (100 px: Chrome on Windows at the default 3-line setting) at the pointer
 position, 40–120 ms apart, in bursts of 2–5 with 150–600 ms between bursts; per burst, with
@@ -232,7 +236,7 @@ by one short burst (1–2 notches) and comes back.
 - Vertical notches first, then horizontal. `modifiers` presses the modifier keys around the scroll.
 - Signs are CDP's: `deltaY > 0` scrolls down.
 
-### Keyboard (plan §6.3)
+### Keyboard
 
 **Key tables** — `keyDefinition(char | keyName) → { key, code, keyCode, text?, shift, location? }`,
 moved here from `tools/interact.js` and extended. Every printable ASCII character has its US-QWERTY
@@ -332,7 +336,7 @@ below was checked against `extension/humanize/profiles.js` on 2026-09-22.
 | `base` | — | | the profile this one was merged onto (team profiles) |
 | `calibration` | — | | fit record: base, recordings, events, samples, fitted and kept parameter paths |
 | **mouse** | | | |
-| `mouse.durationScale` | 1.0 | 1.1 | the plan's speed factor: multiplies the Fitts time (higher = slower) |
+| `mouse.durationScale` | 1.0 | 1.1 | the speed factor: multiplies the Fitts time (higher = slower) |
 | `mouse.fitts.a` / `.b` | 120 / 150 | | Fitts intercept (ms) and slope (ms per bit) |
 | `mouse.fitts.minMs` / `.maxMs` | 150 / 1200 | | clamp on the Fitts time, before scale and jitter |
 | `mouse.durationJitter` | [0.85, 1.15] | | per-move multiplier (real, uniform) |
@@ -401,7 +405,7 @@ agree — `off` is the one direct level; `fitts.minMs ≤ maxMs`; `along1` ends 
 | Profile | For |
 |---|---|
 | `off` | v1's direct dispatch. Fastest, deterministic, obviously synthetic. Use for suites where input realism is irrelevant, or to rule humanize out when a test fails. |
-| `human` | The default input level. Plan §6 defaults. |
+| `human` | The default input level: the defaults of this file. |
 | `stealth` | Detector-sensitive runs: 10 % slower pointer, slower typing (median 160 ms), 1.5 % corrected typos. Pair it with the stealth *environment* (docs/STEALTH.md) — behaviour alone does not make a run undetectable. |
 
 `resolveProfile(nameOrObject, overrides?, library?)` returns a frozen, validated profile:
@@ -420,7 +424,7 @@ An unknown name throws; an invalid result throws with **every** problem listed.
 ## Calibration
 
 `fitProfile(rawEvents, base = 'human', { name }?) → { profile, samples, report }` fits a profile from
-recordings of a real person (plan §6.7). The rule that shapes it: **never fabricate**. A parameter is
+recordings of a real person. The rule that shapes it: **never fabricate**. A parameter is
 fitted only from enough samples of the thing it describes (`MIN_SAMPLES`), otherwise it is kept from
 the base and the report says which and why. A biased sample is not a sample: the time between two v1
 clicks mixes thinking with moving, so it does not become think time just because it is the only
@@ -600,7 +604,7 @@ slow release can still make it longer than planned, as with CfT's 151 ms.
 held in every run of the Engine 2 live test, the Engine 1 live suite (9 final runs) and the stealth
 suite, and in this guide's run.
 
-**Typing** (median interval between keydowns; the plan's median is 140 ms, 160 ms at stealth):
+**Typing** (median interval between keydowns; the profile median is 140 ms, 160 ms at stealth):
 - Engine 2 live test, 26 characters: human 121–154 ms, stealth 139–170 ms, `off` 30 ms.
 - Stealth suite, live round 3: medians 123.7–201 ms (coefficient of variation 0.36–1.07), with key
   hold medians of 76–110 ms.

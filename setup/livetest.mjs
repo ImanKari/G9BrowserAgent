@@ -345,7 +345,7 @@ try {
   check(status.engine?.kind === 'extension', 'status is about the extension engine', short(status.engine));
   check(!('mode' in status) && !('pinnedTabId' in status), 'no v1 mode fields in browser_status');
   check(status.capabilities?.popout === true && status.capabilities?.handoff === true, 'capabilities: popout and handoff available', short(status.capabilities));
-  // v3 (V3_UX_PLAN A2): auto-attach defaults to "Project sites". `autoAttach` stays a boolean for agents
+  // v3 (U2): auto-attach defaults to "Project sites". `autoAttach` stays a boolean for agents
   // ("does auto-attach capture anything": true only with project domains known) and the mode is
   // `autoAttachMode`. A fresh profile with no project anywhere captures nothing by itself.
   check(status.inputMode === 'human' && status.autoAttachMode === 'project' && typeof status.autoAttach === 'boolean',

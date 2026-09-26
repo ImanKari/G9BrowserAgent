@@ -3,7 +3,7 @@
   Writes the extension's icons (extension/panel/icon16/32/48/128.png) from one square artwork PNG.
 
 .DESCRIPTION
-  The artwork is the owner's (V3_UX_PLAN Part E): a detailed scene, a browser window with "G9", a
+  The artwork is the owner's (U9, AIGuide §6.10): a detailed scene, a browser window with "G9", a
   robot, a cursor and an orbit, on a transparent background. 32, 48 and 128 px show all of it,
   cropped to the drawing. At 16 px (the toolbar at 100 % display scaling) that scene is a blur, so
   16 px shows only the browser window with "G9" (-SmallCrop), the one part that stays readable.

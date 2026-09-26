@@ -7,13 +7,13 @@
  *
  * ## What v2 took out, and why nothing replaced it
  *
- * The four modes and the workspace allowlist are gone (plan D6): attaching a
+ * The four modes and the workspace allowlist are gone (decision D6): attaching a
  * tab gives agents that tab, fully. The modes were a product boundary on a
  * local, trusted deployment; the operational safeguards — Stop and the activity
  * log — stay, because they are how a person stays in charge of what is running
  * in their own browser. Bridge discovery is gone too: one daemon, one port.
  *
- * ## What v3 changed (V3_UX_PLAN part A)
+ * ## What v3 changed (U1–U5, AIGuide §6.10)
  *
  * - The big "Attach current tab" button is gone (U1): the daemon pins each
  *   agent's tab on its first call, so its only remaining job was to start
@@ -560,7 +560,7 @@ function renderCurrent(state, status) {
   el.attached.className = cur.attached === false ? 'attached' : 'attached live';
   const parts = [node('div', 'title', cur.title || '(untitled)'), ...urlLines(cur.url, cur.tabId, width)];
   // A minimised window stops rendering, and input sent to it resolves and
-  // delivers nothing (plan §2.1); a tab that is not its window's active tab
+  // delivers nothing (AIGuide §2.8.1); a tab that is not its window's active tab
   // is hidden the same way. The worker says so in `status.warnings`, and it
   // is shown here, where it is broken, rather than in a tooltip nobody reads.
   for (const w of warnings) parts.push(node('p', 'warn', w));

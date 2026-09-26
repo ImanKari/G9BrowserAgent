@@ -1,5 +1,5 @@
 /**
- * App updates (V2 plan §8, §P7.4): electron-updater, generic provider, URL from settings.
+ * App updates (docs/INSTALL.md, "Updates and update hosting"): electron-updater, generic provider, URL from settings.
  *
  * What it promises, and nothing more:
  *   - No URL configured → status 'not-configured', shown as "Updates: not configured". It never
@@ -50,7 +50,7 @@ export function feedConfig({ url, channel } = {}) {
   return {
     provider: 'generic',
     url: u.endsWith('/') ? u : `${u}/`,
-    // The plan's vocabulary is stable/beta; electron-updater's stable channel is called 'latest'.
+    // G9's channel names are stable/beta; electron-updater's stable channel is called 'latest'.
     channel: channel === 'beta' ? 'beta' : 'latest',
   };
 }

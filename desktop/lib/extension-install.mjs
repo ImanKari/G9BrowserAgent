@@ -1,5 +1,5 @@
 /**
- * The extension step (V2 plan §9 step 2, §8 "Extension (unpacked)").
+ * The extension step (docs/INSTALL.md, "The extension: load once, updated by reload").
  *
  * G9_HOME/extension is the one folder the QA person ever loads unpacked. Its path never changes,
  * because an unpacked extension's id is derived from its path — a new path would be a new

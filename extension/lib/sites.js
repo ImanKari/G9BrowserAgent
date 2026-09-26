@@ -8,7 +8,7 @@
  *     agents reach every tab);
  *   - the issue index (store.js): which site an issue was filed on, to group the list by it;
  *   - the side panel: the parts of a URL it shows (origin in full, the path truncated), so a
- *     signed URL no longer fills a third of the panel (V3_UX_PLAN U5).
+ *     signed URL no longer fills a third of the panel (U5, AIGuide §6.10).
  */
 
 /** Parse without throwing; null for anything that is not an absolute URL. */
