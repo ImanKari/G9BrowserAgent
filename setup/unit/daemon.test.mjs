@@ -1808,6 +1808,35 @@ async function adminDone(conn, id, timeoutMs = 15_000) {
   return res.result;
 }
 
+test('after an app update: an extension older than the daemon whose G9_HOME/extension already holds the new version is asked to reload — once, never in a loop', async () => {
+  // The desktop refreshes G9_HOME/extension right after an update, while the extension is still
+  // reconnecting (the old daemon was stopped for the install): its reload reached nobody, and the
+  // browser went on running the old code from the new folder (desktop/test/update-e2e.mjs).
+  const { d, home, connect } = inProcessDaemon('catchup');
+  const VERSION = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version;
+  fs.mkdirSync(path.join(home, 'extension'), { recursive: true });
+  fs.writeFileSync(path.join(home, 'extension', 'manifest.json'), JSON.stringify({ version: VERSION }));
+  const hello = (instanceId, version) => ({ type: 'hello', role: 'engine', version, client: { name: 'extension', instanceId, loadId: 'l1', tabs: [] } });
+
+  const old = connect(hello('inst-catchup-a', '3.0.1'));
+  await waitUntil(() => old.of('reload').length === 1);
+  // It comes back unchanged (loaded from another folder, say): reported, not reloaded again.
+  old.drop();
+  const again = connect(hello('inst-catchup-a', '3.0.1'));
+  await sleep(400);
+  assert.equal(again.of('reload').length, 0, 'at most once per extension instance and version');
+
+  const current = connect(hello('inst-catchup-b', VERSION));
+  await sleep(300);
+  assert.equal(current.of('reload').length, 0, 'an extension at the daemon\'s version is left alone');
+
+  // The folder was not refreshed (or it is not the one the extension runs from): nothing to do.
+  fs.writeFileSync(path.join(home, 'extension', 'manifest.json'), JSON.stringify({ version: '3.0.1' }));
+  const stale = connect(hello('inst-catchup-c', '3.0.1'));
+  await sleep(300);
+  assert.equal(stale.of('reload').length, 0, 'no reload that could not bring the new version');
+});
+
 test('D-c over the protocol: a reconnect takes its identity back; one that races the old socket supersedes it; live views are asked again', async () => {
   const { d, connect } = inProcessDaemon('dc');
   const hello = (tabs) => ({ type: 'hello', role: 'engine', version: '2.0.0',

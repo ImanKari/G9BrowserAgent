@@ -151,11 +151,21 @@ t.test('one version: desktop, the root package.json and the extension manifest a
   }
 });
 
-t.test('installer config: per user, assisted, fixed folder, named artifact, generic feed, resources packed', () => {
+t.test('package config: Windows per user and assisted; macOS dmg+zip for both archs, ad-hoc; Linux AppImage+deb; the official GitHub feed; resources packed', () => {
   const yml = read('electron-builder.yml');
-  for (const line of ['appId: com.g9.browseragent', 'productName: G9', 'oneClick: false', 'perMachine: false', 'allowToChangeInstallationDirectory: false', 'artifactName: G9-Setup-${version}.exe', 'provider: generic', 'url: ${env.G9_UPDATE_URL}', 'executableName: G9', 'include: build/installer.nsh']) {
+  for (const line of [
+    'appId: com.g9.browseragent', 'productName: G9', 'oneClick: false', 'perMachine: false', 'allowToChangeInstallationDirectory: false',
+    'artifactName: G9-Setup-${version}.exe', 'executableName: G9', 'include: build/installer.nsh',
+    // macOS: the zip is what latest-mac.yml describes; both archs; no Developer ID, so ad-hoc.
+    'target: dmg', 'target: zip', 'arch: [x64, arm64]', "identity: '-'", 'artifactName: G9-${version}-mac-${arch}.${ext}',
+    // Linux: the AppImage is the one that updates itself; the .deb installs to /opt/G9.
+    'target: AppImage', 'target: deb', 'executableName: g9', 'artifactName: G9-x86_64.${ext}', 'artifactName: G9_${version}_amd64.${ext}',
+    // Every build writes latest*.yml and app-update.yml for the official releases.
+    'provider: github', 'owner: ImanKari', 'repo: G9BrowserAgent',
+  ]) {
     assert.ok(yml.includes(line), `electron-builder.yml has "${line}"`);
   }
+  assert.ok(!yml.includes('provider: generic'), 'a self-hosted feed is a build option (G9_UPDATE_URL), not the default');
   for (const r of ['../extension', '../engine', '../daemon', '../mcp', '../runner', '../lib', '../package.json']) {
     assert.ok(yml.includes(`from: ${r}`), `extraResources copies ${r}`);
   }

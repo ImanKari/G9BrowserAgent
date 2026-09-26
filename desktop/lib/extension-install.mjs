@@ -19,18 +19,41 @@ import { readJson } from './jsonfile.mjs';
 
 export const EXTENSIONS_PAGE = { edge: 'edge://extensions', chrome: 'chrome://extensions' };
 
-/** The three clicks, per browser. */
-export function threeClicks(kind = 'edge') {
+/**
+ * The three clicks, per browser and per OS. The folder picker differs: Windows has a path box,
+ * macOS Finder needs Go to Folder (Cmd+Shift+G), and GTK on Linux takes Ctrl+L.
+ */
+export function threeClicks(kind = 'edge', platform = process.platform) {
   const name = kind === 'chrome' ? 'Chrome' : 'Edge';
+  const paste = platform === 'darwin'
+    ? 'In the folder picker press Cmd+Shift+G, paste the folder path (Cmd+V), press Return, then press Select.'
+    : platform === 'linux'
+      ? 'In the folder picker press Ctrl+L, paste the folder path (Ctrl+V), press Enter, then press Select (or Open).'
+      : 'Paste the folder path (Ctrl+V) into the folder box and press Select Folder.';
   return [
     `In ${name}'s extensions page, turn on Developer mode (${kind === 'chrome' ? 'top right' : 'left side'}).`,
     'Click Load unpacked.',
-    'Paste the folder path (Ctrl+V) into the folder box and press Select Folder.',
+    paste,
   ];
 }
 
 /** Candidate install paths, per-machine and per-user. Pure. */
-export function browserCandidates(env = process.env) {
+export function browserCandidates(env = process.env, { platform = process.platform, home = env.HOME || env.USERPROFILE || '' } = {}) {
+  if (platform === 'darwin') {
+    const apps = ['/Applications', home ? path.join(home, 'Applications') : null].filter(Boolean);
+    const list = [];
+    for (const root of apps) {
+      list.push({ kind: 'edge', path: path.join(root, 'Microsoft Edge.app', 'Contents', 'MacOS', 'Microsoft Edge') });
+      list.push({ kind: 'chrome', path: path.join(root, 'Google Chrome.app', 'Contents', 'MacOS', 'Google Chrome') });
+    }
+    return list;
+  }
+  if (platform !== 'win32') {
+    return [
+      ...['/usr/bin/microsoft-edge', '/usr/bin/microsoft-edge-stable', '/opt/microsoft/msedge/msedge'].map((p) => ({ kind: 'edge', path: p })),
+      ...['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/opt/google/chrome/chrome'].map((p) => ({ kind: 'chrome', path: p })),
+    ];
+  }
   const pf = env.ProgramFiles || 'C:\\Program Files';
   const pf86 = env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
   const local = env.LOCALAPPDATA || '';
@@ -70,10 +93,10 @@ function appPath(exe) {
  * Locate installed Edge and Chrome executables on this machine (the desktop's own, lighter view;
  * engine/find.js via `engines.versions` is preferred when the daemon is up).
  */
-export async function findBrowserExecutables({ env = process.env, exists = fs.existsSync, useRegistry = true } = {}) {
+export async function findBrowserExecutables({ env = process.env, exists = fs.existsSync, useRegistry = true, platform = process.platform } = {}) {
   const found = new Map();
-  for (const c of browserCandidates(env)) if (!found.has(c.kind) && exists(c.path)) found.set(c.kind, c.path);
-  if (useRegistry) {
+  for (const c of browserCandidates(env, { platform })) if (!found.has(c.kind) && exists(c.path)) found.set(c.kind, c.path);
+  if (useRegistry && platform === 'win32') {
     for (const [kind, exe] of [['edge', 'msedge.exe'], ['chrome', 'chrome.exe']]) {
       if (found.has(kind)) continue;
       const p = await appPath(exe);

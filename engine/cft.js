@@ -1083,7 +1083,7 @@ export async function status({ home = g9Home(), checkLatest = false, ...opts } =
  * Pin the current Stable (or `version`): download it once, compute sha256 and size, write
  * versions.json. This IS the trust-on-first-use step; run it deliberately, commit the result.
  */
-export async function pin({ channel = 'Stable', version, platform = 'win64', cacheDir, onProgress, env } = {}) {
+export async function pin({ channel = 'Stable', version, platform = platformKey(), cacheDir, onProgress, env } = {}) {
   let chosen;
   if (version) {
     chosen = { channel: null, version, url: await downloadUrl(version, { platform, env }) };
@@ -1168,7 +1168,9 @@ async function main(argv) {
   let result;
   if (cmd === 'status') result = await status({ home, checkLatest: rest.includes('--latest') });
   else if (cmd === 'ensure') result = await ensure({ version: arg('version'), cacheDir: arg('cache'), home, trigger: 'cli', onProgress: progressPrinter() });
-  else if (cmd === 'pin') result = await pin({ channel: arg('channel') ?? 'Stable', version: arg('version'), cacheDir: arg('cache'), onProgress: progressPrinter() });
+  // --platform win64|mac-x64|mac-arm64|linux64 pins another OS's zip into the same version (a
+  // maintainer does all four, so every platform's first install is checked, not trusted).
+  else if (cmd === 'pin') result = await pin({ channel: arg('channel') ?? 'Stable', version: arg('version'), platform: arg('platform') ?? platformKey(), cacheDir: arg('cache'), onProgress: progressPrinter() });
   else throw new Error(`Unknown command "${cmd}". Use status, ensure or pin.`);
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
 }

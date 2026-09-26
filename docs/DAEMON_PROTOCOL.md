@@ -14,12 +14,15 @@ v3 side panel (U1–U10, AIGuide §6.10): the `projects` message and the richer 
 
 ## 1. Transport
 
-* `GET /health` → `200 {"ok":true,"name":"g9d","version":"3.0.1","pid":123,"port":8765,"home":"…",
+* `GET /health` → `200 {"ok":true,"name":"g9d","version":"3.1.0","installId":"…","pid":123,"port":8765,"home":"…",
   "engines":2,"agents":3,"extension":true,"launched":1,"activeRuns":[{"runId":"…","kind":"schedule",
   "label":"…","startedAt":…}],"startedAt":…,"uptimeMs":…}`. `engines` counts extension and launched
   engines; `launched` only launched ones (a restart would close them); `activeRuns` is every evidence run
   still open (replays, calibrations, scheduled runs, UI watches) — what the desktop checks before restarting
-  a daemon it is not connected to for an update. CORS header only for extension origins. Any other HTTP
+  a daemon it is not connected to for an update. ***(3.1.0)*** `installId` names the installation the
+  daemon runs from (`lib/runtime.mjs installId`: the `.AppImage` file for a Linux AppImage, else the
+  resource root, with forward slashes), so the desktop app can tell "same version, other install"
+  (two copies of G9) from its own daemon. CORS header only for extension origins. Any other HTTP
   path answers 426.
 * `GET /g9` (or legacy `/agent`) with `Upgrade: websocket`. Any other path → 404; an upgrade without a
   `Sec-WebSocket-Key` → 400. ***(as built)*** A body that `/health` cannot build is answered `{ok:false, error}`
@@ -98,7 +101,7 @@ the socket with code 4001 and a reason naming the fix (reload the v2 extension).
 Reply:
 
 ```json
-{ "type": "welcome", "version": "3.0.1", "daemonPid": 123, "bootId": "4f2c…", "startedAt": 1758…,
+{ "type": "welcome", "version": "3.1.0", "installId": "…", "daemonPid": 123, "bootId": "4f2c…", "startedAt": 1758…,
   "id": "agent-3",
   "repoRoot": "G:/…", "project": { "found": true, "path": "…", "environments": {}, "flowsDir": "…" },
   "halted": { "global": false }, "port": 8765, "home": "C:/Users/…/AppData/Local/G9" }
@@ -327,7 +330,7 @@ Daemon → extension:
 | message | meaning |
 |---|---|
 | `{type:'halt', halted}` | mirror the global halt into the panel |
-| `{type:'reload'}` | the extension folder was updated; call `chrome.runtime.reload()` when idle. Sent only when no relayed call is in flight (waits up to 60 s) |
+| `{type:'reload'}` | the extension folder was updated; call `chrome.runtime.reload()` when idle. Sent only when no relayed call is in flight (waits up to 60 s). ***(3.1.0)*** Also sent once, unasked, when an extension whose `hello` version is older than the daemon's connects while `G9_HOME/extension/manifest.json` already holds the daemon's version — the browser reconnected before an app update's refresh could reach it. Once per extension instance and version, never in a loop |
 | `{type:'agents', agents:[{id,name,owned:[tabId…],halted,project,cwd,current,currentEngine}]}` | for the panel's agent list (Chrome tab ids of that browser); pushed on every change — a connect or disconnect, a claim or release, a rename, a halt, ***(v3)*** a change of an agent's current tab and a closed tab — at most once per 100 ms. ***(v3)*** `project`: the folder name of the agent's project (the folder holding its `g9.project.json`), else of its `client.cwd`, else `null`; `cwd`: `client.cwd` or `null`; `current`: the agent's current tab as THIS browser's Chrome tab id, or `null`; `currentEngine`: `'extension'` (that tab is in this browser), `'launched'` (an Engine 2 tab — `current` is `null`, and no title or URL is sent: engine rows carry none), `'elsewhere'` (a tab of another browser's extension — `current` is `null`) or `null` (no current tab) |
 | `{type:'projects', domains:[host…], projects:[{name, path, domains:[host…], agents:[agentId…]}]}` | ***(v3)*** the connected agents' project sites, for the panel's auto-attach "Project sites". Each project is one `g9.project.json` (`path`; `name` = its folder name) with the agents working in it; its `domains` are the hosts (`host[:port]`, lower case, default ports omitted) of its `environments` URLs — a string per environment, or the string values of an object per environment (`{dev:{baseUrl:"https://…"}}`); anything not an `http(s)` URL is ignored, and a project with no such URL is not listed. `domains` is the de-duplicated union over CONNECTED agents only (an agent without `cwd`/`project` has the daemon's default project, as in its `welcome`). Sent right after the welcome and whenever an agent connects or disconnects (at most once per 100 ms). A capture filter in the extension, never an access boundary |
 | `{type:'watch', tabId, on:boolean}` | start/stop streaming frames + pointer for a tab; re-sent (`on:true`) for every watched tab when a parked extension resumes (D-c) |

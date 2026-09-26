@@ -1,19 +1,23 @@
-# Installing and operating G9 3.0.1
+# Installing and operating G9
 
 This is the operator guide: how G9 gets onto a machine, what it changes there, how to keep it
 running with nobody at the keyboard, how to update it and how to take it off again. It covers
-the desktop installer (the normal way, no Node needed) and the repository install (developers).
+the desktop packages for Windows, macOS and Linux (the normal way, no Node needed) and the
+repository install (developers). The [README](../README.md) is the short, illustrated version.
 
 What was checked, and how: every statement about behaviour is from the code in this repository.
 Numbers come from G9's own test runs on the owner's workstation (Windows 11 Pro 10.0.26200,
 Edge 153.0.4234.32, Chrome 153.0.8010.53, Chrome for Testing 153.0.8010.52, Node 22.15.0) on
-2026-09-22, unless another date is given. Some steps could not be carried out there without
-changing the owner's own machine: installing the app, writing the browser policies, SmartScreen,
-the uninstaller. Each such step is marked **not verified here**, so you know to check it yourself
-on the first machine you install.
+2026-09-22, unless another date is given. Since 3.1.0 the release pipeline also installs and updates
+every package on hosted Windows, macOS and Ubuntu machines (`desktop/test/update-e2e.mjs`), and the
+Windows installer and uninstaller ran on the owner's workstation for the same test (silently, into a
+temporary folder, 2026-09-26). Some steps still could not be carried out without changing the owner's
+own machine: writing the browser policies, SmartScreen, an install into the default folder. Each such
+step is marked **not verified here**, so you know to check it yourself on the first machine you
+install.
 
 - [What goes where](#what-goes-where)
-- [Desktop install](#desktop-install) — [SmartScreen](#smartscreen-the-installer-is-not-signed), [the setup wizard](#the-setup-wizard)
+- [Desktop install](#desktop-install) — [Windows](#windows), [macOS](#macos), [Linux](#linux), [the setup wizard](#the-setup-wizard)
 - [Background policies (HKCU)](#background-policies-hkcu)
 - [AI clients (MCP registration)](#ai-clients-mcp-registration)
 - [The extension: load once, updated by reload](#the-extension-load-once-updated-by-reload)
@@ -31,22 +35,41 @@ on the first machine you install.
 
 | What | Where | Notes |
 |---|---|---|
-| The app (`G9.exe`, Electron 44) and everything it runs | `%LOCALAPPDATA%\Programs\G9` | per user, no administrator rights. `resources\` holds `extension\`, `engine\`, `daemon\`, `mcp\`, `runner\`, `lib\` and the root `package.json`; `G9.exe` with `ELECTRON_RUN_AS_NODE=1` runs them, so the machine needs no Node. The folder is electron-builder's per-user default, and the installer does not let you change it; **not verified here** (the installer was not run on the owner's machine). |
-| G9's data: `G9_HOME` | `%LOCALAPPDATA%\G9`, or the `G9_HOME` environment variable | `settings.json` (daemon settings), `extension\` (the folder the browser loads), `engines\` (Chrome for Testing), `profiles\` (launched-browser profiles, with their site logins), `runs\` (evidence: frames, pointer tracks, reports), `logs\` (`daemon.log`, `install.log`, `desktop.log`, `policies.json`), `desktop.json`, `engine-versions.log`. |
+| The app (Electron 44) and everything it runs | Windows: `%LOCALAPPDATA%\Programs\G9\G9.exe`, per user, no administrator rights. macOS: `/Applications/G9.app` (`Contents/Resources/`). Linux: the `G9-x86_64.AppImage` file where you put it, or `/opt/G9/g9` from the .deb | `resources` holds `extension`, `engine`, `daemon`, `mcp`, `runner`, `lib` and the root `package.json`; the app's own executable with `ELECTRON_RUN_AS_NODE=1` runs them, so the machine needs no Node. The Windows folder is electron-builder's per-user default, and the installer does not let you change it. |
+| G9's data: `G9_HOME` | `%LOCALAPPDATA%\G9` on Windows, `~/.g9` on macOS and Linux, or the `G9_HOME` environment variable | `settings.json` (daemon settings), `extension/` (the folder the browser loads), `engines/` (Chrome for Testing), `profiles/` (launched-browser profiles, with their site logins), `runs/` (evidence: frames, pointer tracks, reports), `logs/` (`daemon.log`, `install.log`, `desktop.log`, `policies.json`), `desktop.json`, `engine-versions.log`, and on a Linux AppImage `bin/g9-run.mjs` (below). |
 | The daemon `g9d` | a process, not a service | listens on `127.0.0.1:8765`, or on `G9_PORT`. The shim and the desktop app always pass `G9_PORT` (default 8765) to a daemon they start, so the `port` setting applies only to a daemon started by hand without it. The first MCP shim or the desktop app starts it when nothing listens. It exits by itself after `idleExitMinutes` (default 60) with no client, no launched browser and no enabled schedule entry. |
 | The extension (Engine 1) | `G9_HOME\extension`, loaded unpacked into your Edge or Chrome | optional. It is only needed for agents to drive tabs in **your** browser. Launched browsers (Engine 2) need no extension. |
 
-Requirements: Windows 10 or 11 (only Windows 11 was tested), Edge or Chrome installed, or internet
-access once to download Chrome for Testing. No administrator rights, no Node, no git.
+Requirements: Windows 10 or 11 x64 (Windows 11 was tested by hand), macOS 12 or newer (Apple
+silicon or Intel), or Linux x64 with a desktop; Edge or Chrome installed, or internet access once to
+download Chrome for Testing. No administrator rights (except to install a .deb), no Node, no git.
 
 ---
 
 ## Desktop install
 
-The installer is `desktop/dist/G9-Setup-<version>.exe` (`G9-Setup-3.0.0.exe` for this release), built
-with `cd desktop && npm run build:win`. The last build, `G9-Setup-3.0.0.exe` of 2026-09-25, is
-103,620,667 bytes, and `Get-AuthenticodeSignature` reports `NotSigned` for it (and for
-`win-unpacked\G9.exe` and `resources\elevate.exe`).
+Every release on [GitHub](https://github.com/ImanKari/G9BrowserAgent/releases) carries these files,
+built by the release pipeline (`azure-pipelines.yml`) on a machine of each system, checked against
+their update metadata and update-tested before they are published:
+
+| File | For | Update metadata |
+|---|---|---|
+| `G9-Setup-<version>.exe` (+ `.blockmap`) | Windows x64 | `latest.yml` |
+| `G9-<version>-mac-arm64.dmg`, `G9-<version>-mac-x64.dmg` | macOS: install from these | `latest-mac.yml` (lists the `.zip`s) |
+| `G9-<version>-mac-arm64.zip`, `G9-<version>-mac-x64.zip` | macOS: the updater's format | |
+| `G9-x86_64.AppImage` | Linux x64, any distribution | `latest-linux.yml` |
+| `G9_<version>_amd64.deb` | Debian, Ubuntu x64 | (not read by the updater) |
+| `SHA256SUMS.txt` | the SHA-256 of every file above | |
+
+To build them yourself: `cd desktop && npm ci && npm run build:win` (`build:mac`, `build:linux`), each
+on its own system; the files land in `desktop/dist/`, and `npm run verify:artifacts` checks each
+against its `latest*.yml` (size and SHA-512) and that every production dependency is inside the packed
+app.
+
+### Windows
+
+`Get-AuthenticodeSignature` reports `NotSigned` for the installer (and for `win-unpacked\G9.exe` and
+`resources\elevate.exe`).
 
 It is an NSIS installer that installs **per user**: the manifest asks for `asInvoker`, and
 electron-builder is set to `perMachine: false`, `allowElevation: false` and
@@ -57,7 +80,7 @@ the "install for all users" page never appears. It creates a desktop and a Start
 and the packaged `G9.exe` ran the MCP shim, the daemon and a full `runner run` on headless Edge
 **with no `node.exe` on the PATH** (3 of 3 runs, 2026-09-22).
 
-### SmartScreen: the installer is not signed
+#### SmartScreen: the installer is not signed
 
 No code-signing certificate is configured, so the installer carries no publisher. When the file
 arrives from the internet or a mail attachment, Windows marks it as downloaded, and Microsoft
@@ -67,6 +90,46 @@ Defender SmartScreen may then stop it with "Windows protected your PC". Choose *
 For a fleet, sign the installer with the company's certificate (electron-builder's
 `win.signtoolOptions`, or `win.azureSignOptions`). Signing it is the only change that removes the
 prompt for everyone.
+
+### macOS
+
+Two disk images, one per processor: `arm64` (Apple silicon) and `x64` (Intel). Open the one for your
+Mac, drag **G9** into **Applications**, and start it from there.
+
+- **Not signed with an Apple Developer ID, not notarized.** The build signs the app ad hoc (identity
+  `-`, so it runs on Apple silicon at all) with the hardened runtime off. Gatekeeper therefore stops
+  the first start: right-click → **Open** → **Open**, or System Settings → Privacy & Security →
+  **Open Anyway**. A browser download may also be refused as *"damaged"*: that is the quarantine
+  flag, removed by `xattr -dr com.apple.quarantine /Applications/G9.app`. With an Apple Developer ID,
+  set `mac.identity`, turn `hardenedRuntime` on and notarize in `desktop/electron-builder.yml`.
+- **Start it from Applications.** An unsigned app opened from a disk image or from Downloads runs from
+  a randomized read-only copy (App Translocation, `/private/var/folders/…/AppTranslocation/…`) or from
+  `/Volumes/…`. An MCP entry naming that path breaks at the next start, so the wizard refuses to
+  register the AI clients until G9 runs from a stable place, and says so.
+- **Updates are installed by hand.** macOS's updater (Squirrel.Mac) installs only into an app signed
+  with a Developer ID. G9 checks the releases as on the other systems, downloads nothing, and tells
+  you (a notification and **Settings → Updates**, with **Open the release page**).
+- The app menu has the usual **Quit G9** (Cmd+Q); closing the window keeps G9 in the menu bar, and
+  clicking the Dock icon brings it back. "Start G9 when I sign in" is a login item that starts it
+  hidden.
+
+### Linux
+
+- **AppImage** (`G9-x86_64.AppImage`, any x64 distribution with a desktop). `chmod +x` it and start
+  it. It needs FUSE 2 (`libfuse2`; `libfuse2t64` on Ubuntu 24.04). **Keep the file name**: the updater
+  replaces a file named without a version in place, and the MCP entries and the autostart entry name
+  that file. An AppImage runs from a temporary mount that disappears when it exits, so G9 never writes
+  a path inside it anywhere: the MCP entries, the daemon and the scheduled runs start
+  `<the .AppImage> <G9_HOME>/bin/g9-run.mjs <script> --no-sandbox` in Node mode, and that small
+  bootstrap (written by the app, `lib/runtime.mjs`) finds the scripts in the current mount. The
+  trailing `--no-sandbox` is there because the AppImage's own launcher adds that switch on systems
+  without unprivileged user namespaces (Ubuntu 24.04, containers), where Node would otherwise reject
+  it; the bootstrap drops it.
+- **.deb** (`G9_<version>_amd64.deb`, Debian and Ubuntu): `sudo apt install ./G9_<version>_amd64.deb`.
+  It installs to `/opt/G9` with the command `g9` and a menu entry (package name `g9-desktop`).
+  Updates are installed by hand the same way; G9 checks and tells you.
+- "Start G9 when I sign in" writes `~/.config/autostart/g9.desktop` (XDG autostart).
+- There is no Linux arm64 build.
 
 ### The setup wizard
 
@@ -85,24 +148,29 @@ run again, and every action and its result is written to `G9_HOME\logs\install.l
    (`profiles.warm`). Sign in to the **sites** your unattended runs need, then close the window,
    and the profile keeps those logins. Do **not** sign in to the browser itself (the Microsoft or
    Google account in the profile menu). See [Edge implicit sign-in](#edge-implicit-sign-in).
-3. **Background policies.** Per-user browser policies for Engine 1. See
-   [the next section](#background-policies-hkcu).
+3. **Background policies** (Windows only; on macOS and Linux the step says there is nothing to
+   set). Per-user browser policies for Engine 1. See [the next section](#background-policies-hkcu).
 4. **AI clients.** Registers the MCP shim with the clients it finds. See
    [AI clients](#ai-clients-mcp-registration).
-5. **Browser extension.** Copies the extension to `G9_HOME\extension`, puts that path on the
-   clipboard and opens `edge://extensions` (it starts `msedge.exe edge://extensions`) or
-   `chrome://extensions`. Then you make three clicks:
-   **Developer mode** (on the left side in Edge, top right in Chrome) → **Load unpacked** → paste
-   the path (Ctrl+V) → **Select Folder**.
+5. **Browser extension.** Copies the extension to `G9_HOME/extension`, puts that path on the
+   clipboard and opens `edge://extensions` or `chrome://extensions` in the browser it found (a
+   browser refuses to open these pages from a link, so G9 starts the browser's executable with the
+   page). Then you make three clicks: **Developer mode** (on the left side in Edge, top right in
+   Chrome) → **Load unpacked** → paste the path (Ctrl+V; on macOS Cmd+Shift+G, then Cmd+V, in the
+   folder picker) → **Select Folder**.
 
 To check the result, start a new session in your AI client and ask it to call `browser_status`.
-Without a client, run `G9.exe --smoke` (from the install folder). It connects to the daemon, prints
+Without a client, run the app with `--smoke` (`G9.exe --smoke` from the install folder; on macOS
+`/Applications/G9.app/Contents/MacOS/G9 --smoke`; on Linux `./G9-x86_64.AppImage --smoke` or `g9 --smoke`). It connects to the daemon, prints
 one line of JSON and exits 0 (or 1 on failure). It never starts a daemon. Add `--launch` to start one
 when nothing listens.
 
 ---
 
 ## Background policies (HKCU)
+
+**Windows only.** macOS and Linux have no equivalent that G9 sets: there too a covered or minimized
+window and a background tab stop rendering, so use a launched (headless) engine for unattended work.
 
 These are for **Engine 1 only**: your own Edge or Chrome, driven through the extension. Chromium
 stops rendering a covered, locked or background page and drops CDP input to it. The policies keep
@@ -150,14 +218,16 @@ reports that rather than success. Restart the browser after Apply or Undo.
 
 ## AI clients (MCP registration)
 
-The wizard registers one entry, named **`g9-browser`**, in each client it finds:
+The wizard registers one entry, named **`g9-browser`**, in each client it finds. `<config>` is
+`%APPDATA%` on Windows, `~/Library/Application Support` on macOS and `$XDG_CONFIG_HOME` (default
+`~/.config`) on Linux; `~` is your home folder (`%USERPROFILE%` on Windows):
 
 | Client | File | Key | Entry carries |
 |---|---|---|---|
-| Claude Code | `%USERPROFILE%\.claude.json` | `mcpServers` | `"type": "stdio"` |
-| Cursor | `%USERPROFILE%\.cursor\mcp.json` | `mcpServers` | |
-| VS Code | `%APPDATA%\Code\User\mcp.json` | `servers` | `"type": "stdio"` |
-| Claude Desktop | `%APPDATA%\Claude\claude_desktop_config.json` | `mcpServers` | |
+| Claude Code | `~/.claude.json` | `mcpServers` | `"type": "stdio"` |
+| Cursor | `~/.cursor/mcp.json` | `mcpServers` | |
+| VS Code | `<config>/Code/User/mcp.json` | `servers` | `"type": "stdio"` |
+| Claude Desktop | `<config>/Claude/claude_desktop_config.json` | `mcpServers` | |
 
 For an installed app, the entry runs the bundled shim with the app itself:
 
@@ -169,9 +239,22 @@ For an installed app, the entry runs the bundled shim with the app itself:
 }
 ```
 
+On macOS the command is `/Applications/G9.app/Contents/MacOS/G9` with
+`…/Contents/Resources/mcp/shim.mjs`; from the .deb, `/opt/G9/g9` with `/opt/G9/resources/mcp/shim.mjs`.
+A Linux AppImage's entry names the `.AppImage` file itself, never its temporary mount:
+
+```json
+"g9-browser": {
+  "command": "/home/<you>/Applications/G9-x86_64.AppImage",
+  "args": ["/home/<you>/.g9/bin/g9-run.mjs", "mcp/shim.mjs", "--no-sandbox"],
+  "env": { "ELECTRON_RUN_AS_NODE": "1" }
+}
+```
+
 `G9_PORT` is added to `env` only when it differs from 8765, and `G9_HOME` whenever the app itself
 was started with `G9_HOME` set. A development build writes `"command": "node"` with
-`<repo>/mcp/shim.mjs`.
+`<repo>/mcp/shim.mjs`. On macOS the wizard refuses to register while G9 runs from a disk image or a
+translocated copy ([macOS](#macos)).
 
 How the wizard writes the file:
 - It **backs up** the file first (`<file>.g9-backup-<time>`), changes only `g9-browser`, re-reads
@@ -184,7 +267,7 @@ How the wizard writes the file:
 
 After registering, restart the client: start a new Claude Code session (or `/mcp`), restart Cursor
 or toggle the server in its MCP settings, start the server once from VS Code's *MCP: List Servers*,
-or quit Claude Desktop from the tray and start it again. Any other MCP client takes the same entry by
+or quit Claude Desktop from the tray (on macOS, Cmd+Q) and start it again. Any other MCP client takes the same entry by
 hand. **Not verified here:** registration was tested on temporary files only, and the owner's real
 client configurations were never written.
 
@@ -205,7 +288,9 @@ an update replaces its *contents*:
    extension has no call in flight (at most 60 s), and the extension calls `chrome.runtime.reload()`
    once idle.
 
-The desktop app runs this after every app update. You can also run it by hand: **Engines** →
+The desktop app runs this after every app update. And when an extension older than the daemon
+connects while `G9_HOME/extension` already holds the daemon's version (the browser reconnected before
+the refresh finished), the daemon asks it once to reload, again only once no call is in flight. You can also run it by hand: **Engines** →
 **Update and reload**, shown when the extension reports another version than the daemon, copies the
 folder and then reloads; **Reload**, shown otherwise, only sends the reload (step 2).
 
@@ -230,7 +315,7 @@ Edge may show a prompt about extensions in developer mode. Keep them on: G9 is o
 On a managed (domain or Entra-joined) machine, IT can install the extension with the
 `ExtensionInstallForcelist` policy and a self-hosted CRX and update URL, instead of Load unpacked
 (the other option is an unlisted Chrome Web Store / Edge Add-ons listing, which the browser
-updates itself). G9 3.0.1 ships no CRX or update manifest for that. **Not verified here.**
+updates itself). G9 ships no CRX or update manifest for that. **Not verified here.**
 
 ---
 
@@ -350,8 +435,8 @@ engines.
 
 - **Installed app.** After the app updates itself it refreshes `G9_HOME\extension` and reloads the
   extension (see [The extension](#the-extension-load-once-updated-by-reload)), and restarts an older
-  daemon once it is idle. Quit the AI clients before installing: shims run as `G9.exe`, and the
-  installer may close them mid-session.
+  daemon once it is idle. Quit the AI clients before installing: shims run as the app's own
+  executable, and the installer may close them mid-session.
 - **Repository checkout.** Reload the extension on `edge://extensions` or `chrome://extensions`. A
   2.x daemon keeps running until it has been idle for `idleExitMinutes` (60 by default); to switch at
   once, close the AI clients and end the `g9d` node process (the panel's About tab and `/health` name
@@ -368,6 +453,12 @@ engines.
 ---
 
 ## Unattended machines
+
+The steps below are written for Windows, where G9 was measured. On macOS and Linux the same rules
+hold with the system's own tools: an account that signs in by itself with no screen lock, "Start G9
+when I sign in" (a login item on macOS, `~/.config/autostart/g9.desktop` on Linux), and G9's own
+scheduler or `cron`/`launchd` running the runner with the app in Node mode. None of that was tested on
+macOS or Linux.
 
 **What runs without anyone there.** Launched browsers (Engine 2) run headless by default. They have
 no window, so the Windows states that hide a window (covered, minimized, locked, another virtual
@@ -424,46 +515,66 @@ unlocked, un-minimized desktop. In the P8 matrix, a minimized headed Engine 2 wi
 
 ## Updates and update hosting
 
-**The app** (electron-updater, generic provider):
-- **Hosting.** Build with the feed URL set:
-  ```powershell
-  $env:G9_UPDATE_URL = 'https://updates.example.com/g9/'
-  cd desktop; npm run build:win
-  ```
-  The build then writes `latest.yml` beside `G9-Setup-<version>.exe` and its `.blockmap`. Upload all
-  three to that folder, on any static http(s) server. Without `G9_UPDATE_URL` the build writes no
-  `latest.yml`, as the 2026-09-22 build shows.
-- **Client side.** The URL is the daemon setting `updateUrl` (**Settings** → Updates). It must be
-  **https** (`http://` is accepted only on `localhost`, `127.0.0.1` or `::1`, for a local test feed; `file://`
-  is refused, because electron-updater cannot download over it). With no URL the app shows
-  "Updates: not configured" and never checks anywhere.
-- **What authenticates an update.** The installer is **unsigned**, so `publisherName` is not in
-  `app-update.yml` and electron-updater performs no signer check: the only things that authenticate
-  a downloaded installer are TLS to the feed host and the SHA-512 in that host's `latest.yml`. That is
-  why plain http is refused, and why the app only updates from the address **saved in this app**: a
-  different `updateUrl` arriving from the daemon's settings is applied only after a dialog naming the
-  new host (the daemon is a local service several programs can write to). When a signing certificate
-  exists, set the signing options so the build writes `publisherName` and Authenticode is checked too.
-- **The prompt.** Install now, install when you quit G9, not now, or skip this version. Only the
-  first two install; closing the dialog means "not now".
-- **Channel.** `updateChannel` is `stable` (reads `latest.yml`) or `beta` (reads `beta.yml`). The
-  build script writes only `latest.yml`, so a beta feed needs a `beta.yml` made some other way.
-  Nothing in the repository produces one, and it is **not tested**.
-- **When it installs.** The app checks on start (and again as soon as the URL or channel changes),
-  then every 6 hours. It downloads by itself, then asks (the four choices of "The prompt"). Installing
-  restarts the daemon, so it waits until the daemon reports no active run and no launched browser. A
-  busy daemon defers the install, and the app checks again every minute.
-- **After an update**, the app refreshes `G9_HOME\extension` and reloads the extension (above), and
-  restarts an older daemon once it is idle.
-- **Before installing, quit the AI clients.** MCP shims run as `G9.exe`, and the installer may close
-  them mid-session. Connected agents do not count as "busy" (a known design gap).
-- **What was tested.** The updater state machine was tested with a fake `autoUpdater` only. No update
-  server existed, so a real download and install is **not verified here**. A build made without
-  `G9_UPDATE_URL` now still gets a minimal `resources/app-update.yml` (the build's `afterPack`, and
-  the app writes one into its user-data folder when the packaged file is missing): electron-updater
-  reads that file before it downloads anything, and without it every install ended as
-  `ENOENT … app-update.yml` after the check had said an update was available (desktop review,
-  2026-09-22, with a windowless Electron against a local feed).
+**The app** (electron-updater, `desktop/lib/updater.mjs`):
+
+- **Where updates come from** is the daemon setting `updateMode` (**Settings → Updates → Update
+  source**):
+  - `official` (the default): the published releases of `github.com/ImanKari/G9BrowserAgent`.
+    Nothing to configure. electron-updater's `github` provider reads `releases.atom` and
+    `/releases/latest` on github.com (not the rate-limited API), then `latest.yml`
+    (`latest-mac.yml`, `latest-linux.yml`) of that release, and downloads from that release tag.
+    Drafts are invisible to it; prereleases only on the `beta` channel.
+  - `custom`: your own folder, `updateUrl`, with the same files (`latest*.yml` and the packages). It
+    must be **https** (`http://` is accepted only on `localhost`, `127.0.0.1` or `::1`, for a local
+    test feed; `file://` and a URL with a user name or password are refused).
+  - `off`: never checks, and says so.
+  A settings file from before 3.1.0 that has an `updateUrl` and no `updateMode` keeps using that URL
+  (`custom`).
+- **When:** on start (and again as soon as the source changes), then every 6 hours, and on **Check
+  now**.
+- **How it installs** depends on what can replace the running app:
+
+  | Package | Install mode | What happens |
+  |---|---|---|
+  | Windows (NSIS) | automatic | downloads in the background, verifies the SHA-512 from `latest.yml`, then asks |
+  | Linux AppImage | automatic | the same; the new AppImage replaces `G9-x86_64.AppImage` in place |
+  | macOS | manual | the app is not signed with a Developer ID, and Squirrel.Mac installs only into a signed app: nothing is downloaded; a notification and **Open the release page** |
+  | Linux .deb | manual | replacing it needs root: the same notice |
+
+- **The prompt.** **Install now**, **Install when I quit G9**, **Not now**, or **Skip this version**.
+  A skipped version is never downloaded again; a newer one is offered as usual. Closing the dialog
+  means "not now".
+- **Never mid-run.** Installing restarts the daemon, so it waits until the daemon reports no active
+  run and no launched browser. A busy daemon defers the install, and the app checks again every
+  minute. Connected agents do not count as busy (a known design gap): quit the AI clients before
+  installing, because MCP shims run as the app's executable and the installer may close them.
+- **After an update**, the app refreshes `G9_HOME/extension` and the extension reloads itself once no
+  call is in flight ([above](#the-extension-load-once-updated-by-reload)), and it restarts an older
+  daemon once that is idle. The side panel, `/health` and the desktop app all compare the versions and
+  say which part is older.
+- **What authenticates an update.** No package is code-signed, so electron-updater performs no signer
+  check: what authenticates a download is TLS to github.com (or your https host) and the SHA-512 in
+  that release's `latest*.yml`, which is checked before anything runs. That is why plain http is
+  refused, and why the app keeps its own copy of the source: a different custom URL arriving through
+  the daemon's settings (a local service several programs can write to) is used only after a dialog
+  naming the new host.
+- **Hosting your own feed.** Build with `G9_UPDATE_URL=https://updates.example.com/g9/` (the build
+  then writes a `generic` feed into the app), or keep the official build and set `custom` in
+  Settings; upload the `latest*.yml` files with the packages they list. The `beta` channel reads
+  `beta*.yml`, which the build does not write.
+- **What was tested, end to end, with real packages** (`desktop/test/update-e2e.mjs`): an older build
+  of the same source (a lower version) is installed, pointed at a local feed that serves the new
+  packages, and updated through its own updater. The scenarios: a corrupt download is refused by its
+  SHA-512 and nothing is installed; a download cut off repeatedly still completes; a skipped version
+  is not downloaded; a busy daemon defers the install; **Install when I quit G9**; install and
+  restart into the new version with a new daemon; the extension folder refreshed and a connected
+  extension reloaded (and a reload waits for a call in flight); no version mismatch left; on macOS,
+  the manual notice; and, against the published release on GitHub, a fresh install with no update
+  settings finding, downloading and installing it by itself. It ran on Windows 11 on the
+  owner's workstation (3.0.1 → 3.1.0, 20 of 20 checks, 2026-09-26) and runs in the release pipeline
+  on hosted Windows, macOS and Ubuntu machines for every release; the Linux AppImage path also ran in
+  a clean Ubuntu container. The official GitHub feed (redirects, `releases/latest`) is checked against
+  the published release.
 
 **Chrome for Testing** is pinned in `engine/versions.json` (153.0.8010.52) and changes only when
 someone re-pins it and ships a new G9. The Engines view shows the pinned and installed versions, and
@@ -478,8 +589,11 @@ browser version it used (`engine.json`).
 For working on G9 itself. You need Node 22 or newer. The core has **no npm dependencies**; only
 `desktop/` has them (Electron, electron-builder, electron-updater).
 
+On macOS and Linux there is no install script: run `npm test`, point the MCP client at
+`node <repo>/mcp/shim.mjs`, and load `<repo>/extension` unpacked. On Windows:
+
 ```powershell
-git clone <repo> g9-browser-agent; cd g9-browser-agent
+git clone https://github.com/ImanKari/G9BrowserAgent.git g9-browser-agent; cd g9-browser-agent
 .\setup\install.ps1                      # checks Node, runs the tests, writes setup\mcp.json
 .\setup\install.ps1 -WriteProjectConfig  # also writes .mcp.json in the repo root (Claude Code's project config)
 .\setup\install.ps1 -Port 9000 -SkipTests
@@ -491,7 +605,7 @@ git clone <repo> g9-browser-agent; cd g9-browser-agent
    first failure. Their last recorded run (3.0.1, 2026-09-25) passed 651 tests in 12 suites, 136 and
    82. The unit suites include real headless launches of Edge and the cached CfT;
    `G9_UNIT_NO_BROWSER=1` skips them. That takes about 5 minutes; `npm run check:all` runs the same
-   checks 4 at a time in about 2.5 (README, [Tests](../README.md#choosing-what-to-run));
+   checks 4 at a time in about 2.5 ([REFERENCE.md, Tests](REFERENCE.md#choosing-what-to-run));
 3. writes an MCP entry `g9-browser` → `node <repo>/mcp/shim.mjs` with `G9_HOST`/`G9_PORT`. It goes to
    `setup\mcp.json`, and with `-WriteProjectConfig` also to `.mcp.json`. A v1 `.mcp.json` is backed
    up to `.mcp.json.v1.bak`; any other existing `.mcp.json` is left alone;
@@ -503,7 +617,7 @@ No service is installed. The first agent call starts the daemon, and it stops af
 nobody connected. To watch it: `node daemon/g9d.mjs --foreground` (it logs to the console and never
 idle-exits). A test page: `node setup/serve.mjs` → `http://127.0.0.1:5199/`.
 
-The desktop app from source: `cd desktop; npm install; npm start` (`desktop/README.md`). Some shells
+The desktop app from source: `cd desktop; npm ci; npm start` (`desktop/README.md`). Some shells
 (VS Code's terminal, several agent hosts) export `ELECTRON_RUN_AS_NODE=1`, which makes Electron run
 as plain Node. `npm start` removes it; for other commands run from such a shell, remove it first.
 
@@ -525,19 +639,22 @@ do it:
    but G9 waits up to 30 s on a busy machine before it kills the browser (measured up to 17.9 s under
    heavy load, 2026-09-24).
 
-Then uninstall **G9** from Windows **Settings** → **Apps**. The uninstaller removes the program
-folder only. These stay behind for you to delete by hand when you are sure:
-- `G9_HOME` (`%LOCALAPPDATA%\G9`: launched-browser profiles with their site logins, run evidence,
-  settings, the extension folder, the Chrome for Testing engines). The uninstaller never touches it;
-- Electron's own data folder (`%APPDATA%\G9`), kept because the installer is set to
-  `deleteAppDataOnUninstall: false`;
-- the updater's download cache (`%LOCALAPPDATA%\g9-desktop-updater`), if an update was ever
-  downloaded: nothing in the uninstaller names it;
+Then remove the app: on Windows, **Settings** → **Apps** → **G9** → Uninstall; on macOS, move
+`/Applications/G9.app` to the Trash; a Linux AppImage, delete the file (and
+`~/.config/autostart/g9.desktop`); a .deb, `sudo apt remove g9-desktop`.
+
+The Windows uninstaller removes the program folder only (it ran, silently, on the owner's
+workstation in the update test). These stay behind for you to delete by hand when you are sure (the
+macOS and Linux places in brackets):
+- `G9_HOME` (`%LOCALAPPDATA%\G9` [`~/.g9`]: launched-browser profiles with their site logins, run
+  evidence, settings, the extension folder, the Chrome for Testing engines). The uninstaller never
+  touches it;
+- Electron's own data folder (`%APPDATA%\G9` [`~/Library/Application Support/G9`, `~/.config/G9`]),
+  kept because the installer is set to `deleteAppDataOnUninstall: false`;
+- the updater's download cache (`%LOCALAPPDATA%\g9-desktop-updater` [`~/Library/Caches/g9-desktop-updater`,
+  `~/.cache/g9-desktop-updater`]), if an update was ever downloaded: nothing in the uninstaller names it;
 - the `*.g9-backup-*` copies next to the AI-client configs;
 - firewall rules for CfT paths (see above; removing them needs an administrator).
-
-**Not verified here:** the installer was never run on the owner's machine, so neither was its
-uninstaller.
 
 A repository install has no uninstaller. Remove the `g9-browser` entries from your MCP configs (and
 `.mcp.json` if `-WriteProjectConfig` wrote it), remove the extension from the browser, stop the

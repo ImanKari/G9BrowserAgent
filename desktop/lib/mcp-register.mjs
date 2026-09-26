@@ -27,8 +27,26 @@ import { writeTextAtomic } from './jsonfile.mjs';
 
 export const ENTRY_NAME = 'g9-browser';
 
-/** The four clients G9 registers with, with where their user-level config lives. Pure. */
-export function mcpClients({ home = os.homedir(), appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming') } = {}) {
+/**
+ * Where desktop apps keep per-user settings (VS Code's User folder, Claude Desktop's config). Pure.
+ *   Windows  %APPDATA%                          (…\AppData\Roaming)
+ *   macOS    ~/Library/Application Support
+ *   Linux    $XDG_CONFIG_HOME, else ~/.config
+ */
+export function userConfigRoot({ platform = process.platform, env = process.env, home = os.homedir() } = {}) {
+  if (platform === 'win32') return env.APPDATA || path.join(home, 'AppData', 'Roaming');
+  if (platform === 'darwin') return path.join(home, 'Library', 'Application Support');
+  return env.XDG_CONFIG_HOME && String(env.XDG_CONFIG_HOME).trim() ? String(env.XDG_CONFIG_HOME).trim() : path.join(home, '.config');
+}
+
+/**
+ * The four clients G9 registers with, with where their user-level config lives. Pure.
+ * `appData` is the per-user settings root (userConfigRoot); tests pass it directly.
+ */
+export function mcpClients({ home = os.homedir(), platform = process.platform, env = process.env, appData = userConfigRoot({ platform, env, home }) } = {}) {
+  const claudeRestart = platform === 'darwin'
+    ? 'Quit Claude Desktop (Claude → Quit, or Cmd+Q) and start it again.'
+    : 'Quit Claude Desktop from the tray and start it again.';
   return [
     {
       id: 'claude-code', label: 'Claude Code', file: path.join(home, '.claude.json'), key: 'mcpServers', type: 'stdio',
@@ -48,7 +66,7 @@ export function mcpClients({ home = os.homedir(), appData = process.env.APPDATA 
     {
       id: 'claude-desktop', label: 'Claude Desktop', file: path.join(appData, 'Claude', 'claude_desktop_config.json'), key: 'mcpServers', type: null,
       detect: [path.join(appData, 'Claude')],
-      restartHint: 'Quit Claude Desktop from the tray and start it again.',
+      restartHint: claudeRestart,
     },
   ];
 }
@@ -62,18 +80,41 @@ export function detectClients(clients, { exists = fs.existsSync } = {}) {
  * The shim entry, before per-client shaping. Env carries only what differs from the defaults, so an
  * entry written on a default machine stays identical across re-runs.
  */
-export function shimEntry({ isPackaged, execPath, resourceRoot, port = DEFAULT_PORT, homeOverride = null }) {
+export function shimEntry({ isPackaged, execPath, resourceRoot, port = DEFAULT_PORT, homeOverride = null, appImage = null }) {
   const { shimScript } = resourcePaths(resourceRoot);
   const env = {};
-  if (isPackaged) env.ELECTRON_RUN_AS_NODE = '1';
+  if (isPackaged || appImage) env.ELECTRON_RUN_AS_NODE = '1';
   if (port && Number(port) !== DEFAULT_PORT) env.G9_PORT = String(port);
   if (homeOverride) env.G9_HOME = forwardSlashes(homeOverride);
-  const entry = {
-    command: isPackaged ? forwardSlashes(execPath) : 'node',
-    args: [forwardSlashes(shimScript)],
-  };
+  // A Linux AppImage runs from a mount that is gone once G9 quits: the entry names the .AppImage
+  // file and the stable bootstrap instead (`appImage` = { file, bootstrap }, lib/runtime.mjs).
+  const entry = appImage
+    // '--no-sandbox' after the script keeps the AppImage's AppRun from putting it before it, where
+    // Node (ELECTRON_RUN_AS_NODE) rejects it; the bootstrap drops it (lib/runtime.mjs NO_SANDBOX).
+    ? { command: forwardSlashes(appImage.file), args: [forwardSlashes(appImage.bootstrap), 'mcp/shim.mjs', '--no-sandbox'] }
+    : {
+      command: isPackaged ? forwardSlashes(execPath) : 'node',
+      args: [forwardSlashes(shimScript)],
+    };
   if (Object.keys(env).length) entry.env = env;
   return entry;
+}
+
+/**
+ * Why an executable path must not be written into an MCP config, or null when it may. Pure.
+ * macOS runs an unsigned app that was opened from Downloads or a disk image from a random,
+ * read-only copy (App Translocation, `/private/var/folders/…/AppTranslocation/…`) or from the
+ * mounted image (`/Volumes/…`); an MCP entry naming either stops working at the next start.
+ */
+export function unstableExecReason({ execPath, platform = process.platform }) {
+  const p = forwardSlashes(execPath ?? '');
+  if (platform === 'darwin' && /\/AppTranslocation\//.test(p)) {
+    return 'macOS is running G9 from a temporary copy (App Translocation). Move G9.app to the Applications folder, start it from there, and register again.';
+  }
+  if (platform === 'darwin' && /^\/Volumes\//.test(p)) {
+    return 'G9 is running from the disk image. Drag G9.app to the Applications folder, start it from there, and register again.';
+  }
+  return null;
 }
 
 /** Shape the entry for one client: VS Code and Claude Code carry `type: 'stdio'`. */

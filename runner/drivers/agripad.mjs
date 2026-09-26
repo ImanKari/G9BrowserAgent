@@ -442,7 +442,7 @@ function compare(actual, oracle, what) {
  *
  * It used to be `shell: process.platform === 'win32'`, which runs the command
  * through cmd.exe by string concatenation. `adb` resolves to
- * `C:\Program Files (x86)\Androidndroid-sdk\platform-toolsdb.exe` on a
+ * `C:\Program Files (x86)\Android\android-sdk\platform-tools\adb.exe` on a
  * normal machine, and cmd then reads that as the program `C:\Program` with
  * arguments — so the driver reported "adb is not available" while pointing at a
  * path that plainly existed. Node warns about this exact hazard (DEP0190).

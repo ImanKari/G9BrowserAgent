@@ -270,4 +270,27 @@ t.test('restartDaemonIfIdle: a daemon that cannot report its runs counts as busy
   assert.match(r.activity.reasons[0], /did not report its runs/);
 });
 
+t.test('Linux AppImage: the daemon is started from the .AppImage file and the stable bootstrap, never from the temporary mount', () => {
+  const mount = '/tmp/.mount_G9x1y2';
+  const cmd = daemonCommand({
+    isPackaged: true, execPath: `${mount}/g9`, resourceRoot: `${mount}/resources`, env: { PATH: '/usr/bin' }, port: 18123, home: '/home/qa/.g9',
+    appImage: { file: '/home/qa/Apps/G9.AppImage', bootstrap: '/home/qa/.g9/bin/g9-run.mjs' },
+  });
+  assert.equal(cmd.command, '/home/qa/Apps/G9.AppImage');
+  assert.deepEqual(cmd.args, ['/home/qa/.g9/bin/g9-run.mjs', 'daemon/g9d.mjs', '--no-sandbox'], 'the flag AFTER the script: AppRun would put it before, where Node rejects it');
+  assert.equal(cmd.env.ELECTRON_RUN_AS_NODE, '1');
+  assert.equal(cmd.env.G9_PORT, '18123');
+  assert.ok(![cmd.command, ...cmd.args, cmd.cwd].some((x) => x.includes('.mount_')), 'nothing that disappears when this app quits');
+});
+
+t.test('mismatch: a stable install id beats the resource root (an AppImage mounts somewhere new on every start)', () => {
+  const base = { daemonVersion: '3.0.9', appVersion: '3.1.0', startDaemon: true, platform: 'linux' };
+  // Same .AppImage, two different mounts: this install's old daemon → restart it.
+  assert.equal(mismatchAction({ ...base, daemonRoot: '/tmp/.mount_G9aaaa/resources', appRoot: '/tmp/.mount_G9bbbb/resources', daemonInstall: '/home/qa/G9.AppImage', appInstall: '/home/qa/G9.AppImage' }), 'restart');
+  // Without the ids, the two mounts look like two installs.
+  assert.equal(mismatchAction({ ...base, daemonRoot: '/tmp/.mount_G9aaaa/resources', appRoot: '/tmp/.mount_G9bbbb/resources' }), 'notice-other-install');
+  // Another install really is another install.
+  assert.equal(mismatchAction({ ...base, daemonInstall: '/opt/G9/resources', appInstall: '/home/qa/G9.AppImage' }), 'notice-other-install');
+});
+
 t.run();

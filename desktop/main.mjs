@@ -18,8 +18,9 @@
 
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { g9Home, daemonPort, homeLayout, resourceRoot as resolveResourceRoot, resourcePaths, osUserName } from './lib/paths.mjs';
 import { runSmoke } from './lib/smoke.mjs';
@@ -46,9 +47,17 @@ function readOwnVersion() {
 
 // Under Electron `require('electron')` is the API; under plain Node (or ELECTRON_RUN_AS_NODE) it
 // is the npm package, whose export is the path of the Electron binary (a string).
+// Only inside Electron: in plain Node the npm package's index.js may download the Electron binary
+// on first use (and print that it does), which a `node main.mjs --smoke` must never do — it broke
+// the smoke test's one-line JSON on fresh CI agents.
+// (test/main-process.test.mjs puts a fake Electron API in the require cache: that one is used.)
 let electron = null;
 try {
-  electron = require('electron');
+  if (process.versions.electron) electron = require('electron');
+  else {
+    const id = require.resolve('electron');
+    if (require.cache[id]) electron = require(id);
+  }
 } catch {
   electron = null;
 }
@@ -138,7 +147,7 @@ async function startApp() {
   const { DaemonLauncher, probeHealth, restartDaemonIfIdle, queryActivity, activityFromHealth, waitForPortFree, mismatchAction } = await import('./lib/daemon-launch.mjs');
   const { DesktopSettings, pickUpdateConfig, detectUpdate } = await import('./lib/settings.mjs');
   const { createLogger, tailLog } = await import('./lib/log.mjs');
-  const { UpdateController } = await import('./lib/updater.mjs');
+  const { UpdateController, installMode, manualReason, releasePageUrl } = await import('./lib/updater.mjs');
   const { Wizard } = await import('./lib/wizard.mjs');
   const { execReg, elevatedRegBatch } = await import('./lib/policies.mjs');
   const { readRunLocal, readFrame, saveVideo, runDir } = await import('./lib/runs-store.mjs');
@@ -159,7 +168,14 @@ async function startApp() {
   const installLog = createLogger(layout.installLog);
   const settings = new DesktopSettings(layout.desktopJson);
   const user = osUserName();
-  log.info(`G9 desktop ${version} starting`, { packaged: isPackaged, port, home, resourceRoot: root, pid: process.pid });
+  // Shared with the daemon and the shim, so it is loaded from the resource root (the packaged app
+  // cannot import the repository's lib/ statically: it lives outside app.asar).
+  const runtime = await import(pathToFileURL(path.join(root, 'lib', 'runtime.mjs')).href);
+  // A Linux AppImage runs from a mount that is gone when it quits: the daemon and MCP entries use the
+  // .AppImage file and a stable bootstrap instead (lib/runtime.mjs).
+  const appImage = runtime.isAppImageRuntime() ? { file: process.env.APPIMAGE, bootstrap: runtime.ensureBootstrap(home) } : null;
+  const appInstallId = runtime.installId({ root });
+  log.info(`G9 desktop ${version} starting`, { packaged: isPackaged, port, home, resourceRoot: root, pid: process.pid, platform: process.platform, appImage: appImage?.file ?? null });
 
   const ctx = {
     win: null,
@@ -196,7 +212,7 @@ async function startApp() {
   // ------------------------------------------------------------------ daemon connection
 
   const launcher = new DaemonLauncher({
-    commandOptions: { isPackaged, execPath: process.execPath, resourceRoot: root, home: process.env.G9_HOME || null },
+    commandOptions: { isPackaged, execPath: process.execPath, resourceRoot: root, home: process.env.G9_HOME || null, appImage },
     port,
     log,
     enabled: () => settings.get().startDaemon !== false,
@@ -223,7 +239,10 @@ async function startApp() {
   };
   let stateTimer = null;
   const snapshot = () => ({
-    app: { version, packaged: isPackaged, home: ctx.daemonHome, desktopHome: home, port, user, platform: process.platform, resourceRoot: root },
+    app: {
+      version, packaged: isPackaged, home: ctx.daemonHome, desktopHome: home, port, user, platform: process.platform, resourceRoot: root,
+      appImage: appImage?.file ?? null, installMode: updateInstallMode, manualReason: updateInstallMode === 'manual' ? manualReason({ platform: process.platform }) : null,
+    },
     connection: client.state,
     halted: ctx.store.halted,
     agents: ctx.store.agents,
@@ -413,6 +432,8 @@ async function startApp() {
       appVersion: version,
       daemonRoot: welcome?.repoRoot ?? null,
       appRoot: root,
+      daemonInstall: welcome?.installId ?? null,
+      appInstall: appInstallId,
       startDaemon: settings.get().startDaemon !== false,
     });
     if (action !== 'restart') {
@@ -481,6 +502,8 @@ async function startApp() {
 
   // ------------------------------------------------------------------ updater
 
+  // Windows (NSIS) and a Linux AppImage replace themselves; macOS (unsigned) and a .deb do not.
+  const updateInstallMode = installMode({ platform: process.platform, appImage: !!appImage });
   const updater = new UpdateController({
     // --check-render never checks, downloads or installs: a feed configured in the daemon it connects
     // to would otherwise download an update and raise the install dialog (focus) over the person's
@@ -494,25 +517,33 @@ async function startApp() {
     // download and run an installer (desktop review, 2026-09-22). A daemon value that differs from
     // the one this app has is applied only after the person confirms the new host here, in the
     // main process — the Settings view saves through this app, which confirms it as it writes.
+    // Official releases, a custom https folder, or off (updater.mjs). Only a CUSTOM address that is
+    // new to this app is confirmed: the official feed is built in, and turning updates off is safe.
     getConfig: async () => {
       const cached = settings.get().update ?? {};
-      if (!client.connected) return cached;
+      const mine = pickUpdateConfig({}, cached);
+      if (!client.connected) return mine;
       try {
         const s = await client.admin('settings.get', {}, { timeoutMs: 10_000 });
         const cfg = pickUpdateConfig(s, cached);
-        if (cfg.source !== 'daemon' || (cfg.url === cached.url && cfg.channel === cached.channel)) return cached.url ? cached : cfg;
-        if (!cfg.url) {
-          settings.patch({ update: { url: '', channel: cfg.channel } });
-          return { ...cfg, url: '' };
+        if (cfg.source !== 'daemon') return mine;
+        if (cfg.mode === mine.mode && cfg.url === mine.url && cfg.channel === mine.channel) return mine;
+        if (cfg.mode === 'custom' && cfg.url && cfg.url !== (mine.mode === 'custom' ? mine.url : null)) {
+          if (!(await confirmUpdateFeed(cfg.url, mine.mode === 'custom' ? mine.url : null))) return mine;
         }
-        if (await confirmUpdateFeed(cfg.url, cached.url)) {
-          settings.patch({ update: { url: cfg.url, channel: cfg.channel } });
-          return cfg;
-        }
-        return cached;
+        settings.patch({ update: { ...cached, mode: cfg.mode, url: cfg.url, channel: cfg.channel } });
+        return { mode: cfg.mode, url: cfg.url, channel: cfg.channel };
       } catch {
-        return cached;
+        return mine;
       }
+    },
+    mode: updateInstallMode,
+    // Manual installs (macOS, .deb): say once per version that a release is out, and where.
+    notifyManual: ({ version: next, releaseUrl }) => {
+      if (CHECKING || !Notification?.isSupported?.()) return;
+      const n = new Notification({ title: `G9 ${next} is available`, body: 'Click to open the release page and download it.', silent: true });
+      n.on('click', () => { if (releaseUrl) shell.openExternal(releaseUrl).catch(() => {}); });
+      n.show();
     },
     // electron-updater will not download without app-update.yml, and a build made without a publish
     // feed has none (desktop review, 2026-09-22: every update ended as ENOENT). A minimal one in
@@ -602,8 +633,22 @@ async function startApp() {
     log: installLog,
     layout,
     resources,
-    app: { isPackaged, execPath: process.execPath, resourceRoot: root, port, homeOverride: process.env.G9_HOME || null },
+    app: { isPackaged, execPath: process.execPath, resourceRoot: root, port, homeOverride: process.env.G9_HOME || null, platform: process.platform, appImage },
     deps: {
+      // engine/find.js knows every OS's install locations (the daemon uses the same module).
+      findBrowsers: async () => {
+        try {
+          const find = await import(pathToFileURL(path.join(root, 'engine', 'find.js')).href);
+          const found = await find.findBrowsers({ includeRegistry: process.platform === 'win32' });
+          const byKind = new Map();
+          for (const b of found ?? []) if ((b.kind === 'edge' || b.kind === 'chrome') && !byKind.has(b.kind) && (b.channel ?? 'stable') === 'stable') byKind.set(b.kind, { kind: b.kind, path: b.path });
+          if (byKind.size) return [...byKind.values()];
+        } catch (err) {
+          log.warn('engine/find.js browser discovery failed; using the desktop list', String(err?.message ?? err));
+        }
+        const { findBrowserExecutables } = await import('./lib/extension-install.mjs');
+        return findBrowserExecutables();
+      },
       clipboardWrite: (text) => clipboard.writeText(String(text)),
       regRun: (args) => execReg(args),
       regRunElevated: (batch) => elevatedRegBatch(batch),
@@ -630,10 +675,32 @@ async function startApp() {
 
   const runsDir = () => path.join(ctx.daemonHome, 'runs');
   const LOGIN_ARGS = ['--hidden'];
+  // Linux has no login-item API: the XDG autostart entry every desktop reads. It names the stable
+  // executable — for an AppImage the .AppImage file, not a path inside its temporary mount.
+  const autostartFile = () => path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'autostart', 'g9.desktop');
   const loginItem = () => {
     if (!isPackaged) return { supported: false, openAtLogin: false, reason: 'Only an installed G9 can start itself at sign-in; this is a development build.' };
+    if (process.platform === 'linux') return { supported: true, openAtLogin: fs.existsSync(autostartFile()), reason: null };
     if (process.platform !== 'win32' && process.platform !== 'darwin') return { supported: false, openAtLogin: false, reason: `Not available on ${process.platform}.` };
-    return { supported: true, openAtLogin: !!app.getLoginItemSettings({ args: LOGIN_ARGS }).openAtLogin, reason: null };
+    return { supported: true, openAtLogin: !!app.getLoginItemSettings(process.platform === 'win32' ? { args: LOGIN_ARGS } : undefined).openAtLogin, reason: null };
+  };
+  const setLoginItem = (enabled) => {
+    if (process.platform === 'linux') {
+      const file = autostartFile();
+      if (!enabled) {
+        fs.rmSync(file, { force: true });
+        return;
+      }
+      const exec = appImage?.file ?? process.execPath;
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, [
+        '[Desktop Entry]', 'Type=Application', 'Name=G9', 'Comment=Start G9 in the tray at sign-in',
+        `Exec="${exec.replace(/"/g, '\\"')}" --hidden`, 'X-GNOME-Autostart-enabled=true', 'Terminal=false', '',
+      ].join('\n'), 'utf8');
+      return;
+    }
+    // macOS ignores `args`: a login start is recognised by wasOpenedAtLogin instead (startHidden).
+    app.setLoginItemSettings(process.platform === 'win32' ? { openAtLogin: !!enabled, args: LOGIN_ARGS } : { openAtLogin: !!enabled });
   };
 
   const HANDLERS = {
@@ -667,6 +734,8 @@ async function startApp() {
         // Saved through this app: the person chose this feed, so it needs no second confirmation.
         const url = args?.patch?.updateUrl;
         if (typeof url === 'string') settings.patch({ update: { ...(settings.get().update ?? {}), url: url.trim(), skipVersion: null } });
+        const mode = args?.patch?.updateMode;
+        if (typeof mode === 'string') settings.patch({ update: { ...(settings.get().update ?? {}), mode, skipVersion: null } });
         const channel = args?.patch?.updateChannel;
         if (typeof channel === 'string') settings.patch({ update: { ...(settings.get().update ?? {}), channel } });
         updater.refresh().catch(() => {});
@@ -733,6 +802,22 @@ async function startApp() {
     'updater.state': () => updater.snapshot(),
     'updater.check': () => updater.check({ manual: true }),
     'updater.install': () => updater.installWhenIdle(),
+    'updater.skip': () => updater.skip(),
+    'updater.installOnQuit': () => updater.installOnQuitChoice(),
+    // Quit G9 (the tray's "Quit G9"): installs a downloaded update first when the person chose so.
+    'app.quit': () => {
+      setTimeout(() => quitApp().catch?.(() => {}), 50);
+      return { quitting: true };
+    },
+    // The release page of the version found (manual installs: macOS, .deb), in the default browser.
+    // Only an https page the updater itself produced — never a URL from the page.
+    'updater.openRelease': async () => {
+      const s = updater.snapshot();
+      const target = s.releaseUrl ?? releasePageUrl({ mode: 'official' });
+      if (!/^https:\/\//i.test(target) && !/^http:\/\/(localhost|127\.0\.0\.1)[:/]/i.test(target)) throw new Error('No release page to open.');
+      await shell.openExternal(target);
+      return { url: target };
+    },
     'desktop.get': () => settings.get(),
     // Start at sign-in, in the tray (--hidden). Schedules run only while the daemon runs, and after
     // a reboot nothing else starts it. Installed builds only: a development build would register
@@ -740,7 +825,7 @@ async function startApp() {
     'desktop.loginItem.get': () => loginItem(),
     'desktop.loginItem.set': ({ enabled }) => {
       if (!loginItem().supported) throw new Error(loginItem().reason);
-      app.setLoginItemSettings({ openAtLogin: !!enabled, args: LOGIN_ARGS });
+      setLoginItem(!!enabled);
       log.info(`Start at sign-in ${enabled ? 'on' : 'off'}`);
       return loginItem();
     },
@@ -794,6 +879,9 @@ async function startApp() {
 
   await app.whenReady();
 
+  // Started at sign-in: `--hidden` (Windows, the Linux autostart entry), or macOS's own flag.
+  const startHidden = FLAGS.hidden || (process.platform === 'darwin' && !!app.getLoginItemSettings().wasOpenedAtLogin);
+
   const CSP = [
     "default-src 'none'", "script-src 'self'", "style-src 'self'", "img-src 'self' data: blob:", "media-src 'self' blob:",
     "font-src 'self'", "connect-src 'none'", "object-src 'none'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
@@ -829,7 +917,13 @@ async function startApp() {
     });
   });
 
-  if (isPackaged) Menu.setApplicationMenu(null);
+  if (process.platform === 'darwin') {
+    // macOS routes Cmd+C/V/X/A and Cmd+Q through the application menu: without one, pasting a URL
+    // into Settings or the wizard does nothing. Standard roles only.
+    Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: 'appMenu' }, { role: 'editMenu' }, { role: 'windowMenu' }]));
+  } else if (isPackaged) {
+    Menu.setApplicationMenu(null);
+  }
 
   const appIcon = nativeImage.createFromBuffer(iconPng(256, 'connected'));
   const trayImages = {};
@@ -911,7 +1005,7 @@ async function startApp() {
         win.showInactive(); // off-screen and transparent: painting, but nothing a person can see
         return;
       }
-      if (!FLAGS.hidden || !settings.get().wizard?.completedAt) win.show();
+      if (!startHidden || !settings.get().wizard?.completedAt) win.show();
     });
     win.loadURL('g9app://app/index.html');
     return win;
@@ -1034,6 +1128,8 @@ async function startApp() {
   app.on('window-all-closed', () => {
     /* stay in the tray */
   });
+  // macOS: clicking the Dock icon while the window is hidden brings it back.
+  app.on('activate', () => showWindow());
 
   if (!CHECKING) {
     ctx.tray = new Tray(trayImage('offline'));

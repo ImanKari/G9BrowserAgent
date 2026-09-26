@@ -1,0 +1,351 @@
+# ==============================================================================================
+#  G9BrowserAgent — validate, package for Windows/macOS/Linux, prove the update, release to GitHub
+# ==============================================================================================
+#
+#  Requires two SECRET pipeline variables (Pipeline → Edit → Variables, "Keep this value secret"):
+#
+#      AzureDevOps.PAT   Code (Read & Write) on g9tm — tags the release commit, clones for the mirror
+#      Github.PAT        repo scope                  — creates github.com/ImanKari/G9BrowserAgent,
+#                                                      pushes the mirror, creates the release
+#
+#  The same discipline as the other G9 libraries (G9MAUIControls, G9SyncData):
+#    - Azure DevOps is the source of truth. The version is bumped by hand (package.json, mirrored in
+#      extension/manifest.json, desktop/package.json and desktop/package-lock.json); the pipeline
+#      never computes one. A re-run without a bump publishes nothing (setup/github-release.mjs).
+#    - Everything public hangs off one expression, isRelease: main, not a pull request. A pull
+#      request runs every check, builds every package and proves the update, and publishes nothing.
+#    - GitHub receives the final state LAST, after everything else passed.
+#
+#  Stages:
+#    1 Validate  Windows: every offline check (setup/check.mjs --all, the desktop suite included).
+#                Linux, macOS: the suites that describe those platforms (portable unit suites,
+#                self-test, extension suite, desktop suite).
+#    2 Package   One job per OS, on that OS: build the packages (desktop/scripts/build.mjs verifies
+#                the update metadata and the packed dependencies), build the SAME source as an older
+#                version, install it, and update it to these packages through the app's own updater
+#                (desktop/test/update-e2e.mjs: corrupted and interrupted downloads, skip, a busy
+#                daemon, install on quit, restart, extension refresh and reload, versions).
+#    3 Release   All packages together, verified again as one release; SHA256SUMS and notes.
+#                Nothing leaves Azure DevOps.
+#    4 Publish   main only, last: tag the commit in Azure, mirror Azure → GitHub, create the GitHub
+#                release as a draft, upload, verify every uploaded byte, publish, and check that
+#                the official update feed serves the new version.
+
+trigger:
+  batch: true   # one run at a time: two pushes must never interleave releases of one version
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+parameters:
+  - name: repositoryName
+    type: string
+    default: 'G9BrowserAgent'
+  - name: githubOwner
+    type: string
+    default: 'ImanKari'
+
+variables:
+  isRelease: $[ and( eq(variables['Build.SourceBranch'], 'refs/heads/main'), ne(variables['Build.Reason'], 'PullRequest') ) ]
+  NODE_VERSION: '22.x'
+  CI: 'true'
+  # electron-builder: never look for a signing identity that is not there.
+  CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+stages:
+
+# ================================================================================================ 1
+- stage: Validate
+  jobs:
+  - job: windows
+    displayName: 'Windows: every offline check'
+    pool: { vmImage: 'windows-latest' }
+    timeoutInMinutes: 60
+    steps:
+    - checkout: self
+    - task: NodeTool@0
+      inputs: { versionSpec: '$(NODE_VERSION)' }
+    - pwsh: |
+        cd desktop
+        npm ci --no-audit --no-fund
+        if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
+      displayName: 'Desktop dependencies (npm ci)'
+    - pwsh: |
+        # The browsers the live checks use, and any machine policy that changes what they do
+        # (a hosted image can set e.g. a popup policy the live window.open test depends on).
+        foreach ($exe in @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Google\Chrome\Application\chrome.exe")) {
+            if (Test-Path $exe) { Write-Host "$exe $((Get-Item $exe).VersionInfo.ProductVersion)" }
+        }
+        foreach ($key in @('HKLM:\SOFTWARE\Policies\Microsoft\Edge', 'HKLM:\SOFTWARE\Policies\Google\Chrome', 'HKCU:\SOFTWARE\Policies\Microsoft\Edge')) {
+            if (Test-Path $key) { Write-Host "== $key"; Get-ItemProperty $key | Format-List | Out-String | Write-Host }
+        }
+      displayName: 'Browsers and browser policies on this agent'
+    - pwsh: |
+        node setup/check.mjs --all --keep-going
+        if ($LASTEXITCODE -ne 0) {
+            # check.mjs prints a summary; the whole output of every check is in its log file.
+            $log = Get-ChildItem $env:TEMP -Filter 'g9-check-*.log' | Sort-Object LastWriteTime | Select-Object -Last 1
+            if ($log) { Write-Host "===== $($log.FullName)"; Get-Content $log.FullName | Select-String -Pattern 'FAIL|Error|✗|expected|actual' -Context 2,6 | Select-Object -First 120 }
+            throw "offline checks failed"
+        }
+      displayName: 'Offline checks (unit incl. the desktop suite, self-test, extension suite, panel render, links)'
+
+  - job: posix
+    displayName: 'Linux and macOS: portable suites'
+    strategy:
+      matrix:
+        linux: { vmImage: 'ubuntu-latest' }
+        macos: { vmImage: 'macos-latest' }
+    pool: { vmImage: '$(vmImage)' }
+    timeoutInMinutes: 60
+    variables:
+      G9_UNIT_NO_BROWSER: '1'
+    steps:
+    - checkout: self
+    - task: NodeTool@0
+      inputs: { versionSpec: '$(NODE_VERSION)' }
+    - bash: cd desktop && npm ci --no-audit --no-fund
+      displayName: 'Desktop dependencies (npm ci)'
+    - bash: |
+        set -e
+        for s in runtime version daemon humanize world sites check panel seam; do
+          echo "== unit: $s"; node setup/unit/$s.test.mjs
+        done
+        echo "== self-test"; node setup/selftest.mjs
+        echo "== extension suite"; node setup/extensiontest.mjs
+        echo "== desktop suite"; (cd desktop && node test/run.mjs)
+      displayName: 'Portable suites'
+
+# ================================================================================================ 2
+- stage: Package
+  dependsOn: Validate
+  jobs:
+  - job: package
+    displayName: 'Package and prove the update:'
+    strategy:
+      matrix:
+        windows: { vmImage: 'windows-latest', target: 'win', release: 'release-win' }
+        macos:   { vmImage: 'macos-latest',   target: 'mac', release: 'release-mac' }
+        linux:   { vmImage: 'ubuntu-latest',  target: 'linux', release: 'release-linux' }
+    pool: { vmImage: '$(vmImage)' }
+    timeoutInMinutes: 90
+    steps:
+    - checkout: self
+    - task: NodeTool@0
+      inputs: { versionSpec: '$(NODE_VERSION)' }
+    - bash: cd desktop && npm ci --no-audit --no-fund
+      displayName: 'Desktop dependencies (npm ci)'
+
+    - bash: |
+        set -e
+        V=$(node -p "require('./package.json').version")
+        # The "installed older version" of the update test: the same source, one patch lower
+        # (or x.(y-1).999 on a .0 patch). It is never published.
+        OLD=$(node -e "const [a,b,c]=process.argv[1].split('.').map(Number); console.log(c>0?[a,b,c-1].join('.'):b>0?[a,b-1,999].join('.'):[a-1,999,999].join('.'))" "$V")
+        echo "Version $V; the update test starts from $OLD"
+        echo "##vso[task.setvariable variable=G9_VERSION]$V"
+        echo "##vso[task.setvariable variable=G9_OLD_VERSION]$OLD"
+      displayName: 'Versions'
+
+    - bash: cd desktop && node scripts/build.mjs --$(target)
+      displayName: 'Build the $(target) packages (and verify them)'
+
+    - bash: cd desktop && node scripts/build.mjs --$(target) --as-version $(G9_OLD_VERSION) --out "$(Agent.TempDirectory)/old"
+      displayName: 'Build the same source as $(G9_OLD_VERSION) (the update test starts from it)'
+
+    - bash: |
+        set -e
+        mkdir -p "$(Build.ArtifactStagingDirectory)/e2e"
+        cd desktop
+        if [ "$(target)" = "linux" ]; then
+          # No FUSE needed: the AppImage runtime extracts, and sets APPDIR/APPIMAGE the same way.
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          # The hosted image's Edge and Chrome sandbox helpers are not root-owned with mode 4755 (what
+          # their own packages install), so a browser G9 launches aborts before it starts. Put them
+          # back as a desktop has them: G9's browsers then run sandboxed here, as they do for people.
+          for h in /opt/microsoft/msedge/msedge-sandbox /opt/google/chrome/chrome-sandbox; do
+            if [ -f "$h" ]; then sudo chown root:root "$h" && sudo chmod 4755 "$h"; ls -l "$h"; fi
+          done
+          xvfb-run -a -s "-screen 0 1280x900x24" node test/update-e2e.mjs --old "$(Agent.TempDirectory)/old" --new dist --report "$(Build.ArtifactStagingDirectory)/e2e/update-$(target).json"
+        else
+          node test/update-e2e.mjs --old "$(Agent.TempDirectory)/old" --new dist --report "$(Build.ArtifactStagingDirectory)/e2e/update-$(target).json"
+        fi
+      displayName: 'Update, end to end: $(G9_OLD_VERSION) → $(G9_VERSION), real packages'
+
+    - bash: |
+        set -e
+        OUT="$(Build.ArtifactStagingDirectory)/$(release)"
+        mkdir -p "$OUT"
+        cd desktop/dist
+        case "$(target)" in
+          win)   cp G9-Setup-*.exe G9-Setup-*.exe.blockmap latest.yml "$OUT/" ;;
+          mac)   cp G9-*-mac-*.dmg G9-*-mac-*.zip G9-*-mac-*.zip.blockmap latest-mac.yml "$OUT/"; cp G9-*-mac-*.dmg.blockmap "$OUT/" 2>/dev/null || true ;;
+          linux) cp G9-x86_64.AppImage G9_*_amd64.deb latest-linux.yml "$OUT/" ;;
+        esac
+        ls -la "$OUT"
+      displayName: 'Stage the release files'
+    - task: PublishPipelineArtifact@1
+      inputs: { targetPath: '$(Build.ArtifactStagingDirectory)/$(release)', artifact: '$(release)' }
+    - task: PublishPipelineArtifact@1
+      condition: succeededOrFailed()
+      inputs: { targetPath: '$(Build.ArtifactStagingDirectory)/e2e', artifact: 'update-test-$(target)' }
+
+# ================================================================================================ 3
+- stage: Release
+  dependsOn: Package
+  jobs:
+  - job: assemble
+    displayName: 'Assemble and verify the release'
+    pool: { vmImage: 'ubuntu-latest' }
+    steps:
+    - checkout: self
+    - task: NodeTool@0
+      inputs: { versionSpec: '$(NODE_VERSION)' }
+    - task: DownloadPipelineArtifact@2
+      inputs: { artifact: 'release-win', path: '$(Pipeline.Workspace)/release' }
+    - task: DownloadPipelineArtifact@2
+      inputs: { artifact: 'release-mac', path: '$(Pipeline.Workspace)/release' }
+    - task: DownloadPipelineArtifact@2
+      inputs: { artifact: 'release-linux', path: '$(Pipeline.Workspace)/release' }
+    - bash: |
+        set -e
+        V=$(node -p "require('./package.json').version")
+        R="$(Pipeline.Workspace)/release"
+        node desktop/scripts/verify-artifacts.mjs "$R" --version "$V" --expect win,mac,linux
+        (cd "$R" && sha256sum G9* > SHA256SUMS.txt && cat SHA256SUMS.txt)
+        # Release notes: this version's change-log entry from AIGuide.md, and how to install.
+        node setup/release-notes.mjs --version "$V" --dir "$R" --out "$(Pipeline.Workspace)/notes.md"
+      displayName: 'Verify all packages as one release; SHA256SUMS; notes'
+    - task: PublishPipelineArtifact@1
+      inputs: { targetPath: '$(Pipeline.Workspace)/release', artifact: 'release' }
+    - task: PublishPipelineArtifact@1
+      inputs: { targetPath: '$(Pipeline.Workspace)/notes.md', artifact: 'release-notes' }
+
+# ================================================================================================ 4
+- stage: Publish
+  dependsOn: Release
+  condition: and(succeeded(), eq(variables.isRelease, true))
+  jobs:
+  - job: github
+    displayName: 'Tag, mirror to GitHub, publish the release'
+    pool: { vmImage: 'ubuntu-latest' }
+    steps:
+    - checkout: self
+      fetchDepth: 0
+    - task: NodeTool@0
+      inputs: { versionSpec: '$(NODE_VERSION)' }
+    - task: DownloadPipelineArtifact@2
+      inputs: { artifact: 'release', path: '$(Pipeline.Workspace)/release' }
+    - task: DownloadPipelineArtifact@2
+      inputs: { artifact: 'release-notes', path: '$(Pipeline.Workspace)/notes' }
+
+    # ──────────────────────────────────────────────────────────────────────────────────────────
+    - pwsh: |
+        $ErrorActionPreference = 'Continue'
+        $failed = @()
+        try {
+            $u = Invoke-RestMethod -Uri 'https://api.github.com/user' -Headers @{ Authorization = "token $env:GITHUB_PAT"; 'User-Agent' = 'g9-pipeline' }
+            Write-Host "[ok]   GitHub PAT valid (authenticated as $($u.login))"
+        } catch { $failed += "GitHub PAT rejected: $($_.Exception.Response.StatusCode.value__)" }
+        try {
+            $basic = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$env:AZDO_PAT"))
+            Invoke-RestMethod -Uri 'https://dev.azure.com/g9tm/_apis/projects?api-version=7.1' -Headers @{ Authorization = "Basic $basic" } | Out-Null
+            Write-Host "[ok]   Azure DevOps PAT valid"
+        } catch { $failed += "Azure DevOps PAT rejected: $($_.Exception.Response.StatusCode.value__)" }
+        if ($failed.Count) { $failed | ForEach-Object { Write-Host "##vso[task.logissue type=error]$_" }; throw "Credential validation failed." }
+      displayName: 'Validate credentials'
+      env:
+        GITHUB_PAT: $(Github.PAT)
+        AZDO_PAT: $(AzureDevOps.PAT)
+
+    # ──────────────────────────────────────────────────────────────────────────────────────────
+    # Tag the release commit in Azure DevOps BEFORE the mirror, so v<version> reaches GitHub with it
+    # and the GitHub release is created on that tag (a mirror push would delete a tag that exists
+    # only on GitHub). A tag of this version on ANOTHER commit means main moved without a version
+    # bump: that stops the release (setup/github-release.mjs would otherwise skip it silently).
+    - pwsh: |
+        $ErrorActionPreference = 'Continue'
+        $repo = '${{ parameters.repositoryName }}'
+        $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+        $tag = "v$version"
+        $head = (git rev-parse HEAD).Trim()
+        Write-Host "##vso[task.setvariable variable=G9_COMMIT]$head"
+        Write-Host "##vso[task.setvariable variable=G9_VERSION]$version"
+        $remote = "https://$env:AZDO_PAT@g9tm.visualstudio.com/$repo/_git/$repo"
+        $existing = (git ls-remote --tags $remote "refs/tags/$tag^{}" | Select-Object -First 1)
+        if (-not $existing) { $existing = (git ls-remote --tags $remote "refs/tags/$tag" | Select-Object -First 1) }
+        if ($existing) {
+            $tagged = ($existing -split "\s+")[0]
+            if ($tagged -eq $head) { Write-Host "Tag $tag already points at $head."; exit 0 }
+            Write-Host "##vso[task.logissue type=error]Tag $tag is on $tagged, but this build is $head: bump the version in package.json (and its mirrors) to release this commit."
+            exit 1
+        }
+        git -c user.name='g9-pipeline' -c user.email='pipeline@g9tm.invalid' tag -a $tag -m "G9 $version" $head
+        git push $remote "refs/tags/$tag"
+        if ($LASTEXITCODE -ne 0) { Write-Host "##vso[task.logissue type=error]Could not push tag $tag (AzureDevOps.PAT needs Code: Read & Write)."; exit 1 }
+        Write-Host "Tagged $head as $tag."
+      displayName: 'Tag the release commit (Azure DevOps)'
+      env:
+        AZDO_PAT: $(AzureDevOps.PAT)
+
+    # ──────────────────────────────────────────────────────────────────────────────────────────
+    # The final state of Azure DevOps, to GitHub. --mirror: GitHub matches Azure exactly.
+    - pwsh: |
+        $ErrorActionPreference = 'Stop'
+        $owner = '${{ parameters.githubOwner }}'
+        $repo  = '${{ parameters.repositoryName }}'
+        $headers = @{ Authorization = "token $env:GITHUB_PAT"; Accept = 'application/vnd.github.v3+json'; 'User-Agent' = 'g9-pipeline' }
+        try {
+            Invoke-RestMethod -Uri "https://api.github.com/repos/$owner/$repo" -Headers $headers | Out-Null
+            Write-Host "GitHub repo $owner/$repo exists"
+        } catch {
+            if ($_.Exception.Response.StatusCode.value__ -ne 404) { throw }
+            Write-Host "Creating $owner/$repo (public: the releases are what the app updates from) ..."
+            $body = @{
+                name        = $repo
+                private     = $false
+                auto_init   = $false
+                has_wiki    = $false
+                description = 'AI agents drive real Chrome and Edge through MCP: two engines, one local daemon, human-like input, reviewable evidence. Windows, macOS, Linux.'
+                homepage    = "https://github.com/$owner/$repo/releases/latest"
+            } | ConvertTo-Json
+            Invoke-RestMethod -Uri 'https://api.github.com/user/repos' -Headers $headers -Method Post -Body $body -ContentType 'application/json' | Out-Null
+        }
+        $work = Join-Path $env:AGENT_TEMPDIRECTORY 'mirror'
+        if (Test-Path $work) { Remove-Item $work -Recurse -Force }
+        New-Item -ItemType Directory -Path $work | Out-Null
+        $source = "https://$env:AZDO_PAT@g9tm.visualstudio.com/$repo/_git/$repo"
+        $dest   = "https://$($owner):$env:GITHUB_PAT@github.com/$owner/$repo.git"
+        $ErrorActionPreference = 'Continue'
+        git clone --mirror $source "$work/$repo.git"
+        if ($LASTEXITCODE -ne 0) { throw "mirror clone failed" }
+        Push-Location "$work/$repo.git"
+        try {
+            git push --mirror $dest
+            if ($LASTEXITCODE -ne 0) { throw "mirror push failed" }
+        } finally {
+            Pop-Location
+            Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        Write-Host "Mirrored to https://github.com/$owner/$repo"
+      displayName: 'Mirror Azure DevOps → GitHub'
+      env:
+        GITHUB_PAT: $(Github.PAT)
+        AZDO_PAT: $(AzureDevOps.PAT)
+
+    # ──────────────────────────────────────────────────────────────────────────────────────────
+    - bash: |
+        node setup/github-release.mjs \
+          --dir "$(Pipeline.Workspace)/release" \
+          --version "$(G9_VERSION)" \
+          --commit "$(G9_COMMIT)" \
+          --owner '${{ parameters.githubOwner }}' --repo '${{ parameters.repositoryName }}' \
+          --notes "$(Pipeline.Workspace)/notes/notes.md"
+      displayName: 'GitHub release: draft, upload, verify, publish, check the update feed'
+      env:
+        GITHUB_PAT: $(Github.PAT)

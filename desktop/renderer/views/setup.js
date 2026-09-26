@@ -182,6 +182,12 @@ async function loadPolicies() {
     replace(body, h('p', null, err.message));
     return;
   }
+  if (r.applicable === false) {
+    // macOS and Linux: these are Windows registry policies. Nothing to do; the step is done.
+    replace(body, h('p', null, r.reason));
+    mark('policies', true, 'Not needed on this operating system.');
+    return;
+  }
   const apply = h('button', { type: 'button', class: 'btn primary' }, r.appliedCount === r.total ? 'Apply again' : 'Apply policies');
   const undo = h('button', { type: 'button', class: 'btn', disabled: !r.canUndo }, 'Undo');
   apply.addEventListener('click', () => runPolicies('apply', apply));
@@ -255,6 +261,11 @@ async function loadMcp() {
     r = await api.invoke('wizard.mcp');
   } catch (err) {
     replace(body, h('p', null, err.message));
+    return;
+  }
+  if (r.blocked) {
+    // macOS: running from a temporary copy or the disk image — an entry would break next start.
+    replace(body, h('p', { class: 'notice warn' }, r.blocked));
     return;
   }
   const rows = r.clients.map((c) => {

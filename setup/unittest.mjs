@@ -60,7 +60,7 @@ function runFile(file) {
     child.stderr.on('data', (d) => { out += d; });
     const name = path.basename(file);
     const progress = setInterval(() => {
-      const passed = (out.match(/^s*PASS/gm) ?? []).length;
+      const passed = (out.match(/^\s*PASS\b/gm) ?? []).length;
       console.log(color(90, `  … ${name} still running, ${Math.round((Date.now() - started) / 1000)} s, ${passed} passed so far`));
     }, PROGRESS_MS);
     const timer = setTimeout(() => {

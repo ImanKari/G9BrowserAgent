@@ -409,7 +409,8 @@ async function main() {
 
   let browser = null;
   try {
-    browser = await launchBrowser({ browser: 'edge', headless: true, windowSize: { width: 1280, height: 900 } });
+    // --browser chrome|cft when Edge cannot start headless on this machine (default: edge, the one the panel ships for).
+    browser = await launchBrowser({ browser: argOf('--browser') ?? 'edge', headless: true, windowSize: { width: 1280, height: 900 } });
     console.log(`  ${browser.browser.product} · temp profile ${browser.profileDir}`);
     const conn = browser.conn;
     const { targetId } = await conn.send('Target.createTarget', { url: 'about:blank' });

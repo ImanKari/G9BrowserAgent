@@ -25,6 +25,8 @@ export function isHumanizeValue(v) {
 }
 export const BROWSERS = ['auto', 'edge', 'chrome', 'cft'];
 export const CHANNELS = ['stable', 'beta'];
+/** Where updates come from (desktop/lib/updater.mjs UPDATE_MODES). */
+export const UPDATE_MODES = ['official', 'custom', 'off'];
 const MB = 1024 * 1024;
 
 export const SETTINGS_FIELDS = [
@@ -77,8 +79,13 @@ export const SETTINGS_FIELDS = [
     paths: ['idleExitMinutes', 'daemon.idleExitMinutes'],
   },
   {
-    key: 'updateUrl', group: 'Updates', label: 'Update server URL', type: 'url', default: '',
-    help: 'An http(s) folder holding latest.yml and the installer. Empty means updates are not configured.',
+    key: 'updateMode', group: 'Updates', label: 'Update source', type: 'select', options: UPDATE_MODES, default: 'official',
+    help: 'official: the published G9 releases on GitHub (nothing to set up). custom: your own https folder, below. off: never check.',
+    paths: ['updateMode', 'update.mode'],
+  },
+  {
+    key: 'updateUrl', group: 'Updates', label: 'Custom update URL', type: 'url', default: '',
+    help: 'Only for "custom": an https folder holding latest.yml (latest-mac.yml, latest-linux.yml) and the installers.',
     paths: ['updateUrl', 'update.url', 'updates.url'],
   },
   {
@@ -193,13 +200,20 @@ export function buildSettingsPatch(settings, values) {
 
 /** What the updater needs, from daemon settings with a desktop-local fallback. */
 export function pickUpdateConfig(daemonSettings, fallback = {}) {
+  const modeField = SETTINGS_FIELDS.find((f) => f.key === 'updateMode');
   const urlField = SETTINGS_FIELDS.find((f) => f.key === 'updateUrl');
   const chField = SETTINGS_FIELDS.find((f) => f.key === 'updateChannel');
+  const mode = readField(daemonSettings, modeField);
   const url = readField(daemonSettings, urlField);
   const ch = readField(daemonSettings, chField);
+  const urlValue = String((url.present ? url.value : fallback.url) ?? '').trim();
+  // Before updateMode existed, a URL was the only way to turn updates on: read it as 'custom'.
+  let modeValue = mode.present ? mode.value : fallback.mode;
+  if (!UPDATE_MODES.includes(modeValue)) modeValue = urlValue ? 'custom' : 'official';
   return {
-    url: String((url.present ? url.value : fallback.url) ?? '').trim(),
+    mode: modeValue,
+    url: urlValue,
     channel: String((ch.present ? ch.value : fallback.channel) ?? 'stable'),
-    source: url.present ? 'daemon' : fallback.url ? 'desktop' : 'none',
+    source: url.present || mode.present ? 'daemon' : fallback.url || fallback.mode ? 'desktop' : 'none',
   };
 }

@@ -35,6 +35,7 @@ import { WsClient } from '../lib/ws-client.mjs';
 import { timeoutFor } from '../daemon/router.js';
 import { resolveHome } from '../daemon/paths.js';
 import { runningDaemonFor } from '../daemon/home-lock.js';
+import { scriptCommand, isAppImageRuntime, ensureBootstrap } from '../lib/runtime.mjs';
 
 const HOST = process.env.G9_HOST || '127.0.0.1';
 const PORT = (() => {
@@ -156,12 +157,25 @@ class DaemonLink {
 
   #spawnDaemon() {
     try {
-      const child = spawn(process.execPath, [DAEMON], {
+      // The daemon outlives this shim, so it is started with THIS runtime's stable command
+      // (lib/runtime.mjs): node or the installed G9 executable — or, from a Linux AppImage, the
+      // .AppImage file itself, never a path inside this process's temporary mount.
+      const home = resolveHome(process.env.G9_HOME);
+      if (isAppImageRuntime()) ensureBootstrap(home);
+      const cmd = scriptCommand({
+        script: 'daemon/g9d.mjs',
+        root: REPO_ROOT,
+        execPath: process.execPath,
+        electron: !!process.versions.electron,
+        home,
+        env: { ...process.env, G9_PORT: String(PORT) },
+      });
+      const child = spawn(cmd.command, cmd.args, {
         detached: true,
         stdio: 'ignore',
         windowsHide: true,
         cwd: process.cwd(),
-        env: { ...process.env, G9_PORT: String(PORT) },
+        env: cmd.env,
       });
       child.on('error', (err) => log(`[g9] could not start the daemon: ${err.message}`));
       child.unref();
@@ -327,7 +341,17 @@ process.on('SIGTERM', () => { link.close(); process.exit(0); });
 
 mcp.start();
 
-// Connect (and start the daemon if needed) right away, so the first tool call
-// does not pay for it. Failures here are not fatal: each call retries and
-// reports the reason itself.
-link.ensure().catch((err) => log(`[g9] daemon not reachable yet: ${err.message}`));
+// Connect (and start the daemon if needed) early, so the first tool call does not pay for it —
+// but only once the MCP client has said who it is (initialize), or after 2 s if it never does.
+// The hello carries the client's name: connecting at the very first moment registered the agent
+// as "mcp-agent" whenever the daemon answered before initialize arrived (a race a slower CI
+// machine lost every time), and the panel and the desktop showed that instead of "claude-code".
+// Failures here are not fatal: each call retries and reports the reason itself.
+let preconnected = false;
+const preconnect = () => {
+  if (preconnected) return;
+  preconnected = true;
+  link.ensure().catch((err) => log(`[g9] daemon not reachable yet: ${err.message}`));
+};
+mcp.on('initialize', () => setImmediate(preconnect));
+setTimeout(preconnect, 2000).unref();

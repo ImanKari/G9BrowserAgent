@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { suite, tmpDir, rmrf } from './harness.mjs';
 import {
-  ENTRY_NAME, mcpClients, detectClients, shimEntry, entryForClient, planRegistration, applyRegistration, removeRegistration,
+  ENTRY_NAME, mcpClients, userConfigRoot, unstableExecReason, detectClients, shimEntry, entryForClient, planRegistration, applyRegistration, removeRegistration,
   stripJsonc, parseConfig, sameEntry, diffLines, inspectClient,
 } from '../lib/mcp-register.mjs';
 
@@ -199,6 +199,29 @@ t.test('sameEntry and diffLines', () => {
   assert.equal(sameEntry({ command: 'a', args: ['c'] }, { command: 'a', args: ['b'] }), false);
   const d = diffLines({ a: 1, b: 2 }, { a: 1, b: 3 });
   assert.deepEqual(d.filter((x) => x.op !== ' ').map((x) => `${x.op}${x.line.trim()}`), ['-"b": 2', '+"b": 3']);
+});
+
+t.test('config locations per OS: VS Code and Claude Desktop under %APPDATA%, ~/Library/Application Support, or $XDG_CONFIG_HOME (~/.config)', () => {
+  assert.equal(userConfigRoot({ platform: 'win32', env: { APPDATA: 'C:\\Users\\qa\\AppData\\Roaming' }, home: 'C:\\Users\\qa' }), 'C:\\Users\\qa\\AppData\\Roaming');
+  assert.equal(userConfigRoot({ platform: 'darwin', env: {}, home: '/Users/qa' }), path.join('/Users/qa', 'Library', 'Application Support'));
+  assert.equal(userConfigRoot({ platform: 'linux', env: {}, home: '/home/qa' }), path.join('/home/qa', '.config'));
+  assert.equal(userConfigRoot({ platform: 'linux', env: { XDG_CONFIG_HOME: '/home/qa/cfg' }, home: '/home/qa' }), '/home/qa/cfg');
+  const mac = Object.fromEntries(mcpClients({ home: '/Users/qa', platform: 'darwin', env: {} }).map((c) => [c.id, c]));
+  assert.equal(mac.vscode.file, path.join('/Users/qa', 'Library', 'Application Support', 'Code', 'User', 'mcp.json'));
+  assert.equal(mac['claude-desktop'].file, path.join('/Users/qa', 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json'));
+  assert.match(mac['claude-desktop'].restartHint, /Cmd\+Q/);
+  assert.equal(mac['claude-code'].file, path.join('/Users/qa', '.claude.json'), 'Claude Code and Cursor keep one place on every OS');
+  const linux = Object.fromEntries(mcpClients({ home: '/home/qa', platform: 'linux', env: {} }).map((c) => [c.id, c]));
+  assert.equal(linux.vscode.file, path.join('/home/qa', '.config', 'Code', 'User', 'mcp.json'));
+  assert.equal(linux.cursor.file, path.join('/home/qa', '.cursor', 'mcp.json'));
+});
+
+t.test('a Linux AppImage entry names the .AppImage file and the bootstrap, never the temporary mount', () => {
+  const e = shimEntry({ isPackaged: true, execPath: '/tmp/.mount_G9q/g9', resourceRoot: '/tmp/.mount_G9q/resources', appImage: { file: '/home/qa/Apps/G9.AppImage', bootstrap: '/home/qa/.g9/bin/g9-run.mjs' } });
+  assert.deepEqual(e, { command: '/home/qa/Apps/G9.AppImage', args: ['/home/qa/.g9/bin/g9-run.mjs', 'mcp/shim.mjs', '--no-sandbox'], env: { ELECTRON_RUN_AS_NODE: '1' } });
+  assert.equal(unstableExecReason({ execPath: '/Applications/G9.app/Contents/MacOS/G9', platform: 'darwin' }), null);
+  assert.match(unstableExecReason({ execPath: '/private/var/folders/a/T/AppTranslocation/X/d/G9.app/Contents/MacOS/G9', platform: 'darwin' }), /App Translocation/);
+  assert.equal(unstableExecReason({ execPath: 'C:/Users/qa/AppData/Local/Programs/G9/G9.exe', platform: 'win32' }), null);
 });
 
 t.run();

@@ -14,7 +14,9 @@ setup/mcp.json
 # Node
 node_modules/
 npm-debug.log*
-package-lock.json
+# The core has no dependencies, so no lock file. desktop/package-lock.json IS tracked: CI installs
+# exactly those versions (npm ci), and the version check compares it.
+/package-lock.json
 
 # Editors / OS
 .vscode/
