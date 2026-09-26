@@ -565,6 +565,23 @@ test('stealth: checkConsistency — consistent settings pass, each kind of contr
 
 // ─── launch (pure parts) ─────────────────────────────────────────────────────────────────────
 
+test('launch: the sandbox stays on unless G9_BROWSER_NO_SANDBOX=1 on Linux; a sandbox abort says how to fix it', () => {
+  const dir = path.join(TEMP_ROOT, 'p');
+  assert.ok(!launch.buildArgs({ profileDir: dir }).includes('--no-sandbox'), 'never by default');
+  assert.equal(launch.buildArgs({ profileDir: dir, noSandbox: true })[2], '--no-sandbox');
+  assert.equal(launch.noSandboxWanted({ platform: 'linux', env: {} }), false);
+  assert.equal(launch.noSandboxWanted({ platform: 'linux', env: { G9_BROWSER_NO_SANDBOX: '1' } }), true);
+  assert.equal(launch.noSandboxWanted({ platform: 'win32', env: { G9_BROWSER_NO_SANDBOX: '1' } }), false, 'Linux only');
+  // Edge 153's own words on a hosted Ubuntu 24.04 machine (setuid_sandbox_host.cc).
+  const abort = '[2812:2812:0926/142108.241953:FATAL:sandbox/linux/suid/client/setuid_sandbox_host.cc:166] The SUID sandbox helper binary was found, but is not configured correctly. Rather than run without sandboxing I\'m aborting now. You need to make sure that /opt/microsoft/msedge/msedge-sandbox is owned by root and has mode 4755.';
+  const hint = launch.sandboxHint(abort);
+  assert.match(hint, /sudo chown root:root \/opt\/microsoft\/msedge\/msedge-sandbox && sudo chmod 4755 \/opt\/microsoft\/msedge\/msedge-sandbox/);
+  assert.match(hint, /G9_BROWSER_NO_SANDBOX=1/);
+  assert.match(launch.sandboxHint('No usable sandbox! Update your kernel'), /user namespaces/);
+  assert.equal(launch.sandboxHint('[123:FATAL:gpu] something else'), '');
+  assert.equal(launch.sandboxHint(''), '');
+});
+
 test('launch: the switch list is exactly the designed list (+ the Edge sign-in guards, + stealth, + extraArgs, + start URL)', () => {
   const dir = path.join(TEMP_ROOT, 'p');
   const args = launch.buildArgs({ profileDir: dir });

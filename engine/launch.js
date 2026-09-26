@@ -255,6 +255,7 @@ function checkLang(lang) {
 export function buildArgs({
   profileDir, headless = true, windowSize = DEFAULT_WINDOW, proxy, proxyBypass, lang,
   extraArgs = [], stealth = 'off', startUrl = 'about:blank', kind = null, componentUpdate = null,
+  noSandbox = false,
 } = {}) {
   if (!profileDir) throw new Error('buildArgs: profileDir is required.');
   const level = normalizeLevel(stealth);
@@ -319,6 +320,7 @@ export function buildArgs({
   if (blinkConflict.length) throw new Error(`Blink features both enabled and disabled: ${blinkConflict.join(', ')}.`);
 
   const args = ['--remote-debugging-pipe', `--user-data-dir=${profileDir}`];
+  if (noSandbox) args.push('--no-sandbox');
   if (headless) args.push('--headless=new');
   // Headless reports an 800×600 screen inside whatever window it has (measured on Edge/Chrome/CfT
   // 153): `screen.width < outerWidth`, a classic headless tell. At EVERY level the screen is made
@@ -358,6 +360,32 @@ function alive(pid) {
 }
 
 /** Kill a process and its descendants, synchronously. Windows: taskkill /T /F — the last resort. */
+/**
+ * Linux only, and only when asked (G9_BROWSER_NO_SANDBOX=1 in the daemon's environment): launched
+ * browsers start without Chromium's sandbox. For a container or a CI machine that cannot run the
+ * sandbox at all; never a default, because the sandbox is what keeps a compromised page in its tab.
+ */
+export function noSandboxWanted({ platform = process.platform, env = process.env } = {}) {
+  return platform === 'linux' && env.G9_BROWSER_NO_SANDBOX === '1';
+}
+
+/**
+ * What to do when a Linux browser died because it could not start its sandbox: Chromium falls back
+ * to the setuid helper when unprivileged user namespaces are off (Ubuntu 24.04's AppArmor default,
+ * containers), and aborts when that helper is not root-owned with mode 4755 (seen on a hosted
+ * Ubuntu 24.04 CI machine with Edge 153). '' when the output shows nothing of the kind.
+ */
+export function sandboxHint(output) {
+  const text = String(output ?? '');
+  const helper = /make sure that (\S+) is owned by root and has mode 4755/.exec(text)?.[1];
+  if (!helper && !/No usable sandbox|SUID sandbox helper/i.test(text)) return '';
+  return '\nThis Linux system cannot start the browser\'s sandbox. ' +
+    (helper
+      ? `Its helper must be owned by root with mode 4755: sudo chown root:root ${helper} && sudo chmod 4755 ${helper} (reinstalling the browser's package also does it).`
+      : 'Allow unprivileged user namespaces, or install the browser from its official package (which sets up its sandbox helper).') +
+    ' Only on a disposable machine or container: G9_BROWSER_NO_SANDBOX=1 in the daemon\'s environment starts launched browsers without the sandbox.';
+}
+
 export function killTree(pid) {
   if (!pid) return false;
   if (process.platform === 'win32') {
@@ -537,7 +565,7 @@ export async function launchBrowser({
   // Build (and validate) before spawning anything.
   let args;
   try {
-    args = buildArgs({ profileDir: dir, headless, windowSize, proxy, proxyBypass, lang, extraArgs, stealth: level, startUrl, kind: target.kind, componentUpdate });
+    args = buildArgs({ profileDir: dir, headless, windowSize, proxy, proxyBypass, lang, extraArgs, stealth: level, startUrl, kind: target.kind, componentUpdate, noSandbox: noSandboxWanted() });
   } catch (err) {
     if (tempProfile) await rm(dir, { recursive: true, force: true }).catch(() => {});
     throw err;
@@ -602,7 +630,7 @@ export async function launchBrowser({
     const tail = stderr.get();
     await cleanupFailedStart();
     throw new Error(
-      `${label} did not become ready: ${err.message}${exit}` +
+      `${label} did not become ready: ${err.message}${exit}` + sandboxHint(tail) +
       (tail ? `\nLast browser output:\n${tail}` : '\n(The browser printed nothing.)'),
     );
   }

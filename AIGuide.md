@@ -1790,7 +1790,12 @@ registered as "mcp-agent" in a race, seen as a flaky self-test on CI). `.gitattr
 file LF: the extension suite compared file text and failed on a Windows checkout with `autocrlf`. The
 unit runner's PASS counter had a control character where `\b` was meant, and counted nothing. The live
 `window.open` test waits for the first paint before it clicks (a hosted CI machine received the click
-before the button was hit-testable). The README is new, for people who use G9, in English and Persian
+before the button was hit-testable). On the hosted Ubuntu 24.04 machine a browser the daemon launched
+aborted at start: without unprivileged user namespaces Chromium falls back to its setuid sandbox
+helper, and that image's `msedge-sandbox` was not root-owned with mode 4755. The pipeline now restores
+the helper as the package installs it (so G9's browsers run sandboxed there, as on a desktop), and
+`engine/launch.js` turns that abort into the fix (`sandboxHint`), with `G9_BROWSER_NO_SANDBOX=1` as an
+explicit, Linux-only opt-out for containers (`engine.test`). The README is new, for people who use G9, in English and Persian
 (`README.fa.md`), with pictures from a real run (`setup/docs-screenshots.mjs`, `docs/assets/`); the
 technical reference moved to `docs/REFERENCE.md`. License: MIT (`LICENSE`).
 

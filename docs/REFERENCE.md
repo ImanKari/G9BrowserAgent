@@ -941,6 +941,7 @@ are kept; invalid values are refused by name.
 | `G9_PROJECT` | shim, daemon | The project adapter. Otherwise the agent's working folder decides. |
 | `G9_ENGINE_RESUME_MS` | daemon | How long a disconnected extension keeps its tab handles. Default 10 minutes. |
 | `G9_IDLE_EXIT_MS` | daemon | Idle-exit time, for tests. |
+| `G9_BROWSER_NO_SANDBOX` | daemon (Linux) | `1` starts launched browsers with `--no-sandbox`. Only for a container or CI machine that cannot run Chromium's sandbox; never set on a desktop. |
 
 **`G9_HOME` layout:**
 
@@ -1378,6 +1379,7 @@ What is still open — the v1 backlog items EXT-01 … EXT-17 and the owner's op
 | macOS: *"G9 cannot be opened because Apple cannot check it for malicious software"*, or *"G9 is damaged"* | The app is not signed with an Apple Developer ID. Open it once with right-click (Control-click) → **Open** → **Open**, or in System Settings → Privacy & Security → **Open Anyway**. For *"damaged"* (a quarantine flag on a download), run `xattr -dr com.apple.quarantine /Applications/G9.app`. |
 | macOS: the wizard refuses to register the MCP server, saying G9 runs from a temporary location | G9 was started from the disk image or the Downloads folder, and macOS runs such apps from a randomized path (App Translocation). Drag G9 into **Applications**, start it from there, and run Setup again. |
 | Linux: the AppImage does not start (*"AppImages require FUSE to run"*) | Install FUSE 2 (`sudo apt install libfuse2`, on Ubuntu 24.04 `libfuse2t64`), make the file executable (`chmod +x G9-x86_64.AppImage`), and start it again. |
+| Linux: a launched browser does not start, *"The SUID sandbox helper binary was found, but is not configured correctly"* | Unprivileged user namespaces are off (Ubuntu 24.04's default AppArmor rule, containers), so the browser falls back to its setuid sandbox helper, and that helper is not root-owned with mode 4755. G9's error names the helper and the fix (`sudo chown root:root <helper> && sudo chmod 4755 <helper>`, or reinstall the browser's package). In a disposable container only, `G9_BROWSER_NO_SANDBOX=1` in the daemon's environment turns the sandbox off. |
 | Linux: the AppImage no longer updates, or updates to a new file each time | The file was renamed. Keep the published name `G9-x86_64.AppImage`: the updater replaces a file with that name in place, and the MCP entries point at it. |
 | Agent shows no `browser_*` tools | The MCP config path is wrong, or the client was not restarted. MCP servers load at client start. |
 | *"No tab to act on"* | Open one (`browser_tabs action:"open"`), attach one (`browser_tabs action:"attach"`), or press **Record from now** in the panel on the tab you want. |
