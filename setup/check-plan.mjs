@@ -129,6 +129,7 @@ export const NO_CHECK = [
   ['setup/github-release.mjs', 'the pipeline Publish stage (a GitHub release); --dry-run against a folder to try it'],
   ['setup/release-notes.mjs', 'the pipeline Release stage; run it with --version <v> to print the notes'],
   ['LICENSE', 'no behaviour'],
+  ['setup/docs-screenshots.mjs', 'makes the README screenshots from a real run; run it by hand when the UI changes'],
   ['**/*.png', 'images; an icon named in the manifest is checked by the panel suite'],
   ['**/*.ico', 'images'],
 ];

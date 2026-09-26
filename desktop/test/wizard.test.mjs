@@ -149,7 +149,7 @@ t.test('5. extension: installed by the daemon, path on the clipboard; the page o
   assert.deepEqual(spawned.at(-1).cmd, 'C:/Edge/msedge.exe');
   assert.deepEqual(spawned.at(-1).args, ['edge://extensions']);
   assert.equal(spawned.at(-1).opts.env.ELECTRON_RUN_AS_NODE, undefined);
-  assert.deepEqual(o.clicks, threeClicks('edge'));
+  assert.deepEqual(o.clicks, threeClicks('edge', 'win32'), 'this wizard is the Windows one (app.platform)');
   await w.openExtensionsPage('chrome');
   assert.deepEqual(spawned.at(-1).args, ['chrome://extensions']);
 });

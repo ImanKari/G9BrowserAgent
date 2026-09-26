@@ -126,7 +126,9 @@ export function describeUpdate(s) {
     case 'downloaded': return `Updates: ${s.version} is ready to install`;
     case 'deferred': return `Updates: ${s.version} waits for the daemon to be idle (${(s.reasons ?? []).join('; ')})`;
     case 'installing': return `Updates: installing ${s.version}…`;
-    case 'error': return `Updates: the last check failed (${s.error})`;
+    case 'error': return /\b404\b|No published versions|ERR_UPDATER_LATEST_VERSION_NOT_FOUND|CHANNEL_FILE_NOT_FOUND/.test(s.error ?? '')
+      ? `Updates: no G9 release is published at ${s.source === 'custom' ? 'the custom address' : 'the official releases'} yet`
+      : `Updates: the last check failed (${String(s.error ?? '').trim()})`;
     default: return 'Updates: unknown';
   }
 }

@@ -47,9 +47,17 @@ function readOwnVersion() {
 
 // Under Electron `require('electron')` is the API; under plain Node (or ELECTRON_RUN_AS_NODE) it
 // is the npm package, whose export is the path of the Electron binary (a string).
+// Only inside Electron: in plain Node the npm package's index.js may download the Electron binary
+// on first use (and print that it does), which a `node main.mjs --smoke` must never do — it broke
+// the smoke test's one-line JSON on fresh CI agents.
+// (test/main-process.test.mjs puts a fake Electron API in the require cache: that one is used.)
 let electron = null;
 try {
-  electron = require('electron');
+  if (process.versions.electron) electron = require('electron');
+  else {
+    const id = require.resolve('electron');
+    if (require.cache[id]) electron = require(id);
+  }
 } catch {
   electron = null;
 }

@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Demo Shop — G9 example page</title>
+<!--
+  A made-up shop for the README screenshots and examples (setup/docs-screenshots.mjs): a product
+  list, a cart and a checkout form. No network requests, no real brand, nothing stored.
+-->
+<style>
+  :root { --ink: #1c2330; --muted: #5d6778; --line: #e3e7ee; --brand: #2f5de8; --bg: #f6f8fb; --ok: #1f8a4c; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); background: var(--bg); }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 14px 28px; background: #fff; border-bottom: 1px solid var(--line); }
+  header b { font-size: 18px; letter-spacing: .2px; }
+  header nav a { margin-left: 18px; color: var(--muted); text-decoration: none; }
+  main { display: grid; grid-template-columns: 1fr 320px; gap: 24px; max-width: 1100px; margin: 24px auto; padding: 0 20px; }
+  h1 { font-size: 22px; margin: 0 0 14px; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .thumb { height: 96px; border-radius: 8px; margin-bottom: 10px; }
+  .price { font-weight: 600; }
+  button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--brand); background: var(--brand); color: #fff; cursor: pointer; }
+  button.ghost { background: #fff; color: var(--brand); }
+  aside h2 { font-size: 17px; margin: 0 0 10px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  input, select { width: 100%; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+  #cart li { display: flex; justify-content: space-between; margin: 4px 0; }
+  #cart { padding-left: 18px; min-height: 24px; }
+  .total { display: flex; justify-content: space-between; font-weight: 600; border-top: 1px solid var(--line); padding-top: 8px; margin-top: 8px; }
+  #status { margin-top: 12px; color: var(--ok); font-weight: 600; min-height: 22px; }
+</style>
+</head>
+<body>
+<header><b>Demo Shop</b><nav><a href="#">Products</a><a href="#">Orders</a><a href="#">Help</a></nav></header>
+<main>
+  <section>
+    <h1>Products</h1>
+    <div class="grid" id="products"></div>
+  </section>
+  <aside class="card">
+    <h2>Your cart</h2>
+    <ul id="cart" aria-label="Cart"></ul>
+    <div class="total"><span>Total</span><span id="total">€0.00</span></div>
+    <form id="checkout" autocomplete="off">
+      <label for="name">Full name</label>
+      <input id="name" name="name" placeholder="Alex Example">
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" placeholder="alex@example.com">
+      <label for="shipping">Shipping</label>
+      <select id="shipping" name="shipping"><option>Standard (3–5 days)</option><option>Express (next day)</option></select>
+      <p><button type="submit">Place order</button></p>
+      <div id="status" role="status"></div>
+    </form>
+  </aside>
+</main>
+<script>
+  const products = [
+    { id: 'lamp', name: 'Desk lamp', price: 39, color: '#f4c95d' },
+    { id: 'mug', name: 'Ceramic mug', price: 14, color: '#8fd3c1' },
+    { id: 'notebook', name: 'Dot notebook', price: 9, color: '#f29e9e' },
+    { id: 'chair', name: 'Task chair', price: 189, color: '#a8b8f0' },
+    { id: 'plant', name: 'Small plant', price: 22, color: '#9fd49b' },
+    { id: 'headset', name: 'Headset', price: 79, color: '#d3b3ec' },
+  ];
+  const cart = [];
+  const grid = document.getElementById('products');
+  for (const p of products) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `<div class="thumb" style="background:${p.color}"></div><div>${p.name}</div><div class="price">€${p.price.toFixed(2)}</div><p><button class="ghost" type="button" data-id="${p.id}">Add to cart</button></p>`;
+    grid.appendChild(card);
+  }
+  const render = () => {
+    const list = document.getElementById('cart');
+    list.replaceChildren(...cart.map((p) => { const li = document.createElement('li'); li.innerHTML = `<span>${p.name}</span><span>€${p.price.toFixed(2)}</span>`; return li; }));
+    document.getElementById('total').textContent = `€${cart.reduce((n, p) => n + p.price, 0).toFixed(2)}`;
+  };
+  grid.addEventListener('click', (e) => {
+    const id = e.target?.dataset?.id;
+    if (!id) return;
+    cart.push(products.find((p) => p.id === id));
+    render();
+  });
+  document.getElementById('checkout').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const name = document.getElementById('name').value.trim();
+    document.getElementById('status').textContent = cart.length && name ? `Thanks, ${name}! Order #1042 placed (${cart.length} item${cart.length > 1 ? 's' : ''}).` : 'Add something to the cart and enter your name.';
+  });
+</script>
+</body>
+</html>

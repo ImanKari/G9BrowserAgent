@@ -138,6 +138,13 @@ t.test('manual mode: checks, never downloads, tells once per version, links the 
   assert.ok(!u.calls.some((x) => x[0] === 'quitAndInstall'));
 });
 
+t.test('before any release exists, the line says so instead of a bare HTTP error', () => {
+  assert.equal(describeUpdate({ status: 'error', source: 'official', error: 'HttpError: 404 ' }), 'Updates: no G9 release is published at the official releases yet');
+  assert.equal(describeUpdate({ status: 'error', source: 'official', error: 'No published versions on GitHub' }), 'Updates: no G9 release is published at the official releases yet');
+  assert.equal(describeUpdate({ status: 'error', source: 'custom', error: 'Cannot find latest.yml (ERR_UPDATER_CHANNEL_FILE_NOT_FOUND)' }), 'Updates: no G9 release is published at the custom address yet');
+  assert.equal(describeUpdate({ status: 'error', error: ' net::ERR_INTERNET_DISCONNECTED ' }), 'Updates: the last check failed (net::ERR_INTERNET_DISCONNECTED)');
+});
+
 t.test('a development build says so and does not touch electron-updater', async () => {
   let loaded = false;
   const { c } = controller({ isPackaged: false, getAutoUpdater: () => { loaded = true; return fakeUpdater(); } });

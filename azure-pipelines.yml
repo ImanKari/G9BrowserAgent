@@ -77,7 +77,12 @@ stages:
       displayName: 'Desktop dependencies (npm ci)'
     - pwsh: |
         node setup/check.mjs --all --keep-going
-        if ($LASTEXITCODE -ne 0) { throw "offline checks failed" }
+        if ($LASTEXITCODE -ne 0) {
+            # check.mjs prints a summary; the whole output of every check is in its log file.
+            $log = Get-ChildItem $env:TEMP -Filter 'g9-check-*.log' | Sort-Object LastWriteTime | Select-Object -Last 1
+            if ($log) { Write-Host "===== $($log.FullName)"; Get-Content $log.FullName | Select-String -Pattern 'FAIL|Error|✗|expected|actual' -Context 2,6 | Select-Object -First 120 }
+            throw "offline checks failed"
+        }
       displayName: 'Offline checks (unit incl. the desktop suite, self-test, extension suite, panel render, links)'
 
   - job: posix
