@@ -1784,7 +1784,11 @@ loaded Electron when run by plain Node (the smoke test printed two lines).
 **CI/CD.** `azure-pipelines.yml` (§7): Validate on Windows, Linux and macOS; Package and the real update
 test on each; Release (checks, SHA-256 sums, notes from this entry); on `main` only, Publish: tag in
 Azure, mirror to GitHub, and a GitHub Release whose assets are verified before and after it is made
-public (`setup/github-release.mjs`).
+public (`setup/github-release.mjs`). The first run on `main` (488) stopped at its first Publish step,
+before anything was tagged or published: PowerShell read `"… is $head: bump …"` as a scope-qualified
+variable and refused to parse the script. It is `${head}` now, and every `pwsh` block of the pipeline
+was put through PowerShell's own parser. Publish runs only on `main`, so no branch run could have
+shown it.
 
 **Also.** The desktop Engines view refreshes the tab list when it opens, so a tab opened since no
 longer shows as "Untitled" (seen in the README pictures). The MCP shim connects after `initialize` (an agent was

@@ -282,7 +282,7 @@ stages:
         if ($existing) {
             $tagged = ($existing -split "\s+")[0]
             if ($tagged -eq $head) { Write-Host "Tag $tag already points at $head."; exit 0 }
-            Write-Host "##vso[task.logissue type=error]Tag $tag is on $tagged, but this build is $head: bump the version in package.json (and its mirrors) to release this commit."
+            Write-Host "##vso[task.logissue type=error]Tag $tag is on $tagged, but this build is ${head}: bump the version in package.json (and its mirrors) to release this commit."
             exit 1
         }
         git -c user.name='g9-pipeline' -c user.email='pipeline@g9tm.invalid' tag -a $tag -m "G9 $version" $head
