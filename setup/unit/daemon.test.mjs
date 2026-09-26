@@ -1248,7 +1248,7 @@ test('mcp tools: fifteen tools, valid schemas, session on every tab tool, v2 ins
   }
   const tabs = TOOLS.find((t) => t.name === 'browser_tabs');
   assert.deepEqual(tabs.inputSchema.properties.action.enum,
-    ['list', 'open', 'close', 'focus', 'attach', 'claim', 'release', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait']);
+    ['list', 'open', 'close', 'focus', 'attach', 'claim', 'release', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch']);
   const engine = TOOLS.find((t) => t.name === 'browser_engine');
   // acquire/release: a run HOLDS a launched engine across its tabs (engine leases, 2026-09-22).
   assert.deepEqual(engine.inputSchema.properties.action.enum, ['launch', 'list', 'stop', 'context', 'versions', 'warm', 'acquire', 'release']);
@@ -2758,6 +2758,146 @@ test('v3: agent rows name each agent\'s project and its current tab — this bro
   assert.equal(info.ok, true, info.error);
   assert.equal(row(info.result.agents, bId).project, 'plain-folder');
   assert.equal(row(info.result.agents, bId).currentEngine, 'launched');
+  await d.stop('test over').catch(() => {});
+});
+
+test('3.2: a flow library for every connected agent\'s project, chosen by path — never a path the caller makes up', async () => {
+  const root = fs.mkdtempSync(path.join(TMP, 'libs-'));
+  const home = projectDir(root, 'home', {});
+  const shop = projectDir(root, 'shop', { test1: 'https://test1.shop.test/' });
+  const { d, connect } = inProcessDaemon('libs', { cwd: home });
+  const ext = connect(engineHello('inst-libs-1', []));
+  const agent = connect(agentHello('claude-code', shop));
+  const agentId = agent.of('welcome')[0].id;
+  let n = 0;
+  const ask = async (op, extra = {}) => {
+    const id = `lib-${++n}`;
+    ext.say({ type: 'flowlib', id, op, ...extra });
+    await waitUntil(() => ext.of('flowlibResult').some((m) => m.id === id));
+    return ext.of('flowlibResult').find((m) => m.id === id);
+  };
+
+  const listed = (await ask('projects')).result;
+  assert.equal(listed.projects.length, 2);
+  const own = listed.projects.find((p) => p.own);
+  const shopRow = listed.projects.find((p) => p.name === 'shop');
+  assert.match(own.path, /\/home\/g9\.project\.json$/);
+  assert.equal(listed.default, own.path, 'the default is the daemon\'s own project, as before 3.2');
+  assert.deepEqual(shopRow.agents, [agentId]);
+  assert.deepEqual(shopRow.domains, ['test1.shop.test']);
+  assert.match(shopRow.flowsDir, /\/shop\/QA\/Flows$/);
+
+  const spec = { format: 'g9-flowspec', schemaVersion: 1, id: 'flow-shop', name: 'Shop login', startUrl: 'https://test1.shop.test/login', steps: [{ id: 's1', action: 'navigate', url: 'https://test1.shop.test/login' }] };
+  const written = await ask('write', { spec, project: shopRow.path });
+  assert.equal(written.ok, true, written.error);
+  assert.ok(fs.existsSync(path.join(shop, 'QA', 'Flows', written.result.file)), 'written into the agent\'s project');
+  assert.equal((await ask('list')).result.flows.length, 0, 'the daemon\'s own library is untouched');
+  assert.deepEqual((await ask('list', { project: shopRow.path })).result.flows.map((f) => f.id), ['flow-shop']);
+  assert.deepEqual((await ask('list', { project: shopRow.path, site: 'https://test1.shop.test' })).result.flows.length, 1);
+  assert.deepEqual((await ask('list', { project: shopRow.path, site: 'https://other.test' })).result.flows.length, 0);
+
+  const stranger = await ask('list', { project: path.join(root, 'elsewhere', 'g9.project.json').replace(/\\/g, '/') });
+  assert.equal(stranger.ok, false);
+  assert.match(stranger.error, /is not the g9\.project\.json of this daemon or of a connected agent/);
+
+  // An approval names no project: it goes to the library that holds the flow.
+  const approved = { format: 'g9-approved', schemaVersion: 1, flowId: 'flow-shop', baselines: { s2: { kind: 'aria', lines: ['button "Pay"'] } } };
+  const w = await ask('writeApproved', { flowId: 'flow-shop', approved });
+  assert.equal(w.ok, true, w.error);
+  assert.equal(w.result.written, true);
+  assert.equal(w.result.project, shopRow.path);
+  const nowhere = await ask('writeApproved', { flowId: 'flow-nobody-pushed', approved: { ...approved, flowId: 'flow-nobody-pushed' } });
+  assert.equal(nowhere.result.written, false, 'not in any library is an answer, not an error');
+  const bad = await ask('writeApproved', { flowId: 'flow-shop', approved: { ...approved, flowId: 'someone-else' } });
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /belongs to flow "someone-else"/);
+  assert.deepEqual((await ask('readApproved', { flowId: 'flow-shop', project: shopRow.path })).result.approved.baselines.s2.lines, ['button "Pay"']);
+
+  // The agent leaves: its project is no longer offered.
+  agent.drop();
+  await waitUntil(async () => (await ask('projects')).result.projects.length === 1);
+  const gone = await ask('list', { project: shopRow.path });
+  assert.equal(gone.ok, false);
+  await d.stop('test over').catch(() => {});
+});
+
+test('3.2: a viewer (the watch window) lists and watches tabs and nothing else; an agent\'s "watch" opens it in the person\'s browser', async () => {
+  const { d, connect } = inProcessDaemon('viewer');
+  const tabs = [{ tabId: 201, url: 'https://a.test/', title: 'A' }];
+  const ext = connect(engineHello('inst-viewer-1', tabs));
+  ext.say({ type: 'event', event: 'tabs', data: { tabs } });
+  const extId = ext.of('welcome')[0].id;
+  await waitUntil(() => d.registry.handleForChrome(extId, 201, { create: false }) != null);
+  const handle = d.registry.handleForChrome(extId, 201, { create: false });
+  // The extension answers the daemon's relayed calls (here: the tab list).
+  const answered = new Set();
+  const answer = setInterval(() => {
+    for (const c of ext.of('call')) {
+      if (answered.has(c.id)) continue;
+      answered.add(c.id);
+      // Chrome ids, as an extension answers; the router rewrites them to handles.
+      if (c.tool === 'browser_tabs' && c.args?.action === 'list') ext.say({ type: 'result', id: c.id, ok: true, result: { tabs: [{ tabId: 201, title: 'A', url: 'https://a.test/' }] } });
+    }
+  }, 10);
+
+  const viewer = connect({ type: 'hello', role: 'viewer', version: '3.1.0', client: { name: 'watch window' } });
+  const welcome = viewer.of('welcome')[0];
+  assert.match(welcome.id, /^viewer-/);
+  let n = 0;
+  const ask = async (msg) => {
+    const id = `v${++n}`;
+    viewer.say({ ...msg, id });
+    await waitUntil(() => viewer.of('viewerResult').some((m) => m.id === id));
+    return viewer.of('viewerResult').find((m) => m.id === id);
+  };
+  // Nothing but viewer ops: no tool calls, no admin (a Stop least of all), no flow library.
+  for (const msg of [{ type: 'call', tool: 'browser_status', args: {} }, { type: 'admin', op: 'halt' }, { type: 'flowlib', op: 'list' }, { type: 'request', op: 'info' }]) {
+    const r = await ask(msg);
+    assert.equal(r.ok, false, msg.type);
+    assert.match(r.error, /may only list and watch tabs/);
+  }
+  assert.equal(d.registry.global.halted, false);
+  assert.equal((await ask({ type: 'viewer', op: 'nope' })).ok, false);
+
+  const list = await ask({ type: 'viewer', op: 'watchables' });
+  assert.equal(list.ok, true, list.error);
+  assert.deepEqual(list.result.tabs.map((t) => [t.tabId, t.engineKind, t.title]), [[handle, 'extension', 'A']]);
+
+  const w = await ask({ type: 'viewer', op: 'watch', tabId: handle });
+  assert.equal(w.ok, true, w.error);
+  assert.equal(w.result.watching, true);
+  await waitUntil(() => ext.of('watch').some((m) => m.tabId === 201 && m.on === true));
+  // The stream reaches the viewer as it reaches the desktop.
+  ext.say({ type: 'event', event: 'watchFrame', data: { tabId: 201, data: 'AAAA', metadata: { deviceWidth: 800, deviceHeight: 600 } } });
+  // Leaving stops the stream the viewer started.
+  viewer.drop();
+  await waitUntil(() => ext.of('watch').some((m) => m.tabId === 201 && m.on === false));
+
+  // An agent asks to show the person its tab: the person's browser opens the watch window.
+  const agent = connect(agentHello('claude-code', null));
+  agent.say({ type: 'call', id: 'watch-1', tool: 'browser_tabs', args: { action: 'watch', tabId: handle } });
+  await waitUntil(() => agent.of('result').some((m) => m.id === 'watch-1'));
+  const opened = agent.of('result').find((m) => m.id === 'watch-1');
+  assert.equal(opened.ok, true, opened.error);
+  assert.equal(opened.result.shown, true);
+  assert.deepEqual(opened.result.shownIn, [`browser (${extId})`]);
+  const open = ext.of('openWatch')[0];
+  assert.equal(open.handle, handle);
+  assert.equal(open.agent.name, 'claude-code');
+  assert.equal(open.focus, false, 'an agent does not take the keyboard unless it asks');
+  agent.say({ type: 'call', id: 'watch-2', tool: 'browser_tabs', args: { action: 'watch', tabId: handle, on: false } });
+  await waitUntil(() => ext.of('closeWatch').some((m) => m.handle === handle));
+
+  // No viewer anywhere: an answer the agent can pass on, not an error.
+  d.registry.addLaunchedEngine({ engineId: 'launched-7' });
+  const lone = d.registry.allocHandle();
+  d.registry.bindHandle(lone, 'launched-7');
+  ext.drop();
+  await waitUntil(() => d.registry.extensionEngines().length === 0);
+  const none = d.requestWatch({ handle: lone, caller: { name: 'claude-code' } });
+  assert.equal(none.shown, false);
+  assert.match(none.note, /no browser with the G9 extension and no G9 desktop app is connected/);
+  clearInterval(answer);
   await d.stop('test over').catch(() => {});
 });
 

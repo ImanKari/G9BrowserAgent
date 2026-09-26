@@ -1,0 +1,23 @@
+#!/usr/bin/with-contenv bash
+# (3.2) The desktop's autostart comes from the image on EVERY start. LinuxServer's init copies
+# /defaults/autostart into /config only when none is there, so without this an updated image never
+# changed how a node that already exists starts its browser. Runs after LinuxServer's copy
+# (init-selkies-config) and before the desktop (svc-de), and keeps its RESTART_APP permissions.
+if [[ "${PIXELFLUX_WAYLAND,,}" == "true" ]]; then
+  CONF_DIR="${HOME:-/config}/.config/labwc"
+  SRC=/defaults/autostart_wayland
+else
+  CONF_DIR="${HOME:-/config}/.config/openbox"
+  SRC=/defaults/autostart
+fi
+mkdir -p "$CONF_DIR"
+cp "$SRC" "$CONF_DIR/autostart"
+chown abc:abc "$CONF_DIR"
+if [[ "${RESTART_APP,,}" == "true" ]]; then
+  chown root:abc "$CONF_DIR/autostart"
+  chmod 550 "$CONF_DIR/autostart"
+else
+  chown abc:abc "$CONF_DIR/autostart"
+  chmod 644 "$CONF_DIR/autostart"
+fi
+echo "[g9] desktop autostart refreshed from the image ($SRC)"

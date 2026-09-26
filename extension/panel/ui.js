@@ -356,6 +356,30 @@ export async function copyText(text, done) {
   }
 }
 
+/**
+ * Save text the panel generated (a report) as a file: an object URL of this extension's origin,
+ * clicked from a detached link, revoked after the download has started. The name is sanitised to
+ * one plain file name.
+ */
+export function downloadText(name, text, type = 'text/html') {
+  return downloadBlob(name, new Blob([text], { type: `${type};charset=utf-8` }));
+}
+
+/** Save a Blob the panel made (a report, a picture) as a file; the one place a download link is made. */
+export function downloadBlob(name, blob) {
+  const safe = String(name ?? 'download').replace(/[^\w.-]+/g, '-').slice(0, 96) || 'download';
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = safe;
+  a.rel = 'noopener';
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  return safe;
+}
+
 export function fileToBase64(file) {
   return file.arrayBuffer().then((buf) => {
     const b = new Uint8Array(buf);

@@ -1164,6 +1164,49 @@ try {
     }
   });
 
+  await section('28. The live view: an agent opens the watch window, which streams the tab as a viewer', async () => {
+    if (!FIXTURES) return skip('live view', NO_FIXTURES);
+    // (3.2) browser_tabs action:"watch": the daemon asks this browser's extension to open
+    // panel/watch.html, which connects to the daemon itself (role "viewer") and draws the frames.
+    const watchPages = async () => (await targets()).filter((t) => t.type === 'page' && t.url.startsWith(extUrl('panel/watch.html')));
+    for (const t of await watchPages()) await cdp.send('Target.closeTarget', { targetId: t.targetId }).catch(() => {});
+    await call('browser_navigate', { action: 'goto', url: PAGE + 'clicks.html?liveview=1', waitUntil: 'load' });
+    await activateMain();
+    let page = null;
+    try {
+      const opened = await call('browser_tabs', { action: 'watch', tabId: mainTab });
+      check(opened?.shown === true && (opened.shownIn ?? []).some((w) => /^browser \(/.test(w)), 'browser_tabs action:"watch" is shown in the person\'s browser', JSON.stringify(opened?.shownIn));
+      const target = await waitFor(async () => (await watchPages())[0] ?? null, { timeoutMs: 10_000 });
+      check(!!target && new URL(target.url).searchParams.get('tab') === String(mainTab), 'the extension opens panel/watch.html on that tab', target?.url ?? 'no watch page');
+      if (!target) return;
+      const { sessionId } = await cdp.send('Target.attachToTarget', { targetId: target.targetId, flatten: true });
+      await cdp.send('Runtime.enable', {}, sessionId).catch(() => {});
+      page = { targetId: target.targetId, evaluate: (expr) => cdp.evaluate(expr, sessionId) };
+      await activateMain();
+      // Something to paint: the pointer moves on the page.
+      const snapped = await call('browser_snapshot');
+      await call('browser_interact', { action: 'hover', ref: refOf(snapped.tree, /textbox "Note"/) });
+      const drawn = await waitFor(async () => (await page.evaluate(String.raw`(() => {
+        const tiles = document.querySelectorAll('.watch-tile');
+        const c = document.querySelector('.watch-tile canvas');
+        if (tiles.length !== 1 || !c || c.width < 50) return null;
+        const d = c.getContext('2d').getImageData(Math.floor(c.width / 2), Math.floor(c.height / 2), 1, 1).data;
+        const hud = document.querySelector('.watch-hud')?.textContent ?? '';
+        return !(d[0] === 15 && d[1] === 20 && d[2] === 27) && hud.includes('fps')
+          ? { conn: document.getElementById('wConn').textContent, hud, state: document.querySelector('.watch-state')?.textContent } : null;
+      })()`).catch(() => null)), { timeoutMs: 15_000 });
+      check(!!drawn && /Connected/.test(drawn.conn), 'the watch page connects as a viewer and draws the tab\'s frames', JSON.stringify(drawn));
+      // The agent closes it again: the tile goes.
+      await call('browser_tabs', { action: 'watch', tabId: mainTab, on: false });
+      const gone = await waitFor(async () => ((await page.evaluate("document.querySelectorAll('.watch-tile').length").catch(() => -1)) === 0 ? true : null), { timeoutMs: 8000 });
+      check(!!gone, 'on:false takes the tab out of the live view', gone ? 'removed' : 'still shown');
+    } finally {
+      for (const t of await watchPages()) await cdp.send('Target.closeTarget', { targetId: t.targetId }).catch(() => {});
+      await activateMain();
+      await call('browser_navigate', { action: 'goto', url: mainUrl, waitUntil: 'load' }).catch(() => {});
+    }
+  });
+
   // ----------------------------------------------------------- misc tool checks
   await section('14. Error quality, screenshot, emulation', async () => {
     // Replays navigate and invalidate prior refs. A fresh generation makes this

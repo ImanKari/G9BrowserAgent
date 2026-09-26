@@ -325,6 +325,70 @@ function fixtures() {
 }
 
 /**
+ * (3.2) The daemon, as the watch page sees it: a WebSocket that says welcome, lists three tabs (one
+ * title carries markup) and streams frames of a drawn mock page with a moving, pressing cursor.
+ * Serialised into the page like installStub.
+ */
+function installFakeDaemon() {
+  const tabs = [
+    { tabId: 21, title: 'Checkout — Shop <img src=x onerror=alert(1)>', url: 'https://shop.example.com/checkout?session=a7f3', engineId: 'engine-2', engineKind: 'launched', headless: true, browser: 'edge', owner: { id: 'agent-2', name: 'cursor' }, agents: [{ id: 'agent-2', name: 'cursor' }] },
+    { tabId: 22, title: 'Orders — Admin', url: 'https://admin.contoso.example/orders', engineId: 'engine-2', engineKind: 'launched', headless: true, browser: 'edge', owner: { id: 'agent-3', name: 'codex' }, agents: [] },
+    { tabId: 5, title: 'Inbox', url: 'https://mail.example.com/', engineId: 'engine-1', engineKind: 'extension', headless: null, browser: 'Microsoft Edge', owner: null, agents: [] },
+  ];
+  const frames = new Map();
+  const frameFor = (tabId) => {
+    if (frames.has(tabId)) return frames.get(tabId);
+    const c = document.createElement('canvas');
+    c.width = 800; c.height = 500;
+    const g = c.getContext('2d');
+    g.fillStyle = '#ffffff'; g.fillRect(0, 0, 800, 500);
+    g.fillStyle = tabId === 21 ? '#1f6feb' : '#8250df'; g.fillRect(0, 0, 800, 56);
+    g.fillStyle = '#ffffff'; g.font = 'bold 22px sans-serif'; g.fillText(tabId === 21 ? 'Shop — Checkout' : 'Admin — Orders', 24, 36);
+    g.fillStyle = '#e6e8eb';
+    for (let i = 0; i < 6; i++) g.fillRect(24, 90 + i * 52, 480, 34);
+    g.fillStyle = '#2da44e'; g.fillRect(560, 390, 200, 48);
+    g.fillStyle = '#ffffff'; g.font = 'bold 18px sans-serif'; g.fillText('Pay now', 620, 420);
+    const data = c.toDataURL('image/jpeg', 0.85).split(',')[1];
+    frames.set(tabId, data);
+    return data;
+  };
+  class FakeSocket extends EventTarget {
+    constructor(url) {
+      super();
+      this.url = url;
+      this.readyState = 0;
+      window.__g9ws = this;
+      setTimeout(() => { this.readyState = 1; this.dispatchEvent(new Event('open')); }, 20);
+    }
+    reply(obj) { setTimeout(() => this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(obj) })), 10); }
+    send(text) {
+      const m = JSON.parse(text);
+      (window.__g9viewerSent ??= []).push(m.type === 'viewer' ? m.op : m.type + ':' + (m.role ?? ''));
+      if (m.type === 'hello') this.reply({ type: 'welcome', id: 'viewer-1', version: '3.1.0' });
+      else if (m.type === 'viewer' && m.op === 'watchables') this.reply({ type: 'viewerResult', id: m.id, ok: true, result: { tabs } });
+      else if (m.type === 'viewer' && m.op === 'watch') {
+        this.reply({ type: 'viewerResult', id: m.id, ok: true, result: { watching: true, tabId: m.tabId } });
+        this.stream(m.tabId);
+      } else if (m.type === 'viewer' && m.op === 'unwatch') this.reply({ type: 'viewerResult', id: m.id, ok: true, result: { watching: false, tabId: m.tabId } });
+    }
+    stream(tabId) {
+      let t = 0;
+      setInterval(() => {
+        t++;
+        const at = Date.now();
+        const emit = (obj) => this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(obj) }));
+        if (t === 1) emit({ type: 'event', topic: 'watchStatus', data: { tabId, state: 'live' } });
+        if (t % 3 === 1) emit({ type: 'event', topic: 'frame', data: { tabId, data: frameFor(tabId), metadata: { deviceWidth: 800, deviceHeight: 500 }, at } });
+        emit({ type: 'event', topic: 'pointer', data: { tabId, sample: { at, x: 560 + ((t * 9) % 180), y: 380 + ((t * 5) % 50), buttons: t % 12 < 2 ? 1 : 0, type: t % 12 === 0 ? 'mousePressed' : 'mouseMoved' } } });
+      }, 60);
+    }
+    close() {}
+  }
+  FakeSocket.CONNECTING = 0; FakeSocket.OPEN = 1; FakeSocket.CLOSING = 2; FakeSocket.CLOSED = 3;
+  window.WebSocket = FakeSocket;
+}
+
+/**
  * The stub, serialised into the page before any script runs. It must be self-contained: it is
  * `toString()`ed, so it closes over nothing but its two arguments.
  */
@@ -340,7 +404,18 @@ function installStub(F, version) {
       case 'recStatus': return { ok: true, status: { recording: false }, elsewhere: [], halted: false, recordings: F.recordings };
       case 'recGet': return { ok: true, recording: F.full[m.id] ?? null };
       case 'recKnownWorld': return { ok: true, knownWorld: F.full[m.id]?.knownWorld ?? null, runHistory: F.full[m.id]?.runHistory ?? [], surpriseHistory: [] };
-      case 'flowStatus': return { ok: true, onlyInRepo: ['a'], onlyLocal: ['b', 'c'], differing: [], total: 13 };
+      case 'flowStatus': return { ok: true, onlyInRepo: ['a'], onlyLocal: ['b', 'c'], differing: [], approvalNewerInRepo: [{ id: 'x' }], approvalNewerHere: [], total: 13 };
+      // (3.2) Two project repositories: the daemon's own and a connected agent's.
+      case 'watchAddress': return { ok: true, address: 'fake-daemon:1', version };
+      case 'openWatch': (window.__g9sent ??= []).push('openWatch'); return { ok: true, windowId: 1, reused: false };
+      case 'flowProjects': return { ok: true, default: 'G:/work/admin-panel/g9.project.json', projects: [
+        { name: 'admin-panel', path: 'G:/work/admin-panel/g9.project.json', flowsDir: 'G:/work/admin-panel/QA/Flows', own: true, agents: ['agent-1'], domains: ['admin.contoso.example'] },
+        { name: 'shop-web', path: 'G:/work/shop-web/g9.project.json', flowsDir: 'G:/work/shop-web/QA/Flows', own: false, agents: ['agent-2', 'agent-3'], domains: ['shop.example.com'] },
+      ] };
+      case 'recHistory': return { ok: true, recordings: (m.ids ?? []).map((id) => {
+        const row = F.recordings.find((r) => r.id === id) ?? {};
+        return { ...row, runHistory: F.full[id]?.runHistory ?? (row.lastRun ? [row.lastRun] : []), steps: [], knownWorld: F.full[id]?.knownWorld ?? null };
+      }) };
       case 'issueList': return { ok: true, issues: F.issues, usage: { attachments: 23, attachmentMB: 14.2 } };
       case 'issueGet': {
         const row = F.issues.find((i) => i.id === m.id);
@@ -557,6 +632,29 @@ async function main() {
         return { found: true };
       })()`);
       if (!malformed?.found) fail(`[${tag}] malformed flow`, 'the flow with stored strings for lists is not listed');
+
+      // (3.2) The history report: built from the same fixtures (markup in titles included), parsed
+      // back, and checked for injected markup and its data block.
+      const report = await evaluate(`(async () => {
+        const m = await import('./report.js');
+        const { cmd } = await import('./ui.js');
+        const ids = (await cmd({ cmd: 'recStatus' })).recordings.map((r) => r.id);
+        const res = await cmd({ cmd: 'recHistory', ids });
+        const html = m.buildHistoryReport(m.summarizeHistory(res.recordings), { scope: 'all sites <b>x</b>', version: '0' });
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const data = JSON.parse(doc.getElementById('g9-history').textContent);
+        return {
+          injected: doc.querySelectorAll('img, h1 b, script:not([type="application/json"])').length + (doc.querySelector('h1').textContent.includes('<b>x</b>') ? 0 : 1),
+          rows: doc.querySelectorAll('tbody tr').length,
+          flows: data.totals.flows,
+          title: doc.querySelector('h1').textContent,
+          name: m.reportFileName('all sites <b>x</b>', 0),
+        };
+      })()`);
+      if (report.injected) fail(`[${tag}] history report`, `${report.injected} element(s) of injected markup`);
+      else if (report.rows !== report.flows || report.rows < 10) fail(`[${tag}] history report`, `${report.rows} row(s) for ${report.flows} flow(s)`);
+      else if (!/^g9-history-all-sites-b-x-b-1970-01-01.html$/.test(report.name)) fail(`[${tag}] history report`, `file name ${report.name}`);
+      else ok(`[${tag}] history report: ${report.rows} flows, no injected markup, data block parses`);
       await waitFor(`[...document.querySelectorAll('#recList .drawer input')].some((i) => i.value === 'legacy, import')`,
         'the malformed flow\'s drawer shows its tags as a list');
       const groups = await evaluate(`[...document.querySelectorAll('#recList *')].filter((n) => n.childElementCount === 0).map((n) => n.textContent.trim())`);
@@ -612,6 +710,41 @@ async function main() {
       }
       const title = await evaluate('document.title');
       if (title !== `G9 Browser Agent v${VERSION}`) fail(`[${tag}] document.title is "${title}"`);
+    }
+
+    // (3.2) The live view: the page an agent's browser_tabs action:"watch" opens.
+    for (const { width, scheme } of [{ width: 1000, scheme: 'light' }, { width: 1000, scheme: 'dark' }, { width: 360, scheme: 'light' }]) {
+      const tag = `${width}-${scheme}`;
+      if (ONLY && ONLY !== tag) continue;
+      phase = `watch ${tag}`;
+      await send('Emulation.setDeviceMetricsOverride', { width, height: 800, deviceScaleFactor: width <= 400 ? 2 : 1, mobile: false });
+      await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
+      if (stubScript) await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: stubScript });
+      ({ identifier: stubScript } = await send('Page.addScriptToEvaluateOnNewDocument', {
+        source: `(${installStub.toString()})(${JSON.stringify(fixtures())}, ${JSON.stringify(VERSION)}); (${installFakeDaemon.toString()})();`,
+      }));
+      const loaded = conn.waitForEvent('Page.loadEventFired', { sessionId, timeoutMs: 15_000 });
+      await send('Page.navigate', { url: `${origin}/panel/watch.html?tab=21&agent=cursor` });
+      await loaded;
+      await waitFor("document.querySelectorAll('.watch-tile').length === 1 && document.getElementById('wConn').textContent.includes('Connected')", 'the first tile and the viewer link');
+      await waitFor("[...document.getElementById('wPicker').options].some((o) => o.value === '22')", 'the picker listing the other tabs');
+      await evaluate("(document.getElementById('wPicker').value = '22', document.getElementById('wAdd').click(), true)");
+      await waitFor("document.querySelectorAll('.watch-tile').length === 2", 'a second tile');
+      // Frames drawn: the middle of each canvas is page, not the dark stage.
+      const drawn = await waitFor("[...document.querySelectorAll('.watch-tile canvas')].every((c) => { const g = c.getContext('2d'); const w = c.width, h = c.height; if (w < 50 || h < 50) return false; const d = g.getImageData(Math.floor(w / 2), Math.floor(h / 2), 1, 1).data; return !(d[0] === 15 && d[1] === 20 && d[2] === 27); }) && [...document.querySelectorAll('.watch-hud')].every((d) => d.textContent.includes('fps'))", 'frames drawn in both tiles');
+      await delay(400);
+      if (drawn) ok(`[watch ${tag}] two live tiles, frames drawn, cursor and HUD running`);
+      const said = await evaluate("(window.__g9viewerSent ?? []).join(',')");
+      if (!/^hello:viewer,watchables/.test(said) || /call|admin|flowlib/.test(said)) fail(`[watch ${tag}] the page spoke more than viewer`, said);
+      const injected = await evaluate("document.querySelectorAll('img[src=\"x\"], script:not([src])').length");
+      if (injected) fail(`[watch ${tag}] a tab title became markup`, `${injected} element(s)`);
+      const overflow = await evaluate(OVERFLOW_PROBE);
+      if (width <= 400 && overflow.length) fail(`[watch ${tag}] horizontal overflow`, overflow.join('; '));
+      const { cssContentSize } = await send('Page.getLayoutMetrics');
+      const height = Math.ceil(Math.max(800, cssContentSize?.height ?? 800));
+      const shot = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true, clip: { x: 0, y: 0, width, height, scale: 1 } });
+      await writeFile(path.join(OUT, `watch-${tag}.png`), Buffer.from(shot.data, 'base64'));
+      ok(`watch-${tag}.png`, `${width}×${height}`);
     }
   } finally {
     if (browser) {

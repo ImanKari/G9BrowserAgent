@@ -1667,6 +1667,28 @@ await test('screencast: a restart the browser refuses gives the other consumers 
   assert.equal(castTab.screencast, null);
 });
 
+await test('screencast: a page between two documents is asked again; anything else fails at once (3.2)', async () => {
+  // A replay that opened its own launched tab started its evidence stream while the tab committed its
+  // first navigation: "Not attached to an active page", and the run recorded 0 frames.
+  const TAB2 = 16;
+  const t = fake.addTab(TAB2, { url: 'https://example.test/fresh' });
+  t.betweenDocuments = 2;
+  const started = await screencast.start(TAB2, 'run:x', { quality: 50, everyNthFrame: 1 });
+  assert.deepEqual(started, { attempts: 3 }, 'two refusals, then it streams');
+  assert.equal(screencast.status(TAB2).running, true);
+  assert.deepEqual(screencast.consumers(TAB2), ['run:x'], 'the consumer stayed registered through the retries');
+  await screencast.stop(TAB2, 'run:x');
+  // Not a transient: no retry, the error as it came.
+  t.refuseScreencast = true;
+  const before = fake.calls('Page.startScreencast', (c) => c.tabId === TAB2).length;
+  await assert.rejects(screencast.start(TAB2, 'run:y', { quality: 50 }), /Unable to start the screencast/);
+  assert.equal(fake.calls('Page.startScreencast', (c) => c.tabId === TAB2).length - before, 1, 'asked once');
+  // Still refused after four tries: it gives up, with the browser's reason.
+  t.betweenDocuments = 9;
+  await assert.rejects(screencast.start(TAB2, 'run:z', { quality: 50 }), /Not attached to an active page/);
+  t.betweenDocuments = 0;
+});
+
 await test('human scroll without a ref turns the wheel over the DOCUMENT, not an inner scroller under the resting pointer', async () => {
   const PANEL = fake.addNode(TAB, { backendNodeId: 150, tag: 'div', scroller: true, fixed: true, box: { x: 900, y: 150, width: 300, height: 400 } });
   tab.scrollY = 0;

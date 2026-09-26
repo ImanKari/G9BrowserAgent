@@ -499,7 +499,9 @@ async function runLaunched({ client, options, project, target, variables, har, r
     try {
       if (fromDisk) {
         const { file, ...spec } = flow;
-        await client.call('browser_recording', { action: 'import_spec', spec, id: spec.id, engine: 'launched' });
+        // (3.2) With what a person approved (the known world, the baselines), from the sidecar.
+        const side = await readSidecar(project, file);
+        await client.call('browser_recording', { action: 'import_spec', spec, id: spec.id, engine: 'launched', ...side });
       }
       let opened;
       try {
@@ -881,6 +883,29 @@ function applySelect(flows, select) {
   return chosen;
 }
 
+/**
+ * (3.2) A flow file's sidecar (daemon/flows.js): `login.approved.json` and `login.baselines/*.png`
+ * beside `login.flow.json`. `{}` when there is none — the launched store then keeps the baselines
+ * and known world it already has (extension/lib/flowsync.js importFlow).
+ */
+async function readSidecar(project, relFile) {
+  if (!relFile || !relFile.endsWith('.flow.json')) return {};
+  const base = path.join(flowsRoot(project), relFile.slice(0, -'.flow.json'.length));
+  let approved;
+  try {
+    approved = JSON.parse(await readFile(`${base}.approved.json`, 'utf8'));
+  } catch (err) {
+    if (err?.code === 'ENOENT') return {};
+    throw new Error(`${relFile.replace(/\.flow\.json$/, '.approved.json')} is not valid JSON: ${err.message}`);
+  }
+  const images = {};
+  for (const b of Object.values(approved?.baselines ?? {})) {
+    if (!b?.image || !/^[\w.-]{1,80}\.png$/.test(b.image)) continue;
+    try { images[b.image] = (await readFile(path.join(`${base}.baselines`, b.image))).toString('base64'); } catch { /* the fingerprint still compares */ }
+  }
+  return { approved, images };
+}
+
 async function collectJson(dir, out = []) {
   const { readdir } = await import('node:fs/promises');
   let entries;
@@ -983,7 +1008,8 @@ async function flowTab(client, options, id, { url = null } = {}) {
   const spec = disk.find((f) => f.id === id);
   if (spec) {
     const { file, ...clean } = spec;
-    await client.call('browser_recording', { action: 'import_spec', spec: clean, id: clean.id, engine: 'launched' });
+    const side = await readSidecar(project, file);
+    await client.call('browser_recording', { action: 'import_spec', spec: clean, id: clean.id, engine: 'launched', ...side });
   }
   const start = url ?? spec?.startUrl ?? (await client.call('browser_recording', { action: 'get', id, engine: 'launched' }).catch(() => null))?.startUrl ?? 'about:blank';
   const opened = await client.call('browser_tabs', { action: 'open', url: start, engine: launched.info.engineId });
@@ -1128,13 +1154,25 @@ async function commandSpec({ options }) {
   const id = requireTarget(options, 'spec');
   const { client } = await connect(options);
   try {
-    const args = { action: 'export_spec', id };
+    const args = { action: 'export_spec', id, includeImages: true };
     if (options.engine && options.engine !== true) args.engine = engineChoice(options);
     const result = await client.call('browser_recording', args);
     if (options.out && options.out !== true) {
-      await mkdir(path.dirname(path.resolve(options.out)), { recursive: true });
-      await writeFile(path.resolve(options.out), result.json, 'utf8');
-      console.log(`Wrote ${path.resolve(options.out)}`);
+      const out = path.resolve(options.out);
+      await mkdir(path.dirname(out), { recursive: true });
+      await writeFile(out, result.json, 'utf8');
+      console.log(`Wrote ${out}`);
+      // (3.2) What a person approved goes beside it, the way the flow library writes it:
+      // login.flow.json → login.approved.json and login.baselines/<step>.png.
+      if (result.approved && out.endsWith('.flow.json')) {
+        const base = out.slice(0, -'.flow.json'.length);
+        const { approvedJson } = await import('../extension/lib/approved.js');
+        await writeFile(`${base}.approved.json`, approvedJson(result.approved), 'utf8');
+        const names = Object.keys(result.images ?? {}).filter((n) => /^[\w.-]{1,80}\.png$/.test(n));
+        if (names.length) await mkdir(`${base}.baselines`, { recursive: true });
+        for (const name of names) await writeFile(path.join(`${base}.baselines`, name), Buffer.from(result.images[name], 'base64'));
+        console.log(`Wrote ${base}.approved.json${names.length ? ` and ${names.length} baseline image(s)` : ''}`);
+      }
     } else {
       process.stdout.write(result.json);
     }

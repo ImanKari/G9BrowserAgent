@@ -40,9 +40,16 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { approvedJson, validateApproved, isApproved } from '../extension/lib/approved.js';
 
 const FLOW_SUFFIX = '.flow.json';
 const SUITE_DIR = 'suites';
+// (3.2) What a person approved travels beside the flow (extension/lib/approved.js):
+// login.flow.json + login.approved.json + login.baselines/<step>.png.
+const APPROVED_SUFFIX = '.approved.json';
+const BASELINES_SUFFIX = '.baselines';
+const IMAGE_NAME = /^[\w.-]{1,80}\.png$/;
+const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
 
 /** Fields that are local-only truth and must never be written to disk. */
 const LOCAL_ONLY = ['runHistory', 'lastRun', 'flaky', 'knownWorld', 'surpriseHistory'];
@@ -72,8 +79,11 @@ export class FlowLibrary {
     }
   }
 
-  /** Every flow and suite on disk, with a content hash for change detection. */
-  async list() {
+  /**
+   * Every flow and suite on disk, with a content hash for change detection. With `site` (3.2), only
+   * the flows whose start URL is on that origin (`'none'`: flows with no start URL); suites stay.
+   */
+  async list({ site = null } = {}) {
     this.#requireRoot();
     const files = await walk(this.root);
     const flows = [];
@@ -109,11 +119,14 @@ export class FlowLibrary {
           tags: parsed.tags ?? [],
           stepCount: (parsed.steps ?? []).length,
           qaTestCaseIds: parsed.qaTestCaseIds ?? [],
+          startUrl: typeof parsed.startUrl === 'string' ? parsed.startUrl : null,
+          ...(await sidecarSummary(file)),
         });
       }
     }
 
-    return { root: this.root.replace(/\\/g, '/'), flows, suites };
+    const shown = site ? flows.filter((f) => !f.broken && siteMatches(f.startUrl, site)) : flows;
+    return { root: this.root.replace(/\\/g, '/'), flows: shown, suites, ...(site ? { site } : {}) };
   }
 
   /** One flow, by id. */
@@ -188,7 +201,93 @@ export class FlowLibrary {
     const found = await this.#findById(id);
     if (!found) return { removed: false };
     await fs.unlink(found);
+    // Its approval and baselines go with it: a sidecar with no flow is noise in the next review.
+    const side = sidecarOf(found);
+    await fs.rm(side.approved, { force: true }).catch(() => {});
+    await fs.rm(side.dir, { recursive: true, force: true }).catch(() => {});
     return { removed: true, file: path.relative(this.root, found).replace(/\\/g, '/') };
+  }
+
+  /**
+   * (3.2) Write what a person approved about a flow that is in this library: the sidecar document
+   * (extension/lib/approved.js approvedDocFor) and its baseline screenshots, `{ name: base64 }`.
+   * A flow that is not here is not an error — the answer says so (`written: false`), because an
+   * approval of a flow nobody pushed yet is normal and must not fail the approval.
+   * Images no longer named by the document are removed; unchanged bytes are not rewritten.
+   */
+  async writeApproved(flowId, doc, images = {}) {
+    this.#requireRoot();
+    const found = await this.#findById(String(flowId));
+    if (!found) {
+      return { written: false, reason: `Flow ${flowId} is not in ${this.root.replace(/\\/g, '/')} yet: push it, and its approval travels with it.` };
+    }
+    const problems = validateApproved(doc, String(flowId));
+    if (problems.length) throw new Error(`The approval of flow ${flowId} was not written: ${problems.join('; ')}.`);
+    const side = sidecarOf(found);
+    const rel = (p) => path.relative(this.root, p).replace(/\\/g, '/');
+    const body = approvedJson(doc);
+    let changed = true;
+    try { changed = (await fs.readFile(side.approved, 'utf8')) !== body; } catch { /* new */ }
+    if (changed) await fs.writeFile(side.approved, body, 'utf8');
+
+    const named = new Set(Object.values(doc.baselines ?? {}).map((b) => b?.image).filter(Boolean));
+    let imagesChanged = 0;
+    const missing = [];
+    for (const name of named) {
+      const data = images?.[name];
+      if (typeof data !== 'string' || !data) { missing.push(name); continue; }
+      if (!IMAGE_NAME.test(name)) throw new Error(`Baseline image name "${name}" is not a plain .png file name.`);
+      const bytes = Buffer.from(data, 'base64');
+      if (bytes.length > MAX_IMAGE_BYTES) throw new Error(`Baseline image ${name} is larger than ${MAX_IMAGE_BYTES / 1048576} MB.`);
+      const file = path.join(side.dir, name);
+      let same = false;
+      try { same = (await fs.readFile(file)).equals(bytes); } catch { /* new */ }
+      if (!same) {
+        await fs.mkdir(side.dir, { recursive: true });
+        await fs.writeFile(file, bytes);
+        imagesChanged++;
+      }
+    }
+    let removedImages = 0;
+    try {
+      for (const name of await fs.readdir(side.dir)) {
+        if (name.endsWith('.png') && !named.has(name)) {
+          await fs.rm(path.join(side.dir, name), { force: true });
+          removedImages++;
+        }
+      }
+      if (!(await fs.readdir(side.dir)).length) await fs.rmdir(side.dir);
+    } catch { /* no folder */ }
+    return {
+      written: true,
+      file: rel(side.approved),
+      changed: changed || imagesChanged > 0 || removedImages > 0,
+      images: named.size - missing.length,
+      ...(missing.length ? { missingImages: missing } : {}),
+      approvedAt: isApproved(doc.knownWorld) ? doc.knownWorld.approvedAt : null,
+    };
+  }
+
+  /** (3.2) A flow's sidecar and its baseline images `{ name: base64 }`; `approved: null` when it has none. */
+  async readApproved(flowId) {
+    this.#requireRoot();
+    const found = await this.#findById(String(flowId));
+    if (!found) throw new Error(`No flow with id "${flowId}" in ${this.root}.`);
+    const side = sidecarOf(found);
+    let approved = null;
+    try {
+      approved = JSON.parse(await fs.readFile(side.approved, 'utf8'));
+    } catch (err) {
+      if (err?.code !== 'ENOENT') throw new Error(`${path.relative(this.root, side.approved).replace(/\\/g, '/')} is not valid JSON: ${err.message}`);
+    }
+    const images = {};
+    if (approved) {
+      for (const b of Object.values(approved.baselines ?? {})) {
+        if (!b?.image || !IMAGE_NAME.test(b.image)) continue;
+        try { images[b.image] = (await fs.readFile(path.join(side.dir, b.image))).toString('base64'); } catch { /* missing image: the fingerprint still compares */ }
+      }
+    }
+    return { approved, images };
   }
 
   /**
@@ -199,26 +298,36 @@ export class FlowLibrary {
    * would silently overwrite whichever side the tool guessed was older, and the
    * loser is always somebody's unsaved work.
    */
-  async status(local = []) {
+  async status(local = [], { site = null } = {}) {
     this.#requireRoot();
-    const { flows } = await this.list();
+    const { flows } = await this.list({ site });
     const byId = new Map(flows.filter((f) => f.id).map((f) => [f.id, f]));
     const localById = new Map(local.filter((f) => f.id).map((f) => [f.id, f]));
 
     const onlyInRepo = [];
     const onlyLocal = [];
     const differing = [];
+    // (3.2) Approvals are compared by when a person approved: `approvedAt` in the local entry
+    // (null when this browser has no human approval) against the sidecar's.
+    const approvalNewerInRepo = [];
+    const approvalNewerHere = [];
 
     for (const [id, remote] of byId) {
       const mine = localById.get(id);
       if (!mine) onlyInRepo.push(remote);
       else if (mine.hash && mine.hash !== remote.hash) differing.push({ id, name: remote.name });
+      if (mine) {
+        const here = Number(mine.approvedAt) || 0;
+        const there = Number(remote.approvedAt) || 0;
+        if (there > here) approvalNewerInRepo.push({ id, name: remote.name, approvedAt: there, approvedBy: remote.approvedBy ?? null });
+        else if (here > there) approvalNewerHere.push({ id, name: remote.name, approvedAt: here });
+      }
     }
     for (const [id, mine] of localById) {
       if (!byId.has(id)) onlyLocal.push({ id, name: mine.name });
     }
 
-    return { onlyInRepo, onlyLocal, differing, total: flows.length };
+    return { onlyInRepo, onlyLocal, differing, approvalNewerInRepo, approvalNewerHere, total: flows.length, ...(site ? { site } : {}) };
   }
 
   /**
@@ -274,6 +383,19 @@ export class FlowLibrary {
     }
     return null;
   }
+}
+
+/**
+ * Is a start URL on this site? `site` is an origin (`https://admin.example.test`, what
+ * extension/lib/sites.js siteOf gives), or `'none'` for a flow with no usable start URL.
+ */
+export function siteMatches(startUrl, site) {
+  let origin = null;
+  try {
+    const u = new URL(String(startUrl ?? ''));
+    if (/^https?:$/.test(u.protocol)) origin = u.origin.toLowerCase();
+  } catch { /* no URL */ }
+  return site === 'none' ? origin === null : origin === String(site).toLowerCase();
 }
 
 /**
@@ -343,7 +465,27 @@ function hash(value) {
   return crypto.createHash('sha1').update(serialised, 'utf8').digest('hex').slice(0, 12);
 }
 
-/** Every *.flow.json and suites/*.json under the root. Missing root is empty. */
+/** Where a flow file's approval and baselines live (3.2): beside it, sharing its base name. */
+function sidecarOf(flowFile) {
+  const base = flowFile.endsWith(FLOW_SUFFIX) ? flowFile.slice(0, -FLOW_SUFFIX.length) : flowFile.replace(/.json$/i, '');
+  return { approved: `${base}${APPROVED_SUFFIX}`, dir: `${base}${BASELINES_SUFFIX}` };
+}
+
+/** A sidecar's approval time and baseline count, for list(); nulls when there is none or it is unreadable. */
+async function sidecarSummary(flowFile) {
+  try {
+    const doc = JSON.parse(await fs.readFile(sidecarOf(flowFile).approved, 'utf8'));
+    return {
+      approvedAt: isApproved(doc?.knownWorld) ? doc.knownWorld.approvedAt : null,
+      approvedBy: isApproved(doc?.knownWorld) ? (doc.knownWorld.approvedBy ?? null) : null,
+      baselines: Object.keys(doc?.baselines ?? {}).length,
+    };
+  } catch {
+    return { approvedAt: null, approvedBy: null, baselines: 0 };
+  }
+}
+
+/** Every *.flow.json and suites/*.json under the root (not sidecars). Missing root is empty. */
 async function walk(dir, out = []) {
   let entries;
   try {
@@ -354,8 +496,12 @@ async function walk(dir, out = []) {
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
+      // A flow's baselines folder holds images only (3.2).
+      if (entry.name === 'node_modules' || entry.name.startsWith('.') || entry.name.endsWith(BASELINES_SUFFIX)) continue;
       await walk(full, out);
+    } else if (entry.name.endsWith(APPROVED_SUFFIX)) {
+      // A sidecar is not a flow: it belongs to the flow file beside it (3.2).
+      continue;
     } else if (entry.name.endsWith(FLOW_SUFFIX) || entry.name.endsWith('.json')) {
       out.push(full);
     }

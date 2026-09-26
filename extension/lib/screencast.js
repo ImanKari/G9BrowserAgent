@@ -121,6 +121,26 @@ const sameParams = (a, b) => !!a && !!b
  * Rejects (and unregisters the consumer) when the browser refuses to start.
  * Options beyond the CDP ones: `backpressure` (see the header).
  */
+/**
+ * Page.startScreencast, asked again for a moment the browser refuses it in: "Not attached to an
+ * active page" while the tab is between two documents (a tab opened a moment ago committing its first
+ * navigation, a process swap). A replay that opened its own launched tab started its evidence stream
+ * in exactly that moment and recorded 0 frames — 2 of 10 Engine 2 live runs on 2026-09-25 (the
+ * daemon log said "no screencast (Not attached to an active page)"). Anything else fails at once.
+ */
+const TRANSIENT_START = /Not attached to an active page/i;
+async function startScreencast(tabId, params) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await send(tabId, 'Page.startScreencast', params);
+      return attempt;
+    } catch (err) {
+      if (attempt >= 4 || !TRANSIENT_START.test(String(err?.message ?? err))) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 150 * attempt));
+    }
+  }
+}
+
 export async function start(tabId, consumerId, opts = {}) {
   if (!consumerId || typeof consumerId !== 'string') throw new Error('screencast.start needs a consumer id.');
   const tab = tabState(tabId);
@@ -140,9 +160,11 @@ export async function start(tabId, consumerId, opts = {}) {
     // A new consumer that needs more than the running stream gives restarts it.
     if (tab.running) await send(tabId, 'Page.stopScreencast').catch(() => {});
     try {
-      await send(tabId, 'Page.startScreencast', want);
+      const attempts = await startScreencast(tabId, want);
       tab.running = true;
       tab.params = want;
+      // Said, so a caller can log it: a start that needed a second try was a page between documents.
+      if (attempts > 1) return { attempts };
     } catch (err) {
       const restarting = tab.running;
       tab.running = false;

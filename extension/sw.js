@@ -22,10 +22,12 @@ import {
 } from './lib/state.js';
 import * as transport from './lib/transport.js';
 import { attach, detachAll, applyStealthLevel, runtimeEnabledTabs, asPerson } from './lib/cdp.js';
-import { hostMatches } from './lib/sites.js';
+import { hostMatches, siteOf } from './lib/sites.js';
+import { importFlow, approvedBundle } from './lib/flowsync.js';
+import { approvedAtFor } from './lib/approved.js';
 import * as screencast from './lib/screencast.js';
 import * as pointer from './lib/pointer.js';
-import { toFlowSpec, fromFlowSpec, canonicalJson, validateFlowSpec } from './lib/flowspec.js';
+import { toFlowSpec, canonicalJson, validateFlowSpec } from './lib/flowspec.js';
 import * as store from './lib/store.js';
 
 import { runTool, setHooks, status } from './tools/index.js';
@@ -57,6 +59,19 @@ setHooks({
   emit: (event, data) => {
     transport.send({ type: 'event', event, data });
   },
+});
+
+// (3.2) An approval made in this browser (the panel's Approve, an agent's approve) travels with the
+// flow: written beside it in whichever repository holds it. Not in the repository yet is normal.
+replay.onApproved(async (id) => {
+  const bundle = await approvedBundle(id);
+  if (!bundle) return null;
+  if (!transport.isConnected()) {
+    return { written: false, reason: 'the daemon is not connected; push the flow later and its approval goes with it' };
+  }
+  const result = await transport.flowLib('writeApproved', { flowId: bundle.flowId, approved: bundle.approved, images: bundle.images }, { timeoutMs: 15_000 });
+  if (result?.written) await logActivity({ kind: 'system', ok: true, detail: `Approval written to the repository: ${result.file}` });
+  return result;
 });
 
 // CDP events, detaches and closed tabs — the same three functions the daemon
@@ -221,19 +236,28 @@ async function doBootstrap() {
  * page with `?updated=1`, reusing an open one rather than stacking a second.
  * A reload of the same version (unpacked development, or the desktop app
  * refreshing identical files) opens nothing — a tab on every reload is noise.
+ *
+ * (3.2) An extension loaded with --load-extension (the browser node, docker/) is
+ * reported as "install" on EVERY browser start, while its storage survives. So an
+ * "install" that finds a version already recorded is a restart: the same version
+ * opens nothing, another version is an update. A real first install (or a reinstall,
+ * which wipes storage) has none.
  */
 async function onInstalled(details) {
   await bootstrap();
   const version = platform.runtime.version();
   const about = await getAbout();
 
-  if (details.reason === 'install') {
+  if (details.reason === 'install' && !about.lastSeenVersion) {
     await setAbout({ lastSeenVersion: version, installedAt: Date.now() });
+    // (3.2) The browser node's image says so in deployment.json: Chromium wipes a command-line
+    // extension's storage and installs it again on every start, so each start is a "first install".
+    if ((await readDeployment()).welcome === false) return;
     await openWelcome({ updated: false });
     return;
   }
 
-  if (details.reason === 'update') {
+  if (details.reason === 'update' || details.reason === 'install') {
     const previous = details.previousVersion ?? about.lastSeenVersion ?? null;
     if (previous && previous !== version) {
       await setAbout({ previousVersion: previous, updatedAt: Date.now(), lastSeenVersion: version });
@@ -242,6 +266,19 @@ async function onInstalled(details) {
     } else if (about.lastSeenVersion !== version) {
       await setAbout({ lastSeenVersion: version });
     }
+  }
+}
+
+/**
+ * (3.2) `deployment.json` beside the manifest: written by an image that ships the extension (the
+ * browser node, docker/), absent everywhere else — then this is one failed fetch and `{}`.
+ */
+async function readDeployment() {
+  try {
+    const response = await fetch(api.runtime.getURL('deployment.json'));
+    return response.ok ? await response.json() : {};
+  } catch {
+    return {};
   }
 }
 
@@ -586,9 +623,58 @@ async function handleDaemonMessage(msg) {
     case 'watch':
       if (msg.tabId == null) return undefined;
       return msg.on ? startWatch(msg.tabId) : stopWatch(msg.tabId);
+    case 'openWatch': {
+      // (3.2) An agent asked to show the person a live view of a tab (browser_tabs action:"watch").
+      if (!Number.isInteger(msg.handle)) return undefined;
+      const who = msg.agent?.name || msg.agent?.id || 'An agent';
+      await openWatchWindow({ handle: msg.handle, agent: msg.agent ?? null, focus: msg.focus === true });
+      await logActivity({ kind: 'system', ok: true, detail: `${who} opened a live view of tab ${msg.handle}${msg.engineKind === 'launched' ? ' (a launched browser)' : ''}.` });
+      broadcast({ type: 'watchOpened', handle: msg.handle, agent: msg.agent ?? null, engineKind: msg.engineKind ?? null, url: msg.url ?? null });
+      return undefined;
+    }
+    case 'closeWatch':
+      if (Number.isInteger(msg.handle)) broadcast({ type: 'watchRemove', handle: msg.handle });
+      return undefined;
     default:
       return undefined;
   }
+}
+
+// ------------------------------------------------------------- live view (3.2)
+
+const WATCH_WINDOW_KEY = 'g9:watchWindow';
+
+/** The watch window, if it is still open. */
+async function watchWindowId() {
+  const saved = (await platform.storage.session.get(WATCH_WINDOW_KEY).catch(() => ({})))?.[WATCH_WINDOW_KEY];
+  if (!Number.isInteger(saved?.windowId)) return null;
+  const win = await api.windows.get(saved.windowId).catch(() => null);
+  return win ? saved.windowId : null;
+}
+
+/**
+ * Open the watch window (panel/watch.html), or add a tab to the one already open. A person's own
+ * press (the panel's Live view) brings it up in front. An agent's request must not take the keyboard
+ * from someone typing: the window opens without focus and flashes in the taskbar, and the panel says
+ * who opened it — unless the agent passed focus:true.
+ */
+async function openWatchWindow({ handle = null, agent = null, person = false, focus = false } = {}) {
+  const inFront = person || focus;
+  const existing = await watchWindowId();
+  if (existing != null) {
+    if (handle != null) broadcast({ type: 'watchAdd', handle, agent });
+    await api.windows.update(existing, inFront ? { focused: true, drawAttention: false } : { drawAttention: true }).catch(() => {});
+    return { windowId: existing, reused: true };
+  }
+  const params = new URLSearchParams();
+  if (handle != null) params.set('tab', String(handle));
+  if (agent?.name) params.set('agent', String(agent.name));
+  const query = params.toString();
+  const url = api.runtime.getURL(`panel/watch.html${query ? `?${query}` : ''}`);
+  const win = await api.windows.create({ url, type: 'popup', width: 1100, height: 720, focused: inFront });
+  await platform.storage.session.set({ [WATCH_WINDOW_KEY]: { windowId: win.id } }).catch(() => {});
+  if (!inFront) await api.windows.update(win.id, { drawAttention: true }).catch(() => {});
+  return { windowId: win.id, reused: false };
 }
 
 async function handleCall(msg) {
@@ -677,6 +763,13 @@ async function stopWatch(tabId) {
  *    sides, first 12 hex — node:crypto there, Web Crypto here, and they agree
  *    because the input and the algorithm are the same.
  */
+/** (3.2) This browser's recordings in full; with `site`, only those whose start URL is on it ('none': no start URL). */
+async function localFlows(site = null) {
+  const index = await store.listRecordings();
+  const keep = site ? index.filter((e) => (siteOf(e.startUrl) ?? 'none') === site) : index;
+  return (await Promise.all(keep.map((e) => store.getRecording(e.id).catch(() => null)))).filter(Boolean);
+}
+
 async function specHash(recording) {
   if (!recording) return null;
   try {
@@ -881,6 +974,20 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sendResponse({ ok: true, result });
         break;
       }
+      // (3.2) The live view: the person's own press opens (or raises) the watch window, on a daemon
+      // tab handle or on its picker; the watch page asks where the daemon is, to connect as a viewer.
+      case 'openWatch': {
+        const handle = Number.isInteger(msg.handle) ? msg.handle : null;
+        sendResponse({ ok: true, ...(await openWatchWindow({ handle, person: true })) });
+        break;
+      }
+      case 'watchAddress': {
+        const address = transport.connectedAddress();
+        sendResponse(address
+          ? { ok: true, address, version: platform.runtime.version() }
+          : { ok: false, error: 'The G9 daemon is not connected. The live view comes back when it is (an agent\'s first call starts it).' });
+        break;
+      }
       case 'daemonInfo': {
         if (!transport.isConnected()) {
           sendResponse({ ok: true, daemon: null });
@@ -1041,20 +1148,53 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         break;
 
       // --- flow library on disk (see lib/transport.js flowLib) --------------
+      // (3.2) The run-history report's data: the flows asked for, without what it does not show
+      // (signatures, locators, the known world's contents).
+      case 'recHistory': {
+        const ids = Array.isArray(msg.ids) ? msg.ids.slice(0, 2000) : (await store.listRecordings()).map((r) => r.id);
+        const recs = [];
+        for (const id of ids) {
+          const r = await store.getRecording(id).catch(() => null);
+          if (!r) continue;
+          recs.push({
+            id: r.id, flowId: r.flowId ?? null, name: r.name, startUrl: r.startUrl ?? null, suite: r.suite ?? null,
+            tags: r.tags ?? [], qaTestCaseIds: r.qaTestCaseIds ?? [], environment: r.environment ?? null,
+            runHistory: r.runHistory ?? [], flaky: r.flaky ?? null,
+            steps: (r.steps ?? []).map((s) => ({ type: s.type })),
+            knownWorld: r.knownWorld ? { approvedAt: r.knownWorld.approvedAt ?? null, approvedBy: r.knownWorld.approvedBy ?? null } : null,
+          });
+        }
+        sendResponse({ ok: true, recordings: recs });
+        break;
+      }
+      // (3.2) Every library the daemon can reach: its own project's and each connected agent's.
+      case 'flowProjects':
+        sendResponse({ ok: true, ...(await transport.flowLib('projects')) });
+        break;
+      // (3.2) `project` picks the library (a path from flowProjects; none: the daemon's own) and
+      // `site` narrows to one origin ('none': flows with no start URL), on both sides.
       case 'flowStatus': {
-        const local = await store.listRecordings();
+        const { project = null, site = null } = msg;
+        const local = await localFlows(site);
         const withHashes = await Promise.all(
-          local.map(async (entry) => {
-            const full = await store.getRecording(entry.id);
-            return { id: full?.flowId ?? entry.id, name: entry.name, hash: await specHash(full) };
-          }),
+          local.map(async (full) => ({ id: full.flowId ?? full.id, name: full.name, hash: await specHash(full), approvedAt: approvedAtFor(full) })),
         );
-        sendResponse({ ok: true, ...(await transport.flowLib('status', { local: withHashes })) });
+        // Pulls before 3.1 saved every repo flow again under a new id: the copies are named, never
+        // deleted here (which one a person edited is theirs to say).
+        const byFlow = new Map();
+        for (const r of local) byFlow.set(r.flowId ?? r.id, [...(byFlow.get(r.flowId ?? r.id) ?? []), r]);
+        const duplicates = [...byFlow.values()].filter((rs) => rs.length > 1).map((rs) => ({ flowId: rs[0].flowId ?? rs[0].id, name: rs[0].name, copies: rs.length }));
+        sendResponse({ ok: true, ...(await transport.flowLib('status', { local: withHashes, project, site })), duplicates });
         break;
       }
       case 'flowPull': {
-        const { flows } = await transport.flowLib('list');
+        const { project = null, site = null } = msg;
+        const { flows } = await transport.flowLib('list', { project, site });
         let imported = 0;
+        let created = 0;
+        let approvals = 0;
+        let baselines = 0;
+        const newerHere = [];
         const problems = [];
         for (const entry of flows) {
           if (entry.broken) {
@@ -1062,46 +1202,55 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             continue;
           }
           try {
-            const { spec } = await transport.flowLib('read', { flowId: entry.id });
-            const recording = fromFlowSpec(spec);
-            // Keep whatever local run history exists for this flow. It is the
-            // machine's own truth about reliability and the repo has no
-            // business overwriting it — that is exactly why it never leaves.
-            const existing = await store.getRecording(recording.id).catch(() => null);
-            await store.saveRecording({
-              ...recording,
-              ...(existing
-                ? {
-                    runHistory: existing.runHistory,
-                    lastRun: existing.lastRun,
-                    flaky: existing.flaky,
-                    knownWorld: existing.knownWorld,
-                    surpriseHistory: existing.surpriseHistory,
-                  }
-                : {}),
-            });
+            const { spec } = await transport.flowLib('read', { flowId: entry.id, project });
+            // The sidecar: what a person approved (known world, baselines). A flow without one keeps
+            // this browser's baselines and known world (lib/approved.js applyApproved).
+            const side = await transport.flowLib('readApproved', { flowId: entry.id, project }, { timeoutMs: 60_000 })
+              .catch((err) => { problems.push(`${entry.file}: its approval was not read (${err.message})`); return null; });
+            // Keeps what this machine learned (run history, flakiness) — the repo has no business
+            // overwriting it, which is why it never leaves — and finds the local copy by the flow's id
+            // (pulling twice used to list every flow twice).
+            const result = await importFlow(spec, { approved: side?.approved ?? null, images: side?.images ?? {} });
             imported += 1;
+            if (result.created) created += 1;
+            if (result.knownWorld === 'repo') approvals += 1;
+            if (result.localNewer) newerHere.push(spec.name ?? spec.id);
+            baselines += result.baselines.fromRepo;
           } catch (err) {
             problems.push(`${entry.file}: ${err.message}`);
           }
         }
-        sendResponse({ ok: true, imported, problems });
+        sendResponse({ ok: true, imported, created, approvals, baselines, newerHere, problems });
         break;
       }
       case 'flowPush': {
-        const ids = msg.ids ?? (await store.listRecordings()).map((r) => r.id);
+        const { project = null, site = null } = msg;
+        const recs = msg.ids
+          ? (await Promise.all(msg.ids.map((id) => store.getRecording(id).catch(() => null)))).map((r, i) => r ?? { missing: msg.ids[i] })
+          : await localFlows(site);
         const written = [];
         const problems = [];
-        for (const id of ids) {
+        let approvals = 0;
+        for (const rec of recs) {
+          const label = rec.missing ?? rec.id;
           try {
-            const rec = await store.getRecording(id);
-            if (!rec) throw new Error('not found in this browser');
+            if (rec.missing) throw new Error('not found in this browser');
             const spec = toFlowSpec(rec, { platform: rec.platform ?? 'web' });
             const problem = validateFlowSpec(spec);
             if (problem?.length) throw new Error(problem.join('; '));
-            written.push(await transport.flowLib('write', { spec }));
+            const w = await transport.flowLib('write', { spec, project });
+            // What a person approved goes with it: the known world and the baselines (3.2).
+            const bundle = await approvedBundle(rec);
+            if (bundle) {
+              const a = await transport.flowLib('writeApproved', { flowId: spec.id, approved: bundle.approved, images: bundle.images, project }, { timeoutMs: 60_000 });
+              if (a?.written) {
+                approvals += 1;
+                if (a.changed) w.changed = true;
+              }
+            }
+            written.push(w);
           } catch (err) {
-            problems.push(`${id}: ${err.message}`);
+            problems.push(`${label}: ${err.message}`);
           }
         }
         // A flow whose name slugs to another flow's file is written beside it, under a name with
@@ -1113,6 +1262,7 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           ok: true,
           written: written.length,
           changed: written.filter((w) => w.changed).length,
+          approvals,
           files: written.map((w) => w.file),
           problems,
           ...(notes.length ? { notes } : {}),

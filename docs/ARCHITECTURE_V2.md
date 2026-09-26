@@ -5,12 +5,13 @@ the design recorded in [AIGuide.md](../AIGuide.md) §2 (decisions D1–D12, rule
 module boundaries, function signatures, message formats and file locations. Every implementer codes
 against the signatures below; if a signature has to change, change it here in the same change set.
 
-Version for everything in this release: **3.0.0**, read from the root `package.json`. (2.0.0 was the first complete build, 2.0.1 added the
+Version for everything in this release: **3.2.0**, read from the root `package.json`. (2.0.0 was the first complete build, 2.0.1 added the
 adversarial review's 40 fixes, 2.0.2 fixed three defects that flaky tests uncovered and sized the browser close budget from a
-measurement, 2.0.3 fixed the side panel's popout, and 3.0.0 is the side-panel redesign (U1–U10, AIGuide §6.10),
-marked ***(v3)*** below.)
+measurement, 2.0.3 fixed the side panel's popout, 3.0.0 is the side-panel redesign (U1–U10, AIGuide §6.10),
+marked ***(v3)*** below, and 3.2.0 adds the live view, repositories per project, MCP over HTTP and the
+browser node image (`docker/`), marked ***(3.2)***.)
 
-**Synced with the code on 2026-09-25 (v3.0.1; 3.0.0 was the side panel, U1–U10 in AIGuide §6.10; 3.0.1 changed no contract).** Signatures, messages, fields
+**Synced with the code on 2026-09-26 (v3.2.0: the live view, repositories per project and site, approvals beside flows, MCP over HTTP, `G9_LAUNCH_ARGS`, the browser node image; 3.1.x changed no contract here; 3.0.0 was the side panel, U1–U10 in AIGuide §6.10).** Signatures, messages, fields
 and defaults below were re-read from the implementation. Text marked ***(as built)*** records something
 the code has that the original contract did not (an addition, or a behaviour that changed after the
 contract was written); everything else was already accurate or has been corrected in place. The wire
@@ -45,6 +46,8 @@ runner/g9.mjs ────────▶ mcp/shim.mjs ──WS /g9──┘    
 desktop (Electron) ───────────────────WS /g9──────────┘   │                          ──pipe CDP──▶ Edge/Chrome/CfT
                                                           │
 extension/sw.js (Engine 1) ───────────WS /g9──────────────┘   tools run INSIDE the extension (platform-extension)
+
+(3.2) remote agent ──HTTPS──▶ reverse proxy ──HTTP /mcp──▶ mcp/http.mjs ──WS /g9 (one link per MCP session)──▶ g9d
 ```
 
 * **One daemon per machine** on `127.0.0.1:${G9_PORT:-8765}`. It owns engines, contexts, tab handles,
@@ -59,7 +62,7 @@ extension/sw.js (Engine 1) ───────────WS /g9────�
 
 ## 2. Root package and version
 
-* `package.json` at the repo root: `{ "name": "g9-browser-agent", "version": "3.0.1", "private": true,
+* `package.json` at the repo root: `{ "name": "g9-browser-agent", "version": "3.2.0", "private": true,
   "type": "module", "engines": { "node": ">=22" }, "scripts": { … } }`. No dependencies.
 * `extension/manifest.json.version` **must equal** it; `desktop/package.json.version` **must equal** it.
   `setup/unit/version.test.mjs` enforces both ***(as built)*** and also compares the version in
@@ -435,6 +438,29 @@ status, openerTabId, session? }` — tab identity is always the key **`tabId`**,
   tabIds)` (the `attachedTabs`/`attachedSince` patch without those tabs). `tools/tabs.js`: `attachTab(tabId,
   { clearHalt, log })`. `lib/state.js`: `AUTO_ATTACH_MODES`, `autoAttachMode(value)`. `lib/store.js`:
   `issueIndexEntry(record, attachments)`, `issueEvidence(record, attachments)`.
+* ***(3.2)*** `lib/approved.js` (new, pure, R2) — what a person approved, as a sidecar beside the flow file
+  (format `g9-approved`, schemaVersion 1): `approvedDocFor(recording)` → `{ doc, images:[{name, stepId,
+  attachmentId}] }` or null (the known world only when a PERSON approved it — `isApproved(kw)`: `approvedAt`
+  set and `approvedBy !== 'seed'`; screenshot baselines `{kind:'screenshot', fingerprint, structure,
+  visualMode, masks, image}`, aria baselines `{kind:'aria', lines, maxNodes}`, keyed by the FlowSpec step id
+  `stepIdOf(step, i)`), `approvedJson(doc)` (canonical bytes), `validateApproved(doc, flowId)`,
+  `applyApproved(recording, doc, local)` → `{ recording, knownWorld:'repo'|'local'|null, localNewer,
+  baselines:{fromRepo, kept}, images }` (per step: the sidecar's baseline, else the local one; known world:
+  the later human approval), `setBaselineImage`, `approvedAtFor`, `imageNameFor`.
+  `lib/flowsync.js` (new, R2; store-backed): `findByFlowId(flowId)`, `approvedBundle(recordingOrId)` →
+  `{ flowId, approved, images:{name: base64} }`, `importFlow(spec, { approved, images, id })` → `{ id, name,
+  steps, created, knownWorld, localNewer, baselines, images }` — the ONE way a FlowSpec enters a store (the
+  panel's Pull, `browser_recording import_spec`, the runner): finds the local copy by flow id (Pull used to
+  save every repo flow again under a new id), keeps run history, flakiness, surprise history and the last
+  signature, applies the sidecar, stores a baseline image once per content. `lib/store.js`: the recording
+  index carries `flowId`. `tools/replay.js`: `onApproved(fn)` — `approveKnownWorld` awaits the listener
+  (15 s at most) and returns what it did as `repo`; a failing listener never fails the approval (the worker
+  writes through the daemon's flow library, the engine manager through the daemon). `browser_recording`:
+  `import_spec` takes `approved` and `images`; `export_spec` returns `approved` and, with `includeImages`,
+  `images` (else `imageNames`). `browser_tabs`: `watch` (§4.2). `lib/transport.js`: `connectedAddress()`.
+  `panel/report.js`: `summarizeHistory(recordings)`, `buildHistoryReport(summary, {scope, at, product,
+  version})` (a DOM document serialised once), `reportFileName(scope, at)`. `panel/watch.js` + `watch.html`:
+  the live view (§8, DAEMON_PROTOCOL §10); `panel/track.js` is `desktop/renderer/lib/track.js`, byte for byte.
 * `tools/record.js`: `recordingTabs()` (every tab recording now), `inputSamplesOf`, `calibrateFromRecording`;
   `startRecording` REFUSES a tab that is already recording (v1 silently replaced the session and leaked the
   first one's scripts). `interact.witnessExpression` is exported for the tests.
@@ -462,6 +488,7 @@ status, openerTabId, session? }` — tab identity is always the key **`tabId`**,
 | `handoff_export` | internal (daemon-only): `{ url, title, origin, cookies: Cookie[], localStorage: [[k,v]…], sessionStorage: [[k,v]…], viewport: {width,height,dpr}, userAgent }` — cookies for the tab's host and every parent domain; storage read in the isolated world |
 | `open` | `{url, focus?, name?}` — `name` also makes it a named session (`session` in the result) |
 | `pin`/`unpin` | removed |
+| `watch` | ***(3.2)*** daemon-level, both engines: `{ tabId?, on = true, focus = false }` → `{ tabId, on, shown, shownIn, note }` (DAEMON_PROTOCOL §10). Read-only (`isReadOnly`): no ownership, no queue. The extension opens `panel/watch.html` in a popup window (`chrome.windows.create({type:'popup', focused: focus})`, then `drawAttention` when unfocused) or adds the tab to the open one; its id is kept in `storage.session` `g9:watchWindow` |
 
 ---
 
@@ -694,6 +721,8 @@ buildArgs({ profileDir, headless, windowSize, proxy, proxyBypass, lang, extraArg
       // extraArgs), --enable-blink-features, --lang, --proxy-server/--proxy-bypass-list, the other extraArgs,
       // then startUrl. A fixed switch passed again is dropped; a feature both enabled and disabled is refused.
 screenInfoSwitch({ width, height }, { workAreaBottom = 0 } = {}): '--screen-info={WxH}' | '--screen-info={WxH workAreaBottom=N}'
+// (3.2) The manager prepends launchArgsFromEnv() — G9_LAUNCH_ARGS as a JSON array or a space-separated
+// list, only entries starting with "--" — to every launch's extraArgs; the refusals below still apply.
 // Refused in extraArgs, case-insensitively: --enable-automation (always), --remote-debugging-port/-address/-pipe/
 // -io-pipes, and the switches owned by an option (--user-data-dir, --headless, --window-size, --lang, --proxy-server,
 // --proxy-bypass-list — as built, other --proxy-* switches such as --proxy-pac-url pass through);
@@ -792,6 +821,18 @@ Files: `daemon/g9d.mjs` (entry), `daemon/ws-server.js` (moved from bridge, origi
 `StorageArea` and `blobs` for platform-cdp), `daemon/evidence.js` (runs dir, frame/pointer spool,
 downloads verification), `daemon/scheduler.js`, `daemon/project.js` + `daemon/flows.js` (moved from
 bridge), `daemon/settings.js`, `daemon/extension-update.js`.
+
+***(3.2)*** `daemon/flows.js` `FlowLibrary`: `list({site})` (rows add `startUrl`, `approvedAt`, `approvedBy`,
+`baselines`), `status(local, {site})` (adds `approvalNewerInRepo`, `approvalNewerHere`), `writeApproved(flowId,
+doc, images)`, `readApproved(flowId)`; `remove` takes the sidecar with the flow; the walk skips
+`*.approved.json` and `*.baselines/`; `siteMatches(startUrl, site)` exported. `Daemon`: one library per known
+project (`#libraryRows`: its own and each connected agent's `g9.project.json`; the flowlib `project` path must
+be one of them), `writeApprovedAnywhere(flowId, approved, images)`, `requestWatch({handle, caller, on, focus})`,
+`watchables()`, the `viewer` role (`#viewerMessage`). `engine/manager.js`: `approvedBundle(id)` and the
+`onApproved` hook (the launched store's approvals go to the repository through the daemon).
+`registry.js` knows the role `viewer`. `router.js`: `browser_tabs action:"watch"` → `onWatchRequest`;
+an `import_spec` that took a later approval from the sidecar (`result.knownWorld === 'repo'`) does not get the
+old known world restored.
 
 Summary of the protocol (full text in DAEMON_PROTOCOL.md):
 
@@ -910,6 +951,15 @@ the fix. Tool calls are forwarded verbatim; the shim adds nothing but `caller.na
 zero-dependency `lib/ws-client.mjs`, not Node's global `WebSocket`: it also runs as `G9.exe` with
 `ELECTRON_RUN_AS_NODE` (whose Node is Electron's), and it must never send an `Origin` header.
 
+***(3.2)*** The shim is split so a second front end shares it:
+
+| Module | Exports | Contract |
+|---|---|---|
+| `mcp/link.mjs` | `DaemonLink`, `HOST`, `PORT`, `describePortHolder` | `new DaemonLink({ name='mcp-agent', cwd=process.cwd(), project=G9_PROJECT })`; `ensure()` connects (spawning the daemon as above), `call(tool, args)` → result or throws, `close(reason='shim exiting')` (the daemon logs the reason). The hello carries `client: { name, pid, cwd, project }`. |
+| `mcp/server.mjs` | `createMcpServer(link, { transport='stdio' })` | an `McpServer` with the 15 tools and the two resources; `initialize` sets `link.name` from `clientInfo.name`; `browser_status` adds `shim: { version, pid, transport }` and a note when shim and daemon versions differ. |
+| `mcp/mcp.js` | `McpServer.handle(msg)` | answers one parsed JSON-RPC message: the response object, or `null` for a notification; a non-object is `-32600`, a throw `-32603`. stdio's `#dispatch` and HTTP both use it. |
+| `mcp/http.mjs` | `createGateway({ token, makeLink, idleMs=30 min, allowedOrigins=[], maxSessions=32, now })` → `{ handler, sessions, sweep, close }`; `main(env)`; `tokenMatches`, `isLoopback`, `MAX_BODY_BYTES` (64 MiB), `MAX_SESSIONS`, `MIN_TOKEN_LENGTH` (24) | MCP Streamable HTTP, JSON responses only (no server-initiated stream: GET 405). Order of refusals: path (`/healthz` → 200 "ok"; not `…/mcp` → 404), Origin not allowed → 403, bearer wrong → 401 + `WWW-Authenticate`, content type → 415, body → 413/parse error. `initialize` (alone or in a batch) creates a session: `Mcp-Session-Id` header, a `DaemonLink` of its own named after the client. Other requests need a live session id (none 400, unknown 404). DELETE ends one (204). Notifications only → 202. `main` listens on `G9_MCP_HTTP_HOST:G9_MCP_HTTP_PORT` (127.0.0.1:8931) and refuses a non-loopback host without a token of ≥ 24 characters (`G9_MCP_TOKEN`, or `G9_MCP_TOKEN_FILE`). |
+
 ---
 
 ## 11. Desktop — `desktop/`
@@ -987,6 +1037,10 @@ Added:
 | `handoff` | `{ tabId? }` | `{ ok, result }` — asks the daemon (`{type:'request', op:'handoff', tabId}`). ***(v3)*** clears `blocked[tabId]` once it succeeded |
 | `daemonInfo` | — | `{ ok, daemon: { version, port, agents:[…], engines:[…] } \| null }` |
 | `about` | — | `{ ok, version, previousVersion, updatedAt, browser }` |
+| `openWatch` | ***(3.2)*** `{ handle? }` — a daemon tab handle (an agent row's `currentHandle`); none: the picker | `{ ok, windowId, reused }` — opens `panel/watch.html` in a popup window, focused (the person's own press), or raises the one already open and adds that tab to it (`{type:'watchAdd', handle}` broadcast). The same window an agent's `browser_tabs action:"watch"` opens (`{type:'openWatch'}` from the daemon, unfocused and flashing in the taskbar) |
+| `watchAddress` | ***(3.2)*** — | `{ ok, address: "host:port", version }` of the daemon this worker is connected to, or `{ ok:false, error }`: the watch page dials it itself as a `viewer` (DAEMON_PROTOCOL §7) |
+| `flowProjects` | ***(3.2)*** — | `{ ok, default, projects:[{ name, path, root, flowsDir, own, agents, domains }] }` — every flow library the daemon can reach (flowlib `projects`). `flowStatus`/`flowPull`/`flowPush` take `{ project?, site? }` (a path from here; an origin or `'none'`); `flowPull` answers `{ imported, created, approvals, baselines, newerHere, problems }`, `flowPush` adds `approvals` |
+| `recHistory` | ***(3.2)*** `{ ids? }` | `{ ok, recordings:[{ id, flowId, name, startUrl, suite, tags, qaTestCaseIds, environment, runHistory, flaky, steps:[{type}], knownWorld:{approvedAt, approvedBy} }] }` — the run-history report's data (`panel/report.js`) |
 
 `getState().state` carries: `currentTabId`, `attachedTabs`, `sessions`, `inputMode`, `autoAttach`,
 `halted`, `dialogOpen`, `dialogs` (`{[tabId]: {tabId,type,message,at}}` — every open dialog; `dialogOpen` is
@@ -1059,6 +1113,7 @@ export function connectNow(): Promise<void>                          // reset ba
 export function disconnect(): Promise<void>                           // (as built) resolves when the state is written
 export function send(payload): boolean
 export function isConnected(): boolean
+export function connectedAddress(): string|null               // (3.2) "host:port" while connected; the watch window dials it
 export function isReconnectPending(): boolean
 export function request(op: 'handoff'|'info'|string, payload = {}, { timeoutMs = 15000 (handoff: 185000) } = {}): Promise<any>
       // sends {type:'request', id, op, ...payload}; resolves on {type:'response', id, ok, result|error}.

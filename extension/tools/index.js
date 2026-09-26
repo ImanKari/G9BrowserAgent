@@ -21,7 +21,8 @@ import { getState, logActivity } from '../lib/state.js';
 import { evaluate, send as cdpSend, attachedTabIds } from '../lib/cdp.js';
 import { bindCallSignal } from '../lib/humanize.js';
 import * as store from '../lib/store.js';
-import { toFlowSpec, fromFlowSpec, canonicalJson, validateFlowSpec } from '../lib/flowspec.js';
+import { toFlowSpec, canonicalJson } from '../lib/flowspec.js';
+import { importFlow, approvedBundle } from '../lib/flowsync.js';
 
 import * as tabsTool from './tabs.js';
 import { snapshot } from './snapshot.js';
@@ -372,15 +373,19 @@ export const TOOLS = {
           const rec = await store.getRecording(requireId(args));
           if (!rec) throw new Error(`No recording with id "${args.id}".`);
           const spec = toFlowSpec(rec);
-          return { id: rec.id, spec, json: canonicalJson(spec) };
+          // (3.2) What a person approved travels beside the spec (lib/approved.js): the known world
+          // and the baselines, with the baseline screenshots only when asked for (they are large).
+          const bundle = await approvedBundle(rec);
+          return {
+            id: rec.id, spec, json: canonicalJson(spec),
+            ...(bundle ? { approved: bundle.approved, ...(args.includeImages ? { images: bundle.images } : { imageNames: Object.keys(bundle.images) }) } : {}),
+          };
         }
         case 'import_spec': {
           if (!args.spec) throw new Error('action:"import_spec" needs a spec.');
-          const problems = validateFlowSpec(args.spec);
-          if (problems.length) throw new Error(`FlowSpec is not valid:\n- ${problems.join('\n- ')}`);
-          const recording = fromFlowSpec(args.spec);
-          const saved = await store.saveRecording({ ...recording, id: args.id ?? undefined });
-          return { id: saved.id, name: saved.name, steps: saved.steps.length };
+          // (3.2) With the flow's sidecar (`approved`, `images`): baselines and a later approval
+          // come with it; what this store learned stays (lib/flowsync.js importFlow).
+          return importFlow(args.spec, { approved: args.approved ?? null, images: args.images ?? {}, id: args.id ?? null });
         }
         case 'delete': return store.deleteRecording(requireId(args));
         case 'export': return store.exportBundle({ includeAttachments: args.includeAttachments !== false });
@@ -625,7 +630,8 @@ export function isReadOnly(tool, args = {}) {
     case 'browser_issue':
       return READ_ONLY_ISSUE.has(a.action ?? 'list');
     case 'browser_tabs':
-      return ['list', 'sessions'].includes(a.action ?? 'list');
+      // 'watch' (3.2) opens a live view for the person; nothing reaches the page.
+      return ['list', 'sessions', 'watch'].includes(a.action ?? 'list');
     default:
       return false;
   }

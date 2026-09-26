@@ -1,0 +1,8 @@
+#!/usr/bin/with-contenv bash
+# The G9 daemon. Loopback only (it has no password by design; mcp/http.mjs is the one door in),
+# as the desktop user abc, its data in /config/g9 so it survives the container.
+export G9_HOME="${G9_HOME:-/config/g9}"
+mkdir -p "${G9_HOME}"
+chown abc:abc "${G9_HOME}"
+cd /config || exit 1
+exec s6-setuidgid abc node /opt/g9/daemon/g9d.mjs --foreground

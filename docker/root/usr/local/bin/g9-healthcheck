@@ -1,0 +1,8 @@
+#!/bin/bash
+# Healthy = the desktop answers, the G9 daemon answers, and (when it is on) the MCP endpoint answers.
+curl -fsS -o /dev/null --max-time 4 http://127.0.0.1:3000/ || exit 1
+curl -fsS --max-time 4 "http://127.0.0.1:${G9_PORT:-8765}/health" | grep -q '"name":"g9d"' || exit 1
+if [ -n "${G9_MCP_TOKEN}${G9_MCP_TOKEN_FILE}" ]; then
+  curl -fsS -o /dev/null --max-time 4 "http://127.0.0.1:${G9_MCP_HTTP_PORT:-8931}/healthz" || exit 1
+fi
+exit 0

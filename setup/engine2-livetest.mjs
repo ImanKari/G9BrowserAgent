@@ -1984,6 +1984,75 @@ async function sectionWatch() {
   check(spooled >= 1, 'the watch was spooled as an evidence run (frames on disk)', `${spooled} frame file(s) in runs/${w.result?.runId}`);
 }
 
+/**
+ * (3.2) The extension's watch window, as the daemon sees it: a "viewer" from an extension origin
+ * lists the tabs (the headless launched one among them) and watches one — real screencast frames and
+ * the pointer of an agent's input — and can do nothing else. An agent's browser_tabs action:"watch"
+ * reaches whoever can show it (here the desktop app, the ui client: no extension is connected).
+ */
+async function viewerClient(port) {
+  const ws = await WsClient.connect(`ws://127.0.0.1:${port}/g9`, { origin: 'chrome-extension://g9e2livetestviewer' });
+  const v = { ws, events: [], results: new Map(), nextId: 1, welcome: null };
+  ws.on('message', (msg) => {
+    if (msg.type === 'welcome') v.welcome = msg;
+    else if (msg.type === 'event') v.events.push(msg);
+    else if (msg.type === 'viewerResult') v.results.get(msg.id)?.(msg);
+    else if (msg.type === 'ping') ws.send({ type: 'pong', at: msg.at });
+  });
+  ws.on('error', () => {});
+  ws.send({ type: 'hello', role: 'viewer', version: VERSION, client: { name: 'engine2-livetest-viewer' } });
+  await waitFor(() => v.welcome, 5_000, 50);
+  v.ask = (msg) => new Promise((resolve, reject) => {
+    const id = `v${v.nextId++}`;
+    const timer = setTimeout(() => reject(new Error(`${msg.op ?? msg.type} timed out`)), 20_000);
+    v.results.set(id, (m) => { clearTimeout(timer); resolve(m); });
+    ws.send({ ...msg, id });
+  });
+  return v;
+}
+
+async function sectionViewer() {
+  const { A } = S;
+  const tab = S.tabMain;
+  const v = await viewerClient(S.port);
+  check(/^viewer-/.test(v.welcome?.id ?? '') && !v.welcome?.problem, 'an extension-origin "viewer" (the watch window) is welcomed', short(v.welcome?.id ?? v.welcome?.problem));
+  const refused = [];
+  for (const msg of [{ type: 'admin', op: 'halt' }, { type: 'call', tool: 'browser_status', args: {} }, { type: 'flowlib', op: 'list' }]) {
+    const r = await v.ask(msg);
+    if (r.ok !== false || !/may only list and watch/.test(r.error ?? '')) refused.push(msg.type);
+  }
+  const st = await must(A, 'browser_status', {});
+  check(refused.length === 0 && st?.halted?.global !== true && st?.halted !== true, 'a viewer cannot Stop, call a tool or reach the flow library', short({ notRefused: refused, halted: st?.halted }));
+  const list = await v.ask({ type: 'viewer', op: 'watchables' });
+  const row = list.result?.tabs?.find((t) => t.tabId === tab);
+  check(!!row && row.engineKind === 'launched' && row.headless === true, 'watchables lists the headless launched tab, with its engine', short(row ?? list.error));
+
+  const n0 = v.events.length;
+  const w = await v.ask({ type: 'viewer', op: 'watch', tabId: tab });
+  check(w.ok && w.result?.watching === true, 'the viewer watches the headless tab', short(w.result ?? w.error));
+  const snapped = await snap(A, tab);
+  await must(A, 'browser_interact', { action: 'hover', ref: snapped.ref('button', 'Hover target'), tabId: tab });
+  await must(A, 'browser_interact', { action: 'click', ref: snapped.ref('button', 'Lab button'), tabId: tab });
+  await sleep(600);
+  const evs = v.events.slice(n0);
+  const frames = evs.filter((e) => e.topic === 'frame' && e.data?.tabId === tab);
+  const pointer = evs.filter((e) => e.topic === 'pointer' && e.data?.tabId === tab);
+  const first = frames[0]?.data?.data ? jpegSize(Buffer.from(frames[0].data.data, 'base64')) : null;
+  check(frames.length >= 3 && !!first && first.width > 0 && pointer.length >= 10, 'it receives the JPEG frames and the pointer of the agent\'s input, as the desktop does', short({ frames: frames.length, first, pointer: pointer.length }));
+
+  // An agent asks to show the person its tab.
+  const ui = S.ui ?? await uiClient(S.port);
+  S.ui = ui;
+  const u0 = ui.events.length;
+  const r = await must(A, 'browser_tabs', { action: 'watch', tabId: tab });
+  await sleep(300);
+  const heard = ui.events.slice(u0).some((e) => e.topic === 'watchRequest' && e.data?.tabId === tab && e.data?.on === true);
+  check(r?.shown === true && (r.shownIn ?? []).includes('desktop app') && heard, 'browser_tabs action:"watch" tells whoever can show it (here the desktop app)', short({ shownIn: r?.shownIn, heard }));
+
+  await v.ask({ type: 'viewer', op: 'unwatch', tabId: tab });
+  v.ws.close();
+}
+
 async function sectionHalt() {
   const { A } = S;
   const ui = S.ui ?? await uiClient(S.port);
@@ -2396,6 +2465,7 @@ try {
   await run('slots', 'maxParallel: the gate works, a wait holds no slot', sectionSlots);
   await run('parallel', '4 contexts, 4 agents, concurrent human input, own cookies', sectionParallel);
   await run('watch', 'live watch from a ui client (the desktop\'s view)', sectionWatch);
+  await run('viewer', 'the watch window: a viewer watches a headless tab; an agent asks to show it', sectionViewer);
   await run('halt', 'halt from a ui client', sectionHalt);
   await run('handoff', 'handoff import (synthetic Engine 1 export)', sectionHandoff);
   await run('clean', 'isolated-world cleanliness', async () => { await ensureStealthTab(); await sectionCleanliness(); });

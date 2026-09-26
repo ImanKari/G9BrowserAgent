@@ -1,0 +1,33 @@
+#!/bin/bash
+# (3.2) Close Chromium cleanly while its compositor is still up, when the container stops.
+#
+# The desktop's own stop (svc-de) signals every process at once, the compositor included, and
+# Chromium then died mid-shutdown: the profile said "Crashed", the next start asked to restore
+# pages, and the last cookie writes (a fresh sign-in) could be lost. Alone, SIGTERM makes Chromium
+# end its session properly ("SessionEnded", measured in the container).
+#
+# The work is done HERE, on the TERM that s6 sends to take this service down, and not in a finish
+# script: s6-rc counts a longrun as down when its run process exits and does not wait for finish,
+# so a finish script raced the desktop's stop (measured: the profile still said "Crashed"). This run
+# exits only once Chromium is gone, and this service depends on svc-de, so the desktop stops after
+# it. The watchdog (RESTART_APP) depends on this service, so it is stopped first and nobody starts
+# the browser again meanwhile.
+close_browser() {
+  main=""
+  for p in $(pgrep -x chromium); do
+    tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q -- '--type=' || main="$main $p"
+  done
+  if [ -n "$main" ]; then
+    kill -TERM $main 2>/dev/null
+    for _ in $(seq 1 60); do
+      pgrep -x chromium > /dev/null || { echo "[g9-quit] Chromium closed cleanly"; exit 0; }
+      sleep 0.25
+    done
+    echo "[g9-quit] Chromium did not close within 15 s; the desktop's stop takes over"
+  fi
+  exit 0
+}
+trap close_browser TERM
+# bash runs a trap only between commands: sleep in the background and wait, which a signal interrupts.
+sleep infinity &
+wait $!

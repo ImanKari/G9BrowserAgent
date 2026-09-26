@@ -778,6 +778,11 @@ export function createFakeBrowser({ viewport = { width: 1280, height: 800 } } = 
           tab.refuseScreencast = false;
           fail('Unable to start the screencast');
         }
+        // `betweenDocuments`: the page is committing a navigation — refused this many times (3.2).
+        if (tab.betweenDocuments > 0) {
+          tab.betweenDocuments -= 1;
+          fail('Not attached to an active page');
+        }
         tab.screencast = { ...params };
         return {};
       case 'Accessibility.getFullAXTree': {

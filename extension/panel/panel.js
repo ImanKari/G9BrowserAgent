@@ -15,7 +15,7 @@
  * expensive than splitting before it.
  */
 
-import { api, el, view, showPanelError, wireErrors, setTitle, VERSION, PRODUCT } from './ui.js';
+import { api, el, view, showPanelError, wireErrors, setTitle, toast, VERSION, PRODUCT } from './ui.js';
 import * as session from './session.js';
 import * as automation from './automation.js';
 import * as issues from './issues.js';
@@ -97,6 +97,11 @@ api.runtime.onMessage.addListener((msg) => {
       break;
     case 'dialog':
       showPanelError(`Page opened a ${msg.dialogType}: ${msg.message}`);
+      break;
+    // (3.2) An agent opened the live view for the person (browser_tabs action:"watch"). The window
+    // came up without the keyboard and flashes in the taskbar; this says whose it is.
+    case 'watchOpened':
+      toast(`${msg.agent?.name ?? 'An agent'} opened a live view of tab #${msg.handle}${msg.engineKind === 'launched' ? ' (a launched browser)' : ''} — in its own window`);
       break;
     case 'detached':
       showPanelError('Debugger detached from the attached tab.');

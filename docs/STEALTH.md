@@ -11,7 +11,7 @@ Detectors change. Re-measure before you rely on anything below.
 **Where the numbers come from.** Everything was measured on the owner's workstation on 2026-09-22,
 except the final pass and the CfT frame-rate A/B of 2026-09-23: Windows 11 Pro 10.0.26200, Edge
 153.0.4234.32, Chrome 153.0.8010.53, and Chrome for Testing (CfT) 153.0.8010.52, which is G9's pinned
-build. 2.0.2, 2.0.3, 3.0.0 and 3.0.1 changed no launch switch, stealth rule or input dispatch since that
+build. 2.0.2, 2.0.3, 3.0.0, 3.0.1 and 3.1.0 changed no launch switch, stealth rule or input dispatch since that
 final pass (they changed replay, evidence pruning, watch ordering, the browser close budget, the
 Engine 1 popout, whose effect on a page is noted [below](#what-the-tools-do-differently-at-stealth),
 and in 3.0.0 the side panel). One 3.0.0 change matters in the person's own browser: Engine 1's

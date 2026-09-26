@@ -184,6 +184,27 @@ async function start() {
   renderControls();
 }
 
+/**
+ * (3.2) An agent asked to show the person this tab (browser_tabs action:"watch", the daemon's
+ * `watchRequest` event): pick it and start, replacing what was being watched. Called after the view
+ * is mounted; a tab that is not in the list (yet) is said, not guessed at.
+ */
+export async function watchTab(tabId, agent = null) {
+  if (!root || !Number.isInteger(tabId)) return;
+  if (live.tabId === tabId) return;
+  if (live.tabId !== null) await stop({ quiet: true });
+  await loadTabs().catch(() => {});
+  lastPickerKey = '';
+  renderPicker(store.state);
+  if (![...pickerEl.options].some((o) => Number(o.value) === tabId)) {
+    toast(`${agent?.name ?? 'An agent'} asked you to watch tab #${tabId}, which is not in the list any more.`);
+    return;
+  }
+  pickerEl.value = String(tabId);
+  await start();
+  toast(`${agent?.name ?? 'An agent'} asked you to watch tab #${tabId}.`);
+}
+
 async function stop({ quiet = false } = {}) {
   const tabId = live.tabId;
   live.tabId = null;

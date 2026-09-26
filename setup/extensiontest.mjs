@@ -1756,10 +1756,12 @@ await test('the daemon keeps its configured port, and explains a held one instea
   for (const bad of ['0', '65536', 'abc', '8765.5', '']) assert.equal(parsePort(bad), null, `"${bad}" is not a port`);
   const g9d = await readFile(new URL('../daemon/g9d.mjs', import.meta.url), 'utf8');
   assert.match(g9d, /const explicitPort = parsePort\(args\.port\) \?\? parsePort\(process\.env\.G9_PORT\)/);
-  const shim = await readFile(new URL('../mcp/shim.mjs', import.meta.url), 'utf8');
-  // The shim dials the same G9_PORT, and starts a daemon on exactly that port.
-  assert.match(shim, /Number\(process\.env\.G9_PORT\)/);
-  assert.match(shim, /G9_PORT: String\(PORT\)/);
+  // The shim (and, since 3.2, the HTTP endpoint) dials the same G9_PORT through mcp/link.mjs, and
+  // starts a daemon on exactly that port.
+  const link = await readFile(new URL('../mcp/link.mjs', import.meta.url), 'utf8');
+  assert.match(link, /Number\(process\.env\.G9_PORT\)/);
+  assert.match(link, /G9_PORT: String\(PORT\)/);
+  assert.match(await readFile(new URL('../mcp/shim.mjs', import.meta.url), 'utf8'), /from '\.\/link\.mjs'/);
 
   // As behaviour: hold a private port with something that answers /health the
   // way a v1 bridge does, start the real g9d on it with a throwaway home, and
@@ -2706,6 +2708,221 @@ await test('the recording index keeps an environment only as a name, never as an
   } finally {
     for (const r of [a, b, c]) await store.deleteRecording(r.id);
   }
+});
+
+// ------------------------------------------- 3.1: what a person approved travels with the flow
+
+/** A flow with a screenshot check, an aria check and a human approval — what a QA has after a week. */
+async function approvedFlowFixture(store, { id = 'rec_travel', approvedAt = 1_700_000_000_000 } = {}) {
+  const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4]);
+  const att = await store.putAttachment({ owner: id, name: 'baseline-2.png', mime: 'image/png', kind: 'baseline', bytes: png });
+  const rec = await store.saveRecording({
+    id,
+    name: 'Checkout travels',
+    folder: 'shop',
+    startUrl: 'https://shop.example.test/cart',
+    steps: [
+      { id: 's1', type: 'navigate', url: 'https://shop.example.test/cart' },
+      { id: 's2', type: 'assert', assertion: 'screenshot', baseline: [1, 2, 3], baselineStructure: { cells: [[0, 1]] }, visualMode: 'layout', baselineImageId: att.id },
+      { id: 's3', type: 'assert', assertion: 'aria', ariaBaseline: ['button "Pay"', 'heading "Cart"'], maxNodes: 200 },
+    ],
+    knownWorld: { runs: 2, network: { 'GET /api/cart': 2 }, console: {}, dialogs: {}, steps: { s1: {} }, volatile: [], approvedAt, approvedBy: 'qa' },
+    runHistory: [{ at: 5, verdict: 'PASS' }],
+  });
+  return { rec, png };
+}
+
+await test('3.2: push writes the approval and baselines beside the flow; pull on another machine brings them back', async () => {
+  const store = await import('../extension/lib/store.js');
+  const sync = await import('../extension/lib/flowsync.js');
+  const { rec, png } = await approvedFlowFixture(store);
+  try {
+    await withFlowLibrary(async (library, root, path) => {
+      const { readdir } = await import('node:fs/promises');
+      // Push, the way sw.js flowPush does it.
+      const spec = flowspec.toFlowSpec(rec);
+      const w = await library.write(spec);
+      const bundle = await sync.approvedBundle(rec.id);
+      assert.ok(bundle, 'an approved flow with baselines has a sidecar');
+      assert.equal(bundle.approved.knownWorld.approvedBy, 'qa');
+      assert.deepEqual(Object.keys(bundle.approved.baselines).sort(), ['s2', 's3']);
+      const a = await library.writeApproved(spec.id, bundle.approved, bundle.images);
+      assert.equal(a.written, true);
+      assert.equal(a.file, w.file.replace('.flow.json', '.approved.json'));
+      const dir = path.join(root, w.file.replace('.flow.json', '.baselines'));
+      assert.deepEqual(await readdir(dir), ['s2.png']);
+      assert.deepEqual(new Uint8Array(await readFile(path.join(dir, 's2.png'))), png, 'the approved screenshot, byte for byte');
+      // The sidecar is not a flow: the library still lists one flow, now with its approval time.
+      const { flows } = await library.list();
+      assert.equal(flows.length, 1);
+      assert.equal(flows[0].approvedAt, 1_700_000_000_000);
+      assert.equal(flows[0].baselines, 2);
+      assert.equal(flows[0].startUrl, 'https://shop.example.test/cart');
+      // Writing the same approval again changes no byte.
+      assert.equal((await library.writeApproved(spec.id, bundle.approved, bundle.images)).changed, false);
+
+      // "Another machine": this store no longer has the flow.
+      await store.deleteRecording(rec.id);
+      const side = await library.readApproved(spec.id);
+      const pulled = await sync.importFlow(await library.read(spec.id), { approved: side.approved, images: side.images });
+      assert.equal(pulled.created, true);
+      assert.equal(pulled.knownWorld, 'repo');
+      assert.deepEqual(pulled.baselines, { fromRepo: 2, kept: 0 });
+      const got = await store.getRecording(pulled.id);
+      assert.equal(got.flowId, spec.id);
+      assert.deepEqual(got.steps[1].baseline, [1, 2, 3], 'the screenshot check has its fingerprint again');
+      assert.deepEqual(got.steps[1].baselineStructure, { cells: [[0, 1]] });
+      assert.deepEqual(got.steps[2].ariaBaseline, ['button "Pay"', 'heading "Cart"'], 'the aria check has its expected lines again');
+      assert.equal(got.knownWorld.approvedAt, 1_700_000_000_000);
+      const image = await store.getAttachment(got.steps[1].baselineImageId);
+      assert.equal(image.kind, 'baseline');
+      assert.deepEqual(new Uint8Array(Buffer.from(image.dataBase64, 'base64')), png);
+
+      // Pull again: the same flow, not a second copy — and no second copy of its image.
+      const before = (await store.listRecordings()).filter((r) => r.flowId === spec.id || r.id === spec.id).length;
+      const again = await sync.importFlow(await library.read(spec.id), { approved: side.approved, images: side.images });
+      assert.equal(again.created, false);
+      assert.equal(again.id, pulled.id);
+      assert.equal(again.images, 0, 'an unchanged image is not stored again');
+      assert.equal((await store.listRecordings()).filter((r) => r.flowId === spec.id || r.id === spec.id).length, before);
+      await store.deleteRecording(pulled.id);
+
+      // Removing the flow removes its approval and baselines too.
+      await library.remove(spec.id);
+      assert.deepEqual((await readdir(root, { recursive: true })).filter((f) => /approved|baselines/.test(f)), []);
+    });
+  } finally {
+    await store.deleteRecording(rec.id).catch(() => {});
+  }
+});
+
+await test('3.2: the later human approval wins; a seeded known world and run history never travel', async () => {
+  const store = await import('../extension/lib/store.js');
+  const sync = await import('../extension/lib/flowsync.js');
+  const approvedMod = await import('../extension/lib/approved.js');
+  const { rec } = await approvedFlowFixture(store, { id: 'rec_newer', approvedAt: 2_000 });
+  try {
+    // A known world only a first run seeded was approved by nobody: it does not travel.
+    assert.equal(approvedMod.isApproved({ runs: 1, approvedAt: 1, approvedBy: 'seed' }), false);
+    const seededOnly = approvedMod.approvedDocFor({ id: 'x', steps: [], knownWorld: { runs: 1, approvedAt: 1, approvedBy: 'seed' } });
+    assert.equal(seededOnly, null);
+
+    await withFlowLibrary(async (library) => {
+      const spec = flowspec.toFlowSpec(rec);
+      await library.write(spec);
+      const olderInRepo = (await sync.approvedBundle(rec.id)).approved;
+      await library.writeApproved(spec.id, { ...olderInRepo, knownWorld: { ...olderInRepo.knownWorld, approvedAt: 1_000, approvedBy: 'someone else' } }, {});
+      // This browser approved later: pull keeps it, says so, and status shows it as newer here.
+      const side = await library.readApproved(spec.id);
+      const r = await sync.importFlow(await library.read(spec.id), { approved: side.approved, images: side.images });
+      assert.equal(r.knownWorld, 'local');
+      assert.equal(r.localNewer, true);
+      const kept = await store.getRecording(r.id);
+      assert.equal(kept.knownWorld.approvedBy, 'qa');
+      assert.deepEqual(kept.runHistory, [{ at: 5, verdict: 'PASS' }], 'run history is this machine\'s and stays');
+      const status = await library.status([{ id: spec.id, name: spec.name, hash: null, approvedAt: 2_000 }]);
+      assert.deepEqual(status.approvalNewerHere.map((f) => f.id), [spec.id]);
+      assert.deepEqual(status.approvalNewerInRepo, []);
+      // Someone approves later and pushes: the next pull takes theirs.
+      await library.writeApproved(spec.id, { ...olderInRepo, knownWorld: { ...olderInRepo.knownWorld, approvedAt: 3_000, approvedBy: 'lead' } }, {});
+      const side2 = await library.readApproved(spec.id);
+      const r2 = await sync.importFlow(await library.read(spec.id), { approved: side2.approved, images: side2.images });
+      assert.equal(r2.knownWorld, 'repo');
+      assert.equal((await store.getRecording(r2.id)).knownWorld.approvedBy, 'lead');
+    });
+  } finally {
+    await store.deleteRecording(rec.id).catch(() => {});
+  }
+});
+
+await test('3.2: a repo flow without a sidecar keeps this browser\'s baselines instead of erasing them', async () => {
+  const store = await import('../extension/lib/store.js');
+  const sync = await import('../extension/lib/flowsync.js');
+  const { rec } = await approvedFlowFixture(store, { id: 'rec_keep' });
+  try {
+    const r = await sync.importFlow(flowspec.toFlowSpec(rec), { approved: null, images: {} });
+    assert.deepEqual(r.baselines, { fromRepo: 0, kept: 2 });
+    const got = await store.getRecording(r.id);
+    assert.deepEqual(got.steps[1].baseline, [1, 2, 3]);
+    assert.deepEqual(got.steps[2].ariaBaseline, ['button "Pay"', 'heading "Cart"']);
+    assert.equal(got.steps[1].baselineImageId, rec.steps[1].baselineImageId);
+  } finally {
+    await store.deleteRecording(rec.id).catch(() => {});
+  }
+});
+
+await test('3.2: an approval reports what its listener did with the repository, and a failing listener never fails it', async () => {
+  const store = await import('../extension/lib/store.js');
+  const replayMod = await import('../extension/tools/replay.js');
+  const base = {
+    id: 'rec_listener', name: 'listener', steps: [{ id: 's1', type: 'navigate', url: 'https://a.test/' }],
+    lastRun: { at: 1 }, lastSignature: { network: { 'GET /x': { count: 1 } }, console: {}, ui: {}, steps: [] },
+  };
+  await store.saveRecording(base);
+  const seen = [];
+  try {
+    replayMod.onApproved(async (id) => { seen.push(id); return { written: true, file: 'web/listener.approved.json' }; });
+    const a = await replayMod.approveKnownWorld('rec_listener', { by: 'qa' });
+    assert.deepEqual(seen, ['rec_listener']);
+    assert.deepEqual(a.repo, { written: true, file: 'web/listener.approved.json' });
+    replayMod.onApproved(async () => { throw new Error('disk full'); });
+    await store.saveRecording({ ...(await store.getRecording('rec_listener')), lastRun: { at: 2 } });
+    const b = await replayMod.approveKnownWorld('rec_listener', { by: 'qa' });
+    assert.equal(b.repo.written, false);
+    assert.match(b.repo.reason, /disk full/);
+    assert.equal((await store.getRecording('rec_listener')).knownWorld.approvedBy, 'qa', 'the approval itself stands');
+    // "seed" is what a first run calls itself; a person approving is never recorded as it.
+    await replayMod.approveKnownWorld('rec_listener', { by: 'seed' });
+    assert.equal((await store.getRecording('rec_listener')).knownWorld.approvedBy, 'operator');
+  } finally {
+    replayMod.onApproved(null);
+    await store.deleteRecording('rec_listener');
+  }
+});
+
+await test('3.2: import_spec takes the sidecar; export_spec returns it', async () => {
+  const store = await import('../extension/lib/store.js');
+  const { rec, png } = await approvedFlowFixture(store, { id: 'rec_tool' });
+  try {
+    const exported = await runtime.runTool('browser_recording', { action: 'export_spec', id: rec.id, includeImages: true });
+    assert.equal(exported.approved.knownWorld.approvedBy, 'qa');
+    assert.deepEqual(Object.keys(exported.images), ['s2.png']);
+    const imported = await runtime.runTool('browser_recording', {
+      action: 'import_spec', id: 'rec_tool_copy', spec: exported.spec, approved: exported.approved, images: exported.images,
+    });
+    assert.equal(imported.id, 'rec_tool_copy');
+    assert.equal(imported.knownWorld, 'repo');
+    const copy = await store.getRecording('rec_tool_copy');
+    assert.deepEqual(copy.steps[2].ariaBaseline, ['button "Pay"', 'heading "Cart"']);
+    const image = await store.getAttachment(copy.steps[1].baselineImageId);
+    assert.deepEqual(new Uint8Array(Buffer.from(image.dataBase64, 'base64')), png);
+    const plain = await runtime.runTool('browser_recording', { action: 'export_spec', id: rec.id });
+    assert.deepEqual(plain.imageNames, ['s2.png'], 'without includeImages only the names');
+    assert.equal('images' in plain, false);
+  } finally {
+    await store.deleteRecording(rec.id).catch(() => {});
+    await store.deleteRecording('rec_tool_copy').catch(() => {});
+  }
+});
+
+await test('3.2: the flow library narrows to one site, and "none" means flows with no start URL', async () => {
+  const { siteMatches } = await import('../daemon/flows.js');
+  assert.equal(siteMatches('https://Shop.example.test/cart?x=1', 'https://shop.example.test'), true);
+  assert.equal(siteMatches('https://shop.example.test:8443/', 'https://shop.example.test'), false);
+  assert.equal(siteMatches(null, 'none'), true);
+  assert.equal(siteMatches('about:blank', 'none'), true);
+  assert.equal(siteMatches('https://a.test/', 'none'), false);
+  await withFlowLibrary(async (library) => {
+    const flow = (id, name, startUrl) => flowspec.toFlowSpec({ id, name, startUrl, steps: [{ id: 's1', type: 'navigate', url: 'https://x.test/' }] });
+    await library.write(flow('f1', 'One', 'https://shop.example.test/a'));
+    await library.write(flow('f2', 'Two', 'https://admin.example.test/'));
+    await library.write(flow('f3', 'Three', null));
+    assert.deepEqual((await library.list({ site: 'https://shop.example.test' })).flows.map((f) => f.id), ['f1']);
+    assert.deepEqual((await library.list({ site: 'none' })).flows.map((f) => f.id), ['f3']);
+    const st = await library.status([], { site: 'https://admin.example.test' });
+    assert.deepEqual(st.onlyInRepo.map((f) => f.id), ['f2']);
+    assert.equal(st.total, 1);
+  });
 });
 
 console.log('\n' + passed + ' passed, 0 failed\n');

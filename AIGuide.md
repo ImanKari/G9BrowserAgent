@@ -2,7 +2,13 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v3.0.2, 2026-09-26. Two engines (the extension in the person's own browser, and real
+**Status:** v3.2.0, 2026-09-26. 3.2.0 adds the live view (a headless tab watched from the person's
+browser, opened by an agent if it wishes), flow libraries per project and site with the approvals and
+baselines that travel with the flows (§6.10), and puts G9 on a server: MCP over HTTP with a bearer
+token (`mcp/http.mjs`) and `docker/`, a browser node image (a web desktop you watch, its Chromium
+carrying the extension, the daemon, the endpoint), one container per account (§5, §6.7, §9). On a
+node, the extension's own storage does not survive a browser start (§8.4). On 3.2.0, `check.mjs --release`:
+21 of 21 checks (unit 690 in 15 suites), Engine 2 live 373/0, Engine 1 live 212/0 (§9). Two engines (the extension in the person's own browser, and real
 Edge/Chrome/Chrome for Testing that the daemon launches), one local daemon `g9d`, one MCP shim per
 agent, fifteen tools, a pure human-input library, three stealth levels, an Electron desktop shell and a
 per-user installer that is **not code-signed**. 3.0.0 is the side-panel redesign (decisions U1–U10,
@@ -304,9 +310,9 @@ and R4, and [Rules for changing this codebase](#rules-for-changing-this-codebase
 
 ```
 g9-browser-agent/
-├── package.json                  the ONE version (3.0.0) for the whole product; no dependencies; node >=22
+├── package.json                  the ONE version (3.2.0) for the whole product; no dependencies; node >=22
 ├── extension/                    Engine 1 (MV3), and the HOME of the shared tool code
-│   ├── manifest.json             3.0.1; minimum_chrome_version 125; permissions in §5
+│   ├── manifest.json             3.2.0; minimum_chrome_version 125; permissions in §5
 │   ├── sw.js                     service worker: lifecycle, transport to g9d, panel commands; calls tools/index.js
 │   ├── lib/
 │   │   ├── platform.js           THE SEAM: exports platform-extension or platform-cdp (rule R2)
@@ -324,6 +330,8 @@ g9-browser-agent/
 │   │   ├── locators.js           multi-locator element identity (recorder core, §8b)
 │   │   ├── signature.js          journey signature, known world, surprise detector (§8c)
 │   │   ├── flowspec.js           canonical, Git-diffable FlowSpec
+│   │   ├── approved.js           (3.2) what a person approved, as a sidecar beside the flow (known world, baselines)
+│   │   ├── flowsync.js           (3.2) a FlowSpec into a store with its sidecar (Pull, import_spec, the runner)
 │   │   ├── visual.js             fingerprint + structure map + diff image (through platform.image)
 │   │   ├── sites.js              (v3) pure URL helpers: siteOf (origin), parseDomain, hostMatches, displayUrl
 │   │   └── transport.js          WebSocket client to g9d (extension only)
@@ -338,14 +346,19 @@ g9-browser-agent/
 │   │   └── issues.js
 │   └── panel/                    side panel (v3): Session (daemon, agents + their tabs, current tab and capture,
 │                                 auto-attach, keep working elsewhere, input level, Stop, activity), Automation
-│                                 (site → suite → flow), Issues (site → status), About; welcome.html/.js
+│                                 (site → suite → flow), Issues (site → status), About; welcome.html/.js;
+│                                 (3.2) watch.html/.js + track.js (the live view), report.js (history report)
 ├── engine/                       Engine 2 (Node): find.js, cft.js, launch.js, pipe-cdp.js, profile.js,
 │                                 stealth.js, firewall.js, manager.js (EngineManager, owned by the daemon), versions.json,
 │                                 README.md
 ├── daemon/                       g9d: g9d.mjs (CLI), daemon.js (composition), ws-server.js, registry.js,
 │                                 router.js, handoff.js, storage.js, evidence.js, scheduler.js, settings.js,
 │                                 paths.js, home-lock.js, project.js, flows.js, extension-update.js
-├── mcp/                          shim.mjs (what an AI client launches), mcp.js (stdio MCP), tools.js (schemas + INSTRUCTIONS)
+├── mcp/                          shim.mjs (what an AI client launches), mcp.js (stdio MCP), tools.js (schemas + INSTRUCTIONS);
+│                                 (3.2) link.mjs (the daemon link), server.mjs (tools + resources on a link),
+│                                 http.mjs (MCP over HTTP, bearer token: agents on other machines)
+├── docker/                       (3.2) the browser node image: Dockerfile, compose.yaml (two nodes), root/ (s6
+│                                 services svc-g9d + svc-g9mcp, the desktop autostart, the health check), README.md
 ├── lib/                          version.mjs (reads package.json), ws-client.mjs, ws-codec.mjs (RFC 6455, shared)
 ├── runner/                       g9.mjs (run · list · calibrate · approve · spec · ab; exit 0–4), mcp-client.mjs,
 │                                 report.mjs, drivers/agripad.mjs, README.md
@@ -356,7 +369,7 @@ g9-browser-agent/
 ├── setup/
 │   ├── check.mjs + check-plan.mjs (3.0.1) only the checks a change reaches, several at a time (§7.0)
 │   ├── doclinks.mjs              (3.0.1) relative links and anchors in the Markdown files
-│   ├── unittest.mjs + unit/      12 unit suites (§7), one child process each
+│   ├── unittest.mjs + unit/      15 unit suites (§7), one child process each
 │   ├── selftest.mjs              real daemon + two real shims + a fake extension, no browser
 │   ├── extensiontest.mjs         extension modules through the real seam over a chrome stub
 │   ├── engine2-livetest.mjs      Engine 2 through the product path, real headless Edge
@@ -715,13 +728,15 @@ What is still refused, and why each costs the owner nothing:
 | `launchBrowser` refuses `--enable-automation` (always), `--remote-debugging-port/-address/-pipe/-io-pipes`, the switches owned by an option, `AutomationControlled` below stealth, and a default user-data-dir (or one inside it, junctions resolved). | Engine 2 has no debugging port anything else could reach; it never identifies as automation; it never touches a person's browser profile (Chrome 136 rule, App-Bound Encryption). |
 | A profile signed in to a browser account is refused at stealth and warned otherwise. | Its synced passwords, history and extensions would enter agent runs (§9 v2.0.0 entry). |
 | `browser_engine stop` refuses an extension engine, and a launched engine with another agent's tab or another client's `acquire` hold (unless `force`). | G9 never closes the person's browser; one agent does not end another's run silently. |
+| (3.2) The ONE way off loopback is `mcp/http.mjs`, and it refuses to listen on a non-loopback address without a bearer token of at least 24 characters (compared in constant time). A request carrying an `Origin` is 403 unless listed in `G9_MCP_ALLOWED_ORIGINS`; bodies over 64 MiB 413; at most 32 sessions. | The daemon stays password-less and on `127.0.0.1` (D7 is unchanged for it). A browser node on a server is reached by agents elsewhere, so the token is the lock; a web page must not be able to use the endpoint through a visitor's browser (MCP's DNS-rebinding rule). |
+| (3.2) The browser node (`docker/`): ports published on `127.0.0.1` only (a test fails otherwise), `HARDEN_DESKTOP=true` (no terminal, no sudo in the web desktop), no apps panel, no desktop commands, no MCP endpoint without a token; the desktop is reached only through TLS and a password at the reverse proxy. | Whoever reaches the desktop page drives a browser that is signed in to an account; nothing else should be reachable from it. |
 
 Supply chain: **zero npm dependencies** in `extension/`, `engine/`, `daemon/`, `mcp/`, `lib/`,
 `runner/` (D11); the WebSocket server, client and MCP are hand-written. Only `desktop/` has
 dependencies (electron, electron-builder, electron-updater). The installer is **not code-signed**
 (no certificate available; SmartScreen warns on first run).
 
-Extension permissions (manifest 3.0.1, `minimum_chrome_version` 125 — flat child sessions):
+Extension permissions (manifest 3.2.0, `minimum_chrome_version` 125 — flat child sessions):
 
 | Permission | Reason |
 |---|---|
@@ -898,6 +913,10 @@ into view first"). Model limits are in §8.
   handoff import, `warm`, versions. `watch(tabId, on, consumerId)` runs the changes for one (tab,
   consumer) through a chain of its own, in the order they were asked for, so the last request wins for
   the whole watch: map, pointer subscription, watchdog and screencast (2.0.2).
+  (3.2) `launchArgsFromEnv()`: `G9_LAUNCH_ARGS` (a JSON array or a space-separated list, `--`
+  switches only) is added to every launch, before the caller's `extraArgs`; `buildArgs` still refuses
+  the switches it owns. The browser node sets `--no-sandbox --test-type` (a container has no user
+  namespaces for Chrome's sandbox; the container is the sandbox).
 
 ### 6.6 `daemon/` — g9d
 
@@ -943,17 +962,50 @@ into view first"). Model limits are in §8.
 
 ### 6.7 `mcp/`, `lib/`, `bridge/`
 
-- **`mcp/shim.mjs`** — connects to `ws://127.0.0.1:${G9_PORT||8765}/g9`; on `ECONNREFUSED` spawns
-  `daemon/g9d.mjs` detached and hidden and retries for 8 s; a non-g9d `/health` (a v1 bridge) makes
-  every tool fail naming its pid and the fix while MCP itself keeps working; a dropped daemon fails the
-  calls in flight and the next call reconnects. Resources `g9://guide`, `g9://status`. stdout is MCP
-  only; diagnostics go to stderr. It connects to the daemon after the client's `initialize` (or 2 s
-  after start, whichever comes first), so the daemon learns the client's name at hello; connecting at
-  start registered agents as "mcp-agent" in a race (3.1.0). How it starts the daemon (node, the app in
-  Node mode, or an AppImage through the bootstrap) is `lib/runtime.mjs`.
+- **`mcp/shim.mjs`** — the stdio front end: a `DaemonLink` and `createMcpServer(link)` on stdin/stdout.
+  stdout is MCP only; diagnostics go to stderr. It connects to the daemon after the client's
+  `initialize` (or 2 s after start, whichever comes first), so the daemon learns the client's name at
+  hello; connecting at start registered agents as "mcp-agent" in a race (3.1.0).
+- **`mcp/link.mjs`** (3.2, moved out of the shim) — `DaemonLink({ name, cwd, project })` connects to
+  `ws://127.0.0.1:${G9_PORT||8765}/g9`; on `ECONNREFUSED` spawns `daemon/g9d.mjs` detached and hidden
+  and retries for 8 s; a non-g9d `/health` (a v1 bridge) makes every tool fail naming its pid and the
+  fix while MCP itself keeps working; a dropped daemon fails the calls in flight and the next call
+  reconnects. How it starts the daemon (node, the app in Node mode, or an AppImage through the
+  bootstrap) is `lib/runtime.mjs`. `close(reason)`: the daemon logs the reason beside "agent
+  disconnected".
+- **`mcp/server.mjs`** (3.2) — `createMcpServer(link, { transport })`: the 15 tools, resources
+  `g9://guide` and `g9://status`, `browser_status` adding `shim: { version, pid, transport }`, and
+  `initialize` naming the link after `clientInfo.name`. Shared by both front ends.
+- **`mcp/http.mjs`** (3.2) — MCP Streamable HTTP (POST and DELETE on `/mcp` or any path ending in
+  `/mcp`; GET 405; `/healthz` says only "ok"). Each `initialize` opens a session with a `DaemonLink` of
+  its own: one agent per session, with its own tabs, ownership and queue; DELETE, 30 idle minutes
+  (`G9_MCP_IDLE_MINUTES`) or eviction at the 32-session limit (least recently used idle one) ends it.
+  Security rules in §5. `G9_MCP_HTTP_HOST` (127.0.0.1), `G9_MCP_HTTP_PORT` (8931), `G9_MCP_TOKEN` or
+  `G9_MCP_TOKEN_FILE`, `G9_MCP_AGENT_CWD` (whose `g9.project.json` the sessions get).
 - **`mcp/mcp.js`** — hand-written MCP (`initialize`, `ping`, `tools/*`, `resources/*`; protocol
   versions 2025-06-18, 2025-03-26, 2024-11-05); tool failures are `isError:true` results, never
-  JSON-RPC errors; `dataBase64` results become image blocks; remembers `clientInfo.name`.
+  JSON-RPC errors; `dataBase64` results become image blocks; remembers `clientInfo.name`. (3.2)
+  `handle(msg)` answers one message and returns the response (or null for a notification), so the
+  HTTP transport uses the same routing as stdio.
+- **`docker/`** (3.2) — see [docker/README.md](docker/README.md). Base: LinuxServer.io's Chromium on
+  Selkies (Debian 13, s6-overlay, user `abc`, home `/config`), pinned by digest. Adds Node 22,
+  `google-chrome-stable` (Engine 2's browser), Noto, emoji and Vazirmatn fonts, `/opt/g9` (package.json,
+  lib, daemon, engine, mcp, runner, extension: no tests, desktop app or docs), `svc-g9d` (the daemon as
+  `abc`, loopback), `svc-g9mcp` (the endpoint on 8931; `sleep infinity` without a token), the desktop's
+  Chromium started with `--load-extension=/opt/g9/extension --silent-debugger-extension-api` (Chromium
+  still takes the flag; branded Chrome dropped it in 137), and a health check (desktop, daemon
+  `/health`, endpoint `/healthz`). (3.2) The switches live in `/usr/local/bin/g9-chromium`; the
+  autostart only calls it.
+  - `init-g9-desktop` (oneshot, after `init-selkies-config`, before `svc-de`) copies the autostart
+    from the image on every start.
+  - `svc-g9-quit` (longrun) closes Chromium with SIGTERM from its `run` script's TERM trap. Its
+    dependencies make it stop before `svc-de`, `svc-dbus` and `svc-pulseaudio`, and the watchdog
+    depends on it.
+  - `RESTART_APP=true` lets LinuxServer's watchdog start a closed browser again.
+  - `g9-chromium` clears `Default/Service Worker` when `/opt/g9/extension.build` (a hash of the
+    extension files) differs from `/config/g9/.extension-build`, and marks a killed profile as
+    exited cleanly.
+  - `/opt/g9/extension/deployment.json` `{"welcome":false}` is read by `sw.js` `readDeployment()`.
 - **`mcp/tools.js`** — the 15 schemas and `INSTRUCTIONS` (loaded into the agent's context by
   `initialize`). Every sentence must describe behaviour that exists (EXT-17).
 - **`lib/version.mjs`** — the one version, read from `package.json`; `setup/unit/version.test.mjs`
@@ -1076,6 +1128,27 @@ good at 128 px: automation meeting a real browser (a cursor with a browser or ta
 two or three colours with deep indigo or violet (around `#4f46e5`) as the primary, on a transparent
 background; PNG at 16, 48 and 128 px plus a 512 px master, correct on light and dark toolbars.
 
+**3.2 additions** (the live view, repositories per project and site, the history report).
+
+- **The live view** (`panel/watch.html` + `watch.js`). A window of tiles, one per watched tab, each
+  drawing the daemon's screencast frames with the cursor interpolated from pointer samples (the same
+  code as the desktop's Watch: `panel/track.js` is `desktop/renderer/lib/track.js`, kept identical by
+  `panel.test.mjs`). It connects to the daemon ITSELF as a `viewer` (DAEMON_PROTOCOL §1, §10) with the
+  address from `watchAddress`, because a service worker that sleeps cannot carry a frame stream; a
+  viewer may list and watch tabs and nothing else. Opened by the panel's **◉ Live view** / **◉ Watch**
+  (focused: the person's press) or by an agent's `browser_tabs action:"watch"` (unfocused, flashing,
+  with a panel toast naming the agent; `focus:true` brings it forward). One window at a time
+  (`storage.session g9:watchWindow`); a later request adds a tile (`watchAdd`), `on:false` removes it
+  (`closeWatch` → `watchRemove`). The daemon picks the NEWEST connected extension to show it and
+  tells the desktop (`watchRequest`), whose Watch view switches to that tab (`views/watch.js watchTab`).
+- **The Repository card** chooses the project (the daemon's own or any connected agent's: flowlib
+  `projects`, `project` on every op; a path the daemon does not know is refused) and the scope (all
+  flows or one site, by start URL). Its line adds approvals: newer in the repo (pull) or only here
+  (push). Pull and Push carry the approval sidecar (`lib/approved.js`, `lib/flowsync.js`; §9 3.2.0).
+- **⤓ History report** (`panel/report.js`): the run history of the flows the filter shows, as one
+  self-contained HTML file built as a DOM document (no HTML from strings) with the data as JSON inside.
+  Run history never goes into the repository; this is how it is shared.
+
 ## 7. Testing
 
 Every harness uses a fresh temp `G9_HOME`, temp browser profiles and random ports in 18000–18999,
@@ -1132,24 +1205,27 @@ would test less, so it runs in parallel with the rest instead.
 
 | Command | What it covers | Latest recorded (marked 3.0.0: 2026-09-25, on the 3.0.0 tree; marked 2.0.2: 2026-09-24; the rest 2026-09-23, on 2.0.1 — the final pass) |
 |---|---|---|
-| `node setup/unittest.mjs` | every `setup/unit/*.test.mjs` in its own process (suites stub `chrome` before importing, and `platform.js` chooses at load). `G9_UNIT_NO_BROWSER=1` skips the `live:` tests; a filter argument runs matching files only. | **651 passed, 12 suites** (3.0.1, 2026-09-25, three runs through `check.mjs --all`; 638 in 11 on 3.0.0; 620 three times in a row on 2.0.2). One after another: 240 s, interaction 141 s of it |
-| · `daemon.test.mjs` | registry, router, handles/rewrites, ownership, queues, halts, D-c parking, settings, scheduler, storage, evidence, handoff helpers, the desktop timeout table cross-check, launched-engine watch ordering; (v3) environmentHosts/projectLabel, the `{type:"projects"}` push (after each welcome, coalesced on agent connect/disconnect), agent rows with project and current tab | 100 (3.0.0; 97 on 2.0.3) |
+| `node setup/unittest.mjs` | every `setup/unit/*.test.mjs` in its own process (suites stub `chrome` before importing, and `platform.js` chooses at load). `G9_UNIT_NO_BROWSER=1` skips the `live:` tests; a filter argument runs matching files only. | **690 passed, 15 suites** (3.2.0, 2026-09-26, through `check.mjs --release`; 656 in 12 on the local 3.1.0 build; 651 on 3.0.1, three runs; 638 in 11 on 3.0.0; 620 three times in a row on 2.0.2). One after another: 240 s, interaction 141 s of it |
+| · `daemon.test.mjs` | registry, router, handles/rewrites, ownership, queues, halts, D-c parking, settings, scheduler, storage, evidence, handoff helpers, the desktop timeout table cross-check, launched-engine watch ordering; (v3) environmentHosts/projectLabel, the `{type:"projects"}` push (after each welcome, coalesced on agent connect/disconnect), agent rows with project and current tab; (3.2) libraries per project (a stranger path refused, an approval written where the flow is), the viewer role (lists and watches, refused everything else), an agent's `watch` reaching the extension and the desktop | 102 (3.1.0; 100 on 3.0.0) |
 | · `desktop.test.mjs` | runs `desktop/test/run.mjs` without `ELECTRON_RUN_AS_NODE`; SKIPs when `desktop/node_modules` is absent | 181 |
 | · `engine.test.mjs` | pipe framing, launch args and refusals, CfT zip/lock/versions, profiles, find; `live:` Edge, system Chrome and cached CfT headless (D-a webdriver per level, the headless screen with its taskbar) | 56 |
 | · `humanize.test.mjs` | determinism, bounds over 2000 random plans, every planner, calibration round trip | 51 |
-| · `interaction.test.mjs` | the witness expression in `node:vm`, delivery states, re-timing, hidden checks, dispatcher timing (80 % rule), levels | 77 |
-| · `panel.test.mjs` | panel/welcome source checks, every §13 command, transport with fake socket/fetch/clock; (v3) no Attach button and Record from now, the three auto-attach settings, the blocked toast above the tab bar and agent rows, the no-HTML-from-strings scan (and http(s)-only links with `noopener noreferrer`), the pure helpers (flow filter and run scope, issue filter, evidence chips, `NO_SUITE`/`NO_SITE`), a lost daemon link forgetting project sites and blocked alerts | 82 (3.0.0; 75 on 2.0.3) |
+| · `interaction.test.mjs` | the witness expression in `node:vm`, delivery states, re-timing, hidden checks, dispatcher timing (80 % rule), levels; (3.2) a screencast asked again while the page is between documents | 78 (3.1.0) |
+| · `panel.test.mjs` | panel/welcome source checks, every §13 command, transport with fake socket/fetch/clock; (v3) no Attach button and Record from now, the three auto-attach settings, the blocked toast above the tab bar and agent rows, the no-HTML-from-strings scan (and http(s)-only links with `noopener noreferrer`), the pure helpers (flow filter and run scope, issue filter, evidence chips, `NO_SUITE`/`NO_SITE`), a lost daemon link forgetting project sites and blocked alerts; (3.2) the new §13 rows, `watch.js` against `watch.html`, `track.js` equal to the desktop's, the repository and report helpers | 84 (3.1.0; 82 on 3.0.0) |
 | · `platform-cdp.test.mjs` | registration, sessions, held targets, F1, tabs, cookies, downloads attribution; `live:` headless Edge | 34 |
 | · `seam.test.mjs` | R2 source scan, no top-level await, Node smoke through platform-cdp, `sw.js` boot and its panel and daemon commands over a stubbed `chrome` — since 2.0.3 also the popout's two callers (the panel's window focused and not buried, an agent's unfocused) and its default geometry; since 3.0.0 the auto-attach modes and their migration, Project sites attaching only project tabs, `focusTab` under Stop, `recordNow`, `attachedSince`, and the blocked-agent bookkeeping (set only by a relayed hidden refusal; cleared when shown, reached, popped out, disconnected or closed) | 16 (3.0.0: the v3 checks sit inside the existing tests) |
 | · `world.test.mjs` | isolated world guard and invalidation over a vm-based fake browser | 26 |
 | · `version.test.mjs` | one version in package.json, manifest, desktop, `lib/version.mjs` — compared, never pinned | 8 (3.0.0; 7 on 2.0.1) |
 | · `check.test.mjs` | (3.0.1) `setup/check-plan.mjs` and `setup/doclinks.mjs` on the real repository: globs, the import graph through test helpers, docs-only / panel / input / unknown / NO_CHECK / live-only changes, `--all`, every unit suite has a check, every tracked file is reached or named, the estimate, GitHub slugs and broken links, `check.mjs --plan` running nothing | 13 (3.0.1) |
 | · `sites.test.mjs` | (v3) `extension/lib/sites.js`: siteOf (origin, none for opaque), parseDomain, hostMatches (exact host or subdomain, port rules, http(s) only), displayUrl, and a purity scan (rule R2) | 7 (3.0.0) |
+| · `mcp-http.test.mjs` | (3.2) `mcp/http.mjs` over a real HTTP server with fake daemon links: the constant-time token compare, 401 (with `WWW-Authenticate`) and 403 before any session exists, initialize → session → tools/list and tools/call (a tool failure is `isError`), two sessions are two agents, a batch, 400/404/DELETE and the close reason the daemon logs, 405/415/parse error, `/healthz`, a prefixed path, idle close and least-recently-used eviction, `main` refusing a network address without a strong token | 8 (3.2.0) |
+| · `docker.test.mjs` | (3.2) `docker/` read as files: every COPY source exists and the base is pinned by digest; compose publishes only on 127.0.0.1, hardens the desktop, hides the apps panel, requires a distinct token per node, one data folder per node; the s6 services; the stop order and the TERM trap; the autostart refreshed from the image; the cached service worker cleared on a changed extension; the autostart loads the extension without the debugger bar; scripts have a shebang and LF | 6 (3.2.0) |
+| · `runtime.test.mjs` | (3.1.0) `lib/runtime.mjs`: an AppImage recognised only when this executable runs inside `$APPDIR`; `scriptCommand` (node in a checkout, the executable as Node when installed, the .AppImage file plus bootstrap from an AppImage); `installId`; `cleanChildEnv` (a browser never inherits `ELECTRON_RUN_AS_NODE` or a path into the AppImage mount); `ensureBootstrap` | 5 (3.2.0) |
 | `node setup/selftest.mjs` | a real daemon, two real shims (two agents), a fake extension over a real WebSocket: /health, Origin rule and version refusal, status composition, relay and id rewriting, ownership, queues, Stop from panel and desktop, extension requests/watch/update, dialogs, delivery tags, disconnects, D-c reconnect, protocol robustness, the v1 forwarder, shim auto-start, a v1 bridge named, idle exit, escaping in injected code | **136/136** (3.0.0) |
-| `node setup/extensiontest.mjs` | extension modules through the real seam over an asynchronous `chrome` stub with a tab/window model; recording, replay, network, downloads, video (write-chain deadlock as behaviour), tab resolution, legacy cleanup, flow library, `/health` CORS, one daemon port, version skew, runner selection; fixture `setup/fixtures/tasks-browse-and-open.flow.json` (EXT-16); (v3) the issue index's severity/tags/site/evidence following the attachments, the one-time serialized completion of a pre-v3 index, `recUpdate` storing TC ids and only an http(s) start URL, an environment indexed only as a name | **82/82** (3.0.0; 78 on 2.0.2) |
+| `node setup/extensiontest.mjs` | extension modules through the real seam over an asynchronous `chrome` stub with a tab/window model; recording, replay, network, downloads, video (write-chain deadlock as behaviour), tab resolution, legacy cleanup, flow library, `/health` CORS, one daemon port, version skew, runner selection; fixture `setup/fixtures/tasks-browse-and-open.flow.json` (EXT-16); (v3) the issue index's severity/tags/site/evidence following the attachments, the one-time serialized completion of a pre-v3 index, `recUpdate` storing TC ids and only an http(s) start URL, an environment indexed only as a name; (3.2) push → sidecar → pull on another machine, no duplicates on a second pull, the later approval wins, local baselines kept without a sidecar, the approve listener, `import_spec`/`export_spec` with the sidecar, site filters | **88/88** (3.1.0; 82 on 3.0.0) |
 | `cd desktop && node test/run.mjs` / `node test/daemon-contract.mjs` / `npm run build:win` + `npm run test:packaged` / `npm run test:render` | renderer in a fake DOM, main process against a fake Electron API, updater/policies/registration with fakes (never the real registry or configs); the real daemon's admin contract; the built `win-unpacked` with no `node` on PATH (shim starts the packaged daemon); the real window off-screen | **14/14 files (3.0.0; 22.6 s on 2.0.1); contract 15/15 (2.0.1); build OK (`G9-Setup-3.0.0.exe`, 103,620,667 bytes, 2026-09-25, unsigned, `resources/app-update.yml` present, payload identical to the repository); packaged 7/7 (3.0.0); render check PASS (2.0.1)** — 4 scenarios (empty and populated × dark and light), 23 pictures per populated run, 171 window samples in the last one, 0 ever on screen, 0 ever in the foreground |
-| `node setup/engine2-livetest.mjs [--only …]` | Engine 2 through the product path (daemon + shims + headless Edge), every check against what the page, server or disk saw: tabs, snapshot, interact at three levels, frames, console, inspect, screenshots, emulate, dialogs, downloads (sha256), popups, HAR, recording/replay, video, agents/ownership, reads during actions, slots, 4 parallel contexts, watch, halt, handoff (fake Engine 1 payload), stealth, locale persona, downloads hub, stop | **366 passed, 0 failed** (3.0.0: 327 s; 2.0.3: 322 s; 2.0.2: 325 s; on 2.0.1: 330 s) |
-| `node setup/isolated-livetest.mjs` | Engine 1 in a real headless browser: private daemon, temp profile, extension copy with `dev-daemon.json` and a tripwire in place of its built-in default port; runs `setup/livetest.mjs` (27 sections: tabs, snapshot, levels, hidden tabs, witness, scroll settle, stealth screenshots, recording, regression memory, issue video, watch, cross-origin frame, popout, handoff, auto-attach in its three settings, version/welcome, Stop, main-world diff) and renders the panel. `G9_BROWSER` picks Chrome/CfT; `G9_LIVE_SECTIONS` narrows | **198 passed, 0 failed** on Edge 153.0.4234.32 (3.0.0, daemon, extension and shim all reporting 3.0.0; 196 on 2.0.2 and 2.0.3) **and 196 passed, 0 failed on system Chrome 153.0.8010.53** (2.0.1, `G9_BROWSER=chrome`), each with the harness checks (tripwire 0 hits, profile never signed in); CfT sections 12+16 ×20: 20/20 (earlier round) |
+| `node setup/engine2-livetest.mjs [--only …]` | Engine 2 through the product path (daemon + shims + headless Edge), every check against what the page, server or disk saw: tabs, snapshot, interact at three levels, frames, console, inspect, screenshots, emulate, dialogs, downloads (sha256), popups, HAR, recording/replay, video, agents/ownership, reads during actions, slots, 4 parallel contexts, watch, halt, handoff (fake Engine 1 payload), stealth, locale persona, downloads hub, stop | **373 passed, 0 failed** (3.2.0: 330 s) · 372 (3.1.0: 328 s, with the new `viewer` section; 3.0.0: 366, 327 s; 2.0.3: 322 s; 2.0.2: 325 s; on 2.0.1: 330 s) |
+| `node setup/isolated-livetest.mjs` | Engine 1 in a real headless browser: private daemon, temp profile, extension copy with `dev-daemon.json` and a tripwire in place of its built-in default port; runs `setup/livetest.mjs` (27 sections: tabs, snapshot, levels, hidden tabs, witness, scroll settle, stealth screenshots, recording, regression memory, issue video, watch, cross-origin frame, popout, handoff, auto-attach in its three settings, version/welcome, Stop, main-world diff) and renders the panel. `G9_BROWSER` picks Chrome/CfT; `G9_LIVE_SECTIONS` narrows | **212 passed, 0 failed** on Edge (3.2.0, 223 s) · 202 on Edge (3.1.0, with section 28, the live view; daemon, extension and shim all reporting 3.1.0; 198 on 3.0.0; 196 on 2.0.2 and 2.0.3) **and 196 passed, 0 failed on system Chrome 153.0.8010.53** (2.0.1, `G9_BROWSER=chrome`), each with the harness checks (tripwire 0 hits, profile never signed in); CfT sections 12+16 ×20: 20/20 (earlier round) |
 | `node setup/stealthtest.mjs [--matrix] [--local-only] [--configs …] [--repeat N]` | the pre-suite gate ([docs/STEALTH.md](docs/STEALTH.md), "Running the self-test"): local detector page (webdriver, Runtime probe, main-world globals/nodes/calls, listener stacks, untrusted events, cross-site frame, popup, worker, read-tool sweep, press/typing/wheel timing, screen, locale, EME, tabs at end, profile sign-in) + public pages (`stealth-pages.json`); human-level controls must be detected | 2026-09-23, both runs: **0 G9 leaks in every stealth configuration**, both human controls detected. Local page, final tree, 7 configurations: **edge-headed-stealth UNDETECTED**; the rest detected only by browser-inherent signals (the HeadlessChrome UA; CfT's missing Widevine). With the public pages (one full matrix): headed Edge stealth flagged by pixelscan alone (“Automated behavior detected”) and passed by sannysoft, creepjs, browserscan, fingerprint-bot-detection and rebrowser; headed CfT stealth flagged by rebrowser (its brand) alone; every headless stealth run flagged by sannysoft, creepjs, browserscan, pixelscan and fingerprint-bot-detection. Exit 1 by design while headless is detectable |
 | `node setup/matrix.mjs` | P8 background-state matrix, Engine 1 (real extension) and Engine 2, per state: does input/screenshot/screencast reach the page, and does G9's report agree | **exit 0, every cell agrees** (2026-09-23, the full default set: Engine 1 × Edge and Chrome × active/background/minimized/offscreen/hidemid/hidemidheaded, with and without the occlusion switch, and Engine 2 × active/background/popup/minimized/offscreen). The partial-delivery cells report themselves as partial and match the page |
 | `node setup/bench.mjs` / `node setup/endurance.mjs --minutes N` | parallelism (1–24 contexts, CPU/RAM per process tree, per-step latency, maxParallel rule) / the flow in a loop with memory and listener sampling after `gc()` | **2026-09-23: 0 failures at every level.** Bench 1/4/8/16 contexts × 5 iterations, flow p50/p95 11,599/12,211 → 12,668/14,233 ms, recommendation maxParallel 8; endurance 10 min, 93 iterations, 0 failures, daemon +0.39 MB/min, browser +1.79 MB/min, listeners flat. Full tables in §9 2.0.1 |
@@ -1256,6 +1332,18 @@ by being written down.
   size is a crop, the browser window with "G9", because the whole drawing is a blur at 16 px; not
   looked at in a real toolbar here (the harnesses are headless). The desktop app's icons (tray,
   window, installer) are still drawn in code by `desktop/lib/icon.mjs`, coloured by state.
+- **The live view (3.2).** View only by design: nothing reaches the page from it. The daemon shows an
+  agent's `watch` in the NEWEST connected extension; with two browsers connected, the other gets
+  nothing (the agent can say which tab, not which browser). The window's placement is Chromium's
+  (no size or position is asked), and an unfocused window relies on `drawAttention` to be noticed;
+  neither was seen on a real desktop here (the harnesses are headless). Frames arrive at the rate the
+  tab paints, so an idle page shows IDLE, not a frozen LIVE. The desktop's Watch view shows one tab: an
+  agent's request replaces what it was showing.
+- **Approvals in the repository (3.2).** The later human approval wins (`approvedAt`), which is a
+  rule, not a merge: two people approving different runs on two machines keep the later one's known
+  world only. Baseline screenshots are committed as PNG (a viewport picture per screenshot check).
+  Nothing is written for a flow that is not in a library yet — push it first; the approval result says
+  so (`repo.written:false`).
 - **What `check.mjs` does not know (3.0.1).** It maps a change to checks by the files each check
   imports or reads, not by behaviour. A change that alters behaviour only through data a check never
   loads, or through the browser (Chromium, Edge) itself, is not detected — the live suites and the
@@ -1286,6 +1374,8 @@ by being written down.
 | Person's own profile in Engine 2 | Impossible by design (Chrome 136 rule, App-Bound Encryption); Engine 2 profiles are per machine (a copied profile loses its cookies). |
 | Browser/enterprise policy | Policy can deny debugger attachment; changing code does not grant an exemption. |
 | Finite capture/history | Buffers are bounded; uncaptured requests cannot be recovered by a larger buffer. |
+| (3.2) The browser node in a container | Chromium runs `--no-sandbox` (no user namespaces; the container is the sandbox), without a GPU (software rendering: WebGL reports it), on Linux, on a datacentre address. None of that was measured against detectors (the stealth matrix of §7 is Windows). Sites that forbid automation — Instagram among them — still forbid it; the node does not change a site's terms. |
+| (3.2) Engine 1's storage on the browser node | Chromium installs a `--load-extension` extension again on every browser start and wipes its storage. Measured: a new `installedAt` at each start; every `onInstalled` is `install`. So recordings, issues and settings kept in the extension are gone after a restart. The daemon's data (`/config/g9`: flow libraries, the launched store, runs) stays. A policy install (`ExtensionInstallForcelist` with a signed CRX and an update URL) would keep the storage; it is not built. Until then, push flows to a repository library, or record on Engine 2. |
 
 **Not implemented:** full heap snapshots, Lighthouse, Firefox/Safari, desktop/audio recording,
 vendor-specific Jira/Azure/Linear clients, IndexedDB transfer on handoff, the showroom driver and the
@@ -1714,6 +1804,263 @@ after every step of a forty-step flow doubles the run for evidence nobody reads.
 Entries below describe what was believed or tested at the time. Current capability claims and
 unresolved findings are in §§4, 7 and 8, which supersede historical assertions. Entries dated before
 2026-09-21 describe v1 (the bridge, the four control modes, the workspace allowlist).
+
+### 2026-09-26 — v3.2.0: a live view, approvals that travel, and a browser on a server
+
+**One release, built in three steps.** The three parts below were built, tested and (the last two)
+deployed as local versions 3.1.0, 3.2.0 and 3.2.1, before the published 3.0.2, 3.1.0 and 3.1.1 of the
+shared history existed. They were then rebased onto that history as one release, 3.2.0. Where a part
+below says 3.1, 3.2.0 or 3.2.1, it means that local step. The runs at the end are on the rebased tree.
+
+#### Part 1 — repositories per project and site, approvals that travel, and a live view
+
+**Asked for.** The owner asked two questions: can an agent open a headless tab so that the person sees
+it, humanized; and does the repository keep a site's automations with their history, so that another
+install sees them? The answers were "yes, but only in the desktop app, which the agent cannot open"
+and "the flows, yes — but not what anyone approved". The owner then asked for all three follow-ups,
+"without limits". Reading the code for them turned up two defects.
+
+**Found while reading, and fixed.**
+- **A repo flow carried none of its baselines.** `toFlowSpec` keeps a screenshot or aria check's kind
+  and a `baselineRef`, and drops the fingerprint, the layout map and the aria lines. `fromFlowSpec`
+  cannot bring them back. So a flow with a screenshot or aria check, pulled on another machine or
+  imported by the runner before a launched run, could never pass: an aria check with no lines calls
+  every node "new", and a screenshot check has nothing to compare. It has been so since FlowSpecs
+  existed. The runner's import dropped the launched store's own baselines before every run as well.
+- **Pull duplicated every flow.** `flowPull` looked the local copy up by `recording.id`, which a
+  FlowSpec never has (`fromFlowSpec` returns `flowId`). Every pull therefore saved every repo flow again
+  under a new id, and the list showed each flow once more per pull. `flowStatus` keyed by flow id and
+  did not show it.
+
+**What travels (`extension/lib/approved.js`, `extension/lib/flowsync.js`).** Beside `x.flow.json`,
+`x.approved.json` (format `g9-approved`) holds the known world a PERSON approved (`isApproved`: a seed
+is not an approval) and each screenshot and aria check's baseline, keyed by the FlowSpec step id.
+`x.baselines/<step>.png` holds the approved screenshot, to review in a diff (the fingerprint is what
+compares).
+- It is written on Push, and on every approval of a flow already in a library: `replay.onApproved`.
+  The worker writes through the flow library, the launched store through the daemon
+  (`writeApprovedAnywhere`: the library that holds the flow). Replays never touch the working tree.
+- It is read by Pull, by `browser_recording import_spec` (`approved`, `images`) and by the runner
+  (`readSidecar`). `runner spec --out` writes it too.
+- `importFlow` is the one way into a store. It finds the local copy by flow id and keeps local truth
+  (run history, flakiness, surprises, last signature). It takes each baseline from the sidecar, else
+  keeps the local one, stores an image once per content, and takes the LATER human approval. The
+  router no longer restores an older known world over one taken from the repository.
+- `FlowLibrary` never lists a sidecar as a flow, and removes it with the flow.
+- Run history stays local by design. **⤓ History report** (`panel/report.js`) shares it as one HTML
+  file.
+
+**Which library.** The daemon offers a library for its own project and for each connected agent's
+(`flowlib projects`; `project` on every op; any other path is refused). The Repository card picks the
+project and a site (`site` narrows list and status by start URL). The card's line adds "newer
+approval in repo — pull" and "approval only here — push to share".
+
+**The live view.** A new daemon role, `viewer`, may list tabs (`watchables`) and watch them, and
+nothing else; any other message is refused. It is accepted from an extension origin (web origins
+never reach a hello). `panel/watch.html` connects to the daemon as a viewer, because a sleeping
+service worker cannot carry frames. It draws tiles of live tabs with the desktop's own cursor code
+(`panel/track.js` is a byte copy, pinned by a test). An agent's `browser_tabs action:"watch"`
+(read-only, no ownership) makes the daemon send `openWatch` to the newest extension, which opens the
+window without taking the keyboard, flashes it, and shows a panel toast. The daemon also sends
+`watchRequest` to the desktop app, whose Watch view switches to that tab. `on:false` closes the view.
+The panel's Session offers **◉ Live view**, and **◉ Watch** next to an agent in a launched browser
+(`currentHandle` in the agent rows).
+
+**Found by the live suite, and fixed.** With these changes, a replay that opened its own launched tab
+now and then recorded 0 evidence frames: 3 of 11 runs of the Engine 2 recording section, against 0 of
+12 on 3.0.1 run from a worktree. The kept daemon log said `no screencast (Not attached to an active
+page)`: the screencast was asked for while the new tab was between two documents. No changed line
+touches that path, so 3.1 only changed the timing of a race that was already there.
+`lib/screencast.js` now asks again (up to 4 tries, 150 ms apart and growing) for exactly that refusal,
+inside its per-tab serial step so the consumer stays registered. Any other refusal fails at once. The
+engine logs a start that needed a retry. With the retry the section passed 12 of 12 runs, and the
+log showed the retry taking effect in one of them ("started on attempt 2 (the page was between two
+documents)"). The full suite passed 372/0.
+
+**Tests.**
+- Extension suite: push → sidecar on disk → pull on another machine; no duplicate on a second pull,
+  and no image stored twice; the later approval wins, and a seed never travels; a flow without a
+  sidecar keeps local baselines; the approve listener, including one that fails; `import_spec` and
+  `export_spec` with the sidecar; site filters.
+- Daemon: libraries per project (a stranger path refused, `writeApproved` finds the right library).
+  The viewer can do nothing but watch; an agent's `watch` reaches the extension; nobody to show it
+  to is an answer, not an error.
+- Panel: the §13 rows; `watch.js` looks up only `watch.html`'s ids; the page is CSP-clean;
+  `track.js` equals the desktop's; the pure repository and report helpers.
+- Interaction: the screencast retry.
+- Render harness: the Repository card with two projects; a history report parsed back (a hostile
+  scope, rows = flows, the data block); the watch page at 360 and 1000 px (a fake daemon socket,
+  two tiles drawn, only viewer messages sent, a hostile tab title stays text).
+- Live: Engine 2 section `viewer` (an extension-origin viewer watches a headless tab and gets real
+  JPEG frames and the agent's pointer; `watch` reaches the desktop app). Engine 1 section 28 (the
+  real extension opens `watch.html` on an agent's `watch`; it connects as a viewer and draws the tab
+  at 30 fps; `on:false` removes the tile).
+
+**Runs on 3.1.0 (2026-09-26).** `check.mjs --all`: 16 of 16 checks, unit 656 in 12 suites, self-test
+136, extension suite 88, the panel render (with the watch page) clean, in 143 s. `engine2-livetest.mjs`
+372/0 (328 s), `isolated-livetest.mjs` 202/0 on Edge (daemon, extension and shim all 3.1.0). Not rebuilt:
+the installer (the last one is still `G9-Setup-3.0.0.exe`).
+
+#### Part 2 — a browser on a server, driven over MCP and watched in a web page
+
+**Asked for.** The owner wants a browser on their server, in Docker, with the extension, that an AI
+agent drives and gives tasks to, and whose screen they can watch, behind a password. Maybe two
+accounts, so perhaps two containers, run through G9ServerManager (their panel, which has an AI
+assistant and controls Docker). They asked for the best proposal, then for it to be built and
+deployed on their server through the panel's AI gate.
+
+**The decisions.**
+- **One container per account.** Two accounts are two profiles, two logins, two desktops, two
+  passwords and two tokens. A crash, a ban or a restore touches one. (One container with two
+  profiles would share a desktop and a daemon.)
+- **The base: LinuxServer.io's Chromium on Selkies** (a web desktop streamed over WebSocket, the
+  browser maximised in it). It was chosen over noVNC stacks (Selkies is smoother and has view-only
+  and per-feature switches) and over building a desktop (s6, users and hardening come with it). The
+  image is pinned by digest, because it changes weekly.
+- **The desktop's Chromium is Engine 1.** Unpacked extensions still load with `--load-extension` in
+  Chromium; branded Chrome dropped the flag in 137. The person watching sees exactly what the agent
+  does, and can take over for a sign-in or a two-step code. `google-chrome-stable` sits beside it for
+  Engine 2 (headless work, watched through the live view).
+- **The daemon keeps its local trust.** It stays on loopback inside the container. What is new is
+  one front end that may leave loopback, MCP over HTTP (§5, §6.7), and it will not do so without a
+  token.
+- **A site's terms still apply.** Many social sites forbid automated access in their terms and offer an
+  API for business accounts instead. G9 stays human-paced, with a person able to watch and step in,
+  but that does not make automation allowed where a site forbids it. The owner was told.
+
+**Built.**
+- `mcp/link.mjs` and `mcp/server.mjs` were moved out of the shim unchanged in behaviour (self-test
+  136/136 after the move). `mcp/mcp.js` gained `handle(msg)`, and `mcp/http.mjs` is the new transport.
+- `engine/manager.js`: `G9_LAUNCH_ARGS` (§6.5).
+- `docker/`: Dockerfile, `compose.yaml` (browser1, browser2), the s6 services, the autostart, the
+  health check, README. `.gitattributes` pins LF under `docker/root/`, and the build strips CR anyway.
+- Two new unit suites (`mcp-http`, `docker`); `check-plan.mjs` knows them.
+
+**Deployed (the owner's VPS, Ubuntu 24.04, Docker 29.8, through the AI gate).**
+- The source was uploaded and `docker build` ran on the server (it has internet, so no image
+  transfer): 5.55 GB, Chromium 153, Chrome 154, Node 22.23. A test container passed first.
+- Then the panel stack `g9-browser` (created through the panel's API): `g9-browser-1` on 127.0.0.1:9101 (desktop) and 9111 (MCP), `g9-browser-2` on 9102 and 9112.
+  Both are healthy with the desktop fixed at 1600×900, and each daemon logged "engine connected:
+  engine-1 (extension) v3.2.0".
+- Tokens were generated for the deployment and kept in the stack's `.env` (mode 600), never in the
+  repository.
+- Both endpoints were registered as the panel assistant's MCP servers (`browser1`, `browser2`). The
+  panel's own test read "15 tool(s) from g9-browser-agent 3.2.0". The tools are `mcp_browser1_*` and
+  `mcp_browser2_*` for the assistant and for gates.
+
+**Checked on the server, per node.**
+- The endpoint answered 401 without the token and 403 with a web Origin, and listed 15 tools.
+- `browser_status` reported the extension engine connected, and the Chromium user agent.
+- On Engine 1: opened a tab, took a snapshot (the page's tree), and a screenshot (a JPEG of the page).
+- On Engine 2: headless `google-chrome` 154 launched from the container with a lease, opened a page
+  and took its snapshot. The lease released on disconnect and the engine stopped.
+- The same calls also went through the panel's gate (`mcp_browser1_browser_tabs`).
+
+**Found on the server, and fixed.** Every HTTP session that ended was logged by the daemon as "shim
+exiting". `DaemonLink.close(reason)` now takes a reason, and the endpoint says "MCP session ended",
+"idle", "evicted" or "re-initialized". The test asserts it.
+
+**Not done.** The two public names needed A records, which the owner was to add (the zone was not
+in a panel DNS provider then). The nginx sites are ready and passed the
+panel's preview (`problems: []`):
+- the desktop behind basic auth, TLS from Let's Encrypt, HSTS and WebSockets;
+- `location = /mcp` with `auth_basic off`, because the token is its lock.
+
+**Runs on 3.2.0 (2026-09-26).** `check.mjs --live` for this change passed 15 of 15 checks in 587 s:
+- unit suites: daemon 102, desktop 181, engine 56, panel 84, version 8, check 13, mcp-http 8, docker 5;
+- self-test 136, extension suite 88, the panel render, links;
+- `engine2-livetest.mjs` 373/0 (330 s), `isolated-livetest.mjs` 212/0 on Edge (223 s).
+
+The unit suites this change does not reach (humanize, interaction, platform-cdp, world, seam, sites)
+were not re-run; their last results are 3.1.0's. The extension suite first failed on one source pin:
+it read the daemon port from `mcp/shim.mjs`, which moved to `mcp/link.mjs`, so the pin now follows
+it. The installer was not rebuilt.
+
+
+#### Part 3 — the public names, and five things the running nodes showed
+
+**Asked for.** The owner saw other sites on the server with certificates, but no browser1 or
+browser2, and asked whether the settings were right.
+- **Why they were missing:** none had been created. When I first looked, the panel had no DNS
+  provider for the domain. One was added minutes later, and I did not check again; the DNS watch only
+  looked for the records.
+- **What was done:**
+  - The A records were created through that provider, DNS-only, as the other sites are.
+  - The nginx sites were created from the definitions that had passed the preview: Let's Encrypt
+    certificates valid to 2026-12-25, basic auth, HSTS, WebSockets, and `/mcp` with `auth_basic off`.
+- **Checked over the internet, per node:**
+  - HTTP is redirected to HTTPS.
+  - The desktop answers 401 without the password or with a wrong one, and 200 with the right one.
+  - `/mcp` answers 401 without the token; with it, `initialize` and 15 tools.
+  - Node 2's headless Chrome opened node 1's public desktop and showed its browser: TLS, the
+    password and the WebSocket stream all worked.
+
+**Found by looking at the running nodes, and fixed.** Each was measured on the server before and
+after the fix.
+- **A stop killed Chromium mid-shutdown.** The desktop's own stop (`svc-de` finish) signals every
+  process at once, compositor included.
+  - Before: the profile said `exit_type: "Crashed"`, and the next start showed "Restore pages?".
+  - Fix: `svc-g9-quit` closes Chromium with SIGTERM before the desktop stops. SIGTERM alone ends the
+    session properly; the profile then says `SessionEnded`.
+  - Two wrong turns first. A `finish` script raced the desktop's stop, because s6-rc does not wait for
+    finish. Depending on `svc-de` alone let D-Bus and PulseAudio stop beside it, and Chromium died
+    anyway.
+  - After the fix: `SessionEnded`, and no bubble.
+- **A browser closed in the desktop stayed closed**, and Engine 1 with it.
+  - Fix: `RESTART_APP=true`.
+  - Measured: back in 3 s, and the extension reconnected ("engine-1 reconnected after 3 s").
+- **An image update never reached an existing node.** LinuxServer copies `/defaults/autostart` into
+  `/config` only when it is missing. Fix: `init-g9-desktop` copies it on every start, and the
+  switches moved into the image (`g9-chromium`).
+- **Chromium ran the first image's extension code.** The profile's service-worker script cache held
+  3.2.0's `sw.js` and its modules, all from the first start, under a 3.2.1 manifest. The daemon
+  reported 3.2.1, because it reads the manifest.
+  - Fix: `g9-chromium` clears `Default/Service Worker` when the extension in the image changed (a
+    hash of its files).
+  - Measured: the cache then held the new `sw.js`.
+- **A welcome tab on every start.** A `--load-extension` extension is installed again on every
+  browser start and its storage is wiped, so each start is a first install.
+  - `sw.js` now treats an `install` with a version on record as a restart. That helps wherever the
+    storage survives.
+  - On the node, the image's `deployment.json` (`welcome:false`) stops the tab.
+  - Measured: only the New Tab after a start.
+  - The storage wipe itself is a gap (§8.4).
+
+**On the side.** Docker Hub answered 403 to a metadata lookup for `node:22-bookworm-slim` during a
+rebuild. Node was then taken from the previous local image (`--build-arg NODE_IMAGE=`); the
+Dockerfile allows exactly that.
+
+**Tests.**
+- Seam: an `install` with a version on record (the same version opens nothing; another version is an
+  update); a browser node's `deployment.json` opens no welcome tab.
+- Docker: the stop order (the watchdog, then svc-g9-quit, then svc-de, D-Bus and PulseAudio); the
+  TERM trap and no finish script; the autostart refreshed from the image; the service-worker cache
+  cleared on a changed extension; `RESTART_APP` and `stop_grace_period`.
+
+**Runs on 3.2.1 (2026-09-26).** `check.mjs --live` for this change passed 14 of 14 checks in 264 s:
+- unit suites: seam 16, docker 6, daemon 102, desktop 181, engine 56, panel 84, version 8, check 13,
+  mcp-http 8;
+- self-test 136, extension suite 88, the panel render;
+- `isolated-livetest.mjs` 212/0 on Edge.
+
+Engine 2 was not reached by the change, so its live suite was not run. On the server, both nodes run
+3.2.1: healthy, both public addresses as above, and the panel's MCP test reads "15 tool(s) from
+g9-browser-agent 3.2.1".
+
+
+**Runs on the rebased tree (3.2.0, 2026-09-26).** `check.mjs --release` passed 21 of 21 checks in 695 s:
+- unit: 690 tests in 15 suites (desktop 194, daemon 103, panel 84, interaction 78, engine 57,
+  humanize 51, platform-cdp 34, world 26, seam 16, check 13, version 8, mcp-http 8, sites 7, docker 6,
+  runtime 5);
+- self-test 136, extension suite 88, the panel render, links;
+- `engine2-livetest.mjs` 373/0 (332 s) and `isolated-livetest.mjs` 212/0 on Edge (221 s).
+
+The rebase moved the shim's daemon start (`lib/runtime.mjs`) into `mcp/link.mjs`, and its connection
+after `initialize` into the split shim. It also renamed the markers of this work from (3.1) and (3.2.1)
+to (3.2). The browser nodes already deployed run the local 3.2.1 build, whose code is this release's.
+
+Version 3.2.0 in `package.json`, `extension/manifest.json`, `desktop/package.json` and
+`desktop/package-lock.json`.
 
 ### 2026-09-26 — v3.1.1: the first update from the published releases, and pictures that say so
 

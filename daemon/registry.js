@@ -53,7 +53,7 @@ export class Registry extends EventEmitter {
     this.resumeMs = Number.isFinite(Number(resumeMs)) && Number(resumeMs) >= 0 ? Number(resumeMs) : ENGINE_RESUME_MS;
     /** instanceId → { id, instanceId, loadId, parkedAt, timer } — extension engines waiting to reconnect. */
     this.parked = new Map();
-    this.counters = { agent: 0, engine: 0, ui: 0, launched: 0 };
+    this.counters = { agent: 0, engine: 0, ui: 0, viewer: 0, launched: 0 };
     this.clients = new Map();
 
     this.nextHandle = 1;
@@ -80,15 +80,15 @@ export class Registry extends EventEmitter {
   // ------------------------------------------------------------- clients
 
   /**
-   * Register a client after its hello. `role` is 'agent' | 'engine' | 'ui'
+   * Register a client after its hello. `role` is 'agent' | 'engine' | 'ui' | 'viewer'
    * (the runner is an agent; a v1 'extension' hello is normalised to 'engine'
-   * before it gets here).
+   * before it gets here; a viewer — the extension's watch window, 3.1 — may only watch).
    */
   addClient({
     role, name = null, pid = null, version = null, send = () => false, browser = null, cwd = null, project = null, origin = null,
     instanceId = null, loadId = null, tabs = null,
   }) {
-    if (!['agent', 'engine', 'ui'].includes(role)) throw new Error(`Unknown client role "${role}".`);
+    if (!['agent', 'engine', 'ui', 'viewer'].includes(role)) throw new Error(`Unknown client role "${role}".`);
     // An extension engine that was here a moment ago (same instanceId) gets its identity back.
     const resumed = role === 'engine' && instanceId ? this.#resume(String(instanceId), { loadId, tabs }) : null;
     let id;
@@ -101,7 +101,7 @@ export class Registry extends EventEmitter {
     const client = {
       id,
       role,
-      name: name || (role === 'engine' ? 'extension' : role === 'ui' ? 'desktop' : 'agent'),
+      name: name || (role === 'engine' ? 'extension' : role === 'ui' ? 'desktop' : role === 'viewer' ? 'viewer' : 'agent'),
       pid,
       version,
       browser,

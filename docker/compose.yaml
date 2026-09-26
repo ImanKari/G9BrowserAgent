@@ -1,0 +1,72 @@
+# Two G9 browser nodes: one browser identity (account) each, each with its own desktop, profile,
+# daemon and MCP endpoint. Everything binds to 127.0.0.1: the desktops go behind a TLS reverse proxy
+# with a password, the MCP endpoints behind the same proxy under /mcp (bearer token) — see
+# docker/README.md. Secrets come from .env next to this file (never commit it):
+#
+#   G9_IMAGE=g9-browser-node:3.2.0
+#   BROWSER1_MCP_TOKEN=<48+ random characters>
+#   BROWSER2_MCP_TOKEN=<48+ random characters>
+#   TZ=Asia/Tehran
+#
+# A third account is a copy of a service with the next ports (9103/9113) and its own data folder.
+name: g9-browser
+
+x-node: &node
+  image: ${G9_IMAGE:-g9-browser-node:latest}
+  restart: unless-stopped
+  # Chromium needs a large /dev/shm; without it pages crash under load.
+  shm_size: "2gb"
+  # Time for svc-g9-quit to close Chromium cleanly (a sign-in's cookies written) before the desktop stops.
+  stop_grace_period: "30s"
+  mem_limit: 6g
+  cpus: 3
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+x-env: &env
+  PUID: "1000"
+  PGID: "1000"
+  TZ: ${TZ:-UTC}
+  # No terminal, no sudo in the web desktop: whoever reaches the page must not get a root shell.
+  HARDEN_DESKTOP: "true"
+  # The desktop has one job: the browser. No apps panel (it installs programs into the session;
+  # its actions also need SELKIES_COMMAND_ENABLED, which stays off), no gamepads.
+  SELKIES_UI_SIDEBAR_SHOW_APPS: "false"
+  # A browser closed in the desktop (its X) comes back within a second: Engine 1 is that browser.
+  RESTART_APP: "true"
+  SELKIES_UI_SIDEBAR_SHOW_GAMEPADS: "false"
+  SELKIES_GAMEPAD_ENABLED: "false"
+  # A fixed desktop size (the browser is maximised in it): the page an agent sees does not change
+  # with whoever is watching, and 1600x900 is an ordinary laptop screen.
+  SELKIES_MANUAL_WIDTH: "1600"
+  SELKIES_MANUAL_HEIGHT: "900"
+
+services:
+  browser1:
+    <<: *node
+    container_name: g9-browser-1
+    hostname: g9-browser-1
+    environment:
+      <<: *env
+      TITLE: "G9 Browser 1"
+      G9_MCP_TOKEN: ${BROWSER1_MCP_TOKEN:?set BROWSER1_MCP_TOKEN in .env}
+    volumes:
+      - ./data/browser1:/config
+    ports:
+      - "127.0.0.1:9101:3000"
+      - "127.0.0.1:9111:8931"
+
+  browser2:
+    <<: *node
+    container_name: g9-browser-2
+    hostname: g9-browser-2
+    environment:
+      <<: *env
+      TITLE: "G9 Browser 2"
+      G9_MCP_TOKEN: ${BROWSER2_MCP_TOKEN:?set BROWSER2_MCP_TOKEN in .env}
+    volumes:
+      - ./data/browser2:/config
+    ports:
+      - "127.0.0.1:9102:3000"
+      - "127.0.0.1:9112:8931"

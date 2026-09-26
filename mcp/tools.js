@@ -236,21 +236,22 @@ export const TOOLS = [
   {
     name: 'browser_tabs',
     description:
-      'Tabs across ALL engines, with full titles and URLs. "list" every tab (engine, owner, session); "open" a URL (in the user\'s browser when the extension is connected, else a launched browser — or choose with engine) and make it your current tab (in the user\'s browser it opens in the BACKGROUND: readable, not clickable, unless focus:true; a launched engine gives it its own window); "close"/"focus" a tab; "attach" the tab the user is on (extension) and make it current; "claim"/"release" ownership (force:true takes over — only when the user asks); "popout" an extension tab into its own window without reloading it (never minimise that window); "handoff" an extension tab into a launched browser (cookies + local/session storage travel, the page reloads, in-memory state/IndexedDB/service workers do not); "session" names a tab (with url: opens or re-points it); "sessions"/"end_session" list or forget names (the tab stays open); "wait" for a popup/new tab by url/title/opener. NOTE (the user\'s browser): a browser only delivers input to the tab it is SHOWING, so a background tab or session can be read (snapshot, console, network, screenshot) but not clicked or typed into — "focus" it first, or "popout"/"handoff" it.',
+      'Tabs across ALL engines, with full titles and URLs. "list" every tab (engine, owner, session); "open" a URL (in the user\'s browser when the extension is connected, else a launched browser — or choose with engine) and make it your current tab (in the user\'s browser it opens in the BACKGROUND: readable, not clickable, unless focus:true; a launched engine gives it its own window); "close"/"focus" a tab; "attach" the tab the user is on (extension) and make it current; "claim"/"release" ownership (force:true takes over — only when the user asks); "popout" an extension tab into its own window without reloading it (never minimise that window); "handoff" an extension tab into a launched browser (cookies + local/session storage travel, the page reloads, in-memory state/IndexedDB/service workers do not); "session" names a tab (with url: opens or re-points it); "sessions"/"end_session" list or forget names (the tab stays open); "wait" for a popup/new tab by url/title/opener; "watch" opens a LIVE VIEW of a tab for the user (frames and your cursor, view only) — the way to let them see a headless launched tab, which has no window: the watch window opens in their browser without taking the keyboard (focus:true brings it to the front), on:false closes it. NOTE (the user\'s browser): a browser only delivers input to the tab it is SHOWING, so a background tab or session can be read (snapshot, console, network, screenshot) but not clicked or typed into — "focus" it first, or "popout"/"handoff" it.',
     inputSchema: {
       type: 'object',
       properties: {
         action: str('What to do.', {
-          enum: ['list', 'open', 'close', 'focus', 'attach', 'claim', 'release', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait'],
+          enum: ['list', 'open', 'close', 'focus', 'attach', 'claim', 'release', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch'],
           default: 'list',
         }),
+        on: bool('For watch: false closes the live view again.', true),
         url: str('For open/session: the URL. For wait: a URL substring.'),
-        tabId: num('For close/focus/attach/claim/release/popout/handoff, or session (name a tab already open). A G9 handle.'),
+        tabId: num('For close/focus/attach/claim/release/popout/handoff/watch, or session (name a tab already open). A G9 handle. watch without one: your current tab.'),
         session: str('Instead of tabId: a session name.'),
         name: str('For session/end_session: the session name, e.g. "buyer". For open: also name the new tab.'),
         engine: str('For open/session/attach: "extension", "launched", or an engineId from browser_engine. For handoff: the launched engine to receive the tab. Default for open: the extension if connected, else a launched browser (launched on demand).'),
         context: str('For open/handoff: a contextId from browser_engine action:"context" (launched engines only). Handoff defaults to a fresh isolated context.'),
-        focus: bool('For open/session: bring the tab to the front in its window. For popout: create the new window in front and focused (default: unfocused, so the user keeps the keyboard).', false),
+        focus: bool('For open/session: bring the tab to the front in its window. For popout/watch: create the new window in front and focused (default: unfocused, so the user keeps the keyboard).', false),
         force: bool('For claim: take the tab over from another agent. Only when the user asked for it; it is logged.', false),
         includeStorage: bool('For handoff: also carry localStorage/sessionStorage of the page\'s origin.', true),
         launch: bool('For handoff: launch the default engine if none runs.', true),
@@ -502,7 +503,7 @@ export const TOOLS = [
   {
     name: 'browser_recording',
     description:
-      'Recorded user flows, replayable as tests WITH MEMORY. A QA records in the side panel (or you call start/stop); each element is stored with several independent locators so a step survives a redeploy, and replay reports WHICH locator matched (a step that matched only by xpath passes with a warning). A failing step says what it looked for, what it tried and the closest thing on the page. Every replay also compares what the flow did against its approved known world and reports surprises — see Regression memory in the instructions. replay engine:"launched" runs in a launched browser (copying the recording there if needed); humanize/seed control input style and reproduce motion. "calibrate_humanize" fits a humanize profile from the raw pointer/keyboard events a recording captured and saves it under name (then use humanize:"<name>"). "export_spec"/"import_spec" move a flow in and out as a Git-diffable FlowSpec. Without a tab, list shows the recordings of every engine\'s store (engine field), and id-based actions use the store that has the id.',
+      'Recorded user flows, replayable as tests WITH MEMORY. A QA records in the side panel (or you call start/stop); each element is stored with several independent locators so a step survives a redeploy, and replay reports WHICH locator matched (a step that matched only by xpath passes with a warning). A failing step says what it looked for, what it tried and the closest thing on the page. Every replay also compares what the flow did against its approved known world and reports surprises — see Regression memory in the instructions. replay engine:"launched" runs in a launched browser (copying the recording there if needed); humanize/seed control input style and reproduce motion. "calibrate_humanize" fits a humanize profile from the raw pointer/keyboard events a recording captured and saves it under name (then use humanize:"<name>"). "export_spec"/"import_spec" move a flow in and out as a Git-diffable FlowSpec, with what a person approved beside it (approved: the known world and the screenshot/aria baselines). approve also writes that approval next to the flow in the project repository when the flow is there. Without a tab, list shows the recordings of every engine\'s store (engine field), and id-based actions use the store that has the id.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -533,6 +534,9 @@ export const TOOLS = [
         note: str('For approve — why.'),
         expectLastRunAt: num('For approve — the `lastRun.at` of the run that was reviewed. The approval is refused when a newer run arrived since, instead of folding that run\'s surprises into the known world unseen.'),
         spec: { type: 'object', description: 'For import_spec — a G9 FlowSpec document.' },
+        approved: { type: 'object', description: 'For import_spec — the flow\'s approval sidecar (format "g9-approved": the approved known world and the screenshot/aria baselines), as export_spec returns it or <name>.approved.json holds it. The later human approval wins; without it the store keeps the baselines it has.' },
+        images: { type: 'object', description: 'For import_spec — baseline screenshots named in approved, { "<step>.png": base64 }.' },
+        includeImages: bool('For export_spec — also return the baseline screenshots as base64 (they can be large).', false),
         assertion: str('For assert. "aria" stores a SEMANTIC baseline and is the one to prefer for regression; "screenshot" compares layout structure by default.', { enum: ['url', 'text', 'visible', 'value', 'state', 'network', 'console', 'a11y', 'screenshot', 'aria'] }),
         visualMode: str('For a screenshot assertion: "layout" (default), "strict", or "off" (record only).', { enum: ['off', 'layout', 'strict'], default: 'layout' }),
         masks: { type: 'array', description: 'For a screenshot assertion — normalised 0..1 rectangles {x,y,w,h} excluded. Prefer calibrate.', items: { type: 'object' } },

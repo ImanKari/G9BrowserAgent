@@ -92,19 +92,45 @@ export class McpServer extends EventEmitter {
     } catch {
       return this.#fail(null, -32700, 'Parse error');
     }
+    const response = await this.handle(msg);
+    if (response) this.#write(response);
+  }
+
+  /**
+   * One JSON-RPC message in, its response out — or null for a notification, which gets none. The
+   * transport-independent core: stdio writes the response as a line, the HTTP transport (3.2,
+   * mcp/http.mjs) sends it as the body of the POST that carried the request.
+   */
+  async handle(msg) {
+    let out = null;
+    const reply = (id, result) => { out = { jsonrpc: '2.0', id, result }; };
+    const fail = (id, code, message, data) => { out = { jsonrpc: '2.0', id, error: { code, message, ...(data ? { data } : {}) } }; };
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
+      fail(null, -32600, 'Invalid Request');
+      return out;
+    }
 
     // Notifications carry no id and expect no response.
     const { id, method, params = {} } = msg;
     const isNotification = id === undefined || id === null;
 
     try {
+      await this.#route(method, params, id, isNotification, reply, fail);
+    } catch (err) {
+      if (!isNotification) fail(id, -32603, String(err?.message ?? err));
+    }
+    return isNotification && !out?.error ? null : out;
+  }
+
+  async #route(method, params, id, isNotification, reply, fail) {
+    {
       switch (method) {
         case 'initialize': {
           const requested = params.protocolVersion;
           const protocolVersion = SUPPORTED_PROTOCOLS.includes(requested) ? requested : SUPPORTED_PROTOCOLS[0];
           this.clientInfo = params.clientInfo ?? null;
           this.emit('initialize', this.clientInfo);
-          return this.#reply(id, {
+          return reply(id, {
             protocolVersion,
             capabilities: {
               tools: { listChanged: false },
@@ -121,10 +147,10 @@ export class McpServer extends EventEmitter {
           return;
 
         case 'ping':
-          return this.#reply(id, {});
+          return reply(id, {});
 
         case 'tools/list':
-          return this.#reply(id, {
+          return reply(id, {
             tools: [...this.tools.values()].map((t) => ({
               name: t.name,
               description: t.description,
@@ -135,14 +161,14 @@ export class McpServer extends EventEmitter {
 
         case 'tools/call': {
           const tool = this.tools.get(params.name);
-          if (!tool) return this.#fail(id, -32602, `Unknown tool: ${params.name}`);
+          if (!tool) return fail(id, -32602, `Unknown tool: ${params.name}`);
           try {
             const output = await tool.handler(params.arguments ?? {});
-            return this.#reply(id, normalizeToolResult(output));
+            return reply(id, normalizeToolResult(output));
           } catch (err) {
             // Tool failures are results, not protocol errors — the agent needs
             // to read the message and adapt rather than see a transport fault.
-            return this.#reply(id, {
+            return reply(id, {
               isError: true,
               content: [{ type: 'text', text: String(err?.message ?? err) }],
             });
@@ -150,7 +176,7 @@ export class McpServer extends EventEmitter {
         }
 
         case 'resources/list':
-          return this.#reply(id, {
+          return reply(id, {
             resources: [...this.resources.values()].map((r) => ({
               uri: r.uri,
               name: r.name,
@@ -161,19 +187,17 @@ export class McpServer extends EventEmitter {
 
         case 'resources/read': {
           const resource = this.resources.get(params.uri);
-          if (!resource) return this.#fail(id, -32602, `Unknown resource: ${params.uri}`);
+          if (!resource) return fail(id, -32602, `Unknown resource: ${params.uri}`);
           const text = await resource.reader();
-          return this.#reply(id, {
+          return reply(id, {
             contents: [{ uri: resource.uri, mimeType: resource.mimeType ?? 'text/markdown', text }],
           });
         }
 
         default:
           if (isNotification) return;
-          return this.#fail(id, -32601, `Method not found: ${method}`);
+          return fail(id, -32601, `Method not found: ${method}`);
       }
-    } catch (err) {
-      if (!isNotification) this.#fail(id, -32603, String(err?.message ?? err));
     }
   }
 }

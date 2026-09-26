@@ -11,3 +11,7 @@
 *.ico  binary
 *.jpg  binary
 *.icns binary
+
+# Scripts that run inside the Linux image must keep LF (a CR breaks the shebang).
+docker/root/** text eol=lf
+docker/Dockerfile text eol=lf

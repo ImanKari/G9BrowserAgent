@@ -11,7 +11,12 @@ Measurements below name the version and the machine they were taken on; most wer
 Windows 11 Pro 10.0.26200 with Edge 153, Chrome 153, Chrome for Testing 153.0.8010.52 and Node 22.
 What 3.1.0 added — packages for macOS and Linux, updates from the official releases, and the
 update end-to-end test — is in [Install](#install), [The desktop app](#the-desktop-app) and
-[AIGuide.md](../AIGuide.md) §9.
+[AIGuide.md](../AIGuide.md) §9. 3.2.0 adds:
+- [the live view](#the-live-view) of any tab, headless ones included;
+- flows in the repository [with what people approved](#what-travels-with-a-flow), per project and
+  per site, and a run-history report;
+- G9 on a server: [a browser node](#c-a-browser-on-a-server-docker) that agents on other machines
+  drive over MCP with a token.
 
 - [What G9 is](#what-g9-is)
 - [Requirements](#requirements)
@@ -206,6 +211,27 @@ The entry it writes:
 There is no service to install or start. To watch the daemon's log live, run it yourself with
 `npm run daemon` (`node daemon/g9d.mjs --foreground`, which never exits on idle).
 
+### C. A browser on a server (Docker)
+
+For work that should not run on your own machine, or needs an account of its own: `docker/` builds a
+**browser node**.
+- A web desktop shows the browser in a page. You watch it, and step in for a sign-in or a two-step
+  code.
+- Its Chromium has the G9 extension loaded.
+- The daemon runs inside the container.
+- An MCP endpoint over HTTP lets agents elsewhere (Claude Code on a laptop, a server panel's
+  assistant) drive it with a bearer token.
+
+One container per account: `docker/compose.yaml` runs two. The details are in
+[docker/README.md](../docker/README.md): build, run, nginx in front with TLS and a password, and the
+security rules.
+
+```bash
+claude mcp add --transport http g9-browser1 https://browser1.example.com/mcp   --header "Authorization: Bearer <token>"
+```
+
+The endpoint also runs without Docker (`G9_MCP_TOKEN=… node mcp/http.mjs`, on 127.0.0.1:8931 by default).
+
 ### The one manual step: load the extension
 
 This step is needed for Engine 1 only. Agents can use Engine 2 without it.
@@ -261,6 +287,17 @@ A browser can skip this step only when the extension is installed by enterprise 
 - **Stored flows and issues need nothing done to them.** The issue index gains site, severity, tags
   and evidence counts. The first time the list is read, entries written by 2.x are completed from
   their issue records and attachment metadata in one pass, and later reads find nothing left to do.
+
+### Upgrading to 3.2
+
+- **Reload the extension and restart the daemon**, as for 3.0. With a daemon older than 3.2 still running, the
+  live view says the daemon is older than 3.2, the Repository card uses the daemon's own project
+  only, and approvals are not written beside the flows (the approval itself works).
+- **Flow files need nothing.** The first Push after this writes each flow's `.approved.json` beside it
+  (for flows with an approval or a baseline). Commit those files with the flows.
+- **Duplicates from earlier pulls.** Before 3.2 every Pull saved each repo flow again under a new id.
+  The Repository line now names flows that are here more than once; delete the copies you did not
+  edit. Nothing is deleted for you.
 
 ---
 
@@ -324,6 +361,11 @@ Agents are told to call `browser_status` first. It reports:
   Each flow opens into a drawer with replay, dry run, the assertion wizard, calibrate, approve,
   history, push, Playwright export, delete, and its section, suite, tags, covered test cases and
   start URL.
+- **Live view** (3.2, in the Agents block, or **◉ Watch** next to an agent working in a launched
+  browser) — see [The live view](#the-live-view).
+- **Repository** (3.2): pick the project (the daemon's own, or any connected agent's) and the site;
+  Pull and Push move the flows with what people approved. **⤓ History report** saves the run
+  history of the flows shown as one HTML file.
 - **Issues** — grouped by site, then Open, Filed and Closed; each row shows severity, age, the tracker
   key and chips for the evidence it holds (screenshots, video, files, console, network, DOM). Filter
   by site, status, severity, tag or text.
@@ -339,7 +381,7 @@ Agents are told to call `browser_status` first. It reports:
 |---|---|
 | `browser_status` | Orientation: current tab, page health, engines, agents, ownership, halts, capabilities. The daemon answers it, and it still answers while Stop is pressed. |
 | `browser_engine` | **New in v2.** Launched browsers: `launch`, `list`, `stop`, `context`, `versions`, `warm`, `acquire`, `release`. |
-| `browser_tabs` | Tabs across all engines: `list`, `open`, `close`, `focus`, `attach`, `claim`, `release`, `popout`, `handoff`, `session`, `sessions`, `end_session`, `wait`. |
+| `browser_tabs` | Tabs across all engines: `list`, `open`, `close`, `focus`, `attach`, `claim`, `release`, `popout`, `handoff`, `session`, `sessions`, `end_session`, `wait`, and (3.2) `watch`: a [live view](#the-live-view) of a tab for you. |
 | `browser_snapshot` | Accessibility tree with a `[ref=eN]` handle on every interactive element. This is the **primary perception** tool. |
 | `browser_interact` | `click`, `double_click`, `right_click`, `hover`, `type`, `key`, `scroll`, `drag`, `select`, `upload`. Trusted input, humanized by default; every result reports `delivery`. |
 | `browser_navigate` | `goto`, `reload`, `back`, `forward`, and `wait` for text, a selector, its disappearance, or idle. |
@@ -350,7 +392,7 @@ Agents are told to call `browser_status` first. It reports:
 | `browser_screenshot` | `viewport` (a read), `fullpage` or `element` (actions: they resize the viewport or scroll the element into view, so they claim the tab and are queued). Oversized full-page captures are scaled to fit, never cropped; at the human and stealth levels an element taller or wider than the viewport is captured as far as it shows on screen and the result's `cropped` gives its full size (take several viewport shots for all of it). |
 | `browser_emulate` | Device, viewport, network throttle, CPU throttle, colour scheme, locale, timezone. |
 | `browser_dialog` | Accept or dismiss `alert`, `confirm`, `prompt` or `beforeunload`. |
-| `browser_recording` | Recorded flows: record and replay, assertions, the suggestion wizard, calibration, the known world and approvals, FlowSpec export/import, Playwright export, `calibrate_humanize`. |
+| `browser_recording` | Recorded flows: record and replay, assertions, the suggestion wizard, calibration, the known world and approvals, FlowSpec export/import (3.2: with the approval sidecar, [what travels](#what-travels-with-a-flow)), Playwright export, `calibrate_humanize`. |
 | `browser_issue` | Defects captured with screenshot, tab video with pointer track, console, failed requests and page context attached. |
 
 There are fifteen grouped tools rather than dozens, because tool definitions are re-sent on every
@@ -708,6 +750,40 @@ broken product.
   It reports *differences*, not verdicts: a shipped feature and a regression look the same from
   here.
 
+### What travels with a flow
+
+Flows live in the repository of the project under test, under `flowsDir` of its `g9.project.json`
+(default `QA/Flows`), one canonical FlowSpec per flow, so `git log` is each flow's history. Since 3.2,
+what a person **approved** travels beside it:
+
+```
+QA/Flows/web/shop/checkout.flow.json        the steps and checks (FlowSpec)
+QA/Flows/web/shop/checkout.approved.json    the approved known world + the screenshot and aria baselines
+QA/Flows/web/shop/checkout.baselines/s5.png the approved screenshot of step s5 (to review in a diff)
+```
+
+| | In the repository | Stays on the machine |
+|---|---|---|
+| Steps, locators, checks, suite, tags, start URL, test case ids | yes (`.flow.json`) | |
+| The known world a person approved (what normal looks like) | yes (`.approved.json`) | a known world only seeded by a first run |
+| Screenshot fingerprints and layout maps, aria baselines | yes (`.approved.json`; the PNG beside it) | |
+| Run history, pass rate, flakiness, surprise history | no — share it as a **History report** | yes |
+| Evidence runs (frames, videos), issues | no | yes |
+
+- **Written when a person decides**: on Push, and on every Approve of a flow that is already in a
+  repository (panel, agent or `runner approve`). Replays never touch the working tree. Committing
+  the files is yours (or your agent's).
+- **Pull on another machine** brings the flows with their approvals and baselines, so a screenshot
+  or aria check passes there too and surprises are reported from the first run. Before 3.2 a repo
+  flow carried no baselines at all, so those checks could only pass in the browser they were
+  recorded in; and each Pull saved every flow again under a new id.
+- **Conflicts**: the later human approval wins. A Pull keeps this machine's approval when it is newer
+  and says so; the Repository line shows "newer approval in repo — pull" or "approval only here — push
+  to share". A repo flow without a sidecar keeps the baselines this machine has.
+- **Which repository, which flows**: the Repository card offers the daemon's own project and each
+  connected agent's, and "All flows" or one site (by the flows' start URLs). The runner and
+  `browser_recording import_spec` read the sidecar too; `runner spec --out x.flow.json` writes it.
+
 ---
 
 ## Evidence: screencast frames and the pointer track
@@ -749,6 +825,24 @@ Frames past a limit are counted, not written, and `result.json` says so.
 pointer samples. It is view only: nothing you click there reaches the page. A hidden tab produces no
 frames, and the viewer is told so (a `watchStatus` event with `state:"hidden"`) instead of seeing a
 frozen picture.
+### The live view
+
+A headless tab has no window, and a tab in a launched browser is not on your screen. The live view
+shows either, as it happens, with the agent's cursor drawn in (the cursor is data from the input,
+never an element in the page, so neither the page nor a bot detector can see it). View only.
+
+- **In your browser (3.2)**: the side panel's **◉ Live view**, or **◉ Watch** next to an agent
+  working in a launched browser, opens a window with one tile per tab: title, owner, engine, LIVE /
+  IDLE / HIDDEN, frames per second, cursor position; enlarge one (⤢, or double-click), save the
+  picture (⤓), add another tab from the list.
+- **Asked by an agent**: `browser_tabs action:"watch"` opens that window on its tab in your browser —
+  without taking your keyboard; it flashes in the taskbar and the panel says who opened it
+  (`focus:true` brings it to the front, `on:false` closes it). The desktop app's Watch view switches
+  to that tab as well. With neither connected, the agent is told where you could look.
+- **How**: the window connects to the daemon itself as a `viewer`, which may list and watch tabs and
+  nothing else (no tool calls, no Stop, no settings). Every watch is also an evidence run, as the
+  desktop's is.
+
 The Runs view replays a run's frames with the cursor. **Export video** writes
 `runs\<runId>\video.webm`, though the export itself was not exercised in the recorded test rounds.
 
@@ -1001,6 +1095,13 @@ The Stop button and the activity log remain as operational features, not securit
 - **A locked-down desktop window.** The renderer runs with `contextIsolation`, `sandbox`, a CSP of
   `connect-src 'none'`, no `<webview>`, and a fixed list of operations. Approvals go through the
   main process.
+- **(3.2) Off the machine only with a token.** The daemon never leaves loopback. The one way in from
+  another machine is the MCP endpoint (`mcp/http.mjs`), and it refuses to listen beyond loopback
+  without a bearer token of at least 24 characters. It also refuses any request that carries a web
+  page's `Origin`.
+- **(3.2) The browser node** publishes its ports on `127.0.0.1` only. Its web desktop has no
+  terminal, no sudo and no apps panel. The desktop sits behind TLS and a password at the reverse
+  proxy ([docker/README.md](../docker/README.md#security-in-one-place)).
 
 **What is not protected:**
 
@@ -1009,8 +1110,9 @@ The Stop button and the activity log remain as operational features, not securit
 - **The installer is unsigned.**
 - **The debugging bar.** While `chrome.debugger` is attached, the browser shows a "started
   debugging this browser" bar. Per Chromium, only a policy-installed extension or
-  `--silent-debugger-extension-api` removes it. G9 sets up neither, and that removal was not
-  measured.
+  `--silent-debugger-extension-api` removes it. On a person's machine G9 sets up neither. The
+  browser node's Chromium is started with the switch (3.2), because that desktop exists to be
+  driven.
 
 **Extension permissions:** `debugger`, `tabs`, `activeTab`, `cookies`, `storage`, `alarms`,
 `sidePanel`, `unlimitedStorage`, `downloads`, and host access to `<all_urls>`.
@@ -1468,7 +1570,8 @@ What each test does:
 
 `setup/serve.mjs` also serves `/hang` (accepts, never answers) and `/slow?ms=`.
 
-**Latest recorded results.** Rows marked 3.0.0 were run on 2026-09-25 on the 3.0.0 tree. The
+**Latest recorded results.** Rows marked 3.2.0 were run on 2026-09-26 on the 3.2.0 tree, rows marked
+3.0.0 on 2026-09-25 on the 3.0.0 tree. The
 others were run on 2026-09-23 on the 2.0.1 tree and not repeated since: 2.0.2 changed replay,
 evidence pruning, launched-engine watch ordering and browser shutdown, 2.0.3 the popout, and 3.0.0
 the side panel and what the daemon and extension tell it, none of which those rows measure
@@ -1476,13 +1579,14 @@ differently.
 
 | Suite | Result |
 |---|---|
-| `unittest.mjs` (3.0.0) | 638 tests in 11 suites passed (desktop 181, daemon 100, panel 82, interaction 77, engine 56, humanize 51, platform-cdp 34, world 26, seam 16, version 8, sites 7) |
-| `selftest.mjs` (3.0.0) | 136/136 |
-| `extensiontest.mjs` (3.0.0) | 82/82 |
-| `panel-render.mjs` (3.0.0) | passed: 26 screenshots (every tab, empty states, an issue's detail; 360 and 1000 px; light and dark), no page error, no horizontal overflow at 360 px, no fixture text turned into markup, no `[object Object]` or `NaN`, a malformed stored flow opens, ArrowLeft in Auto-attach does not switch the mode |
+| `unittest.mjs` (3.2.0, through `check.mjs --release`) | 690 tests in 15 suites passed (desktop 194, daemon 103, panel 84, interaction 78, engine 57, humanize 51, platform-cdp 34, world 26, seam 16, check 13, version 8, mcp-http 8, sites 7, docker 6, runtime 5) |
+| `selftest.mjs` (3.2.0) | 136/136 |
+| `extensiontest.mjs` (3.2.0) | 88/88 |
+| `panel-render.mjs` (3.2.0) | passed: screenshots of every tab (with empty states, an issue's detail and the live view; 360 and 1000 px; light and dark), a history report parsed back, no page error, no horizontal overflow at 360 px, no fixture text turned into markup, no `[object Object]` or `NaN`, a malformed stored flow opens, ArrowLeft in Auto-attach does not switch the mode |
 | `desktop`: `test/run.mjs`, `daemon-contract.mjs`, `test:packaged`, `test:render` | 14/14 files (3.0.0), 15/15 (2.0.1), 7/7 (3.0.0, on `G9-Setup-3.0.0.exe`), render check passed (2.0.1; 4 scenarios, 0 windows on screen, 0 in the foreground) |
-| `engine2-livetest.mjs` (3.0.0) | 366 passed, 0 failed (327 s) |
-| `isolated-livetest.mjs` (headless) | Edge 198 passed, 0 failed (3.0.0, the real popout included; daemon, extension and shim all report 3.0.0); Chrome 196 passed, 0 failed (2.0.1). Harness checks all pass: the tripwire recorded 0 connections to the default port, and neither test profile was ever signed in. |
+| `mcp-http.test.mjs`, `docker.test.mjs`, `runtime.test.mjs` (3.2.0) | 8/8, 6/6, 5/5 |
+| `engine2-livetest.mjs` (3.2.0) | 373 passed, 0 failed (332 s) |
+| `isolated-livetest.mjs` (headless) | Edge 212 passed, 0 failed (3.2.0, 221 s, the real popout and the live view included; daemon, extension and shim all report 3.2.0); Chrome 196 passed, 0 failed (2.0.1). Harness checks all pass: the tripwire recorded 0 connections to the default port, and neither test profile was ever signed in. |
 | `matrix.mjs` | exit 0 — every cell of both engines, both browsers, every state agrees with the page |
 | `bench.mjs` / `endurance.mjs --minutes 10` | 0 failures at 1/4/8/16 contexts, recommendation maxParallel 8; 93 iterations, 0 failures, listeners flat |
 | `stealthtest.mjs --matrix` | 7 configurations, 0 G9 leaks at stealth, headed Edge undetected on the local page, both human controls detected (exit 1 by design while headless is detectable) |
@@ -1514,7 +1618,9 @@ g9-browser-agent/
 ├── daemon/                   g9d: ws-server, registry (agents, handles, ownership, queues, halts), router,
 │                             handoff, evidence, scheduler, storage, settings, paths, home-lock (one daemon per
 │                             G9_HOME), project, flows, extension-update
-├── mcp/                      shim.mjs (what AI clients launch), mcp.js, tools.js (the 15 schemas + agent instructions)
+├── mcp/                      shim.mjs (what AI clients launch), mcp.js, tools.js (the 15 schemas + agent instructions);
+│                             link.mjs (the daemon link), server.mjs (tools on a link), http.mjs (MCP over HTTP, 3.2)
+├── docker/                   the browser node image (3.2): Dockerfile, compose.yaml, root/ (services, autostart), README
 ├── lib/                      version.mjs, ws-client.mjs, ws-codec.mjs, runtime.mjs (how to start a G9 script from
 │                             node, the app or an AppImage) — shared, zero-dependency
 ├── runner/                   g9.mjs (unattended CLI), mcp-client.mjs, report.mjs, drivers/ (AgriPad)

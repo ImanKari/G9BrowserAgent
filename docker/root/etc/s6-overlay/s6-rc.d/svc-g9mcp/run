@@ -1,0 +1,10 @@
+#!/usr/bin/with-contenv bash
+# G9's MCP endpoint over HTTP (mcp/http.mjs): the way agents that are not in this container drive
+# its browser. Off without a token: the endpoint refuses to listen beyond loopback without one.
+if [ -z "${G9_MCP_TOKEN}" ] && [ -z "${G9_MCP_TOKEN_FILE}" ]; then
+  echo "[g9-mcp] G9_MCP_TOKEN is not set, so the MCP endpoint stays off (set it to a long random secret)."
+  exec sleep infinity
+fi
+export G9_HOME="${G9_HOME:-/config/g9}"
+cd /config || exit 1
+exec s6-setuidgid abc node /opt/g9/mcp/http.mjs

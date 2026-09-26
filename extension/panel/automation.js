@@ -40,8 +40,9 @@
 import { siteOf, displayUrl } from '../lib/sites.js';
 import {
   el, cmd, node, btn, chip, dot, toast, showPanelError, ago, view, setOptions, prefs, group, keepFocus, middle, extLink,
-  copyText, metaLine,
+  copyText, metaLine, downloadText, PRODUCT, VERSION,
 } from './ui.js';
+import { summarizeHistory, buildHistoryReport, reportFileName } from './report.js';
 
 let recording = false;
 /** A start or stop is on its way to the service worker. */
@@ -320,6 +321,7 @@ function renderList(list) {
   const here = siteOf(view.current?.url);
   paintAffinity(lastList, here);
   paintRunBar(shown);
+  paintRepoPickers();
 
   // Repaint only when what the list shows changed (or once a minute, for the
   // "2h ago"s): the list holds buttons and fields, and a rebuild on every poll
@@ -1002,10 +1004,84 @@ function renderSuiteSummary() {
     .join('   ');
 }
 
+// ------------------------------------------------------------ the repository (3.2)
+//
+// Which library: the daemon's own project or a connected agent's (it used to be only the daemon's,
+// the project of whichever session happened to start it). Which flows: all, or one site's.
+
+const REPO_KEY = 'g9.repoProject';
+const SCOPE_KEY = 'g9.repoScope';
+let repo = { projects: [], default: null, loaded: false, error: null };
+
+async function loadProjects() {
+  const res = await cmd({ cmd: 'flowProjects' }).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
+  // A daemon older than 3.2 knows one library, its own, and no `projects` op: that library is used, and
+  // the line says why there is no choice.
+  const legacy = !res?.ok && /Unknown flow-library op/i.test(String(res?.error ?? ''));
+  repo = res?.ok
+    ? { projects: Array.isArray(res.projects) ? res.projects : [], default: res.default ?? null, loaded: true, error: null, legacy: false }
+    : { projects: [], default: null, loaded: true, error: legacy ? null : (res?.error ?? 'Could not reach the flow library.'), legacy };
+  paintRepoPickers();
+}
+
+/**
+ * The scope: '' (all flows) or a site key. Follows the list's site filter until the person picks one
+ * here. Pure over its inputs; exported for the unit test.
+ */
+export function repoScopeOf(saved, f = filter) {
+  if (saved === '' || (typeof saved === 'string' && saved)) return saved;
+  return f.site || '';
+}
+
+/**
+ * The project: the person's pick when it is still offered; else the one whose environments name the
+ * scope's site; else the daemon's default. Pure; exported for the unit test.
+ */
+export function repoProjectOf(projects, { saved = null, fallback = null, site = '' } = {}) {
+  const list = Array.isArray(projects) ? projects : [];
+  if (saved && list.some((p) => p.path === saved)) return saved;
+  if (site && site !== NO_SITE) {
+    const host = displayUrl(site).host?.toLowerCase();
+    const match = host && list.find((p) => Array.isArray(p.domains) && p.domains.includes(host));
+    if (match) return match.path;
+  }
+  return fallback ?? list[0]?.path ?? null;
+}
+
+const currentScope = () => repoScopeOf(prefs.get(SCOPE_KEY, null));
+const currentProject = () => repoProjectOf(repo.projects, { saved: prefs.get(REPO_KEY, null), fallback: repo.default, site: currentScope() });
+const projectName = (path) => repo.projects.find((p) => p.path === path)?.name ?? 'repository';
+const inScope = (site) => lastList.filter((r) => !site || siteKeyOf(r) === site);
+
+function paintRepoPickers() {
+  const project = currentProject();
+  setOptions(el.syncProject, repo.projects.map((p) => [p.path, `${p.name}${p.own ? ' · daemon' : ''}${p.agents?.length ? ` · ${p.agents.length} agent${p.agents.length === 1 ? '' : 's'}` : ''}`]), project ?? '');
+  el.syncProject.hidden = repo.projects.length < 2;
+  if (project) el.syncProject.title = `${project}\nflows in ${repo.projects.find((p) => p.path === project)?.flowsDir ?? '?'}`;
+  const counts = new Map();
+  for (const r of lastList) counts.set(siteKeyOf(r), (counts.get(siteKeyOf(r)) ?? 0) + 1);
+  const scope = currentScope();
+  const keys = [...counts.keys()].sort((a, b) => (a === NO_SITE) - (b === NO_SITE) || siteLabel(a).localeCompare(siteLabel(b)));
+  if (scope && !counts.has(scope)) keys.push(scope);
+  setOptions(el.syncScope, [['', `All flows (${lastList.length})`], ...keys.map((k) => [k, `${siteLabel(k)} (${counts.get(k) ?? 0})`])], scope);
+  el.syncScope.hidden = keys.length < 1;
+  const n = inScope(scope).length;
+  el.syncPush.textContent = `↑ Push ${n} to repo`;
+  el.syncPush.disabled = n === 0;
+  el.syncPull.disabled = !repo.projects.length && !repo.legacy;
+}
+
 async function syncStatus() {
+  if (!repo.loaded) await loadProjects();
+  if (!repo.projects.length && !repo.legacy) {
+    el.syncLine.textContent = repo.error ?? 'No project repository: neither the daemon nor a connected agent has a g9.project.json. Start your agent in the project folder, or add g9.project.json there.';
+    return;
+  }
+  const project = currentProject();
+  const site = currentScope() || null;
   let res;
   try {
-    res = await cmd({ cmd: 'flowStatus' });
+    res = await cmd({ cmd: 'flowStatus', project, site });
   } catch (err) {
     el.syncLine.textContent = String(err?.message ?? err);
     return;
@@ -1018,30 +1094,62 @@ async function syncStatus() {
   if (res.onlyInRepo?.length) parts.push(`↓ ${res.onlyInRepo.length} new in repo`);
   if (res.onlyLocal?.length) parts.push(`↑ ${res.onlyLocal.length} not in repo`);
   if (res.differing?.length) parts.push(`⇅ ${res.differing.length} differ`);
-  el.syncLine.textContent = parts.length ? parts.join(' · ') : `In sync — ${res.total} flow(s) in the repo.`;
+  if (res.approvalNewerInRepo?.length) parts.push(`✓ ${res.approvalNewerInRepo.length} newer approval${res.approvalNewerInRepo.length === 1 ? '' : 's'} in repo — pull`);
+  if (res.approvalNewerHere?.length) parts.push(`✓ ${res.approvalNewerHere.length} approval${res.approvalNewerHere.length === 1 ? '' : 's'} only here — push to share`);
+  // Copies an earlier Pull made (before 3.1): named, for the person to delete the ones they did not edit.
+  if (res.duplicates?.length) {
+    parts.push(`⚠ ${res.duplicates.length} flow${res.duplicates.length === 1 ? ' is' : 's are'} here more than once (${res.duplicates.slice(0, 3).map((d) => `"${d.name}" ×${d.copies}`).join(', ')}${res.duplicates.length > 3 ? ', …' : ''}) — from pulls before 3.1; delete the extra copies`);
+  }
+  const where = repo.legacy ? "The daemon's project (it is older than 3.2: restart it to choose a project or a site)" : `${projectName(project)}${site ? ` · ${siteLabel(site)}` : ''}`;
+  el.syncLine.textContent = `${where}: ${parts.length ? parts.join(' · ') : `in sync — ${res.total} flow(s) in the repo`}`;
 }
 
 async function pull() {
-  const res = await cmd({ cmd: 'flowPull' }).catch((err) => ({ ok: false, error: String(err) }));
+  const project = currentProject();
+  const site = currentScope() || null;
+  const res = await cmd({ cmd: 'flowPull', project, site }).catch((err) => ({ ok: false, error: String(err) }));
   if (!res?.ok) return showPanelError(res?.error ?? 'Pull failed.');
-  toast(`${res.imported} flow(s) pulled from the repo`);
+  const extra = [
+    res.created ? `${res.created} new` : null,
+    res.approvals ? `${res.approvals} approval${res.approvals === 1 ? '' : 's'}` : null,
+    res.baselines ? `${res.baselines} baseline${res.baselines === 1 ? '' : 's'}` : null,
+  ].filter(Boolean);
+  toast(`${res.imported} flow(s) pulled from ${projectName(project)}${extra.length ? ` — ${extra.join(', ')}` : ''}`);
   // Every problem, not just the last: each one is a flow that did not come over.
-  if (res.problems?.length) showPanelError(res.problems.join('\n'));
+  const lines = [...(res.problems ?? [])];
+  if (res.newerHere?.length) {
+    lines.push(`Kept this browser's approval of ${res.newerHere.length} flow(s), approved here after the repository's: ${res.newerHere.join(', ')}. Push to share it.`);
+  }
+  if (lines.length) showPanelError(lines.join('\n'));
   syncStatus();
   refresh();
 }
 
 async function push(ids) {
-  const res = await cmd({ cmd: 'flowPush', ids }).catch((err) => ({ ok: false, error: String(err) }));
+  const project = currentProject();
+  const res = await cmd({ cmd: 'flowPush', ids, project, site: ids ? null : currentScope() || null }).catch((err) => ({ ok: false, error: String(err) }));
   if (!res?.ok) return showPanelError(res?.error ?? 'Push failed.');
+  const approvals = res.approvals ? `, with ${res.approvals} approval${res.approvals === 1 ? '' : 's'}` : '';
   toast(
     res.changed
-      ? `${res.changed} file(s) written — commit them on a branch off dev`
-      : `${res.written} flow(s) already up to date`,
+      ? `${res.changed} flow(s) written to ${projectName(project)}${approvals} — commit them on a branch`
+      : `${res.written} flow(s) already up to date in ${projectName(project)}`,
   );
   const lines = [...(res.problems ?? []), ...(res.notes ?? [])];
   if (lines.length) showPanelError(lines.join('\n'));
   syncStatus();
+}
+
+/** (3.2) The run history of the flows shown, saved as one HTML file (panel/report.js). */
+async function historyReport() {
+  const shown = applyFilter(lastList);
+  if (!shown.length) return toast('No flows shown, so there is nothing to report');
+  const res = await cmd({ cmd: 'recHistory', ids: shown.map((r) => r.id) }).catch((err) => ({ ok: false, error: String(err) }));
+  if (!res?.ok) return showPanelError(res?.error ?? 'Could not read the run history.');
+  const summary = summarizeHistory(res.recordings);
+  const scope = scopeText(filter);
+  const saved = downloadText(reportFileName(scope), buildHistoryReport(summary, { scope, product: PRODUCT, version: VERSION }));
+  toast(`Saved ${saved} — ${summary.totals.flows} flow(s), ${summary.totals.runs} run(s)`);
 }
 
 // -------------------------------------------------------------------- wiring
@@ -1072,7 +1180,10 @@ export function wire() {
   el.suiteBtn.addEventListener('click', runAll);
   el.syncPull.addEventListener('click', pull);
   el.syncPush.addEventListener('click', () => push());
-  el.syncRefresh.addEventListener('click', syncStatus);
+  el.syncRefresh.addEventListener('click', () => loadProjects().then(syncStatus));
+  el.syncProject.addEventListener('change', () => { prefs.set(REPO_KEY, el.syncProject.value || null); paintRepoPickers(); syncStatus(); });
+  el.syncScope.addEventListener('change', () => { prefs.set(SCOPE_KEY, el.syncScope.value); paintRepoPickers(); syncStatus(); });
+  el.historyBtn.addEventListener('click', historyReport);
 
   el.fSite.addEventListener('change', () => setFilter({ site: el.fSite.value, suite: '' }));
   el.fSuite.addEventListener('change', () => setFilter({ suite: el.fSuite.value }));
@@ -1087,3 +1198,4 @@ export function wire() {
 }
 
 export { syncStatus, NO_SUITE, NO_SITE };
+export { summarizeHistory } from './report.js';

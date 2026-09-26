@@ -357,7 +357,7 @@ await test('every panel command is in the ARCHITECTURE_V2 §13 table, and every 
   const added = [...s13.matchAll(/^\|\s*`([A-Za-z]+)`\s*\|/gm)].map((m) => m[1]);
   assert.ok(kept.includes('getState') && kept.includes('rec*'), 'kept list parsed');
   assert.deepEqual(removed.sort(), ['discoverBridges', 'setMode']);
-  assert.deepEqual(added.sort(), ['about', 'daemonInfo', 'focusTab', 'handoff', 'popout', 'recordNow', 'setAutoAttach', 'setInputMode']);
+  assert.deepEqual(added.sort(), ['about', 'daemonInfo', 'flowProjects', 'focusTab', 'handoff', 'openWatch', 'popout', 'recHistory', 'recordNow', 'setAutoAttach', 'setInputMode', 'watchAddress']);
 
   const allowed = (c) =>
     added.includes(c) ||
@@ -396,11 +396,12 @@ await test('the service worker answers every command the panel sends (once sw.js
   }
 });
 
-await test('every element the scripts reach for exists, once', () => {
+await test('every element the scripts reach for exists, once', async () => {
   const ids = htmlIds(panelHtml);
   assert.equal(new Set(ids).size, ids.length, `duplicate id in panel.html: ${ids.filter((x, i) => ids.indexOf(x) !== i)}`);
   for (const [file, src] of Object.entries(panelJs)) {
-    if (file === 'welcome.js') continue;
+    // welcome.js and watch.js belong to pages of their own (checked below).
+    if (file === 'welcome.js' || file === 'watch.js') continue;
     for (const m of code(src).matchAll(/\bel\.([A-Za-z_][A-Za-z0-9_]*)/g)) {
       assert.ok(ids.includes(m[1]), `${file} uses el.${m[1]} but panel.html has no id="${m[1]}"`);
     }
@@ -409,6 +410,12 @@ await test('every element the scripts reach for exists, once', () => {
   for (const m of panelJs['welcome.js'].matchAll(/\$\('([^']+)'\)/g)) {
     assert.ok(wIds.includes(m[1]), `welcome.js uses #${m[1]} but welcome.html has none`);
   }
+  // (3.2) The live view: every $('…') watch.js looks up is in watch.html, once.
+  const watchIds = htmlIds(await read(`${PANEL_DIR}/watch.html`));
+  assert.equal(new Set(watchIds).size, watchIds.length, 'duplicate id in watch.html');
+  const looked = [...panelJs['watch.js'].matchAll(/\$\('([^']+)'\)/g)].map((m) => m[1]);
+  assert.ok(looked.length >= 8, 'watch.js looks its elements up by id');
+  for (const id of looked) assert.ok(watchIds.includes(id), `watch.js uses #${id} but watch.html has none`);
   for (const m of panelHtml.matchAll(/aria-controls="([^"]+)"/g)) assert.ok(ids.includes(m[1]), `aria-controls ${m[1]}`);
   // Each tab has a body, and each body names its tab.
   const tabs = [...panelHtml.matchAll(/data-tab="([^"]+)"/g)].map((m) => m[1]);
@@ -591,6 +598,47 @@ await test('v3 pure helpers: safeHref, middle, the flow filter and scope, the is
   assert.match(panelJs['issues.js'], /tags: el\.dTags\.value\.split\(','\)/);
 });
 
+await test('3.2 repository and report helpers: which project, which flows, what the report says', async () => {
+  const automation = await import(pathToFileURL(path.join(ROOT, PANEL_DIR, 'automation.js')).href);
+  const report = await import(pathToFileURL(path.join(ROOT, PANEL_DIR, 'report.js')).href);
+  // Scope: the person's pick, else the list's site filter, else all flows.
+  assert.equal(automation.repoScopeOf(null, { site: 'https://a.test' }), 'https://a.test');
+  assert.equal(automation.repoScopeOf('', { site: 'https://a.test' }), '', 'an explicit "all flows" is kept');
+  assert.equal(automation.repoScopeOf('https://b.test', { site: '' }), 'https://b.test');
+  // Project: a pick still offered; else the one whose environments name the site; else the default.
+  const projects = [
+    { path: 'G:/own/g9.project.json', domains: ['own.test'] },
+    { path: 'G:/shop/g9.project.json', domains: ['shop.test', 'localhost:3000'] },
+  ];
+  assert.equal(automation.repoProjectOf(projects, { saved: 'G:/shop/g9.project.json', fallback: 'G:/own/g9.project.json' }), 'G:/shop/g9.project.json');
+  assert.equal(automation.repoProjectOf(projects, { saved: 'G:/gone/g9.project.json', fallback: 'G:/own/g9.project.json', site: 'http://localhost:3000' }), 'G:/shop/g9.project.json', 'a project that left is not picked; the site decides');
+  assert.equal(automation.repoProjectOf(projects, { fallback: 'G:/own/g9.project.json', site: 'https://elsewhere.test' }), 'G:/own/g9.project.json');
+  assert.equal(automation.repoProjectOf([], { fallback: null }), null);
+
+  const s = report.summarizeHistory([
+    { id: 'a', name: 'Login', startUrl: 'https://a.test/login', suite: 'smoke', flaky: { detected: true },
+      runHistory: [{ at: 3, verdict: 'FAIL_PRODUCT', durationMs: 3000 }, { at: 1, verdict: 'PASS', durationMs: 1000 }, { at: 2, passed: 3, failed: 0 }],
+      steps: [{ type: 'assert' }, { type: 'click' }], knownWorld: { approvedAt: 9, approvedBy: 'qa' } },
+    { id: 'b', name: 'Macro', startUrl: null, runHistory: [], knownWorld: { approvedAt: 1, approvedBy: 'seed' } },
+    null,
+  ]);
+  assert.deepEqual(s.totals, { flows: 2, runs: 3, passed: 2, flaky: 1, neverRun: 1, sites: 2 });
+  const login = s.flows.find((f) => f.id === 'a');
+  assert.deepEqual(login.runs.map((r) => r.verdict), ['PASS', 'PASS', 'FAIL_PRODUCT'], 'oldest first; a pre-v1.7 run counts by its failures');
+  assert.equal(login.last, 'FAIL_PRODUCT');
+  assert.equal(login.meanMs, 2000);
+  assert.equal(login.checks, 1);
+  assert.equal(login.approvedBy, 'qa');
+  const macro = s.flows.find((f) => f.id === 'b');
+  assert.equal(macro.site, 'none');
+  assert.equal(macro.approvedAt, null, 'a seeded known world is not an approval');
+  assert.equal(macro.last, 'none');
+  assert.equal(report.reportFileName('smoke on admin.test (flaky)', Date.UTC(2026, 8, 25)), 'g9-history-smoke-on-admin-test-flaky-2026-09-25.html');
+  // It builds a document, never markup from strings (the scan above covers report.js too).
+  assert.ok(Object.keys(panelJs).includes('report.js'), 'report.js is scanned');
+  assert.match(panelJs['report.js'], /createHTMLDocument/);
+});
+
 await test('every panel script and the transport parse', async () => {
   // Most panel modules are only ever loaded by the browser, so nothing else in
   // this suite would notice one that no longer parses — the whole panel would
@@ -606,8 +654,9 @@ await test('every panel script and the transport parse', async () => {
   }
 });
 
-await test('pages are self-contained and CSP-clean; no node: imports; no top-level await', () => {
-  for (const [name, html] of [['panel.html', panelHtml], ['welcome.html', welcomeHtml]]) {
+await test('pages are self-contained and CSP-clean; no node: imports; no top-level await', async () => {
+  const watchHtml = await read(`${PANEL_DIR}/watch.html`);
+  for (const [name, html] of [['panel.html', panelHtml], ['welcome.html', welcomeHtml], ['watch.html', watchHtml]]) {
     assert.doesNotMatch(html, /(src|href)="(https?:)?\/\//, `${name} loads something remote`);
     for (const m of html.matchAll(/<script\b([^>]*)>/g)) assert.match(m[1], /\bsrc="/, `${name} has an inline script (MV3 CSP blocks it)`);
     assert.doesNotMatch(html, /\son[a-z]+="/, `${name} has an inline event handler`);
@@ -618,6 +667,26 @@ await test('pages are self-contained and CSP-clean; no node: imports; no top-lev
   }
   const imports = [...transportSrc.matchAll(/^import .* from '([^']+)';/gm)].map((m) => m[1]);
   assert.deepEqual(imports, ['./state.js'], 'the transport depends on state.js and nothing else');
+});
+
+await test('3.2 live view: the cursor is drawn by the desktop\'s own code, the page talks to the daemon as a viewer only', async () => {
+  // One drawing of the cursor in two places: extension/panel/track.js IS desktop/renderer/lib/track.js
+  // (neither can import the other: an unpacked extension loads nothing outside its folder).
+  const mine = await read(`${PANEL_DIR}/track.js`);
+  const desktops = await read('desktop/renderer/lib/track.js');
+  assert.equal(mine, desktops, 'extension/panel/track.js drifted from desktop/renderer/lib/track.js — copy one over the other');
+  const w = code(panelJs['watch.js']);
+  assert.match(w, /role: 'viewer'/, 'it says hello as a viewer');
+  assert.doesNotMatch(w, /role: '(ui|engine|agent)'/);
+  assert.match(w, /type: 'viewer', id, op/, 'every request is a viewer op');
+  assert.doesNotMatch(w, /type: '(call|admin|flowlib|request)'/, 'nothing but viewer ops');
+  assert.match(w, /cmd: 'watchAddress'/, 'the address comes from the worker, not a guess');
+  const watch = await import(pathToFileURL(path.join(ROOT, PANEL_DIR, 'watch.js')).href).catch((err) => ({ err }));
+  // Importing it outside a page throws on its DOM wiring; its pure part is checked by source instead.
+  assert.ok(watch.err || typeof watch.tabLabel === 'function');
+  const label = w.slice(w.indexOf('export function tabLabel'), w.indexOf('function paintPicker'));
+  assert.match(label, /headless/);
+  assert.match(label, /middle\(/, 'a long title is shortened in the middle');
 });
 
 // ======================================================= 2. panel behaviour
@@ -1033,7 +1102,7 @@ const TRANSPORT_TESTS = [
     const t = await g.fresh();
     assert.deepEqual(Object.keys(t).sort(), [
       // `hurry`: a Stop that could not be sent connects at once instead of waiting out the backoff.
-      'DEFAULT_PORT', 'connect', 'connectNow', 'disconnect', 'flowLib', 'hurry', 'isConnected', 'isReconnectPending',
+      'DEFAULT_PORT', 'connect', 'connectNow', 'connectedAddress', 'disconnect', 'flowLib', 'hurry', 'isConnected', 'isReconnectPending',
       'onMessage', 'request', 'send',
     ]);
     assert.equal(t.DEFAULT_PORT, 8765);

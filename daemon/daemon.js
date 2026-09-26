@@ -99,6 +99,15 @@ export class Daemon {
     this.router.emitUi = (topic, data) => this.broadcastUi(topic, data);
     this.router.onHaltFromEngine = (engineId, halted, by) => this.setGlobalHalt(halted, by, { except: engineId });
     this.router.onWatchData = (handle, kind, data) => this.#watchData(handle, kind, data);
+    this.router.onWatchRequest = (req) => this.requestWatch(req);
+    // (3.2) An approval in the launched-engine store goes beside the flow in the repository.
+    this.engines.onApproved = async (id) => {
+      const bundle = await this.engines.approvedBundle(id);
+      if (!bundle) return { written: false, reason: 'nothing approved to write' };
+      const result = await this.writeApprovedAnywhere(bundle.flowId, bundle.approved, bundle.images);
+      if (result.written) this.log(`[flows] approval of ${bundle.flowId} written to ${result.project}: ${result.file}`);
+      return result;
+    };
 
     this.scheduler = new Scheduler({
       settings: this.settings,
@@ -114,6 +123,7 @@ export class Daemon {
 
     this.project = loadProject(cwd);
     this.flows = new FlowLibrary(this.project.flowsDir);
+    this.libraries = new Map(); // flowsDir → FlowLibrary, for connected agents' projects (3.2)
     this.projectCache = new Map();
 
     this.watchers = new Map(); // handle → Set(uiId)
@@ -287,8 +297,11 @@ export class Daemon {
     let role = msg.role;
     if (role === 'extension') role = 'engine'; // a v1 extension's word for it
     if (role === 'runner') role = 'agent'; // the runner is an agent like any other
-    if (!['agent', 'engine', 'ui'].includes(role)) {
-      conn.send({ type: 'welcome', version: VERSION, daemonPid: process.pid, id: null, problem: `Unknown role "${msg.role}". Use agent, engine or ui.` });
+    // (3.2) "viewer": the extension's watch window. It may list tabs and watch them, nothing else —
+    // no calls, no admin — so an extension origin is enough (web pages never get this far: the
+    // WebSocket upgrade refuses http(s) origins, ws-server.js).
+    if (!['agent', 'engine', 'ui', 'viewer'].includes(role)) {
+      conn.send({ type: 'welcome', version: VERSION, daemonPid: process.pid, id: null, problem: `Unknown role "${msg.role}". Use agent, engine, ui or viewer.` });
       setTimeout(() => conn.close(4002, 'unknown role'), 50).unref?.();
       return null;
     }
@@ -402,7 +415,7 @@ export class Daemon {
     if (client.role === 'engine') {
       this.router.failEngine(client.id, 'The browser extension disconnected mid-call. Check that the browser is still open.');
     }
-    if (client.role === 'ui') {
+    if (client.role === 'ui' || client.role === 'viewer') {
       for (const [handle, set] of this.watchers) {
         if (set.delete(client.id) && set.size === 0) this.#stopWatching(handle).catch(() => {});
       }
@@ -423,6 +436,11 @@ export class Daemon {
   // ------------------------------------------------------------ messages
 
   async #dispatch(client, msg) {
+    // (3.2) A viewer watches and nothing else: no calls, no requests, no flow library, no admin.
+    if (client.role === 'viewer' && msg.type !== 'viewer') {
+      if (msg.id != null) client.send({ type: 'viewerResult', id: msg.id, ok: false, error: 'A viewer (the watch window) may only list and watch tabs.' });
+      return;
+    }
     switch (msg.type) {
       case 'call':
         if (client.role === 'engine') return; // engines answer calls, they do not make them
@@ -444,6 +462,8 @@ export class Daemon {
         return this.#flowlibMessage(client, msg);
       case 'admin':
         return this.#admin(client, msg);
+      case 'viewer':
+        return this.#viewerMessage(client, msg);
       default:
         return; // unknown types are ignored, as the protocol promises
     }
@@ -521,16 +541,103 @@ export class Daemon {
       if (msg.flowId == null || msg.flowId === '') throw new Error(`The flow-library op "${op}" needs a flowId.`);
       return String(msg.flowId);
     };
+    if (op === 'projects') return this.#libraryList();
+    // An approval names no project: it goes where the flow is.
+    if (op === 'writeApproved' && !msg.project) return this.writeApprovedAnywhere(flowId(), msg.approved, msg.images ?? {});
+    // (3.2) `project` names WHICH library: a g9.project.json path from the `projects` op. Without
+    // it, the daemon's own project, as before 3.2.
+    const lib = this.#libraryFor(msg.project ?? null);
+    const site = typeof msg.site === 'string' && msg.site ? msg.site : null;
     switch (op) {
-      case 'list': return this.flows.list();
-      case 'read': return { spec: await this.flows.read(flowId()) };
-      case 'write': return this.flows.write(msg.spec);
-      case 'remove': return this.flows.remove(flowId());
-      case 'status': return this.flows.status(msg.local ?? []);
-      case 'suite': return this.flows.resolveSuite(msg.suiteId);
+      case 'list': return lib.list({ site });
+      case 'read': return { spec: await lib.read(flowId()) };
+      case 'write': return lib.write(msg.spec);
+      case 'remove': return lib.remove(flowId());
+      case 'status': return lib.status(msg.local ?? [], { site });
+      case 'suite': return lib.resolveSuite(msg.suiteId);
+      case 'readApproved': return lib.readApproved(flowId());
+      case 'writeApproved': return lib.writeApproved(flowId(), msg.approved, msg.images ?? {});
       default:
-        throw new Error(`Unknown flow-library op "${op}". Known: list, read, write, remove, status, suite.`);
+        throw new Error(`Unknown flow-library op "${op}". Known: projects, list, read, write, remove, status, suite, readApproved, writeApproved.`);
     }
+  }
+
+  /**
+   * (3.2) An approval made where no project was named (an agent's approve, the runner's, the
+   * panel's) belongs in whichever library holds that flow: the daemon's own project first, then the
+   * connected agents'. `{ written: false, reason }` when none holds it — a flow nobody pushed yet.
+   */
+  async writeApprovedAnywhere(flowId, approved, images) {
+    const rows = this.#libraryRows().sort((a, b) => Number(b.own) - Number(a.own));
+    for (const row of rows) {
+      const lib = this.#libraryFor(row.project.path);
+      const result = await lib.writeApproved(flowId, approved, images);
+      if (result.written) return { ...result, project: row.project.path };
+    }
+    return { written: false, reason: rows.length
+      ? `Flow ${flowId} is in none of the flow libraries (${rows.map((r) => r.project.flowsDir).join(', ')}): push it, and its approval travels with it.`
+      : 'No flow library: no g9.project.json for the daemon or any connected agent.' };
+  }
+
+  /**
+   * (3.2) Every flow library this daemon can reach: its own project's (the folder it was started
+   * in) and each connected agent's. One row per g9.project.json. The panel's Repository card
+   * used to reach only the daemon's own project — the project of whichever session happened to
+   * start the daemon — so a QA working in a second project could neither pull nor push its flows.
+   * Only projects that exist here are offered: a path is never taken from the caller.
+   */
+  #libraryRows() {
+    const rows = new Map();
+    const add = (project, { own = false, agentId = null } = {}) => {
+      if (!project?.found || !project.path || !project.flowsDir) return;
+      let row = rows.get(project.path);
+      if (!row) {
+        row = { project, own: false, agents: [] };
+        rows.set(project.path, row);
+      }
+      if (own) row.own = true;
+      if (agentId && !row.agents.includes(agentId)) row.agents.push(agentId);
+    };
+    add(this.project, { own: true });
+    for (const agent of this.registry.agents()) add(agent.project, { agentId: agent.id });
+    return [...rows.values()];
+  }
+
+  #libraryList() {
+    const rows = this.#libraryRows();
+    const fallback = rows.find((r) => r.own) ?? rows[0] ?? null;
+    return {
+      default: fallback?.project.path ?? null,
+      projects: rows.map((r) => ({
+        name: projectLabel(r.project, null),
+        path: r.project.path,
+        root: r.project.root,
+        flowsDir: r.project.flowsDir,
+        own: r.own,
+        agents: r.agents,
+        domains: environmentHosts(r.project.environments),
+      })),
+    };
+  }
+
+  /** The library for a project path from #libraryRows, or the default one; a stranger path is refused. */
+  #libraryFor(projectPath) {
+    const rows = this.#libraryRows();
+    let row;
+    if (projectPath == null || projectPath === '') {
+      row = rows.find((r) => r.own) ?? rows[0] ?? null;
+      if (!row) return this.flows; // unavailable: it explains itself (no g9.project.json)
+    } else {
+      row = rows.find((r) => r.project.path === String(projectPath));
+      if (!row) {
+        throw new Error(`"${projectPath}" is not the g9.project.json of this daemon or of a connected agent, so its flow library is not offered. ` +
+          `Known: ${rows.map((r) => r.project.path).join(', ') || '(none)'}.`);
+      }
+    }
+    if (row.project === this.project) return this.flows;
+    const key = row.project.flowsDir;
+    if (!this.libraries.has(key)) this.libraries.set(key, new FlowLibrary(key));
+    return this.libraries.get(key);
   }
 
   // ------------------------------------------------------------ admin (ui)
@@ -708,6 +815,9 @@ export class Daemon {
         cwd: client?.cwd ?? null,
         current,
         currentEngine,
+        // (3.2) The daemon's handle for a tab this browser cannot name (launched, or another
+        // browser's): what the panel's Watch opens the live view on.
+        ...(a.current != null && current == null ? { currentHandle: a.current } : {}),
       };
     });
   }
@@ -858,6 +968,110 @@ export class Daemon {
       await this.engines.watch(handle, false, 'ui-watch').catch(() => {});
     }
     if (runId) await this.evidence.finishRun(runId, { ok: true }).catch(() => {});
+  }
+
+  /**
+   * (3.2) An agent's `browser_tabs action:"watch"`: show the person a live view of a tab. The newest
+   * connected extension opens its watch window on it (`{type:'openWatch'}`, DAEMON_PROTOCOL §5) and
+   * the desktop app hears `watchRequest`. `on:false` closes that view again (`closeWatch`).
+   * Nobody to show it to is an answer, not an error: the agent is told where a person could look.
+   */
+  requestWatch({ handle, caller = {}, on = true, focus = false }) {
+    if (!this.registry.hasHandle(handle)) throw new Error(`Tab ${handle} does not exist.`);
+    const engineId = this.registry.engineOf(handle);
+    const engineKind = this.registry.engineKind(engineId);
+    const url = this.registry.handles.get(handle)?.url ?? null;
+    const agent = { id: caller.agentId ?? null, name: caller.name ?? null };
+    const exts = this.registry.extensionEngines();
+    const uis = this.registry.byRole('ui');
+    const shownIn = [];
+    if (!on) {
+      for (const ext of exts) ext.send({ type: 'closeWatch', handle });
+      this.broadcastUi('watchRequest', { tabId: handle, on: false, agent });
+      return { tabId: handle, on: false, closedIn: [...exts.map((e) => e.id), ...(uis.length ? ['desktop'] : [])] };
+    }
+    // The newest extension connection is the browser the person is using (usually the only one).
+    const ext = exts[exts.length - 1] ?? null;
+    if (ext) {
+      ext.send({ type: 'openWatch', handle, engineKind, url, agent, focus: !!focus });
+      shownIn.push(`browser (${ext.id})`);
+    }
+    if (uis.length) {
+      this.broadcastUi('watchRequest', { tabId: handle, on: true, engineKind, url, agent });
+      shownIn.push('desktop app');
+    }
+    const where = engineKind === 'launched' ? 'a launched browser' : "the person's own browser";
+    return {
+      tabId: handle,
+      on: true,
+      shown: shownIn.length > 0,
+      shownIn,
+      note: shownIn.length
+        ? `A live view of tab ${handle} (in ${where}) is open for the person: frames and your cursor as you act, view only. ` +
+          'It stays open until they close it or you call action:"watch" with on:false.'
+        : 'Nobody could be shown a live view: no browser with the G9 extension and no G9 desktop app is connected. ' +
+          "Ask the person to open the G9 side panel (Session → Live view) or the desktop app's Watch view.",
+    };
+  }
+
+  /**
+   * (3.2) The watch window's requests (DAEMON_PROTOCOL §7): `watchables`, `watch`, `unwatch`, answered as
+   * `{type:'viewerResult', id, ok, result|error}`. Frames, pointer samples and watchStatus arrive as the
+   * desktop's do (`{type:'event', topic}`), the same stream and the same evidence run.
+   */
+  async #viewerMessage(client, msg) {
+    const reply = (ok, payload) => client.send({ type: 'viewerResult', id: msg.id ?? null, ok, ...(ok ? { result: payload } : { error: payload }) });
+    if (client.role !== 'viewer' && client.role !== 'ui') return reply(false, 'Viewer messages are for the watch window (role "viewer").');
+    const tab = () => {
+      const n = Number(msg.tabId);
+      if (!Number.isInteger(n)) throw new Error(`The viewer op "${msg.op}" needs a tabId.`);
+      return n;
+    };
+    try {
+      switch (msg.op) {
+        case 'watchables': return reply(true, await this.watchables());
+        case 'watch': return reply(true, await this.#watch(client, tab(), true));
+        case 'unwatch': return reply(true, await this.#watch(client, tab(), false));
+        default: return reply(false, `Unknown viewer op "${msg.op}". Known: watchables, watch, unwatch.`);
+      }
+    } catch (err) {
+      return reply(false, String(err?.message ?? err));
+    }
+  }
+
+  /**
+   * (3.2) Every tab there is to watch, for the watch window's picker: its handle, title, URL, which
+   * engine (and whether headless), and which agent owns it or works in it.
+   */
+  async watchables() {
+    const rows = await this.router.listTabs(null).catch(() => []);
+    const engines = new Map(this.router.engineRows().map((e) => [e.engineId, e]));
+    const nameOf = (id) => (id ? this.registry.getClient(id)?.name ?? id : null);
+    const currentOf = new Map();
+    for (const a of this.registry.agents()) {
+      if (a.current == null) continue;
+      if (!currentOf.has(a.current)) currentOf.set(a.current, []);
+      currentOf.get(a.current).push({ id: a.id, name: a.name });
+    }
+    const tabs = [];
+    for (const r of rows) {
+      if (!Number.isInteger(r?.tabId)) continue;
+      const engineId = r.engine ?? r.engineId ?? this.registry.engineOf(r.tabId);
+      const owner = this.registry.ownerOf(r.tabId);
+      tabs.push({
+        tabId: r.tabId,
+        title: r.title ?? null,
+        url: r.url ?? null,
+        engineId,
+        engineKind: r.engineKind ?? this.registry.engineKind(engineId),
+        headless: engines.get(engineId)?.headless ?? null,
+        browser: typeof engines.get(engineId)?.browser === 'string' ? engines.get(engineId).browser : (engines.get(engineId)?.browser?.kind ?? null),
+        owner: owner ? { id: owner, name: nameOf(owner) } : null,
+        agents: currentOf.get(r.tabId) ?? [],
+        watched: this.watchers.has(r.tabId),
+      });
+    }
+    return { tabs };
   }
 
   /** Frames and pointer samples for a watched tab: spooled, then multicast to its watchers. */

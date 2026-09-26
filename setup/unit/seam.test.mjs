@@ -1308,6 +1308,40 @@ async function extensionSide() {
   assert.equal(calls.created.length, beforeUpdate);
   ok('a reload of the same version opens nothing');
 
+  // (3.2) --load-extension (the browser node) reports "install" on every browser start while
+  // storage survives: with a version on record that is a restart, not a first install.
+  const { about: aboutBefore } = await local.get('about');
+  ev.installed.fire({ reason: 'install' });
+  await tick(100);
+  assert.equal(calls.updated.length + calls.reloaded.length, updatesSoFar, 'a restart of the same version opens nothing');
+  assert.equal(calls.created.length, beforeUpdate, 'and creates no tab');
+  assert.equal((await local.get('about')).about.installedAt, aboutBefore.installedAt, 'the first install time is kept');
+  await local.set({ about: { ...aboutBefore, lastSeenVersion: '1.9.0' } });
+  ev.installed.fire({ reason: 'install' });
+  await until(async () => (await local.get('about')).about.previousVersion === '1.9.0', 'a new image counts as an update');
+  await until(() => calls.updated.length + calls.reloaded.length > updatesSoFar, 'the welcome tab is reused, with ?updated=1');
+  assert.equal(calls.created.length, beforeUpdate, 'still no second welcome tab');
+  ok('"install" with a version on record: same version opens nothing, another version is an update');
+
+  // (3.2) On the browser node every start is a first install (storage wiped); its image ships
+  // deployment.json {"welcome":false}, and then the install records itself and opens nothing.
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, ...rest) => (String(url) === 'chrome-extension://g9test/deployment.json'
+    ? new Response(JSON.stringify({ welcome: false }), { status: 200 }) : realFetch(url, ...rest));
+  try {
+    await local.set({ about: {} });
+    const createdBefore = calls.created.length;
+    const touchedBefore = calls.updated.length + calls.reloaded.length;
+    ev.installed.fire({ reason: 'install' });
+    await until(async () => (await local.get('about')).about.lastSeenVersion === '2.0.0', 'the install is recorded');
+    await tick(100);
+    assert.equal(calls.created.length, createdBefore, 'no welcome tab on a browser node');
+    assert.equal(calls.updated.length + calls.reloaded.length, touchedBefore, 'nor an existing one reused');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  ok('a browser node (deployment.json welcome:false) opens no welcome tab on its every-start install');
+
   // --- the daemon connection -------------------------------------------------
   const ws = await until(() => sockets.find((s) => s.readyState === 1 && s.sent.some((m) => m.type === 'hello')), 'hello');
   assert.equal(ws.url, `ws://127.0.0.1:${PORT}/g9`);

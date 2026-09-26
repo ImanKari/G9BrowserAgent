@@ -190,6 +190,12 @@ export function isConnected() {
   return !!socket && socket.readyState === OPEN && welcomed;
 }
 
+/** "host:port" of the daemon this worker is connected to, or null (3.1: the watch window dials it too). */
+export function connectedAddress() {
+  return isConnected() ? openAddress : null;
+}
+let openAddress = null;
+
 export function send(payload) {
   if (!socket || socket.readyState !== OPEN) return false;
   try {
@@ -548,6 +554,7 @@ function v1BridgeMessage(address, info) {
 
 function onOpen(ws, address) {
   if (ws !== socket) return;
+  openAddress = address;
   startPing();
   send({
     type: 'hello',

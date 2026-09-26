@@ -456,9 +456,11 @@ export async function approveKnownWorld(id, { by = 'operator', note = null, expe
     );
   }
   const merged = mergeKnownWorld(recording.knownWorld, recording.lastSignature);
-  const knownWorld = { ...merged, approvedAt: Date.now(), approvedBy: by, approvalNote: note };
+  // A person's name, never the word a first run uses for itself (lib/approved.js isApproved).
+  const approver = by === 'seed' ? 'operator' : by;
+  const knownWorld = { ...merged, approvedAt: Date.now(), approvedBy: approver, approvalNote: note };
   await saveRecording({ ...recording, knownWorld, surpriseHistory: [] });
-  return {
+  const result = {
     id,
     runs: knownWorld.runs,
     networkOperations: Object.keys(knownWorld.network).length,
@@ -466,6 +468,35 @@ export async function approveKnownWorld(id, { by = 'operator', note = null, expe
     steps: Object.keys(knownWorld.steps).length,
     volatileKeys: knownWorld.volatile.length,
   };
+  // (3.2) The approval travels with the flow: the engine's listener writes it next to the flow in
+  // the repository, when the flow is there. The approval above already stands, so a slow or failed
+  // write is reported, never thrown.
+  if (approvedListener) {
+    let timer = null;
+    try {
+      result.repo = await Promise.race([
+        Promise.resolve(approvedListener(id)),
+        new Promise((resolve) => { timer = setTimeout(() => resolve({ written: false, reason: 'the flow library did not answer within 15 s' }), 15_000); }),
+      ]);
+    } catch (err) {
+      result.repo = { written: false, reason: String(err?.message ?? err) };
+    } finally {
+      clearTimeout(timer);
+    }
+    if (result.repo == null) delete result.repo;
+  }
+  return result;
+}
+
+let approvedListener = null;
+
+/**
+ * (3.2) Who writes an approval to the repository: the extension's service worker (through the
+ * daemon's flow library) or the daemon itself (for the launched-engine store). `fn(id)` resolves to
+ * what it did, e.g. `{ written: true, file }` or `{ written: false, reason }`; null removes it.
+ */
+export function onApproved(fn) {
+  approvedListener = typeof fn === 'function' ? fn : null;
 }
 
 /**

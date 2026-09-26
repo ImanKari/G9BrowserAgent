@@ -209,8 +209,8 @@ the same pointer paths and typing rhythm.
 |---|---|
 | `list` | the flows in the repository library and in each browser store |
 | `calibrate <flowId>` | replays the flow twice on one build and marks what differs as volatile noise, so it never counts as a surprise. Run it once per flow. |
-| `approve <flowId> [--by <name>] [--note <text>]` | folds the last run into the flow's approved known world (default `--by runner`). The desktop's Approvals view does the same with your Windows user name. |
-| `spec <flowId> [--out <file>]` | exports a canonical, Git-diffable FlowSpec (to stdout without `--out`) |
+| `approve <flowId> [--by <name>] [--note <text>]` | folds the last run into the flow's approved known world (default `--by runner`). The desktop's Approvals view does the same with your Windows user name. (3.2) When the flow is in a project repository, the approval is written beside it (`<name>.approved.json`), ready to commit. |
+| `spec <flowId> [--out <file>]` | exports a canonical, Git-diffable FlowSpec (to stdout without `--out`). (3.2) With `--out x.flow.json` it also writes what was approved beside it: `x.approved.json` and `x.baselines/*.png`. |
 | `ab <flowId> --a <url> --b <url> [--timing <mode>] [--report <dir>]` | runs the flow against two builds and diffs their full signatures. It reports differences, not verdicts: a shipped feature and a regression look the same. It exits 0 unless a side failed to run (2), and writes `ab.json` with `--report`. |
 
 ## Pinning the backend

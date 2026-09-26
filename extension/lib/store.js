@@ -236,6 +236,8 @@ export async function saveRecording(recording) {
   const steps = record.steps ?? [];
   await upsertIndex(RECORDING_INDEX, {
     id,
+    // (3.2) The flow's own id when it came from the repository (lib/flowsync.js findByFlowId).
+    flowId: record.flowId ?? null,
     name: record.name ?? '(unnamed)',
     startUrl: record.startUrl ?? null,
     stepCount: steps.length,

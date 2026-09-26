@@ -88,7 +88,7 @@ export function fallbackIsReadOnly(tool, args = {}) {
     case 'browser_diagnose':
       return [undefined, 'health', 'vitals', 'memory'].includes(args.what);
     case 'browser_tabs':
-      return [undefined, 'list', 'sessions'].includes(action);
+      return [undefined, 'list', 'sessions', 'watch'].includes(action);
     case 'browser_recording':
       return [undefined, 'list', 'get', 'status', 'known_world', 'signature', 'export', 'export_spec', 'export_test'].includes(action);
     case 'browser_issue':
@@ -172,7 +172,7 @@ const NOT_FOUND = /\bNo (recording|issue|attachment|flow)\b|not found in this br
 /** What a store learns about a flow by running it; never part of a FlowSpec (daemon/flows.js LOCAL_ONLY). */
 const LOCAL_TRUTH = ['runHistory', 'lastRun', 'flaky', 'knownWorld', 'surpriseHistory', 'lastSignature'];
 
-const TABS_ACTIONS = ['list', 'open', 'close', 'focus', 'attach', 'claim', 'release', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait'];
+const TABS_ACTIONS = ['list', 'open', 'close', 'focus', 'attach', 'claim', 'release', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch'];
 
 /**
  * An input error's delivery state ("not-delivered" | "missed" | "partial"), carried as fields from
@@ -908,7 +908,10 @@ export class Router {
       const previous = id ? await this.engines.getRecording?.(id).catch(() => null) : null;
       const result = await this.#storeCall(client, store, tool, args);
       let kept = [];
-      if (previous && result?.id) kept = await this.#restoreLocalTruth(result.id, previous);
+      // (3.2) import_spec keeps local truth itself (lib/flowsync.js importFlow) and may have taken a
+      // LATER approval from the repository's sidecar: then the old known world must not come back.
+      const skip = result?.knownWorld === 'repo' ? ['knownWorld', 'surpriseHistory'] : [];
+      if (previous && result?.id) kept = await this.#restoreLocalTruth(result.id, previous, skip);
       if (!result || typeof result !== 'object' || Array.isArray(result)) return result;
       return { ...result, engine: store.kind, ...(kept.length ? { keptLocal: kept } : {}) };
     }
@@ -928,10 +931,10 @@ export class Router {
   }
 
   /** Copy the local-only fields of a recording's previous version onto its re-imported one. */
-  async #restoreLocalTruth(id, previous) {
+  async #restoreLocalTruth(id, previous, skip = []) {
     const current = await this.engines.getRecording(id).catch(() => null);
     if (!current) return [];
-    const kept = LOCAL_TRUTH.filter((key) => previous[key] !== undefined && previous[key] !== null);
+    const kept = LOCAL_TRUTH.filter((key) => !skip.includes(key) && previous[key] !== undefined && previous[key] !== null);
     if (!kept.length) return [];
     const merged = { ...current };
     for (const key of kept) merged[key] = previous[key];
@@ -1051,6 +1054,15 @@ export class Router {
         const { width, height, left, top, focus } = args;
         return this.registry.enqueue(handle, () => (this.#atTurn(client, handle),
           this.relay(target.client, 'browser_tabs', { action: 'popout', tabId: handle, width, height, left, top, focus }, caller, { handle })));
+      }
+
+      case 'watch': {
+        // (3.2) Show the PERSON a live view of this tab — a headless one above all, which has no
+        // window: the daemon opens the watch window in their browser (and tells the desktop app).
+        // Read-only: nothing reaches the page, so it needs no ownership and no turn in the queue.
+        const handle = await this.#resolve(client, args);
+        if (typeof this.onWatchRequest !== 'function') throw new Error('This daemon cannot open a live view.');
+        return this.onWatchRequest({ handle, caller: { agentId: client.id, name: client.name ?? null }, on: args.on !== false, focus: args.focus === true });
       }
 
       case 'handoff': {

@@ -43,6 +43,8 @@ export const CHECKS = [
   unit('world', 0.2, []),
   unit('runtime', 0.5, []),
   unit('check', 1, ['setup/check.mjs']),
+  unit('mcp-http', 0.5, []),
+  unit('docker', 0.2, ['docker/**', '.gitattributes']),
   {
     id: 'selftest', label: 'self-test (daemon + two shims + a fake extension)', tier: 'offline', est: 10,
     cmd: ['setup/selftest.mjs'],

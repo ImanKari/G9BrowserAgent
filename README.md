@@ -23,6 +23,7 @@ debug and automate web apps. Every click is visible, recorded and replayable.**
 - [The side panel](#the-side-panel)
 - [The desktop app](#the-desktop-app)
 - [How an agent drives the browser](#how-an-agent-drives-the-browser)
+- [A browser on a server](#a-browser-on-a-server)
 - [Browser profiles](#browser-profiles)
 - [Updates](#updates)
 - [Troubleshooting](#troubleshooting)
@@ -384,6 +385,23 @@ this problem — use them for anything unattended.
 **Sharing.** Each tab has one owner; changes on a tab run one at a time; other agents get a clear
 "owned by" message. **Stop** blocks everything, and only a person can resume.
 
+**Watching a background tab.** An agent can open a **live view** of any tab, headless ones included
+(`browser_tabs action:"watch"`): a window in your browser shows the page moving, with the agent's
+pointer. The side panel's **◉ Live view** opens the same view.
+[Details](docs/REFERENCE.md#the-live-view).
+
+## A browser on a server
+
+G9 also runs on a server, as a **browser node**. It is a Docker container:
+- A web desktop shows the browser in a page. You watch it, behind a password, and step in for a
+  sign-in.
+- Its browser has the extension, and the daemon runs inside the container.
+- Agents on other machines connect to it over MCP with a token, for example
+  `claude mcp add --transport http …`.
+
+Use one container per account. Building, running, nginx in front of it and the security rules are
+in [docker/README.md](docker/README.md).
+
 ## Browser profiles
 
 - **Your own profile** is used only by the extension, in your own browser. G9 never opens it from
@@ -529,7 +547,9 @@ browser. Treat it like an SSH key, and use it on machines whose users and softwa
 - **Local only.** The daemon listens on `127.0.0.1`, never on your network. Web pages are refused:
   a page cannot connect to it, even one served from your own machine.
 - **No token.** Any program running as a user on this machine can connect to the daemon. That is a
-  deliberate choice for a trusted QA machine.
+  deliberate choice for a trusted QA machine. The one way in from another machine is the MCP
+  endpoint over HTTP ([A browser on a server](#a-browser-on-a-server)). It will not listen beyond
+  loopback without a long bearer token.
 - **Nothing leaves your machine.** No telemetry, no accounts. Recordings, issues and evidence stay in
   `G9_HOME` and in the extension's storage. The only outside connections are the pages you test, the
   update check (GitHub) and, if you choose it, the Chrome for Testing download (Google).

@@ -1,0 +1,5 @@
+#!/bin/bash
+# The desktop's Chromium with the G9 extension: /usr/local/bin/g9-chromium (in the image, so an
+# update reaches a node that already exists; init-g9-desktop copies this file into /config on every
+# start). Not exec: with RESTART_APP the watchdog watches this script's own process.
+/usr/local/bin/g9-chromium

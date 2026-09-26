@@ -76,7 +76,10 @@
       <div class="subblock" id="agentsBlock" hidden>
         <div class="row spread">
           <span class="label">Agents</span>
-          <span class="muted sm" id="agentCount"></span>
+          <span class="row">
+            <span class="muted sm" id="agentCount"></span>
+            <button class="link" id="liveView" type="button" title="Watch the tabs agents work in — launched and headless ones too — live, with their cursor, in a window of its own. View only.">◉ Live view</button>
+          </span>
         </div>
         <ul class="list" id="agentList"></ul>
         <p class="help" id="agentEmpty" hidden>No agent is connected. Open your AI client — its G9 tools connect through the daemon.</p>
@@ -237,6 +240,8 @@
            an accidental run of everything. -->
       <div class="runbar" id="suiteCard" hidden>
         <button id="suiteBtn" class="primary sm" type="button">▶ Run</button>
+        <button id="historyBtn" class="sm" type="button"
+                title="Save the run history of the flows shown as one HTML file — pass rates, flakiness and the last runs of each. Run history stays on this machine; this is how it is shared.">⤓ History report</button>
         <span class="help" id="suiteProgress">Runs in order; skips flows tagged <code>@manual</code>.</span>
       </div>
 
@@ -249,10 +254,14 @@
         <span class="label">Repository</span>
         <button class="link" id="syncRefresh" type="button">check</button>
       </div>
+      <div class="filters repo-pick" role="group" aria-label="Which repository and which flows">
+        <select id="syncProject" aria-label="Project repository" title="Which project's flow library: the daemon's own, or a connected agent's"></select>
+        <select id="syncScope" aria-label="Which flows" title="All flows, or only one site's"></select>
+      </div>
       <p class="help" id="syncLine">Flows in this browser live only in this browser until you push them.</p>
       <div class="btnrow">
-        <button id="syncPull" class="sm" type="button">↓ Pull from repo</button>
-        <button id="syncPush" class="sm" type="button">↑ Push all to repo</button>
+        <button id="syncPull" class="sm" type="button" title="Bring the repository's flows here, with what people approved (known world, baselines). Run history here stays.">↓ Pull from repo</button>
+        <button id="syncPush" class="sm" type="button" title="Write this browser's flows to the repository, with what you approved beside them. Commit them on a branch.">↑ Push to repo</button>
       </div>
     </section>
   </div>

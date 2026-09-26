@@ -1,0 +1,37 @@
+#!/bin/bash
+# The desktop's Chromium, with the G9 extension (Engine 1) loaded from the image. Chromium (not
+# branded Chrome, which dropped --load-extension in 137) still takes the flag. The debugger infobar
+# ("G9 started debugging this browser") is not shown: this desktop exists to be driven.
+#
+# (3.2) The switches live here, in the image, not in the autostart file: LinuxServer copies
+# /defaults/autostart into /config once, so switches written there never changed on an update.
+#
+# A container that was killed (docker kill, a host crash) leaves the profile marked "Crashed", and
+# Chromium would ask to restore pages. svc-g9-quit closes it cleanly on a normal stop; this is the
+# fallback for the other cases (the tabs are not restored either way; the sign-ins are kept).
+PROFILE="${HOME:-/config}/.config/chromium/Default"
+
+# Chromium keeps an extension's service-worker scripts in the profile (Service Worker/ScriptCache)
+# and, for this --load-extension extension, went on running the FIRST image's code after the image
+# changed (measured: the first build's sw.js under a later manifest). When the extension in the image differs
+# from the one last started here, that cache goes; sites register their own workers again on their
+# next visit. /opt/g9/extension.build is a hash of the extension's files, written by the Dockerfile.
+STAMP="${HOME:-/config}/g9/.extension-build"
+BUILD="$(cat /opt/g9/extension.build 2>/dev/null)"
+if [ -n "$BUILD" ] && [ "$(cat "$STAMP" 2>/dev/null)" != "$BUILD" ]; then
+  rm -rf "$PROFILE/Service Worker"
+  mkdir -p "$(dirname "$STAMP")" && echo "$BUILD" > "$STAMP"
+  echo "[g9] the extension in the image changed: its cached service worker was cleared"
+fi
+
+PREFS="$PROFILE/Preferences"
+if [ -f "$PREFS" ]; then
+  sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/; s/"exited_cleanly":false/"exited_cleanly":true/' "$PREFS" 2>/dev/null || true
+fi
+exec wrapped-chromium \
+  --load-extension=/opt/g9/extension \
+  --silent-debugger-extension-api \
+  --hide-crash-restore-bubble \
+  --no-first-run \
+  --no-default-browser-check \
+  ${CHROME_CLI}

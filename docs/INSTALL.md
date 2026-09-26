@@ -24,6 +24,7 @@ install.
 - [Windows Firewall and Chrome for Testing](#windows-firewall-and-chrome-for-testing)
 - [Edge implicit sign-in](#edge-implicit-sign-in)
 - [Upgrading a machine that runs G9 v1](#upgrading-a-machine-that-runs-g9-v1)
+- [A browser on a server (Docker, MCP over HTTP)](#a-browser-on-a-server-docker-mcp-over-http)
 - [Unattended machines](#unattended-machines)
 - [Updates and update hosting](#updates-and-update-hosting)
 - [Repository (developer) install](#repository-developer-install)
@@ -450,6 +451,36 @@ engines.
   **Project sites**. Recorded flows and issues need nothing: the issue index is completed from the
   stored issues the first time it is read.
 
+## Upgrading to G9 3.2
+
+- **Reload the extension and restart the daemon**, as for 3.0. With a daemon older than 3.2 still running, the
+  live view says the daemon is older than 3.2, the Repository card uses the daemon's own project
+  only, and approvals are not written beside the flows (the approval itself works).
+- **Flow files need nothing.** The first Push after this writes each flow's `.approved.json` beside it
+  (for flows with an approval or a baseline). Commit those files with the flows.
+- **Duplicates from earlier pulls.** Before 3.2 every Pull saved each repo flow again under a new id.
+  The Repository line now names flows that are here more than once; delete the copies you did not
+  edit. Nothing is deleted for you.
+
+---
+
+## A browser on a server (Docker, MCP over HTTP)
+
+Since 3.2, G9 also runs on a server as a **browser node**: a container with a web desktop you watch
+(and take over, for a sign-in), its Chromium carrying the extension, the daemon, and an MCP endpoint
+over HTTP for agents on other machines. One container per account. Building, running, the reverse
+proxy and the security rules are in [docker/README.md](../docker/README.md).
+
+An agent connects to a node's endpoint with its bearer token instead of launching a shim:
+
+```bash
+claude mcp add --transport http g9-browser1 https://browser1.example.com/mcp   --header "Authorization: Bearer <token>"
+```
+
+The same endpoint runs outside Docker: `G9_MCP_TOKEN=<48 random characters> node mcp/http.mjs`
+(127.0.0.1:8931 by default). Set `G9_MCP_HTTP_HOST` to listen elsewhere; it refuses to start there
+without a token of at least 24 characters. The daemon itself stays on loopback.
+
 ---
 
 ## Unattended machines
@@ -605,8 +636,8 @@ git clone https://github.com/ImanKari/G9BrowserAgent.git g9-browser-agent; cd g9
 `install.ps1`:
 1. checks for Node 22+;
 2. runs `setup\unittest.mjs`, `setup\selftest.mjs` and `setup\extensiontest.mjs`, and stops at the
-   first failure. Their last recorded run (3.0.1, 2026-09-25) passed 651 tests in 12 suites, 136 and
-   82. The unit suites include real headless launches of Edge and the cached CfT;
+   first failure. Their last recorded run (3.1.0, 2026-09-26) passed 656 tests in 12 suites, 136 and
+   88. The unit suites include real headless launches of Edge and the cached CfT;
    `G9_UNIT_NO_BROWSER=1` skips them. That takes about 5 minutes; `npm run check:all` runs the same
    checks 4 at a time in about 2.5 ([REFERENCE.md, Tests](REFERENCE.md#choosing-what-to-run));
 3. writes an MCP entry `g9-browser` → `node <repo>/mcp/shim.mjs` with `G9_HOST`/`G9_PORT`. It goes to

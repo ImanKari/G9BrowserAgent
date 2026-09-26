@@ -181,6 +181,12 @@ api.on('navigate', (d) => navigate(d?.view, { ...d, force: false }));
 api.on('event', (e) => {
   for (const name of mounted) VIEWS[name].onEvent?.(e);
   if (e.topic === 'run') approvals.refreshCount().catch(() => {});
+  // (3.2) An agent asked to show the person a tab (browser_tabs action:"watch"): the Watch view
+  // opens on it. The extension's watch window gets the same request.
+  if (e.topic === 'watchRequest' && e.data?.on !== false && Number.isInteger(e.data?.tabId)) {
+    navigate('watch');
+    watch.watchTab(e.data.tabId, e.data.agent ?? null).catch(toastError);
+  }
 });
 
 document.getElementById('update-line').addEventListener('click', () => navigate('settings'));

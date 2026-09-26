@@ -835,3 +835,52 @@ body.detached .report { max-height: none; }
 /* A column of cards inside a tab body (the Issues list and detail views). Not
  * .tabbody: panel.js hides every .tabbody that is not the selected tab's. */
 .stack { display: flex; flex-direction: column; gap: var(--s4); flex: 1; min-height: 0; min-width: 0; }
+
+/* ------------------------------------------------------------------ the live view (3.1, watch.html)
+ * Tiles of live tabs, one per stream: a title bar with who and where, the picture, a small HUD.
+ * The stage is always dark: it frames a picture of a page, whatever the theme. */
+
+body.watch { min-height: 100vh; }
+.watch-hd { flex-wrap: wrap; justify-content: space-between; }
+.watch-hd .brand { display: flex; align-items: center; gap: var(--s3); min-width: 0; }
+.watch-hd .name { font-weight: 650; }
+.watch-add { display: flex; align-items: center; gap: var(--s2); min-width: 0; flex: 1 1 320px; justify-content: flex-end; }
+.watch-add select { min-width: 0; flex: 1 1 auto; max-width: 560px; }
+.watch-note { margin-top: calc(-1 * var(--s2)); }
+
+.watch-grid { display: grid; gap: var(--s4); grid-template-columns: 1fr; align-items: start; align-content: start; flex: 1; min-height: 0; }
+.watch-grid[data-count="2"] { grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
+.watch-grid[data-count="3"], .watch-grid[data-count="4"] { grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); }
+.watch-grid.focused { grid-template-columns: 1fr; }
+.watch-grid.focused .watch-tile:not(.is-focused) { display: none; }
+
+.watch-tile {
+  display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--r-lg);
+  overflow: hidden; transition: box-shadow 0.3s;
+}
+.watch-tile.flash { box-shadow: 0 0 0 3px var(--accent); }
+.watch-tile-hd { display: flex; align-items: center; gap: var(--s3); padding: var(--s3) var(--s4); border-bottom: 1px solid var(--line); min-width: 0; }
+.watch-tile-hd .grow { min-width: 0; flex: 1; }
+.watch-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.watch-meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.watch-actions { display: flex; gap: var(--s2); flex: none; }
+.watch-state { flex: none; font-variant-numeric: tabular-nums; }
+
+.watch-stage { position: relative; background: #0f141b; aspect-ratio: 16 / 10; min-height: 180px; }
+.watch-grid.focused .watch-stage { aspect-ratio: auto; height: calc(100vh - 190px); }
+.watch-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: default; }
+.watch-hud {
+  position: absolute; left: var(--s3); bottom: var(--s3); padding: 2px var(--s3); border-radius: var(--r-sm);
+  background: rgba(15, 20, 27, 0.72); color: #dfe6ee; font: var(--fs-xs)/1.6 var(--mono); pointer-events: none;
+}
+.watch-hud:empty { display: none; }
+.watch-problem {
+  position: absolute; inset: auto var(--s4) var(--s4) var(--s4); padding: var(--s3) var(--s4); border-radius: var(--r-sm);
+  background: #3a1d1d; color: #ffd7d3; font-size: var(--fs-sm);
+}
+.watch-empty { max-width: 640px; }
+@media (max-width: 520px) {
+  .watch-grid[data-count] { grid-template-columns: 1fr; }
+  .watch-add { flex-basis: 100%; }
+}

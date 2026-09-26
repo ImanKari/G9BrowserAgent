@@ -33,6 +33,22 @@ const ENGINE = new URL('./', import.meta.url);
 
 const pick = (mod, name) => mod?.[name] ?? mod?.default?.[name];
 
+/**
+ * (3.2) G9_LAUNCH_ARGS, the switches every Engine 2 launch on this machine gets: a JSON array, or
+ * switches separated by spaces (none may contain one). Only `--` switches are kept.
+ */
+export function launchArgsFromEnv(env = process.env) {
+  const raw = String(env.G9_LAUNCH_ARGS ?? '').trim();
+  if (!raw) return [];
+  let list;
+  try {
+    list = raw.startsWith('[') ? JSON.parse(raw) : raw.split(/\s+/);
+  } catch {
+    list = raw.split(/\s+/);
+  }
+  return (Array.isArray(list) ? list : []).map(String).filter((s) => s.startsWith('--'));
+}
+
 export class EngineManager {
   /**
    * @param {object} o
@@ -93,7 +109,7 @@ export class EngineManager {
         this.cdp = cdp;
         this.tools = tools;
         this.events = events;
-        for (const [key, rel] of [['screencast', 'lib/screencast.js'], ['pointer', 'lib/pointer.js'], ['state', 'lib/state.js'], ['store', 'lib/store.js'], ['humanize', 'lib/humanize.js'], ['world', 'lib/world.js'], ['cdpLayer', 'lib/cdp.js'], ['tabsTool', 'tools/tabs.js']]) {
+        for (const [key, rel] of [['screencast', 'lib/screencast.js'], ['pointer', 'lib/pointer.js'], ['state', 'lib/state.js'], ['store', 'lib/store.js'], ['humanize', 'lib/humanize.js'], ['world', 'lib/world.js'], ['cdpLayer', 'lib/cdp.js'], ['tabsTool', 'tools/tabs.js'], ['replay', 'tools/replay.js'], ['flowsync', 'lib/flowsync.js']]) {
           try {
             this.optional[key] = await import(new URL(rel, EXT).href);
           } catch (err) {
@@ -158,6 +174,9 @@ export class EngineManager {
 
   #wire() {
     const platform = pick(this.cdp, 'platform');
+    // (3.2) An approval in the launched-engine store (an agent's, the runner's) travels with the
+    // flow: the daemon writes it beside the flow in the repository (daemon.js).
+    pick(this.optional.replay, 'onApproved')?.((id) => (typeof this.onApproved === 'function' ? this.onApproved(id) : null));
     const { onCdpEvent, onDetach, onTabRemoved } = {
       onCdpEvent: pick(this.events, 'onCdpEvent'),
       onDetach: pick(this.events, 'onDetach'),
@@ -557,7 +576,10 @@ export class EngineManager {
       proxy: opts.proxy,
       proxyBypass: opts.proxyBypass,
       lang: locale ?? undefined,
-      extraArgs: Array.isArray(opts.extraArgs) ? opts.extraArgs : [],
+      // (3.2) G9_LAUNCH_ARGS: switches every launch on this machine needs, before the caller's —
+      // in a container, `--no-sandbox` (the container is the sandbox; Chromium's own needs user
+      // namespaces a container does not give). launchBrowser refuses the same switches as always.
+      extraArgs: [...launchArgsFromEnv(), ...(Array.isArray(opts.extraArgs) ? opts.extraArgs : [])],
       stealth,
       home: this.home,
       name: opts.name,
@@ -1399,13 +1421,14 @@ export class EngineManager {
     try {
       if (!screencast) throw new Error('extension/lib/screencast.js is not available, so no frames can be streamed');
       pick(screencast, 'subscribe')(tabId, consumerId, (frame) => onFrame({ ...frame, tabId }));
-      await pick(screencast, 'start')(tabId, consumerId, {
+      const started = await pick(screencast, 'start')(tabId, consumerId, {
         format: 'jpeg',
         quality: s.quality ?? 60,
         maxWidth: s.maxWidth ?? 1280,
         maxHeight: s.maxHeight ?? 800,
         everyNthFrame: 1,
       });
+      if (started?.attempts > 1) this.log(`[screencast] tab ${tabId}: started on attempt ${started.attempts} (the page was between two documents)`);
     } catch (err) {
       // A watch that never started must not linger as "watching": the next
       // watch of this tab would be answered from the stale entry and stream
@@ -1443,6 +1466,13 @@ export class EngineManager {
     const save = pick(this.optional.store, 'saveRecording');
     if (typeof save !== 'function') throw new Error('The launched-engine recording store is unavailable.');
     return save(recording);
+  }
+
+  /** (3.2) A launched-store recording's approval sidecar with its images, or null (lib/flowsync.js). */
+  async approvedBundle(id) {
+    await this.#requireReady();
+    const bundle = pick(this.optional.flowsync, 'approvedBundle');
+    return typeof bundle === 'function' ? bundle(id) : null;
   }
 
   // ------------------------------------------------------------ versions and profiles

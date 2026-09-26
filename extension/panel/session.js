@@ -39,6 +39,20 @@ import {
 import { renderUpdateNote, noteDaemon } from './about.js';
 
 const DEFAULT_PORT = 8765;
+
+/** (3.2) "Watch": the live view of a tab this browser cannot show (a launched one, often headless). */
+function watchButton(handle, agentName) {
+  return btn('◉ Watch', 'link', () => openWatch(handle), {
+    title: `A live view of ${agentName ?? 'the agent'}'s tab, with its cursor — in its own window, view only`,
+    key: `watch:${handle}`,
+  });
+}
+
+/** Open (or bring up) the live-view window, on a tab or on its picker. */
+export async function openWatch(handle = null) {
+  const res = await cmd({ cmd: 'openWatch', ...(Number.isInteger(handle) ? { handle } : {}) }).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
+  if (!res?.ok) showPanelError(res?.error ?? 'Could not open the live view.');
+}
 /** How stale the tab list may get before a render asks again. */
 const TABS_TTL_MS = 5_000;
 /** Daemon info (engines) changes rarely; a person can press "refresh". */
@@ -262,8 +276,11 @@ function agentRow(a) {
     where.append(node('span', null, 'on:'), tabChip(a.current, { cur: true }));
   } else if (a.currentEngine === 'launched') {
     where.append(node('span', null, 'working in a launched browser'));
+    // (3.2) A launched tab — often headless — has no window: the live view is how to see it.
+    if (Number.isInteger(a.currentHandle)) where.append(watchButton(a.currentHandle, a.name));
   } else if (a.currentEngine === 'elsewhere') {
     where.append(node('span', null, 'working in another browser'));
+    if (Number.isInteger(a.currentHandle)) where.append(watchButton(a.currentHandle, a.name));
   } else if (a.currentEngine === null || 'currentEngine' in a) {
     where.append(node('span', null, 'no tab yet'));
   } else {
@@ -1055,6 +1072,9 @@ export function parseAddress(hostInput, portInput) {
 // -------------------------------------------------------------------- wiring
 
 export function wire() {
+  // (3.2) The live view: every tab an engine works in, in a window of its own.
+  el.liveView.addEventListener('click', () => openWatch());
+
   // Record from now (A1): start capture on the tab in front of the person, make
   // it current, lift Stop — and, with the box ticked, reload it so the capture
   // holds the page load from its first request. One command, one activity line.
