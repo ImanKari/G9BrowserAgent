@@ -573,8 +573,11 @@ unlocked, un-minimized desktop. In the P8 matrix, a minimized headed Engine 2 wi
   settings finding, downloading and installing it by itself. It ran on Windows 11 on the
   owner's workstation (3.0.1 → 3.1.0, 20 of 20 checks, 2026-09-26) and runs in the release pipeline
   on hosted Windows, macOS and Ubuntu machines for every release; the Linux AppImage path also ran in
-  a clean Ubuntu container. The official GitHub feed (redirects, `releases/latest`) is checked against
-  the published release.
+  a clean Ubuntu container. Against the real GitHub feed (`releases/latest`, its redirect to the tag,
+  `latest*.yml`, the download from GitHub's storage): 3.0.999 → the published 3.1.0 on Windows 11
+  (the owner's workstation, 6 of 6) and as an AppImage in a clean Ubuntu container (6 of 6), both on
+  2026-09-26. The release pipeline also reads
+  the feed back after every publish.
 
 **Chrome for Testing** is pinned in `engine/versions.json` (153.0.8010.52) and changes only when
 someone re-pins it and ships a new G9. The Engines view shows the pinned and installed versions, and

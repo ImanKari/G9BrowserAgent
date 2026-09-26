@@ -1715,6 +1715,30 @@ Entries below describe what was believed or tested at the time. Current capabili
 unresolved findings are in §§4, 7 and 8, which supersede historical assertions. Entries dated before
 2026-09-21 describe v1 (the bridge, the four control modes, the workspace allowlist).
 
+### 2026-09-26 — v3.1.1: the first update from the published releases, and pictures that say so
+
+**Why.** 3.1.0 is the first release on GitHub. Two things could only be done after it existed: the
+update test against the real feed, and README pictures whose update status is true.
+
+**The update from GitHub, end to end** (`desktop/test/update-e2e.mjs --feed official`, real
+packages, no settings written): an older build of the 3.1.0 source (3.0.999), freshly installed,
+checked `github.com/ImanKari/G9BrowserAgent` by itself, downloaded the published 3.1.0 from GitHub's
+storage (SHA-512 from the release's `latest*.yml`), installed it and restarted as 3.1.0.
+**Windows 11, the owner's workstation: 6 of 6** (the extension in Chrome 153 connected before the
+update). **Linux AppImage, a clean Ubuntu container: 6 of 6** (the published `G9-x86_64.AppImage`
+replaced the installed file byte for byte; Chrome could not be downloaded into the container that
+time, so the extension half ran only in the pipeline's local-feed test, 20 of 20 with Edge). Found on
+the way: Node on the owner's workstation cannot reach `api.github.com` (a network timeout; git,
+Docker and the app itself can), which is why the check goes through the app, as a person's would.
+
+**The pictures.** Made again from the 3.1.1 source in the neutral container: the footer and
+Settings → Updates now read "up to date (3.1.1)" — a real check against the published releases —
+instead of "no G9 release is published yet", and the Engines view shows the launched tabs' titles
+(the 3.1.0 fix). The README and README.fa gained the Updates picture.
+
+No runtime behaviour changed. Version 3.1.1 in `package.json`, `extension/manifest.json`,
+`desktop/package.json` and `desktop/package-lock.json`.
+
 ### 2026-09-26 — v3.1.0: Windows, macOS and Linux packages, updates from the official releases
 
 **Why.** G9 is published on GitHub, so a person should be able to download it for their system, and

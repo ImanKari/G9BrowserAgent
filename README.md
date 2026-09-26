@@ -409,6 +409,11 @@ this problem — use them for anything unattended.
 - **The extension updates with the app.** After an update, G9 refreshes its extension folder and the
   extension reloads itself once no agent call is in flight. The side panel's badge shows the new
   version. If it ever does not, press **Reload** on the extension (or **Engines → Update and reload**).
+![Settings → Updates: the official source, and the result of the last check](docs/assets/desktop-updates.png)
+
+*Settings → Updates on a Linux install that updates by hand; on Windows and with the AppImage the
+card also offers the install buttons when a new version is ready.*
+
 - **Settings → Updates** has **Check now** and the update source: **official** (the default, nothing
   to set up), **custom** (your own `https://` folder with the same files), or **off**.
 - Updating from source: `git pull`, then reload the extension in the browser.
