@@ -9,7 +9,7 @@ Linux desktop app on the same daemon. Nothing is mocked or arranged by hand.
 |---|---|
 | `demo-shop.png` | The made-up Demo Shop (`setup/fixtures/demo-shop.html`) after the agent placed an order. |
 | `panel-session.png`, `panel-automation.png`, `panel-issues.png`, `panel-about.png` | The side panel's four tabs, after the agent attached the tab, recorded a checkout flow and filed an issue. |
-| `desktop-agents.png`, `desktop-engines.png`, `desktop-watch.png`, `desktop-runs.png`, `desktop-settings.png`, `desktop-setup.png` | The desktop app's views; Watch shows a launched headless browser live, with the agent's cursor; Runs shows the recorded flow replayed there. |
+| `desktop-agents.png`, `desktop-engines.png`, `desktop-watch.png`, `desktop-runs.png`, `desktop-settings.png`, `desktop-updates.png`, `desktop-setup.png` | The desktop app's views; Watch shows a launched headless browser live, with the agent's cursor; Runs shows the recorded flow replayed there; Updates shows a real check against the published GitHub releases. |
 
 **Privacy.** They were made in a throwaway Linux container (`node:22-bookworm`) as a user called
 `demo`, so every path in them is `/home/demo/…` or `/tmp/…`. The only site visited is the local Demo
