@@ -76,6 +76,16 @@ stages:
         if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
       displayName: 'Desktop dependencies (npm ci)'
     - pwsh: |
+        # The browsers the live checks use, and any machine policy that changes what they do
+        # (a hosted image can set e.g. a popup policy the live window.open test depends on).
+        foreach ($exe in @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Google\Chrome\Application\chrome.exe")) {
+            if (Test-Path $exe) { Write-Host "$exe $((Get-Item $exe).VersionInfo.ProductVersion)" }
+        }
+        foreach ($key in @('HKLM:\SOFTWARE\Policies\Microsoft\Edge', 'HKLM:\SOFTWARE\Policies\Google\Chrome', 'HKCU:\SOFTWARE\Policies\Microsoft\Edge')) {
+            if (Test-Path $key) { Write-Host "== $key"; Get-ItemProperty $key | Format-List | Out-String | Write-Host }
+        }
+      displayName: 'Browsers and browser policies on this agent'
+    - pwsh: |
         node setup/check.mjs --all --keep-going
         if ($LASTEXITCODE -ne 0) {
             # check.mjs prints a summary; the whole output of every check is in its log file.
@@ -169,7 +179,7 @@ stages:
         case "$(target)" in
           win)   cp G9-Setup-*.exe G9-Setup-*.exe.blockmap latest.yml "$OUT/" ;;
           mac)   cp G9-*-mac-*.dmg G9-*-mac-*.zip G9-*-mac-*.zip.blockmap latest-mac.yml "$OUT/"; cp G9-*-mac-*.dmg.blockmap "$OUT/" 2>/dev/null || true ;;
-          linux) cp G9-*-x86_64.AppImage G9_*_amd64.deb latest-linux.yml "$OUT/" ;;
+          linux) cp G9-x86_64.AppImage G9_*_amd64.deb latest-linux.yml "$OUT/" ;;
         esac
         ls -la "$OUT"
       displayName: 'Stage the release files'

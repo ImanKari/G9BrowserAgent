@@ -159,7 +159,7 @@ t.test('package config: Windows per user and assisted; macOS dmg+zip for both ar
     // macOS: the zip is what latest-mac.yml describes; both archs; no Developer ID, so ad-hoc.
     'target: dmg', 'target: zip', 'arch: [x64, arm64]', "identity: '-'", 'artifactName: G9-${version}-mac-${arch}.${ext}',
     // Linux: the AppImage is the one that updates itself; the .deb installs to /opt/G9.
-    'target: AppImage', 'target: deb', 'executableName: g9', 'artifactName: G9-${version}-x86_64.${ext}', 'artifactName: G9_${version}_amd64.${ext}',
+    'target: AppImage', 'target: deb', 'executableName: g9', 'artifactName: G9-x86_64.${ext}', 'artifactName: G9_${version}_amd64.${ext}',
     // Every build writes latest*.yml and app-update.yml for the official releases.
     'provider: github', 'owner: ImanKari', 'repo: G9BrowserAgent',
   ]) {

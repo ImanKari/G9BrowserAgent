@@ -13,8 +13,9 @@ export function suite(title) {
   const tests = [];
   const cleanups = [];
   return {
-    test(name, fn) {
-      tests.push([name, fn]);
+    /** `timeoutMs`: for a test that starts real processes (default 20 s). */
+    test(name, fn, { timeoutMs = 20_000 } = {}) {
+      tests.push([name, fn, timeoutMs]);
     },
     cleanup(fn) {
       cleanups.push(fn);
@@ -22,9 +23,9 @@ export function suite(title) {
     async run() {
       console.log(title);
       let failed = false;
-      for (const [name, fn] of tests) {
+      for (const [name, fn, timeoutMs] of tests) {
         try {
-          await withTimeout(fn(), 20_000, name);
+          await withTimeout(fn(), timeoutMs, name);
           console.log(`  PASS ${name}`);
         } catch (err) {
           console.error(`  FAIL ${name}\n${err?.stack ?? err}`);

@@ -4,7 +4,7 @@
  *   node test/update-e2e.mjs --old <dir> --new <dir> [--feed local|official] [--only a,b] [--report <file>] [--keep]
  *
  *   --old   a folder with the OLDER build's installer for this OS (scripts/build.mjs --as-version):
- *           Windows G9-Setup-<v>.exe, Linux G9-<v>-x86_64.AppImage, macOS G9-<v>-mac-<arch>.zip
+ *           Windows G9-Setup-<v>.exe, Linux G9-x86_64.AppImage, macOS G9-<v>-mac-<arch>.zip
  *   --new   the NEWER release: its installers and latest*.yml, exactly what a release publishes.
  *           With --feed local (default) it is served on 127.0.0.1 as the app's custom update feed,
  *           with faults injected on purpose. With --feed official it is only read for its version:
@@ -245,7 +245,9 @@ class Install {
       if (!this.exe) throw new Error(`G9.exe was not found after installing (looked in ${candidates.join(', ')})`);
       this.root = path.dirname(this.exe);
     } else if (PLATFORM === 'linux') {
-      this.exe = path.join(this.dir, 'G9.AppImage');
+      // Under the name it is published with (G9-x86_64.AppImage): the updater replaces a file IN
+      // PLACE only when its name carries no version, which is what this checks.
+      this.exe = path.join(this.dir, path.basename(file));
       fs.copyFileSync(file, this.exe);
       fs.chmodSync(this.exe, 0o755);
       this.root = this.dir;

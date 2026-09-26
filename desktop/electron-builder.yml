@@ -5,7 +5,7 @@
 #
 #   Windows  G9-Setup-<v>.exe (+ .blockmap)            per-user NSIS, auto-update     latest.yml
 #   macOS    G9-<v>-mac-<arch>.dmg / .zip (x64, arm64) drag to Applications; unsigned  latest-mac.yml
-#   Linux    G9-<v>-x86_64.AppImage                     auto-update                    latest-linux.yml
+#   Linux    G9-x86_64.AppImage (no version: see below) auto-update                    latest-linux.yml
 #            G9_<v>_amd64.deb                           system package, updated by hand
 
 appId: com.g9.browseragent
@@ -117,8 +117,11 @@ linux:
   synopsis: AI agents drive real Chrome and Edge through MCP, with human-like input
   description: G9 lets AI agents drive real Chromium browsers at DevTools depth through MCP, with human-like input and reviewable evidence.
   maintainer: Iman Kari <iman.kari@live.com>
+# No version in the AppImage's name, on purpose: electron-updater replaces the file IN PLACE only
+# when its name has no version; otherwise it moves the update to the new version's name and deletes
+# the old file, and every MCP entry and autostart entry naming that file breaks after an update.
 appImage:
-  artifactName: G9-${version}-x86_64.${ext}
+  artifactName: G9-x86_64.${ext}
 deb:
   # electron-builder's default dependency list (Electron's own needs). Not overridden: a hard
   # libasound2 would make the package uninstallable on Ubuntu 24.04 (libasound2t64).

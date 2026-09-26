@@ -6,7 +6,7 @@
  *
  *   Windows  G9-Setup-<v>.exe (+ .blockmap), latest.yml                 build on Windows
  *   macOS    G9-<v>-mac-{x64,arm64}.{dmg,zip} (+ .blockmap), latest-mac.yml   build on macOS
- *   Linux    G9-<v>-x86_64.AppImage, G9_<v>_amd64.deb, latest-linux.yml    build on Linux
+ *   Linux    G9-x86_64.AppImage, G9_<v>_amd64.deb, latest-linux.yml        build on Linux
  *
  * 1. Draw build/icon.png (scripts/make-icons.mjs).
  * 2. Check that every packaged resource exists — an app that cannot start its daemon is worse than

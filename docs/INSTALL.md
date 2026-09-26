@@ -491,7 +491,7 @@ git clone <repo> g9-browser-agent; cd g9-browser-agent
    first failure. Their last recorded run (3.0.1, 2026-09-25) passed 651 tests in 12 suites, 136 and
    82. The unit suites include real headless launches of Edge and the cached CfT;
    `G9_UNIT_NO_BROWSER=1` skips them. That takes about 5 minutes; `npm run check:all` runs the same
-   checks 4 at a time in about 2.5 (README, [Tests](../README.md#choosing-what-to-run));
+   checks 4 at a time in about 2.5 ([REFERENCE.md, Tests](REFERENCE.md#choosing-what-to-run));
 3. writes an MCP entry `g9-browser` → `node <repo>/mcp/shim.mjs` with `G9_HOST`/`G9_PORT`. It goes to
    `setup\mcp.json`, and with `-WriteProjectConfig` also to `.mcp.json`. A v1 `.mcp.json` is backed
    up to `.mcp.json.v1.bak`; any other existing `.mcp.json` is left alone;

@@ -76,6 +76,6 @@ left once you know it.
   tab without trusted mouse/key delivery. It still depends on Telegram loading the next batch and
   the page remaining alive; frozen/discarded pages, changed selectors or a stalled load can stop
   progress. Input and screenshot behavior are separate; see
-  [What works in which state (measured)](../README.md#what-works-in-which-state-measured).
+  [What works in which state (measured)](../docs/REFERENCE.md#what-works-in-which-state-measured).
 - Already-saved posts are tracked in the page for the run, so re-collecting the
   same mounted post is free.

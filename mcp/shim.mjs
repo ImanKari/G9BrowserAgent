@@ -341,7 +341,17 @@ process.on('SIGTERM', () => { link.close(); process.exit(0); });
 
 mcp.start();
 
-// Connect (and start the daemon if needed) right away, so the first tool call
-// does not pay for it. Failures here are not fatal: each call retries and
-// reports the reason itself.
-link.ensure().catch((err) => log(`[g9] daemon not reachable yet: ${err.message}`));
+// Connect (and start the daemon if needed) early, so the first tool call does not pay for it —
+// but only once the MCP client has said who it is (initialize), or after 2 s if it never does.
+// The hello carries the client's name: connecting at the very first moment registered the agent
+// as "mcp-agent" whenever the daemon answered before initialize arrived (a race a slower CI
+// machine lost every time), and the panel and the desktop showed that instead of "claude-code".
+// Failures here are not fatal: each call retries and reports the reason itself.
+let preconnected = false;
+const preconnect = () => {
+  if (preconnected) return;
+  preconnected = true;
+  link.ensure().catch((err) => log(`[g9] daemon not reachable yet: ${err.message}`));
+};
+mcp.on('initialize', () => setImmediate(preconnect));
+setTimeout(preconnect, 2000).unref();

@@ -284,7 +284,8 @@ t.test('the elevated launch survives a %TEMP% path with a cmd metacharacter (R&D
     await new Promise((resolve) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { windowsHide: true, timeout: 30_000 }, () => resolve()));
     assert.equal(fs.existsSync(marker), true, `the batch ran from a folder named "${name}"`);
   }
-});
+  // Four real PowerShell starts: ~1 s each here, over 5 s each on a cold CI agent.
+}, { timeoutMs: 120_000 });
 
 t.test('parseRegQuery keeps a QWORD above 2^53 exact, and REG_BINARY can be restored', () => {
   const out = `\r\nHKEY_CURRENT_USER\\Software\\Policies\\Microsoft\\Edge\r\n    Big    REG_QWORD    0xffffffffffffffff\r\n    Bin    REG_BINARY    0100FF\r\n\r\n`;

@@ -1043,7 +1043,7 @@ await test('live: headless Edge — a click that calls window.open() returns, th
   const http = await import('node:http');
   const pages = {
     '/opener': '<!doctype html><title>opener</title><button id="b" style="position:fixed;left:10px;top:10px;width:200px;height:60px" ' +
-      'onclick="window.__w = window.open(\'/popup\', \'_blank\'); window.__opened = !!window.__w">open</button>' +
+      'onclick="window.__clicked = true; window.__w = window.open(\'/popup\', \'_blank\'); window.__opened = !!window.__w">open</button>' +
       '<a id="nl" target="_blank" href="/newtab" style="position:fixed;left:10px;top:100px;width:200px;height:60px;display:block">new tab</a>',
     '/popup': '<!doctype html><title>popup</title><script>window.tzAtLoad = Intl.DateTimeFormat().resolvedOptions().timeZone;</script>',
     '/newtab': '<!doctype html><title>newtab</title><script>window.tzAtLoad = Intl.DateTimeFormat().resolvedOptions().timeZone; fetch("/api/missing").catch(() => {});</script>',
@@ -1101,7 +1101,14 @@ await test('live: headless Edge — a click that calls window.open() returns, th
     await click('mouseReleased');
     const clickMs = Date.now() - t0;
     assert.ok(clickMs < 5_000, `the click returned (${clickMs} ms; the wedge was a 15-20 s hang)`);
-    assert.equal(await evalIn(opener.id, 'window.__opened === true'), true, 'window.open() returned the popup, and the opener\'s script ran on');
+    // The click's handler runs in the task that handles mouseup: poll briefly, and say what was seen.
+    let state = null;
+    for (let i = 0; i < 30; i++) {
+      state = await evalIn(opener.id, 'JSON.stringify({ clicked: !!window.__clicked, opened: window.__opened ?? null, focus: document.hasFocus(), visibility: document.visibilityState })');
+      if (JSON.parse(state).opened === true) break;
+      await tick(100);
+    }
+    assert.equal(JSON.parse(state).opened, true, `window.open() returned the popup, and the opener's script ran on (${state})`);
     let popup = null;
     for (let i = 0; i < 50 && !popup; i++) {
       popup = (await platform.tabs.query({})).find((t) => t.openerTabId === opener.id && /\/popup$/.test(t.url)) ?? null;

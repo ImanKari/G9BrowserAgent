@@ -1,54 +1,17 @@
-# G9 Browser Agent
+# G9 Browser Agent — technical reference
 
-G9 lets AI agents, and suites that run on a schedule, drive real Chrome and Edge browsers for QA
-work. They can inspect a page the way DevTools does, act on it with trusted input that moves like a
-person's, record flows, and replay those flows as regression tests that remember what normal looks
-like. Everything runs on the local machine.
+This is the complete technical reference: every tool and its arguments, how sharing, human input,
+recording, replay and evidence work, what was measured and on which machines, the known limits,
+and how the code is tested. **Start with the [README](../README.md)** (what G9 is, installing it on
+Windows, macOS or Linux, the first setup, a tour of the side panel and the desktop app, updating,
+troubleshooting). The design and its decisions are in [AIGuide.md](../AIGuide.md) §2, the history in
+its change log (§9).
 
-**Version 3.0.1**: the extension's new icon, and `npm run check`, which runs only the tests a change
-needs, several at a time, and says what it is running ([Tests](#choosing-what-to-run)). This README was written on 2026-09-23 against the code in this repository and
-the v2 live rounds. It was revised on 2026-09-24 for 2.0.2, which fixed three defects that flaky
-tests uncovered (the replay quiet window, the evidence prune race, and watch ordering on a launched
-engine) and gave a closing browser 30 s instead of 10 s, and on 2026-09-25 for 2.0.3, which fixed
-the side panel's **Pop out tab**: the new window used to open behind the person's own window, where
-Windows stops rendering it. It was revised again on 2026-09-25 for **3.0.0**, the side-panel
-redesign (decisions U1–U10, [AIGuide.md](AIGuide.md) §6.10): agents are shown per project, Auto-attach follows the
-project's sites by default, a blocked agent raises an alert with **Pop out** on it, Automation and
-Issues are grouped by site, and the panel has one visual system (see
-[The side panel (v3)](#the-side-panel-v3)). Those rounds ran on Windows 11 Pro 10.0.26200 with
-Edge 153.0.4234.32, Chrome 153.0.8010.53, Chrome for Testing 153.0.8010.52 and Node 22.15.0.
-
-On the 3.0.1 tree (2026-09-25), `npm run check:all` ran every offline check (unit 651 tests in 12
-suites, self-test, extension suite, panel render, links) three times: 16 of 16 each time, in 142 s.
-The live suites and the installer were not rebuilt for 3.0.1 (icons, test tooling and docs only).
-
-Latest recorded results. Run on the 3.0.0 tree on 2026-09-25:
-
-- unit: 638 tests in 11 suites
-- self-test: 136/136
-- extension suite: 82/82
-- desktop: 14 test files and the packaged build at 7/7
-- Engine 2 live test: 366 passed, 0 failed (327 s)
-- isolated Engine 1 live test on Edge: 198 passed, 0 failed, the real popout included
-- panel render check (`setup/panel-render.mjs`): every tab at 360 and 1000 px wide, light and dark,
-  no fixture text turned into markup, no `[object Object]` or `NaN` shown
-
-On 2.0.2 (2026-09-24) the unit suite also passed three times in a row.
-
-Run on the 2.0.1 tree on 2026-09-23 and not repeated for 2.0.2, whose changes are correctness fixes
-in replay, evidence pruning, launched-engine watch ordering and browser shutdown:
-
-- the daemon contract at 15/15 and the render check over four scenarios with no window ever on
-  screen or in the foreground
-- isolated Engine 1 live test on Chrome: 196 passed, 0 failed
-- background-state matrix: exit 0, every cell agrees with the page
-- bench 1/4/8/16 contexts and a 10-minute endurance run: 0 failures
-- stealth matrix, 7 configurations including the public detector pages: 0 G9 leaks at stealth,
-  headed Edge undetected on the local page, both human controls detected
-
-The installer is not code-signed. `npm run build:win` in `desktop/` writes it as
-`desktop/dist/G9-Setup-<version>.exe`; the last one built and tested is `G9-Setup-3.0.0.exe`
-(2026-09-25). For what does not work yet, see [Limits and known gaps](#limits-and-known-gaps).
+Measurements below name the version and the machine they were taken on; most were taken on
+Windows 11 Pro 10.0.26200 with Edge 153, Chrome 153, Chrome for Testing 153.0.8010.52 and Node 22.
+What 3.1.0 added — packages for macOS and Linux, updates from the official releases, and the
+update end-to-end test — is in [Install](#install), [The desktop app](#the-desktop-app) and
+[AIGuide.md](../AIGuide.md) §9.
 
 - [What G9 is](#what-g9-is)
 - [Requirements](#requirements)
@@ -120,7 +83,7 @@ bridge port hunting and the runner's "port rule" are gone.
 
 - **Human input.** By default, pointer paths, clicks, wheel notches and typing are planned the way a
   hand produces them. The random generator is seeded, so a seed replays the same motion. See
-  [Human input](#human-input) and [docs/HUMANIZE.md](docs/HUMANIZE.md).
+  [Human input](#human-input) and [docs/HUMANIZE.md](HUMANIZE.md).
 - **Cursor in the evidence, never in the page.** The pointer position is stored as a timestamped
   track beside the screencast frames. The desktop's Watch view, run replays and issue videos draw
   the cursor from it. Nothing is drawn into the DOM, so the page cannot see it.
@@ -131,7 +94,7 @@ bridge port hunting and the runner's "port rule" are gone.
   `browser_engine action:"launch" stealth:"stealth"` adds the switch that clears it. A stealth
   *context* inside an engine launched below stealth gets the Runtime and input rules and says, in
   its own result, that `navigator.webdriver` is still true there. See
-  [Stealth: what was measured](#stealth-what-was-measured) and [docs/STEALTH.md](docs/STEALTH.md).
+  [Stealth: what was measured](#stealth-what-was-measured) and [docs/STEALTH.md](STEALTH.md).
 
 ### Why it is built this way
 
@@ -148,59 +111,69 @@ bridge port hunting and the runner's "port rule" are gone.
   copies cookies instead.
 
 The design, its twelve decisions (D1–D12) and the verified facts they rest on are in
-[AIGuide.md](AIGuide.md) §2.
-The binding module contracts are in [docs/ARCHITECTURE_V2.md](docs/ARCHITECTURE_V2.md), and the wire
-protocol in [docs/DAEMON_PROTOCOL.md](docs/DAEMON_PROTOCOL.md).
+[AIGuide.md](../AIGuide.md) §2.
+The binding module contracts are in [docs/ARCHITECTURE_V2.md](ARCHITECTURE_V2.md), and the wire
+protocol in [docs/DAEMON_PROTOCOL.md](DAEMON_PROTOCOL.md).
 
 ---
 
 ## Requirements
 
-- **Windows.** v2.0 was built and measured on Windows 11 Pro only. The macOS and Linux code paths
-  in `engine/` exist but are untested.
+- **Desktop app:** Windows 10/11 (x64), macOS 12 or newer (Apple silicon or Intel), or Linux x64
+  (an AppImage for any distribution with a desktop, a .deb for Debian and Ubuntu). It carries its own
+  runtime: no Node, git or npm. Windows is where G9 was built and measured most; the macOS and Linux
+  packages are built and their update path tested on hosted macOS and Ubuntu machines by the release
+  pipeline, and the Linux AppImage's daemon, MCP shim and update in a clean container (see
+  [AIGuide.md](../AIGuide.md) §7 and §9, 3.1.0).
 - **Engine 1:** Edge or Chrome 125 or newer (the manifest's `minimum_chrome_version`).
 - **Engine 2:** an installed Edge or Chrome, or Chrome for Testing. The pinned version is
-  153.0.8010.52, about 205 MB, and its sha256 is checked against `engine/versions.json` before
-  install.
+  153.0.8010.52; its size and sha256 for Windows, macOS (Intel and Apple silicon) and Linux are in
+  `engine/versions.json`, and a download that does not match is refused.
 - **Repository path:** Node.js 22 or newer. The core (`extension/`, `engine/`, `daemon/`, `mcp/`,
   `lib/`, `runner/`) has no npm dependencies. Only `desktop/` has any: Electron, electron-builder
   and electron-updater.
-- **Installer path:** nothing else is needed. `G9.exe` carries its own runtime, so a QA machine
-  needs no Node, git or npm.
 
 ---
 
 ## Install
 
-The operator guide, [docs/INSTALL.md](docs/INSTALL.md), covers the rest: what goes where, the
+The operator guide, [docs/INSTALL.md](INSTALL.md), covers the rest: what goes where, the
 background policies, MCP registration, unattended machines, update hosting and uninstall. This
 section is the short version.
 
-### A. Desktop installer (QA machines)
+### A. Desktop app (QA machines)
 
-1. Run `G9-Setup-<version>.exe` (`G9-Setup-3.0.0.exe` for this release). It is built by
-   `npm run build:win` in `desktop/` and written to `desktop/dist/`.
-   - It installs per user into `%LOCALAPPDATA%\Programs\G9` and needs no administrator rights.
-   - It is not code-signed, so SmartScreen warns on first run ([Troubleshooting](#troubleshooting)).
-2. The first-run wizard (full detail in [desktop/README.md](desktop/README.md)):
-   - lists the Edge and Chrome it found, and can install the pinned Chrome for Testing;
-   - offers to open the `automation` profile headed, so you can sign in to your sites once;
-   - optionally writes per-user background policies (`HKCU` only, recorded first, with Undo). This
-     may need one administrator approval.
-   - registers the MCP shim, as `g9-browser`, with Claude Code, Cursor, VS Code and Claude Desktop.
-     Each config file is backed up before it is written.
-   - copies the extension to `%LOCALAPPDATA%\G9\extension`, puts that path on the clipboard, and
-     opens the browser's extensions page.
-3. Do [the one manual step](#the-one-manual-step-load-the-extension).
-4. Restart your AI client.
+Download the package for your system from the [latest release](https://github.com/ImanKari/G9BrowserAgent/releases/latest)
+(the [README](../README.md#install) walks through each one with pictures):
 
-How the installer was checked:
+| System | Package | Installs to | Updates |
+|---|---|---|---|
+| Windows | `G9-Setup-<version>.exe` | `%LOCALAPPDATA%\Programs\G9`, per user, no administrator rights | automatic |
+| macOS | `G9-<version>-mac-arm64.dmg` / `-x64.dmg` | `/Applications/G9.app` (drag it there) | G9 tells you; you install it |
+| Linux | `G9-x86_64.AppImage` (keep this name: updates replace the file in place) | wherever you keep the file | automatic |
+| Debian/Ubuntu | `G9_<version>_amd64.deb` | `/opt/G9` | G9 tells you; `sudo apt install ./G9_<version>_amd64.deb` |
 
-- Its payload was compared file for file with the repository.
-- The unpacked build (`desktop/dist/win-unpacked`) passed the packaged tests with no Node on PATH.
-  In those tests the packaged shim started the packaged daemon, and a full `runner run` passed on
-  headless Edge.
-- The installer itself was not run on the build machine.
+None is code-signed: Windows SmartScreen and macOS Gatekeeper ask once ([Troubleshooting](#troubleshooting)).
+Packages are built by `npm run build:win|build:mac|build:linux` in `desktop/` (each on its own
+system) and written to `desktop/dist/`, with the `latest*.yml` update metadata beside them.
+
+The first-run wizard (full detail in [desktop/README.md](../desktop/README.md)):
+
+- lists the Edge and Chrome it found, and can install the pinned Chrome for Testing;
+- offers to open the `automation` profile headed, so you can sign in to your sites once;
+- on Windows only, optionally writes per-user background policies (`HKCU` only, recorded first,
+  with Undo); this may need one administrator approval;
+- registers the MCP shim, as `g9-browser`, with Claude Code, Cursor, VS Code and Claude Desktop
+  (in each system's own config location); each config file is backed up before it is written;
+- copies the extension to `G9_HOME/extension` (`%LOCALAPPDATA%\G9\extension` on Windows,
+  `~/.g9/extension` elsewhere), puts that path on the clipboard, and opens the browser's extensions page.
+
+Then do [the one manual step](#the-one-manual-step-load-the-extension), and restart your AI client.
+
+How the packages are checked before a release: every file the update metadata lists is present with
+its exact size and SHA-512, every production dependency is inside the packed app, and on each system
+an older build of the same source is installed and updated to the new packages through the app's own
+updater (`desktop/test/update-e2e.mjs`).
 
 ### B. From the repository (developers)
 
@@ -423,7 +396,7 @@ You rarely call `launch` directly: `browser_tabs action:"open"` starts the defau
 | `claim` / `release` | Ownership. `claim force:true` takes a tab from another agent, only when the user asks; it is logged. `release` without `tabId` releases every tab the caller holds. |
 | `focus` | Brings the tab to the front and focuses its window. On Engine 1 this takes the screen from the person. |
 | `close` | Closes a tab. It needs an explicit `tabId` or `session`. |
-| `popout` | **Engine 1 only.** `{tabId?, focus?, width?, height?, left?, top?}`. Moves the tab into its own window without reloading it (same renderer). An agent's popout opens that window **unfocused**, so the person keeps the keyboard, and gives focus back to the person's window only if the browser moved it; `focus:true` brings the new window to the front. The side panel's **⧉ Pop out tab** always opens it in front, focused. Without explicit geometry the window is half the source window's width and three quarters of its height (clamped to 640–1280 × 480–1000), at the source window's top-right. The result carries `focused`, and `visible`: what the page's `document.visibilityState` says about 600 ms after the move. Do not minimize that window, and do not let another window cover it completely: on Windows a completely covered window also stops rendering, unless the `WindowOcclusionEnabled` policy is off ([docs/INSTALL.md](docs/INSTALL.md#background-policies-hkcu)). When `visible` is false, `focus` it. |
+| `popout` | **Engine 1 only.** `{tabId?, focus?, width?, height?, left?, top?}`. Moves the tab into its own window without reloading it (same renderer). An agent's popout opens that window **unfocused**, so the person keeps the keyboard, and gives focus back to the person's window only if the browser moved it; `focus:true` brings the new window to the front. The side panel's **⧉ Pop out tab** always opens it in front, focused. Without explicit geometry the window is half the source window's width and three quarters of its height (clamped to 640–1280 × 480–1000), at the source window's top-right. The result carries `focused`, and `visible`: what the page's `document.visibilityState` says about 600 ms after the move. Do not minimize that window, and do not let another window cover it completely: on Windows a completely covered window also stops rendering, unless the `WindowOcclusionEnabled` policy is off ([docs/INSTALL.md](INSTALL.md#background-policies-hkcu)). When `visible` is false, `focus` it. |
 | `handoff` | **Engine 1 → Engine 2.** Carries cookies (HttpOnly included) and the origin's localStorage and sessionStorage into a fresh launched context. The page **reloads** there. In-memory page state, IndexedDB and service-worker state do not travel. `storageCheck` and `warnings` say what actually arrived, for example a sign-in redirect. The new tab is claimed and becomes current; the caller's claim on the source tab is released; the user agent is never overridden. |
 | `session`, `sessions`, `end_session` | Names for tabs, stored in the daemon. `end_session` forgets the name; the tab stays open. |
 | `wait` | Waits for a popup or new tab by `url`, `title` or `openerTabId`. |
@@ -589,7 +562,7 @@ matter.
 and keyboard samples that a recording captured, and saves it under a name. Use it afterwards as
 `humanize:"<name>"`.
 
-Limits of the model are listed in [docs/HUMANIZE.md](docs/HUMANIZE.md#honest-limits):
+Limits of the model are listed in [docs/HUMANIZE.md](HUMANIZE.md#honest-limits):
 
 - uniform ranges and one Bézier path per move, with at most one overshoot;
 - white-noise tremor;
@@ -804,7 +777,7 @@ requests.
 ## Unattended runs: the runner and the scheduler
 
 `runner/g9.mjs` replays flows with no agent and no QA present. Full reference:
-[runner/README.md](runner/README.md).
+[runner/README.md](../runner/README.md).
 
 ```powershell
 node runner/g9.mjs list
@@ -877,7 +850,7 @@ it exactly as to an agent; there is no back door.
   starts the daemon unless the desktop app starts at sign-in (Settings → **Start G9 when I sign
   in**). An agent's first call also starts it.
 - Windows Task Scheduler can call `runner/g9.mjs` instead. The exact command for an installed
-  machine is in [docs/INSTALL.md](docs/INSTALL.md#unattended-machines). Task Scheduler itself was
+  machine is in [docs/INSTALL.md](INSTALL.md#unattended-machines). Task Scheduler itself was
   not exercised.
 - **Not measured in v2:** a scheduled or launched run while the Windows session is **locked**, or
   on **another virtual desktop**. Headless Engine 2 has no window, so by design neither state
@@ -892,7 +865,7 @@ format, verdicts and reports.
 
 The Electron shell (`desktop/`) is never an engine: pages under test run only in real Edge, Chrome
 or Chrome for Testing. The app talks to the daemon as a UI client over the same WebSocket, and
-starts it if nothing is listening. Full reference: [desktop/README.md](desktop/README.md).
+starts it if nothing is listening. Full reference: [desktop/README.md](../desktop/README.md).
 
 | View | What it does |
 |---|---|
@@ -1203,7 +1176,7 @@ Raise the setting only after running `npm run bench` on your own machine class.
 
 ## Stealth: what was measured
 
-The full guide is [docs/STEALTH.md](docs/STEALTH.md). Its first rule: behaviour can be made
+The full guide is [docs/STEALTH.md](STEALTH.md). Its first rule: behaviour can be made
 indistinguishable, but the environment can only be made **consistent**. A human-looking mouse in a
 browser that says `HeadlessChrome` is still caught.
 
@@ -1366,7 +1339,7 @@ the version string and comments changed after them.
 - runs longer than 10 minutes.
 
 What is still open — the v1 backlog items EXT-01 … EXT-17 and the owner's open decisions — is in
-[AIGuide.md](AIGuide.md) §8.5 and §8.6. The full architecture record is [AIGuide.md](AIGuide.md).
+[AIGuide.md](../AIGuide.md) §8.5 and §8.6. The full architecture record is [AIGuide.md](../AIGuide.md).
 
 ---
 
@@ -1376,8 +1349,8 @@ What is still open — the v1 backlog items EXT-01 … EXT-17 and the owner's op
 |---|---|
 | Every tool fails with *"Port 8765 is held by a G9 v1 bridge (pid N)"*, or the panel says the address *"is held by a G9 v1 bridge"* | A v1 bridge from before the upgrade is still running. Close the editor or MCP client that started it (or end node process N), then restart your AI client; the v2 shim starts the daemon itself. Then press **Reconnect now** in the panel. Or give v2 another port: `G9_PORT` in the MCP entry, and the same port in the panel's daemon address. G9 never connects to or closes the v1 bridge for you. |
 | Panel says the daemon refused the extension, or `browser_status` reports a version mismatch | The browser still runs an older extension build. Press **Reload** on the G9 card in `edge://extensions` or `chrome://extensions`, or use Engines → **Reload** / **Update and reload** in the desktop app. The panel badge shows the running version. After `git pull`, always reload. |
-| Refused at stealth, or warned, because *the profile is signed in to a browser account* | This profile was signed in, usually by an early v2 build that did not yet block Edge's implicit sign-in. G9 cannot sign it out. Warm it (`browser_engine action:"warm"`) and sign out from the profile menu, or delete the profile and use a new one. **Test browsing done in such a profile may already be in that Microsoft account's synced Edge history.** How to check and clean up: [docs/INSTALL.md](docs/INSTALL.md#edge-implicit-sign-in). |
-| Windows Defender Firewall asks "Allow access?" for a `chrome.exe` under `G9_HOME\engines\cft-<version>\` | Chrome for Testing is an unpacked zip, so no installer registered a firewall rule for it. Windows may ask once per new path (a new CfT version or a new `G9_HOME`). **Either answer is fine:** G9 drives the browser over a pipe, not a port, and the prompt concerns inbound connections only. The first launch from a new path carries a launch warning that says so (`engine/firewall.js`). The rules found on the test workstation, and how to list stale ones: [docs/INSTALL.md](docs/INSTALL.md#windows-firewall-and-chrome-for-testing). |
+| Refused at stealth, or warned, because *the profile is signed in to a browser account* | This profile was signed in, usually by an early v2 build that did not yet block Edge's implicit sign-in. G9 cannot sign it out. Warm it (`browser_engine action:"warm"`) and sign out from the profile menu, or delete the profile and use a new one. **Test browsing done in such a profile may already be in that Microsoft account's synced Edge history.** How to check and clean up: [docs/INSTALL.md](INSTALL.md#edge-implicit-sign-in). |
+| Windows Defender Firewall asks "Allow access?" for a `chrome.exe` under `G9_HOME\engines\cft-<version>\` | Chrome for Testing is an unpacked zip, so no installer registered a firewall rule for it. Windows may ask once per new path (a new CfT version or a new `G9_HOME`). **Either answer is fine:** G9 drives the browser over a pipe, not a port, and the prompt concerns inbound connections only. The first launch from a new path carries a launch warning that says so (`engine/firewall.js`). The rules found on the test workstation, and how to list stale ones: [docs/INSTALL.md](INSTALL.md#windows-firewall-and-chrome-for-testing). |
 | Windows Defender Firewall asks about `node.exe` | Probably `node setup/serve.mjs`: the test-page server listens on all interfaces (`0.0.0.0`), so `localhost` and `127.0.0.1` can serve as two origins for the cross-origin frame fixture. The daemon itself binds `127.0.0.1` only and needs no exception. Declining keeps other machines out. |
 | SmartScreen: "Windows protected your PC" on `G9-Setup-<version>.exe` | The installer is not code-signed. Choose **More info** → **Run anyway** if you trust the build's source. For a fleet, sign the installer. |
 | Agent shows no `browser_*` tools | The MCP config path is wrong, or the client was not restarted. MCP servers load at client start. |
@@ -1385,7 +1358,7 @@ What is still open — the v1 backlog items EXT-01 … EXT-17 and the owner's op
 | *"Tab 7 is owned by agent-2 (cursor)"* | Another agent claimed it. Ask it to release the tab, or use `browser_tabs action:"claim" force:true` when the user asks (logged). |
 | Everything fails with *"The user pressed Stop…"* | Stop is engaged. Press **Resume** in the side panel or the desktop app. Agents cannot. |
 | `[delivery: not-delivered; tab hidden]` | The Engine 1 tab is not showing: a background tab, a minimized window, or an occluded window without the occlusion policy. Use `browser_tabs action:"focus"` (it takes the screen), `"popout"`, or `"handoff"`. |
-| **Pop out tab** or `browser_tabs action:"popout"` moved the tab, but no window is on screen, or the result says `visible:false` | The new window is behind another window. An agent's popout opens unfocused so that you keep the keyboard, and on Windows a window that is covered completely stops rendering (unless the `WindowOcclusionEnabled` policy is off, [docs/INSTALL.md](docs/INSTALL.md#background-policies-hkcu)). Bring it forward: click it in the taskbar, or `browser_tabs action:"focus"`. The side panel's **⧉ Pop out tab** opens the window in front; before 2.0.3 it opened it behind your own window. |
+| **Pop out tab** or `browser_tabs action:"popout"` moved the tab, but no window is on screen, or the result says `visible:false` | The new window is behind another window. An agent's popout opens unfocused so that you keep the keyboard, and on Windows a window that is covered completely stops rendering (unless the `WindowOcclusionEnabled` policy is off, [docs/INSTALL.md](INSTALL.md#background-policies-hkcu)). Bring it forward: click it in the taskbar, or `browser_tabs action:"focus"`. The side panel's **⧉ Pop out tab** opens the window in front; before 2.0.3 it opened it behind your own window. |
 | `[delivery: missed; hit <…>]` | Something covered the element or moved it. The action was not repeated. Take a new snapshot and check the page before retrying. |
 | `browser_network` shows 0 requests | Capture starts when the tab is attached. Reload the page and read again, or press **Record from now** with **reload to capture page load** ticked. |
 | Auto-attach is on **Project sites** but a tab on your site shows no capture, and the panel says *"No project sites known yet"* | Project sites are the hosts of the `environments` URLs in the `g9.project.json` of a CONNECTED agent. No agent is connected, or its project folder has no `g9.project.json`, or that file names no environment URL. Start the agent in the project folder, or add the environment, or switch to **All tabs** for now. If the panel says *"The running daemon (v2.x) is too old"*, restart the daemon ([Upgrading from 2.x to 3.0](#upgrading-from-2x-to-30)). |
@@ -1430,7 +1403,7 @@ Measured on 2026-09-25 (20 threads):
 
 Build the installer (`cd desktop; npm run build:win; npm run test:packaged`) only for a change in
 `desktop/` or a build someone will install. How the plan is made, and what it cannot know:
-[AIGuide §7.0](AIGuide.md#70-choosing-what-to-run-since-301).
+[AIGuide §7.0](../AIGuide.md#70-choosing-what-to-run-since-301).
 
 ### Every suite
 
@@ -1537,19 +1510,19 @@ it is ASP.NET, React or PHP. Keep it as its own repository and use it across pro
 
 ## Changing this codebase
 
-> **Every change must also update [`AIGuide.md`](AIGuide.md).** It is the durable record of what
+> **Every change must also update [`AIGuide.md`](../AIGuide.md).** It is the durable record of what
 > exists, why it was built that way, and what is deliberately absent. An AI agent or a new teammate
 > reads it before touching this code. A change that is not recorded there did not happen.
 
 1. **Make the change.**
 2. **Log it.** Add an entry to the **Change log** in AIGuide.md
-   ([§9](AIGuide.md#9-change-log)): the date, what changed, why, and the bugs found on the way.
+   ([§9](../AIGuide.md#9-change-log)): the date, what changed, why, and the bugs found on the way.
 3. **Update the documents it touches, in the same change set:**
    - the affected AIGuide sections;
-   - [docs/ARCHITECTURE_V2.md](docs/ARCHITECTURE_V2.md) for module boundaries and signatures (it is
+   - [docs/ARCHITECTURE_V2.md](ARCHITECTURE_V2.md) for module boundaries and signatures (it is
      binding);
-   - [docs/DAEMON_PROTOCOL.md](docs/DAEMON_PROTOCOL.md) for anything on the wire;
-   - [docs/STEALTH.md](docs/STEALTH.md) and [docs/HUMANIZE.md](docs/HUMANIZE.md) when their
+   - [docs/DAEMON_PROTOCOL.md](DAEMON_PROTOCOL.md) for anything on the wire;
+   - [docs/STEALTH.md](STEALTH.md) and [docs/HUMANIZE.md](HUMANIZE.md) when their
      behaviour changes;
    - this README.
 4. **Bump the version.** There is one version string, the root `package.json` version.
