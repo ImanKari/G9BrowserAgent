@@ -219,8 +219,11 @@ export function candidatePaths(env = process.env) {
       for (const root of [pf, pf86, local]) add('chrome', channel, chrome(root, folder));
     }
   } else if (process.platform === 'darwin') {
-    add('chrome', 'stable', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
-    add('edge', 'stable', '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge');
+    // /Applications first; a per-user install (~/Applications, no admin rights) after it.
+    for (const root of ['/Applications', path.join(os.homedir(), 'Applications')]) {
+      add('chrome', 'stable', path.join(root, 'Google Chrome.app/Contents/MacOS/Google Chrome'));
+      add('edge', 'stable', path.join(root, 'Microsoft Edge.app/Contents/MacOS/Microsoft Edge'));
+    }
     add('chrome', 'beta', '/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta');
     add('edge', 'beta', '/Applications/Microsoft Edge Beta.app/Contents/MacOS/Microsoft Edge Beta');
   } else {

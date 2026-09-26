@@ -20,6 +20,7 @@ import { PipeCdp } from './pipe-cdp.js';
 import { launchArgsFor, launchWarnings, normalizeLevel } from './stealth.js';
 import { profileInUse } from './profile.js';
 import { noteFirewallLaunch } from './firewall.js';
+import { cleanChildEnv } from '../lib/runtime.mjs';
 
 /**
  * The designed list (engine/README.md), plus ONE deliberate addition: `msImplicitSignin`. Features merged with any
@@ -556,7 +557,9 @@ export async function launchBrowser({
       windowsHide: !!headless,
       // POSIX: its own process group, so killTree can signal the whole group.
       detached: process.platform !== 'win32',
-      env: env ? { ...process.env, ...env } : process.env,
+      // Never the runtime's own variables: from a Linux AppImage, LD_LIBRARY_PATH into its mount
+      // breaks a system Chrome, and ELECTRON_RUN_AS_NODE must not reach anything the browser starts.
+      env: env ? { ...cleanChildEnv(process.env), ...env } : cleanChildEnv(process.env),
     });
   } catch (err) {
     // Windows throws synchronously for a file that is not an executable ("spawn UNKNOWN").

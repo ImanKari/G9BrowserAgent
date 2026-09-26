@@ -159,20 +159,41 @@ function renderRaw() {
 
 function renderUpdates(s) {
   const u = s.update ?? {};
+  const app = s.app ?? {};
   const check = h('button', { type: 'button', class: 'btn' }, icon('refresh', { size: 15 }), 'Check now');
-  check.disabled = ['dev', 'not-configured', 'invalid-url', 'checking', 'downloading', 'installing'].includes(u.status);
+  check.disabled = ['dev', 'off', 'not-configured', 'invalid-url', 'checking', 'downloading', 'installing'].includes(u.status);
   check.addEventListener('click', () => busy(check, () => api.invoke('updater.check')));
   const install = h('button', { type: 'button', class: 'btn primary', hidden: !['downloaded', 'deferred'].includes(u.status) }, `Install ${u.version ?? ''}`.trim());
   install.addEventListener('click', () => busy(install, async () => {
     const r = await api.invoke('updater.install');
     if (r?.status === 'deferred') toast(`Waiting: ${(r.reasons ?? []).join('; ')}. It installs by itself when the daemon is idle.`);
   }));
+  const onQuit = h('button', { type: 'button', class: 'btn', hidden: !['downloaded', 'deferred'].includes(u.status) || u.installOnQuit }, 'Install when I quit G9');
+  onQuit.addEventListener('click', () => busy(onQuit, async () => {
+    await api.invoke('updater.installOnQuit');
+    toast(`G9 ${u.version} installs the next time you quit G9 while nothing runs.`);
+  }));
+  // Manual installs (macOS, .deb): the release is found here, and downloaded from its page.
+  const manual = u.status === 'available-manual';
+  const open = h('button', { type: 'button', class: 'btn primary', hidden: !manual }, `Open the ${u.version ?? ''} release page`.replace(/\s+/g, ' '));
+  open.addEventListener('click', () => busy(open, () => api.invoke('updater.openRelease')));
+  const skip = h('button', { type: 'button', class: 'btn ghost', hidden: !(manual || ['downloaded', 'deferred'].includes(u.status)) || u.skipped === u.version }, 'Skip this version');
+  skip.addEventListener('click', () => busy(skip, async () => {
+    await api.invoke('updater.skip');
+    toast(`G9 ${u.version} will not be offered again; a newer release will.`);
+  }));
+  const where = u.source === 'custom' ? `from ${u.url ?? 'your custom address'}` : u.source === 'off' ? null : 'from the official G9 releases on GitHub';
+  const how = app.installMode === 'manual'
+    ? `This installation updates by hand: ${app.manualReason ?? 'it cannot replace itself'}. G9 still checks and tells you when a release is out.`
+    : 'Downloads in the background, then asks. Installing waits until no run is in progress and no launched browser is open.';
   const help = u.status === 'not-configured'
-    ? 'Set "Update server URL" above to an http(s) folder that holds latest.yml and G9-Setup-<version>.exe. Until then G9 does not check anywhere.'
-    : u.status === 'dev'
-      ? 'This is a development build (run from the repository). Installed builds update themselves.'
-      : `Checks on start and every 6 hours${u.lastCheckAt ? `; last check ${new Date(u.lastCheckAt).toLocaleString()}` : ''}. Installing waits until no run is in progress.`;
-  replace(updatesEl, h('p', null, h('strong', null, u.line ?? 'Updates: …')), h('p', { class: 'muted' }, help), h('div', { class: 'row' }, check, install));
+    ? 'Update source is "custom" but no address is set. Set "Custom update URL" above to an https folder that holds latest.yml and the installers, or switch the source back to "official".'
+    : u.status === 'off'
+      ? 'Set "Update source" above to "official" to be told about new G9 releases.'
+      : u.status === 'dev'
+        ? 'This is a development build (run from the repository): update it with git pull. Installed builds update themselves.'
+        : `Checks ${where} on start and every 6 hours${u.lastCheckAt ? `; last check ${new Date(u.lastCheckAt).toLocaleString()}` : ''}. ${how}`;
+  replace(updatesEl, h('p', null, h('strong', null, u.line ?? 'Updates: …')), h('p', { class: 'muted' }, help), h('div', { class: 'row' }, check, install, onQuit, open, skip));
 }
 
 function renderDaemon(s) {

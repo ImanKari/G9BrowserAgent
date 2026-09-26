@@ -15,7 +15,7 @@
 
 import os from 'node:os';
 import { policyEntries, policyStatus, applyPolicies, undoPolicies } from './policies.mjs';
-import { mcpClients, detectClients, shimEntry, inspectClient, applyRegistration, removeRegistration } from './mcp-register.mjs';
+import { mcpClients, detectClients, shimEntry, inspectClient, applyRegistration, removeRegistration, unstableExecReason } from './mcp-register.mjs';
 import { findBrowserExecutables, installExtension, openExtensionsPage, threeClicks, manifestVersion, EXTENSIONS_PAGE } from './extension-install.mjs';
 import { normalizeVersions, pickList } from '../renderer/lib/engines.js';
 
@@ -133,11 +133,28 @@ export class Wizard {
 
   // ---------------------------------------------------------------- 3. policies
 
+  /**
+   * The background policies are Windows registry values (HKCU\Software\Policies); the native
+   * occlusion tracker `WindowOcclusionEnabled` turns off is Chromium's Windows one. G9 writes no
+   * policies on macOS or Linux, and the step says so instead of failing on reg.exe.
+   */
+  #policiesApply() {
+    return (this.app.platform ?? process.platform) === 'win32';
+  }
+
   async policies() {
-    return policyStatus({ entries: policyEntries(), run: this.deps.regRun, recordFile: this.layout.policiesJson });
+    if (!this.#policiesApply()) {
+      return {
+        applicable: false,
+        reason: 'Nothing to set here: these are Windows registry policies, and G9 sets no browser policies on macOS or Linux. There too, a background tab or a minimized window stops rendering, so keep the tab an agent works in visible — or hand it to a launched browser (headless, which no window state affects).',
+        rows: [], appliedCount: 0, total: 0, canUndo: false,
+      };
+    }
+    return { applicable: true, ...(await policyStatus({ entries: policyEntries(), run: this.deps.regRun, recordFile: this.layout.policiesJson })) };
   }
 
   async applyPolicies({ elevate = false } = {}) {
+    if (!this.#policiesApply()) throw new Error('Background policies are Windows-only; nothing to apply on this operating system.');
     this.log.info(`Setup: applying HKCU policies${elevate ? ' with administrator approval' : ''}`);
     const r = await applyPolicies({
       entries: policyEntries(),
@@ -153,6 +170,7 @@ export class Wizard {
   }
 
   async undoPolicies({ elevate = false } = {}) {
+    if (!this.#policiesApply()) throw new Error('Background policies are Windows-only; nothing to undo on this operating system.');
     this.log.info(`Setup: undoing HKCU policies${elevate ? ' with administrator approval' : ''}`);
     const r = await undoPolicies({ run: this.deps.regRun, runElevated: this.deps.regRunElevated, elevate, recordFile: this.layout.policiesJson, log: this.log, by: this.deps.user() });
     if (r.ok) this.mark('policies', { ok: false, skipped: true, summary: 'Policies undone.' });
@@ -168,7 +186,14 @@ export class Wizard {
       resourceRoot: this.app.resourceRoot,
       port: this.app.port,
       homeOverride: this.app.homeOverride,
+      appImage: this.app.appImage ?? null,
     });
+  }
+
+  /** A packaged app running from a path that will not exist next time must not be registered. */
+  #unstableReason() {
+    if (!this.app.isPackaged || this.app.appImage) return null;
+    return unstableExecReason({ execPath: this.app.execPath, platform: this.app.platform ?? process.platform });
   }
 
   mcp() {
@@ -176,6 +201,7 @@ export class Wizard {
     const clients = detectClients(this.deps.clients(), this.deps.exists ? { exists: this.deps.exists } : undefined);
     return {
       entry,
+      blocked: this.#unstableReason(),
       clients: clients.map((c) => {
         // nextText is the whole rewritten file (~/.claude.json can be large); the page needs only the plan.
         const { nextText, ...plan } = inspectClient(c, entry);
@@ -187,6 +213,8 @@ export class Wizard {
   registerMcp(clientId, { confirmReplace = false, confirmDropComments = false } = {}) {
     const client = this.deps.clients().find((c) => c.id === clientId);
     if (!client) throw new Error(`Unknown AI client ${clientId}`);
+    const unstable = this.#unstableReason();
+    if (unstable) throw new Error(unstable);
     const r = applyRegistration(client, this.entry(), { confirmReplace, confirmDropComments, log: this.log });
     return r;
   }
@@ -207,7 +235,7 @@ export class Wizard {
       target: this.deps.extensionDir(),
       installedVersion: manifestVersion(this.deps.extensionDir()),
       browsers: browsers.map((b) => ({ ...b, page: EXTENSIONS_PAGE[b.kind] })),
-      clicks: { edge: threeClicks('edge'), chrome: threeClicks('chrome') },
+      clicks: { edge: threeClicks('edge', this.app.platform ?? process.platform), chrome: threeClicks('chrome', this.app.platform ?? process.platform) },
     };
   }
 
@@ -231,6 +259,6 @@ export class Wizard {
     const b = browsers.find((x) => x.kind === kind);
     const cmd = openExtensionsPage(kind, b?.path, this.deps.spawn ? { spawn: this.deps.spawn } : undefined);
     this.log.info('Setup: opened the extensions page', { kind, command: cmd.command, args: cmd.args });
-    return { ...cmd, clicks: threeClicks(kind) };
+    return { ...cmd, clicks: threeClicks(kind, this.app.platform ?? process.platform) };
   }
 }

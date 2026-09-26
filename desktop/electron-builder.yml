@@ -1,6 +1,12 @@
-# G9 desktop installer (docs/INSTALL.md; ARCHITECTURE_V2 §11).
-# Build with `npm run build:win` (scripts/build-win.mjs), which draws the icon first and drops
-# `publish` when G9_UPDATE_URL is not set — see that script for why.
+# G9 desktop packages (docs/INSTALL.md; ARCHITECTURE_V2 §11).
+# Build with `npm run build:win|build:mac|build:linux` (scripts/build.mjs), which draws the icon,
+# checks the packaged resources and the version, and never publishes: the release pipeline uploads
+# the artifacts to GitHub itself (azure-pipelines.yml).
+#
+#   Windows  G9-Setup-<v>.exe (+ .blockmap)            per-user NSIS, auto-update     latest.yml
+#   macOS    G9-<v>-mac-<arch>.dmg / .zip (x64, arm64) drag to Applications; unsigned  latest-mac.yml
+#   Linux    G9-<v>-x86_64.AppImage                     auto-update                    latest-linux.yml
+#            G9_<v>_amd64.deb                           system package, updated by hand
 
 appId: com.g9.browseragent
 productName: G9
@@ -73,9 +79,56 @@ nsis:
   deleteAppDataOnUninstall: false
   include: build/installer.nsh
 
-# electron-updater generic feed. The in-app URL always comes from Settings (autoUpdater.setFeedURL);
-# this block is what makes the build emit latest.yml for the update server.
+# macOS. Not signed with a Developer ID (none exists yet): the app is ad-hoc signed ("-") so it runs
+# on Apple silicon, Gatekeeper asks once on first open, and updates are installed by hand — the app
+# finds them and links the release page (desktop/lib/updater.mjs, installMode 'manual'). The zip
+# exists because latest-mac.yml describes it; the dmg is what people download.
+mac:
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+    - target: zip
+      arch: [x64, arm64]
+  category: public.app-category.developer-tools
+  icon: build/icon.png
+  identity: '-'
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  artifactName: G9-${version}-mac-${arch}.${ext}
+dmg:
+  title: G9 ${version}
+  artifactName: G9-${version}-mac-${arch}.${ext}
+
+# Linux. The AppImage updates itself (electron-updater replaces the file at $APPIMAGE); the .deb
+# installs to /opt/G9 and is updated with the package manager. An AppImage runs from a temporary
+# mount, so the daemon and MCP entries go through the .AppImage file (lib/runtime.mjs).
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+  executableName: g9
+  # The .desktop entry is g9.desktop (package.json desktopName), and Electron's app_id / WM_CLASS
+  # follows it, so the desktop links G9's windows to its launcher and dock icon.
+  syncDesktopName: true
+  category: Development
+  icon: build/icon.png
+  synopsis: AI agents drive real Chrome and Edge through MCP, with human-like input
+  description: G9 lets AI agents drive real Chromium browsers at DevTools depth through MCP, with human-like input and reviewable evidence.
+  maintainer: Iman Kari <iman.kari@live.com>
+appImage:
+  artifactName: G9-${version}-x86_64.${ext}
+deb:
+  # electron-builder's default dependency list (Electron's own needs). Not overridden: a hard
+  # libasound2 would make the package uninstallable on Ubuntu 24.04 (libasound2t64).
+  artifactName: G9_${version}_amd64.${ext}
+
+# The official update feed: the GitHub releases of the official repository. The app sets its feed
+# at runtime (Settings: official / custom / off); this block is what makes every build write
+# latest.yml / latest-mac.yml / latest-linux.yml and an app-update.yml into the app.
 publish:
-  provider: generic
-  url: ${env.G9_UPDATE_URL}
-  channel: latest
+  provider: github
+  owner: ImanKari
+  repo: G9BrowserAgent
+  releaseType: release

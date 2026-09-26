@@ -1,0 +1,13 @@
+# Text files are LF in the repository AND in every checkout, Windows included.
+#
+# Why: some suites read source files as text and match "\n}\n" (setup/extensiontest.mjs pins where
+# the input witness sits in a function body), and a Windows checkout with core.autocrlf=true turned
+# every line ending into CRLF — the suite failed on a clean clone, and on Windows CI agents. Node,
+# PowerShell 7, NSIS and every browser read LF files as they are.
+* text=auto eol=lf
+
+# Binary: never touched.
+*.png  binary
+*.ico  binary
+*.jpg  binary
+*.icns binary

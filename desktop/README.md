@@ -208,7 +208,7 @@ lib/policies.mjs    HKCU policy apply/undo with a record, elevation batch, read-
 lib/mcp-register.mjs    client detection, entry, plan/diff, backup, atomic write, verify
 lib/extension-install.mjs, lib/wizard.mjs, lib/updater.mjs, lib/settings.mjs, lib/paths.mjs,
 lib/runs-store.mjs (frames and cursor track from disk), lib/icon.mjs (tray/app icon, drawn in code)
-scripts/            start.mjs, build-win.mjs, make-icons.mjs
+scripts/            start.mjs, build.mjs (win/mac/linux), verify-artifacts.mjs, make-icons.mjs
 test/               *.test.mjs + run.mjs; fake-daemon.mjs is a fake g9d, fake-dom.mjs a fake DOM for the
                     views; daemon-contract.mjs is the live check against the real g9d (npm run test:daemon);
                     packaged.mjs checks dist/win-unpacked (npm run test:packaged); render-check.mjs drives

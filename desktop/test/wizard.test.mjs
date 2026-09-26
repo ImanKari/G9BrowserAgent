@@ -58,7 +58,9 @@ function wizard(over = {}) {
     log: createLogger(layout.installLog),
     layout,
     resources: resourcePaths(res),
-    app: { isPackaged: true, execPath: 'C:/Programs/G9/G9.exe', resourceRoot: res, port: 8765, homeOverride: null },
+    // Pinned to Windows: the registry policies and the msedge.exe paths are Windows facts, and this
+    // suite also runs on macOS and Linux agents.
+    app: { isPackaged: true, execPath: 'C:/Programs/G9/G9.exe', resourceRoot: res, port: 8765, homeOverride: null, platform: 'win32' },
     deps: {
       clipboardWrite: (x) => clip.push(x),
       spawn: (cmd, args, opts) => { spawned.push({ cmd, args, opts }); return { on() {}, unref() {} }; },
@@ -178,7 +180,9 @@ t.test('5. extension: the folder is the DAEMON\'s G9_HOME/extension when the dae
     log: createLogger(layout.installLog),
     layout,
     resources: resourcePaths(res),
-    app: { isPackaged: true, execPath: 'C:/Programs/G9/G9.exe', resourceRoot: res, port: 8765, homeOverride: null },
+    // Pinned to Windows: the registry policies and the msedge.exe paths are Windows facts, and this
+    // suite also runs on macOS and Linux agents.
+    app: { isPackaged: true, execPath: 'C:/Programs/G9/G9.exe', resourceRoot: res, port: 8765, homeOverride: null, platform: 'win32' },
     deps: { clipboardWrite: (x) => clip.push(x), findBrowsers: async () => [], extensionDir: () => daemonExt },
   });
   const info = await w.extension();
@@ -193,10 +197,47 @@ t.test('extensions page command and browser candidates', () => {
   assert.deepEqual(extensionsPageCommand('chrome', 'C:/c.exe'), { command: 'C:/c.exe', args: ['chrome://extensions'] });
   assert.throws(() => extensionsPageCommand('edge', null), /Microsoft Edge was not found/);
   assert.throws(() => extensionsPageCommand('firefox', 'x'), /Unknown browser/);
-  const c = browserCandidates({ ProgramFiles: 'C:\\PF', 'ProgramFiles(x86)': 'C:\\PF86', LOCALAPPDATA: 'C:\\L' });
+  const c = browserCandidates({ ProgramFiles: 'C:\\PF', 'ProgramFiles(x86)': 'C:\\PF86', LOCALAPPDATA: 'C:\\L' }, { platform: 'win32' });
   assert.ok(c.some((x) => x.kind === 'edge' && x.path === path.join('C:\\PF86', 'Microsoft', 'Edge', 'Application', 'msedge.exe')));
   assert.ok(c.some((x) => x.kind === 'chrome' && x.path === path.join('C:\\L', 'Google', 'Chrome', 'Application', 'chrome.exe')));
-  assert.equal(threeClicks('chrome').length, 3);
+  assert.equal(threeClicks('chrome', 'win32').length, 3);
+});
+
+t.test('macOS and Linux: browsers are found where they install, and the picker steps are that OS\'s', () => {
+  const mac = browserCandidates({}, { platform: 'darwin', home: '/Users/qa' });
+  assert.ok(mac.some((x) => x.kind === 'chrome' && x.path === path.join('/Applications', 'Google Chrome.app', 'Contents', 'MacOS', 'Google Chrome')));
+  assert.ok(mac.some((x) => x.kind === 'edge' && x.path === path.join('/Users/qa', 'Applications', 'Microsoft Edge.app', 'Contents', 'MacOS', 'Microsoft Edge')), 'a per-user install (~/Applications)');
+  const linux = browserCandidates({}, { platform: 'linux' });
+  assert.ok(linux.some((x) => x.kind === 'chrome' && x.path === '/usr/bin/google-chrome'));
+  assert.ok(linux.some((x) => x.kind === 'edge' && x.path === '/usr/bin/microsoft-edge'));
+  assert.match(threeClicks('chrome', 'darwin')[2], /Cmd\+Shift\+G/);
+  assert.match(threeClicks('edge', 'linux')[2], /Ctrl\+L/);
+  assert.match(threeClicks('edge', 'win32')[2], /Select Folder/);
+});
+
+t.test('3. policies on macOS and Linux: not applicable, said plainly, and nothing runs reg.exe', async () => {
+  const ran = [];
+  for (const platform of ['darwin', 'linux']) {
+    const { w } = wizard({ ctor: { app: { isPackaged: true, execPath: '/opt/G9/g9', resourceRoot: res, port: 8765, homeOverride: null, platform } } });
+    w.deps.regRun = async (args) => { ran.push(args); return { code: 0, stdout: '', stderr: '' }; };
+    const r = await w.policies();
+    assert.equal(r.applicable, false);
+    assert.match(r.reason, /Windows registry policies/);
+    await assert.rejects(() => w.applyPolicies(), /Windows-only/);
+    await assert.rejects(() => w.undoPolicies(), /Windows-only/);
+  }
+  assert.deepEqual(ran, [], 'no registry command on a non-Windows machine');
+});
+
+t.test('4. MCP on macOS: an app running from App Translocation or the disk image is not registered (the path dies next start)', () => {
+  const translocated = '/private/var/folders/xy/T/AppTranslocation/1234-ABCD/d/G9.app/Contents/MacOS/G9';
+  const { w } = wizard({ ctor: { app: { isPackaged: true, execPath: translocated, resourceRoot: res, port: 8765, homeOverride: null, platform: 'darwin' } } });
+  assert.match(w.mcp().blocked, /App Translocation/);
+  assert.throws(() => w.registerMcp('claude-code'), /Applications folder/);
+  const fromImage = wizard({ ctor: { app: { isPackaged: true, execPath: '/Volumes/G9 3.1.0/G9.app/Contents/MacOS/G9', resourceRoot: res, port: 8765, homeOverride: null, platform: 'darwin' } } });
+  assert.match(fromImage.w.mcp().blocked, /disk image/);
+  const installed = wizard({ ctor: { app: { isPackaged: true, execPath: '/Applications/G9.app/Contents/MacOS/G9', resourceRoot: res, port: 8765, homeOverride: null, platform: 'darwin' } } });
+  assert.equal(installed.w.mcp().blocked, null);
 });
 
 t.test('marking steps completes the wizard; everything is in install.log', () => {

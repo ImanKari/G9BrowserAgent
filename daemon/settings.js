@@ -16,6 +16,8 @@ import { validateEntry } from './scheduler.js';
 export const HUMANIZE_LEVELS = ['off', 'human', 'stealth'];
 /** The desktop app's update channels (electron-updater: 'stable' → its 'latest' channel). */
 export const UPDATE_CHANNELS = ['stable', 'beta'];
+/** Where the desktop app's updates come from: the official GitHub releases, an https folder, or nowhere. */
+export const UPDATE_MODES = ['official', 'custom', 'off'];
 export const STEALTH_LEVELS = ['off', 'human', 'stealth'];
 export const BROWSERS = ['auto', 'edge', 'chrome', 'cft'];
 
@@ -43,10 +45,16 @@ export const DEFAULTS = Object.freeze({
   /** Exit after this long with no client, no launched engine and no enabled schedule. 0 = never. */
   idleExitMinutes: 60,
   /**
-   * Desktop auto-update feed: an http(s):// URL of an electron-updater "generic" feed; empty
-   * disables the updater with a visible reason. file:// is refused (F6): electron-updater's
-   * generic provider downloads over http(s) only, so a file:// feed saved fine and then failed
-   * every check on every QA machine with "the configured URL is not usable".
+   * Where the desktop app updates from (desktop/lib/updater.mjs): 'official' (the default) is the
+   * published G9 releases on GitHub and needs nothing configured; 'custom' uses `updateUrl`;
+   * 'off' never checks.
+   */
+  updateMode: 'official',
+  /**
+   * For updateMode 'custom': an https:// URL of an electron-updater "generic" feed (http:// only on
+   * localhost, for a test feed). file:// is refused (F6): electron-updater's generic provider
+   * downloads over http(s) only, so a file:// feed saved fine and then failed every check on every
+   * QA machine with "the configured URL is not usable".
    */
   updateUrl: '',
   /** Which releases the desktop app follows: 'stable' | 'beta'. */
@@ -104,7 +112,9 @@ export function validateSettings(s) {
   if (!STEALTH_LEVELS.includes(s.stealth)) problems.push(`stealth must be one of ${STEALTH_LEVELS.join(', ')} (got ${JSON.stringify(s.stealth)}).`);
   int('maxParallel', 1, 256);
   int('idleExitMinutes', 0, 60 * 24 * 30);
-  if (typeof s.updateUrl !== 'string') problems.push('updateUrl must be a string (empty disables updates).');
+  if (!UPDATE_MODES.includes(s.updateMode)) problems.push(`updateMode must be one of ${UPDATE_MODES.join(', ')} (got ${JSON.stringify(s.updateMode)}).`);
+  if (s.updateMode === 'custom' && typeof s.updateUrl === 'string' && !s.updateUrl.trim()) problems.push('updateMode "custom" needs updateUrl (an https:// folder).');
+  if (typeof s.updateUrl !== 'string') problems.push('updateUrl must be a string (used only when updateMode is "custom").');
   else if (/^file:/i.test(s.updateUrl.trim())) {
     problems.push(
       'updateUrl cannot be a file:// URL: the desktop app\'s updater (electron-updater, generic provider) downloads ' +
@@ -181,6 +191,8 @@ export class Settings {
       raw = {};
     }
     const merged = mergeSettings(DEFAULTS, raw);
+    // Before updateMode existed, a URL was the only way to turn updates on: keep that meaning.
+    if (!('updateMode' in raw) && typeof raw.updateUrl === 'string' && raw.updateUrl.trim()) merged.updateMode = 'custom';
     // A broken schedule ENTRY costs that entry, not the whole schedule: the
     // other entries are somebody's nightly runs.
     if (Array.isArray(merged.schedule)) {

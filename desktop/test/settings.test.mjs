@@ -112,10 +112,15 @@ t.test('update URL validation and pickUpdateConfig (daemon first, desktop cache 
   assert.match(validateUpdateUrl('file:///C:/share'), /https:\/\//);
   assert.match(validateUpdateUrl('http://updates.example/g9/'), /only by TLS/);
   assert.equal(validateUpdateUrl('http://localhost:18080/g9/'), null, 'a loopback test feed stays allowed');
-  assert.deepEqual(pickUpdateConfig({ updateUrl: 'https://d/', updateChannel: 'beta' }, { url: 'https://c/' }), { url: 'https://d/', channel: 'beta', source: 'daemon' });
-  assert.deepEqual(pickUpdateConfig({ update: { url: 'https://old/', channel: 'stable' } }), { url: 'https://old/', channel: 'stable', source: 'daemon' });
-  assert.deepEqual(pickUpdateConfig({}, { url: 'https://c/', channel: 'stable' }), { url: 'https://c/', channel: 'stable', source: 'desktop' });
-  assert.deepEqual(pickUpdateConfig({}, {}), { url: '', channel: 'stable', source: 'none' });
+  // A URL with no mode is a settings file from before updateMode: it meant a custom feed.
+  assert.deepEqual(pickUpdateConfig({ updateUrl: 'https://d/', updateChannel: 'beta' }, { url: 'https://c/' }), { mode: 'custom', url: 'https://d/', channel: 'beta', source: 'daemon' });
+  assert.deepEqual(pickUpdateConfig({ update: { url: 'https://old/', channel: 'stable' } }), { mode: 'custom', url: 'https://old/', channel: 'stable', source: 'daemon' });
+  assert.deepEqual(pickUpdateConfig({}, { url: 'https://c/', channel: 'stable' }), { mode: 'custom', url: 'https://c/', channel: 'stable', source: 'desktop' });
+  // Nothing anywhere: the official releases (the default of a fresh install).
+  assert.deepEqual(pickUpdateConfig({}, {}), { mode: 'official', url: '', channel: 'stable', source: 'none' });
+  assert.deepEqual(pickUpdateConfig({ updateMode: 'official', updateUrl: '' }, {}), { mode: 'official', url: '', channel: 'stable', source: 'daemon' });
+  assert.deepEqual(pickUpdateConfig({ updateMode: 'off', updateUrl: 'https://d/' }, {}), { mode: 'off', url: 'https://d/', channel: 'stable', source: 'daemon' });
+  assert.equal(pickUpdateConfig({ updateMode: 'nonsense' }, {}).mode, 'official', 'an unknown mode is never "check nowhere"');
   assert.equal(getPath({ a: { b: 0 } }, 'a.b'), 0);
 });
 

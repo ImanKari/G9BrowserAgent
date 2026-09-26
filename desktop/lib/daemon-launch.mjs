@@ -15,6 +15,7 @@
 
 import fs from 'node:fs';
 import http from 'node:http';
+import path from 'node:path';
 import { spawn as nodeSpawn } from 'node:child_process';
 import { resourcePaths } from './paths.mjs';
 
@@ -22,11 +23,19 @@ import { resourcePaths } from './paths.mjs';
  * The exact command that starts the daemon. Pure.
  * @returns {{ command, args, env, cwd, script }}
  */
-export function daemonCommand({ isPackaged, execPath, resourceRoot, env = process.env, port, home, nodePath = 'node' }) {
+export function daemonCommand({ isPackaged, execPath, resourceRoot, env = process.env, port, home, nodePath = 'node', appImage = null }) {
   const { daemonScript, root } = resourcePaths(resourceRoot);
   const childEnv = { ...env };
   if (port) childEnv.G9_PORT = String(port);
   if (home) childEnv.G9_HOME = home;
+  if (appImage) {
+    // A Linux AppImage: this process runs from a mount that disappears when it quits, and the
+    // daemon must outlive it. Start the .AppImage file itself (its own mount) through the stable
+    // bootstrap (lib/runtime.mjs). `appImage` = { file, bootstrap }, computed by main.mjs.
+    childEnv.ELECTRON_RUN_AS_NODE = '1';
+    // '--no-sandbox' after the script keeps AppRun from putting it before it (lib/runtime.mjs NO_SANDBOX).
+    return { command: appImage.file, args: [appImage.bootstrap, 'daemon/g9d.mjs', '--no-sandbox'], env: childEnv, cwd: path.dirname(appImage.bootstrap), script: daemonScript };
+  }
   if (isPackaged) {
     // The Electron binary as a plain Node runtime.
     childEnv.ELECTRON_RUN_AS_NODE = '1';
@@ -277,9 +286,15 @@ export async function waitForPortFree(port, { timeoutMs = 15_000, probe = probeH
  * (desktop review, 2026-09-22).
  * → 'none' | 'restart' | 'notice-newer' | 'notice-other-install' | 'notice-no-autostart'
  */
-export function mismatchAction({ daemonVersion, appVersion, daemonRoot = null, appRoot = null, startDaemon = true, platform = process.platform } = {}) {
+export function mismatchAction({ daemonVersion, appVersion, daemonRoot = null, appRoot = null, daemonInstall = null, appInstall = null, startDaemon = true, platform = process.platform } = {}) {
   if (!daemonVersion || daemonVersion === appVersion) return 'none';
   if (compareVersions(daemonVersion, appVersion) > 0) return 'notice-newer';
+  // A stable install id wins over the resource root when both sides report one: an AppImage's
+  // resource root is a new mount on every start, its .AppImage file is not (lib/runtime.mjs).
+  if (daemonInstall && appInstall) {
+    daemonRoot = daemonInstall;
+    appRoot = appInstall;
+  }
   const same = (a, b) => {
     if (!a || !b) return true; // an older daemon that does not say where it lives: treat as ours
     const norm = (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, '');

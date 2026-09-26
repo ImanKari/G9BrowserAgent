@@ -21,6 +21,10 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 import { VERSION, REPO_ROOT, majorOf } from '../lib/version.mjs';
+import { installId } from '../lib/runtime.mjs';
+
+/** This installation, stable across restarts (an AppImage's resource root is a new mount every start). */
+const INSTALL_ID = installId({ root: REPO_ROOT });
 import { WsServer, classifyOrigin } from './ws-server.js';
 import { Registry } from './registry.js';
 import { Router, deliveryFields } from './router.js';
@@ -90,7 +94,7 @@ export class Daemon {
       log,
       version: VERSION,
       timeoutMs,
-      info: () => ({ pid: process.pid, port: this.port, home: this.home.replace(/\\/g, '/'), repoRoot: REPO_ROOT, startedAt: this.startedAt }),
+      info: () => ({ pid: process.pid, port: this.port, home: this.home.replace(/\\/g, '/'), repoRoot: REPO_ROOT, installId: INSTALL_ID, startedAt: this.startedAt }),
     });
     this.router.emitUi = (topic, data) => this.broadcastUi(topic, data);
     this.router.onHaltFromEngine = (engineId, halted, by) => this.setGlobalHalt(halted, by, { except: engineId });
@@ -232,6 +236,8 @@ export class Daemon {
       pid: process.pid,
       port: this.port,
       home: this.home.replace(/\\/g, '/'),
+      /** This installation (lib/runtime.mjs installId): the .AppImage file for an AppImage, else the resource root. */
+      installId: INSTALL_ID,
       engines: this.registry.extensionEngines().length + this.engines.list().length,
       agents: this.registry.agents().length,
       extension,
@@ -361,6 +367,7 @@ export class Daemon {
       startedAt: this.startedAt,
       id: client.id,
       repoRoot: REPO_ROOT.replace(/\\/g, '/'),
+      installId: INSTALL_ID,
       project: projectForClient(client.project),
       halted: { global: this.registry.global.halted, ...(this.registry.global.halted ? { by: this.registry.global.by } : {}) },
       port: this.port,
@@ -373,6 +380,7 @@ export class Daemon {
       if (this.registry.global.halted) conn.send({ type: 'halt', halted: true });
       this.#pushAgents();
       this.#pushProjects(client);
+      this.#catchUpExtension(client, msg.version).catch((err) => this.log(`[g9d] extension catch-up failed: ${err.message}`));
       // Live views of this engine's tabs lived in the old worker's memory; ask again.
       if (client.resumed) {
         for (const handle of this.watchers.keys()) {
@@ -623,6 +631,38 @@ export class Daemon {
   }
 
   /** Ask connected extensions to reload, each once it has no call in flight (max 60 s wait). */
+  /**
+   * An extension older than this daemon whose folder already holds this version gets one reload.
+   *
+   * After an app update the desktop refreshes G9_HOME/extension and asks every CONNECTED extension to
+   * reload — but the extension is usually reconnecting at that moment (the old daemon was stopped for
+   * the install), so the ask reached nobody and the browser kept running the old code from the new
+   * folder: a version mismatch that nothing ever cleared (found by desktop/test/update-e2e.mjs). So
+   * the daemon checks at hello: extension older than the daemon, and the folder the updater writes
+   * is the daemon's version → reload, once the extension has no call in flight. At most once per
+   * extension instance and version: an extension loaded from another folder comes back unchanged,
+   * and is then only reported (browser_status versionMismatch), never reloaded in a loop.
+   */
+  async #catchUpExtension(client, version) {
+    if (!version || version === VERSION) return;
+    let folder = null;
+    try {
+      folder = JSON.parse(await fs.promises.readFile(path.join(this.paths.extensionDir, 'manifest.json'), 'utf8')).version ?? null;
+    } catch {
+      return; // no G9_HOME/extension (a repository checkout loads extension/ directly)
+    }
+    if (folder !== VERSION) return;
+    this.catchUpAsked ??= new Set();
+    const key = `${client.instanceId ?? client.id}:${version}`;
+    if (this.catchUpAsked.has(key)) return;
+    this.catchUpAsked.add(key);
+    const deadline = Date.now() + 60_000;
+    while (this.router.inFlight(client.id) > 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 250));
+    if (this.registry.getClient(client.id) !== client) return; // gone meanwhile; it loads the new files when it comes back
+    client.send({ type: 'reload' });
+    this.log(`[g9d] ${client.id} is v${version} but ${this.paths.extensionDir} holds v${VERSION}: asked it to reload`);
+  }
+
   async reloadExtensions() {
     const engines = this.registry.extensionEngines();
     await Promise.all(engines.map(async (ext) => {

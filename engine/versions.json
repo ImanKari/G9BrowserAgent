@@ -3,8 +3,7 @@
   "chrome-for-testing": {
     "channel": "Stable",
     "version": "153.0.8010.52",
-    "revision": "1681091",
-    "pinnedAt": "2026-09-21T18:13:49.740Z",
+    "pinnedAt": "2026-09-26T12:45:20.804Z",
     "trust": "trust-on-first-use: sha256 and size computed by engine/cft.js pin from the first download; the transfer was checked against the MD5 in Google storage's x-goog-hash header",
     "source": "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json",
     "downloads": {
@@ -13,6 +12,24 @@
         "size": 205149043,
         "sha256": "df4854428c509fcf2f790ac448bca3f994151bcff22008236fa7c4587294fbe1",
         "serverMd5": "zpBayjQjVXGHNOpRyiRcpw=="
+      },
+      "mac-x64": {
+        "url": "https://storage.googleapis.com/chrome-for-testing-public/153.0.8010.52/mac-x64/chrome-mac-x64.zip",
+        "size": 201666425,
+        "sha256": "01130a136cb492ff32a7253b2b8db9577bd3f7543574e2d7ce1a83ed1cbed3fd",
+        "serverMd5": "rc5uUuLTSWtQfjUbK/Da/Q=="
+      },
+      "mac-arm64": {
+        "url": "https://storage.googleapis.com/chrome-for-testing-public/153.0.8010.52/mac-arm64/chrome-mac-arm64.zip",
+        "size": 191015853,
+        "sha256": "6f67faa4b34dd551b53abb6fee24edeae470ab695b0b100ddc4885ff0be6724a",
+        "serverMd5": "yx+IWXOwGckiD27X2zhI2g=="
+      },
+      "linux64": {
+        "url": "https://storage.googleapis.com/chrome-for-testing-public/153.0.8010.52/linux64/chrome-linux64.zip",
+        "size": 195708470,
+        "sha256": "e66f66d4802a46d4a022667e668aa950e277cadbfbed4b3777915b47413a0ef9",
+        "serverMd5": "BPWT3O6kF7ubA6VhPKOAtg=="
       }
     }
   }

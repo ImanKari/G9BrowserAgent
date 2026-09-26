@@ -41,6 +41,7 @@ export const CHECKS = [
   unit('sites', 0.1, []),
   unit('version', 0.1, ['package.json', 'extension/manifest.json', 'desktop/package.json', 'desktop/package-lock.json', 'lib/version.mjs']),
   unit('world', 0.2, []),
+  unit('runtime', 0.5, []),
   unit('check', 1, ['setup/check.mjs']),
   {
     id: 'selftest', label: 'self-test (daemon + two shims + a fake extension)', tier: 'offline', est: 10,
@@ -121,8 +122,13 @@ export const NO_CHECK = [
   ['setup/mcp.example.json', 'a template'],
   ['g9.project.example.json', 'a template'],
   ['**/.gitignore', 'no behaviour'],
-  ['desktop/electron-builder.yml', 'the installer build: cd desktop && npm run build:win, then npm run test:packaged'],
-  ['desktop/build/**', 'the installer build: cd desktop && npm run build:win, then npm run test:packaged'],
+  ['.gitattributes', 'line endings (LF everywhere); no behaviour'],
+  ['desktop/electron-builder.yml', 'the package builds: cd desktop && npm run build:win|mac|linux (each verifies its artifacts), then test/update-e2e.mjs'],
+  ['desktop/build/**', 'the package builds: cd desktop && npm run build:win|mac|linux, then test/update-e2e.mjs'],
+  ['azure-pipelines.yml', 'the release pipeline itself: every run of it exercises it'],
+  ['setup/github-release.mjs', 'the pipeline Publish stage (a GitHub release); --dry-run against a folder to try it'],
+  ['setup/release-notes.mjs', 'the pipeline Release stage; run it with --version <v> to print the notes'],
+  ['LICENSE', 'no behaviour'],
   ['**/*.png', 'images; an icon named in the manifest is checked by the panel suite'],
   ['**/*.ico', 'images'],
 ];
