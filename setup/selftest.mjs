@@ -413,7 +413,13 @@ try {
   const s = stA.data ?? {};
   check(stA.ok && s.daemon?.version === VERSION && s.daemon?.port === PORT, 'daemon block', JSON.stringify(s.daemon ?? {}).slice(0, 90));
   check(s.engines?.length === 1 && s.engines[0].kind === 'extension' && s.engines[0].engineId === 'engine-1', 'engines list the extension');
-  const names = (s.agents ?? []).map((a) => a.name).sort();
+  // A shim connects to the daemon just after its client's `initialize` (mcp/shim.mjs), in the
+  // background: shim B, which has made no call yet, can still be connecting on a slow machine.
+  let names = (s.agents ?? []).map((a) => a.name).sort();
+  for (let i = 0; i < 50 && !(names.includes('agent-alpha') && names.includes('agent-beta')); i++) {
+    await sleep(200);
+    names = ((await shimA.call('browser_status')).data?.agents ?? []).map((a) => a.name).sort();
+  }
   check(names.includes('agent-alpha') && names.includes('agent-beta'), 'agents list both shims by their MCP client names', names.join(', '));
   check(s.halted?.global === false && s.halted?.mine === false, 'halted { global, mine }');
   check(s.health?.consoleErrors === 1, 'engine-local status carried (health)');

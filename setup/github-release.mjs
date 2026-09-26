@@ -168,13 +168,27 @@ async function main() {
   release = await gh(`${API}/releases/${release.id}`, { method: 'PATCH', body: { draft: false, make_latest: 'true' } });
   say(`Published: ${release.html_url}`);
 
-  // 6. the official feed, as electron-updater reads it (github provider, stable channel)
-  const latest = await fetch(`https://github.com/${OWNER}/${REPO}/releases/latest`, { headers: { accept: 'application/json', 'user-agent': 'g9-release' } }).then((r) => r.json());
-  if (latest?.tag_name !== TAG) fail(`/releases/latest names ${latest?.tag_name}, not ${TAG}`);
+  // 6. the official feed, as electron-updater reads it (github provider, stable channel). github.com
+  // serves /releases/latest from a cache that can trail a publish by seconds: ask again, up to 2 min.
+  const settle = async (what, probe) => {
+    let last = null;
+    for (let i = 0; i < 24; i++) {
+      last = await probe().catch((err) => ({ ok: false, why: err.message }));
+      if (last.ok) return;
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+    fail(`${what}: ${last?.why}`);
+  };
+  await settle('/releases/latest', async () => {
+    const latest = await fetch(`https://github.com/${OWNER}/${REPO}/releases/latest`, { headers: { accept: 'application/json', 'user-agent': 'g9-release' } }).then((r) => r.json());
+    return { ok: latest?.tag_name === TAG, why: `names ${latest?.tag_name}, not ${TAG}` };
+  });
   for (const meta of ['latest.yml', 'latest-mac.yml', 'latest-linux.yml']) {
-    const res = await fetch(`https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${meta}`, { redirect: 'follow', headers: { 'user-agent': 'g9-release' } });
-    const text = await res.text();
-    if (!res.ok || !new RegExp(`^version: ${VERSION.replace(/\./g, '\\.')}$`, 'm').test(text)) fail(`${meta} from the release does not carry version ${VERSION} (HTTP ${res.status})`);
+    await settle(meta, async () => {
+      const res = await fetch(`https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${meta}`, { redirect: 'follow', headers: { 'user-agent': 'g9-release' } });
+      const text = await res.text();
+      return { ok: res.ok && new RegExp(`^version: ${VERSION.replace(/\./g, '\\.')}$`, 'm').test(text), why: `does not carry version ${VERSION} (HTTP ${res.status})` };
+    });
   }
   say(`The official update feed serves ${VERSION}: /releases/latest → ${TAG}; latest.yml, latest-mac.yml and latest-linux.yml carry ${VERSION}.`);
 }
