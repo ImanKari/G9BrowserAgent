@@ -1773,7 +1773,9 @@ when I quit; the new version starts with a new daemon, `G9_HOME/extension` refre
 mismatch; the reload waits for a call in flight; macOS's manual notice; and, against GitHub, a fresh
 install with no update settings finds, downloads and installs the published release. **Windows, on the
 owner's workstation: 3.0.1 → 3.1.0, 20 of 20 checks** (installed silently into a temporary folder,
-uninstalled at the end). **Linux AppImage, in a clean Ubuntu container: 13 of 13.** It also found:
+uninstalled at the end). **Linux AppImage, in a clean Ubuntu container: 13 of 13.** **In the pipeline, on hosted machines
+(Azure DevOps run 487, 3.0.999 → 3.1.0 through the local feed): Windows 20 of 20, Linux AppImage 20 of
+20 (with Edge 153 for the extension), macOS 6 of 6 (the manual path).** It also found:
 `build.mjs` staging `node_modules` through a junction lost `electron-updater`'s dependencies in the
 packed app (`fs-extra`; the older build could not update at all) — now copied, and
 `verify-artifacts.mjs` checks every production dependency is inside each `app.asar`; and `main.mjs`
