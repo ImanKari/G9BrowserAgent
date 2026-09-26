@@ -1094,6 +1094,18 @@ await test('live: headless Edge — a click that calls window.open() returns, th
     const opener = await cdp.createTab('live2', null, `http://127.0.0.1:${port}/opener`);
     const evalIn = async (tabId, expression) => (await platform.debugger.sendCommand(tabId, 'Runtime.evaluate', { expression, returnByValue: true }, null, { timeoutMs: 8_000 })).result.value;
     for (let i = 0; i < 50 && (await evalIn(opener.id, 'document.readyState')) !== 'complete'; i++) await tick(100);
+    // Input is hit-tested against what was painted: on a slow machine (a hosted CI agent) the first
+    // frame can come after 'complete', and a click before it reaches nothing. Wait for the button
+    // to be what (100, 40) hits, two frames after it is, and record what the page receives.
+    const hitTest = 'JSON.stringify({ hit: document.elementFromPoint(100, 40)?.id ?? null, w: innerWidth, h: innerHeight })';
+    await evalIn(opener.id, "addEventListener('mousedown', () => { window.__down = (window.__down ?? 0) + 1; }, true); addEventListener('mouseup', () => { window.__up = (window.__up ?? 0) + 1; }, true); true");
+    let hit = null;
+    for (let i = 0; i < 50; i++) {
+      hit = await evalIn(opener.id, hitTest);
+      if (JSON.parse(hit).hit === 'b') break;
+      await tick(100);
+    }
+    await platform.debugger.sendCommand(opener.id, 'Runtime.evaluate', { expression: 'new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))', awaitPromise: true, returnByValue: true }, null, { timeoutMs: 8_000 });
     const click = async (type) => platform.debugger.sendCommand(opener.id, 'Input.dispatchMouseEvent', { type, x: 100, y: 40, button: 'left', buttons: type === 'mousePressed' ? 1 : 0, clickCount: 1 }, null, { timeoutMs: 8_000 });
     const t0 = Date.now();
     await click('mouseMoved');
@@ -1104,11 +1116,11 @@ await test('live: headless Edge — a click that calls window.open() returns, th
     // The click's handler runs in the task that handles mouseup: poll briefly, and say what was seen.
     let state = null;
     for (let i = 0; i < 30; i++) {
-      state = await evalIn(opener.id, 'JSON.stringify({ clicked: !!window.__clicked, opened: window.__opened ?? null, focus: document.hasFocus(), visibility: document.visibilityState })');
+      state = await evalIn(opener.id, 'JSON.stringify({ clicked: !!window.__clicked, opened: window.__opened ?? null, down: window.__down ?? 0, up: window.__up ?? 0, focus: document.hasFocus(), visibility: document.visibilityState })');
       if (JSON.parse(state).opened === true) break;
       await tick(100);
     }
-    assert.equal(JSON.parse(state).opened, true, `window.open() returned the popup, and the opener's script ran on (${state})`);
+    assert.equal(JSON.parse(state).opened, true, `window.open() returned the popup, and the opener's script ran on (${state}; before the click: ${hit})`);
     let popup = null;
     for (let i = 0; i < 50 && !popup; i++) {
       popup = (await platform.tabs.query({})).find((t) => t.openerTabId === opener.id && /\/popup$/.test(t.url)) ?? null;

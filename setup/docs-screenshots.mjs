@@ -263,7 +263,12 @@ async function main() {
     await waitFor('the app to connect', async () => (await cdp.eval('window.g9.invoke("state").then((s) => s.connection?.status)')) === 'connected');
     // A launched browser for Watch, driven by the agent so the cursor moves.
     const launched = await agent.call('browser_engine', { action: 'launch', headless: true, ...(opt('--engine') ? { browser: opt('--engine') } : {}) });
+    // The recorded flow, replayed there: the run the Runs view shows (steps, checks, replay).
+    const replayed = await agent.call('browser_recording', { action: 'replay', id: flowId, engine: 'launched', timing: 'adaptive' })
+      .catch((err) => ({ problem: err.message }));
+    log(`replay: ${JSON.stringify(replayed).slice(0, 200)}`);
     const opened = await agent.call('browser_tabs', { action: 'open', url: SHOP, engine: launched.engineId });
+    log(`watch tab: ${JSON.stringify(opened).slice(0, 200)}`);
     const view = async (name, file, extra = null) => {
       await cdp.eval(`document.querySelector('[data-view=${name}]')?.click()`);
       await delay(1200);
@@ -274,13 +279,21 @@ async function main() {
     await view('engines', 'desktop-engines.png');
     await view('watch', 'desktop-watch.png', async () => {
       // Pick the launched shop tab in the view's own picker, then press Watch — as a person does.
-      await cdp.eval(`(async () => {
+      // The launched tab by its id; the extension's own shop tab has the same title.
+      const want = String(opened?.tabId ?? opened?.tab?.tabId ?? '');
+      const picked = await waitFor('the launched tab in the Watch picker', async () => cdp.eval(`(() => {
         const sel = document.querySelector('select[aria-label="Tab to watch"]');
-        const opt = [...(sel?.options ?? [])].find((o) => o.value === String(${opened.tabId}) || /Demo Shop/.test(o.textContent));
-        if (opt) { sel.value = opt.value; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+        const opts = [...(sel?.options ?? [])];
+        const o = opts.find((x) => x.value === ${JSON.stringify(want)}) ?? opts.filter((x) => /Demo Shop/.test(x.textContent)).pop();
+        if (!o) return null;
+        sel.value = o.value;
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
         [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Watch')?.click();
-      })()`).catch(() => {});
-      await delay(2000);
+        return o.textContent;
+      })()`), 15_000);
+      log(`watching: ${picked}`);
+      await waitFor('the first frame', async () => cdp.eval("[...document.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Stop watching') && !/Waiting for the first frame|Pick a tab/.test(document.body.innerText)"), 20_000)
+        .catch((err) => log(`watch: ${err.message}`));
       const t2 = await agent.call('browser_snapshot', { tabId: opened.tabId });
       const txt2 = typeof t2 === 'string' ? t2 : (t2.snapshot ?? t2.tree ?? t2.text ?? JSON.stringify(t2));
       const add = [...txt2.matchAll(/- button "Add to cart" \[ref=(e\d+)\]/g)].map((m) => m[1]);
@@ -289,7 +302,12 @@ async function main() {
       if (name) await agent.call('browser_interact', { action: 'hover', ref: name, tabId: opened.tabId }).catch(() => {});
       await delay(1500);
     });
-    await view('runs', 'desktop-runs.png');
+    await view('runs', 'desktop-runs.png', async () => {
+      // Open the newest run, as a person does.
+      await waitFor('a run in the list', async () => cdp.eval("(() => { const r = document.querySelector('.runs-layout tbody tr'); r?.click(); return !!r; })()"), 20_000)
+        .catch((err) => log(`runs: ${err.message}`));
+      await delay(2500);
+    });
     await view('settings', 'desktop-settings.png');
     await view('settings', 'desktop-updates.png', async () => {
       await cdp.eval("[...document.querySelectorAll('h2, h3, .section-head')].find((e) => /Updates/.test(e.textContent))?.scrollIntoView()");

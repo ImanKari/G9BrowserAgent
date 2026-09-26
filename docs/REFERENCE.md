@@ -219,7 +219,7 @@ This step is needed for Engine 1 only. Agents can use Engine 2 without it.
 5. Leave the folder where it is. The browser identifies an unpacked extension by its folder.
 
 On first install, a welcome page opens once. The side panel's title then reads
-`G9 Browser Agent v3.0.1`, and its badge `v3.0.1`.
+`G9 Browser Agent v<version>`, and its badge `v<version>`.
 
 A browser can skip this step only when the extension is installed by enterprise policy
 (`ExtensionInstallForcelist`). G9 does not set that policy up.
@@ -873,7 +873,7 @@ starts it if nothing is listening. Full reference: [desktop/README.md](../deskto
 | **Engines** | The extension and launched engines, with their contexts and tabs. A launch form, Stop, Reload (or Update and reload) for the extension, installed browsers, Chrome for Testing install, and profile warm-up. |
 | **Watch** | A live tab with the cursor drawn in. View only. |
 | **Runs** | Every run: verdict, steps, surprises, a frame replay with the cursor, and Export video. |
-| **Approvals** | Flows with surprises. Approve calls `browser_recording approve` with `by` set to your Windows user name, and asks once more. |
+| **Approvals** | Flows with surprises. Approve calls `browser_recording approve` with `by` set to your sign-in user name, and asks once more. |
 | **Schedule** | Daily or every N minutes. Every engine option becomes an explicit runner flag, so later default changes never alter a scheduled suite — except a browser left at "auto", which passes no `--browser` and so follows the daemon's `defaultBrowser`. |
 | **Settings** | Daemon settings, the updater, sign-in start, and folders. |
 | **Setup** | The first-run wizard, runnable again at any time. |
@@ -881,17 +881,30 @@ starts it if nothing is listening. Full reference: [desktop/README.md](../deskto
 **Always visible.** The top bar and the tray menu carry **Stop all** and **Resume**. The version
 appears in the window title, the tray tooltip and a badge.
 
-**Updates.** Updates use electron-updater's generic provider.
+**Updates.** electron-updater, from the official GitHub releases by default (`desktop/lib/updater.mjs`).
 
-- The feed is set in Settings → Updates: the daemon setting `updateUrl` (`https://`, or `http://`
-  only on the local machine for a test feed), on the channel `updateChannel` (`stable` or `beta`).
-  The app keeps its own copy and updates only from it: a different URL that arrives through the
-  daemon's settings is used only after a dialog naming the new host. With no URL, the app never
-  checks anywhere.
-- An update restarts the daemon, so it waits until the daemon reports no run in progress and no
-  launched browser.
-- After an update, the app refreshes `G9_HOME\extension`, and the extension reloads itself.
-- The updater was tested with an injected fake only; no update server exists yet.
+- **Where from** (Settings → Updates, the daemon setting `updateMode`): `official` (the default) reads
+  the published releases of `github.com/ImanKari/G9BrowserAgent` — nothing to configure; `custom`
+  reads your own `https://` folder in `updateUrl` (`http://` only on the local machine, for a test
+  feed); `off` never checks. `updateChannel` `beta` also takes prereleases. The app keeps its own copy
+  of this choice: a custom URL that arrives through the daemon's settings is used only after a dialog
+  naming the new host.
+- **When:** on start and every 6 hours, or **Check now**.
+- **How it installs** depends on the package. Windows (NSIS) and the Linux AppImage download in the
+  background (the file's SHA-512 from `latest*.yml` is checked before anything runs) and then ask:
+  **Install now**, **Install when I quit G9**, **Not now** or **Skip this version**. macOS (the app is
+  not signed with an Apple Developer ID, and macOS installs updates only into a signed app) and the
+  .deb (replacing it needs root) download nothing: G9 tells you, and **Open the release page** takes
+  you to the files.
+- **Never mid-run.** Installing restarts the daemon, so it waits until the daemon reports no run in
+  progress and no launched browser, and re-checks every minute.
+- **The extension follows.** After an update the app refreshes `G9_HOME/extension` (the same folder,
+  so the browser keeps the extension's identity); the extension reloads itself once no call is in
+  flight, and a daemon that finds an older extension connected asks it to reload once.
+- **Tested end to end** with real packages on each system: an older build installed, updated through
+  its own updater to the new one (including a corrupt download, an interrupted one, a skipped
+  version, a busy daemon, install on quit and the extension refresh). See
+  [AIGuide.md](../AIGuide.md) §7.
 
 **How it was checked.** The render check (`npm run test:render`) opened the real window off-screen
 and captured every view, empty and populated, in dark and light. The tray, notifications and the
@@ -914,14 +927,15 @@ are kept; invalid values are refused by name.
 | `maxParallel` | 8 | Concurrent state-changing Engine 2 calls ([measured](#measured-performance)). |
 | `evidence` | `{maxFrames:3000, maxBytes:300 MB, keepRuns:200, quality:60, maxWidth:1280, maxHeight:800}` | Evidence-run limits. |
 | `idleExitMinutes` | 60 | Idle time before the daemon exits; 0 means never. |
-| `updateUrl`, `updateChannel` | `''`, `stable` | The desktop app's update feed. |
+| `updateMode` | `official` | Where the desktop app looks for updates: `official` (the GitHub releases), `custom` (`updateUrl`) or `off`. |
+| `updateUrl`, `updateChannel` | `''`, `stable` | The custom feed's `https://` folder; `beta` also takes prereleases. |
 
 **Environment variables.**
 
 | Variable | Used by | Effect |
 |---|---|---|
 | `G9_PORT` | shim, daemon | The daemon's port. |
-| `G9_HOME` | shim, daemon | The data folder. Default `%LOCALAPPDATA%\G9`. |
+| `G9_HOME` | shim, daemon | The data folder. Default `%LOCALAPPDATA%\G9` on Windows, `~/.g9` on macOS and Linux. |
 | `G9_HOST` | shim | The address it connects to. |
 | `G9_TIMEOUT_MS` | shim, daemon | Per-call base deadline, default 120000. Long calls get more (DAEMON_PROTOCOL §3). |
 | `G9_PROJECT` | shim, daemon | The project adapter. Otherwise the agent's working folder decides. |
@@ -931,7 +945,7 @@ are kept; invalid values are refused by name.
 **`G9_HOME` layout:**
 
 ```
-G9_HOME\  (default %LOCALAPPDATA%\G9)
+G9_HOME\  (default %LOCALAPPDATA%\G9 on Windows, ~/.g9 elsewhere; / instead of \ there)
   settings.json  daemon.json  daemon.lock  desktop.json  engine-versions.log
   engines\cft-<version>\      Chrome for Testing        engines\log\<engineId>.json  (argv, versions)
   engines\firewall-seen.json  CfT paths already warned about
@@ -1317,12 +1331,20 @@ the switch, 17.4 ms in every launch with it, against Edge's 10.5 ms).
 
 **Platform and delivery**
 
-- Measured on Windows 11 only.
+- The measurements on this page were taken on Windows 11. On macOS and Linux the automated suites
+  and the package and update end-to-end test run on the release pipeline's hosted machines; the
+  live browser matrices (`matrix`, `bench`, `endurance`, the stealth matrix) were not repeated there.
+- The Windows background policies exist on Windows only. On macOS and Linux a hidden tab or a
+  minimized window stops rendering as it does on Windows, and nothing is set to change that: use a
+  launched (headless) engine for unattended work.
 - The HTTPS proxy tunnel for the Chrome for Testing download is untested, and so is the zip64 path.
 - No Firefox, Safari or Lighthouse. Device emulation is not a real device.
-- The installer is unsigned. The updater has been tested only against a fake.
-- Installing an app update while AI clients run shims as `G9.exe` may close those shims
-  mid-session. This is an open design issue.
+- No package is code-signed. Windows SmartScreen and macOS Gatekeeper ask once; macOS updates are
+  installed by hand (macOS installs updates only into a signed app), and so is the .deb (root).
+- Linux packages are x64 only; there is no arm64 Linux build and no Windows arm64 build.
+- Installing an app update while AI clients run shims through the app's own executable may close
+  those shims mid-session; the AI client restarts its MCP server on its next call. This is an open
+  design issue.
 
 **Re-run on the 2.0.1 tree (2026-09-23):** every suite above, including bench, the
 10-minute endurance run, the full matrix state set, the stealth matrix with the public detector
@@ -1353,6 +1375,10 @@ What is still open — the v1 backlog items EXT-01 … EXT-17 and the owner's op
 | Windows Defender Firewall asks "Allow access?" for a `chrome.exe` under `G9_HOME\engines\cft-<version>\` | Chrome for Testing is an unpacked zip, so no installer registered a firewall rule for it. Windows may ask once per new path (a new CfT version or a new `G9_HOME`). **Either answer is fine:** G9 drives the browser over a pipe, not a port, and the prompt concerns inbound connections only. The first launch from a new path carries a launch warning that says so (`engine/firewall.js`). The rules found on the test workstation, and how to list stale ones: [docs/INSTALL.md](INSTALL.md#windows-firewall-and-chrome-for-testing). |
 | Windows Defender Firewall asks about `node.exe` | Probably `node setup/serve.mjs`: the test-page server listens on all interfaces (`0.0.0.0`), so `localhost` and `127.0.0.1` can serve as two origins for the cross-origin frame fixture. The daemon itself binds `127.0.0.1` only and needs no exception. Declining keeps other machines out. |
 | SmartScreen: "Windows protected your PC" on `G9-Setup-<version>.exe` | The installer is not code-signed. Choose **More info** → **Run anyway** if you trust the build's source. For a fleet, sign the installer. |
+| macOS: *"G9 cannot be opened because Apple cannot check it for malicious software"*, or *"G9 is damaged"* | The app is not signed with an Apple Developer ID. Open it once with right-click (Control-click) → **Open** → **Open**, or in System Settings → Privacy & Security → **Open Anyway**. For *"damaged"* (a quarantine flag on a download), run `xattr -dr com.apple.quarantine /Applications/G9.app`. |
+| macOS: the wizard refuses to register the MCP server, saying G9 runs from a temporary location | G9 was started from the disk image or the Downloads folder, and macOS runs such apps from a randomized path (App Translocation). Drag G9 into **Applications**, start it from there, and run Setup again. |
+| Linux: the AppImage does not start (*"AppImages require FUSE to run"*) | Install FUSE 2 (`sudo apt install libfuse2`, on Ubuntu 24.04 `libfuse2t64`), make the file executable (`chmod +x G9-x86_64.AppImage`), and start it again. |
+| Linux: the AppImage no longer updates, or updates to a new file each time | The file was renamed. Keep the published name `G9-x86_64.AppImage`: the updater replaces a file with that name in place, and the MCP entries point at it. |
 | Agent shows no `browser_*` tools | The MCP config path is wrong, or the client was not restarted. MCP servers load at client start. |
 | *"No tab to act on"* | Open one (`browser_tabs action:"open"`), attach one (`browser_tabs action:"attach"`), or press **Record from now** in the panel on the tab you want. |
 | *"Tab 7 is owned by agent-2 (cursor)"* | Another agent claimed it. Ask it to release the tab, or use `browser_tabs action:"claim" force:true` when the user asks (logged). |
@@ -1474,7 +1500,7 @@ After the final fixes, the Chrome for Testing popout and replay sections passed 
 ```
 g9-browser-agent/
 ├── extension/                Engine 1 (MV3 extension) and the home of the shared tool layer
-│   ├── manifest.json         version 3.0.0, Chrome/Edge 125+
+│   ├── manifest.json         the product version, Chrome/Edge 125+
 │   ├── sw.js                 service worker: daemon link, panel commands, tool calls via tools/index.js
 │   ├── tools/                the tool modules BOTH engines run; index.js = TOOLS + runTool, events.js = CDP fan-out
 │   ├── humanize/             pure human-input library: plans, profiles, seeded PRNG, calibration
@@ -1487,20 +1513,26 @@ g9-browser-agent/
 │                             handoff, evidence, scheduler, storage, settings, paths, home-lock (one daemon per
 │                             G9_HOME), project, flows, extension-update
 ├── mcp/                      shim.mjs (what AI clients launch), mcp.js, tools.js (the 15 schemas + agent instructions)
-├── lib/                      version.mjs, ws-client.mjs, ws-codec.mjs — shared, zero-dependency
+├── lib/                      version.mjs, ws-client.mjs, ws-codec.mjs, runtime.mjs (how to start a G9 script from
+│                             node, the app or an AppImage) — shared, zero-dependency
 ├── runner/                   g9.mjs (unattended CLI), mcp-client.mjs, report.mjs, drivers/ (AgriPad)
-├── desktop/                  Electron shell: views, wizard, installer, updater; its own tests in desktop/test
+├── desktop/                  Electron shell: views, wizard, packages (scripts/build.mjs), updater; its own tests in
+│                             desktop/test, including the real update end-to-end test (update-e2e.mjs)
 ├── bridge/src/server.js      v1 entry point, kept only as a forwarder to mcp/shim.mjs
 ├── setup/                    install.ps1; unittest.mjs + unit/, selftest, extensiontest; live harnesses
 │                             (isolated-livetest + livetest, engine2-livetest, stealthtest, matrix, bench,
 │                             endurance); panel-render (the v3 panel in pictures); check + check-plan (only the
-│                             checks a change needs), doclinks, make-icons.ps1; serve.mjs, testpage.html, fixtures/
-├── docs/                     ARCHITECTURE_V2 (binding contracts), DAEMON_PROTOCOL, HUMANIZE, STEALTH, INSTALL (operators)
+│                             checks a change needs), doclinks, make-icons.ps1; serve.mjs, testpage.html, fixtures/;
+│                             docs-screenshots (the README pictures); release-notes, github-release (the pipeline)
+├── docs/                     REFERENCE (this file), ARCHITECTURE_V2 (binding contracts), DAEMON_PROTOCOL, HUMANIZE,
+│                             STEALTH, INSTALL (operators); assets/ (README pictures)
 ├── scripts/                  standalone example automations (documented against v1.7.21, not re-verified on v2)
 ├── g9.project.example.json   project adapter template — belongs in the repo under test, not this one
 ├── package.json              the one version for the whole product; npm scripts
+├── azure-pipelines.yml       build, test, package, update-test and release (Azure DevOps → GitHub)
 ├── AIGuide.md                design decisions, build log and architecture reference
-└── README.md                 this file
+├── README.md, README.fa.md   the guide for users, in English and Persian
+└── LICENSE                   MIT
 ```
 
 G9 is independent of any project it tests. It sees only the browser, never whether the page behind
@@ -1524,7 +1556,8 @@ it is ASP.NET, React or PHP. Keep it as its own repository and use it across pro
    - [docs/DAEMON_PROTOCOL.md](DAEMON_PROTOCOL.md) for anything on the wire;
    - [docs/STEALTH.md](STEALTH.md) and [docs/HUMANIZE.md](HUMANIZE.md) when their
      behaviour changes;
-   - this README.
+   - this reference, and the [README](../README.md) (and its Persian twin, [README.fa.md](../README.fa.md))
+     when what a user sees or does changes.
 4. **Bump the version.** There is one version string, the root `package.json` version.
    `extension/manifest.json`, `desktop/package.json` and `desktop/package-lock.json` must equal it;
    `setup/unit/version.test.mjs` fails otherwise. Every change that ships bumps it (decision D12).
@@ -1536,7 +1569,7 @@ it is ASP.NET, React or PHP. Keep it as its own repository and use it across pro
    - its read-only classification (`isReadOnly`), which ownership and queues depend on;
    - its deadline in `timeoutFor` if it can run long. `desktop/lib/daemon-client.mjs` mirrors that
      table, and `daemon.test` checks the two agree.
-   - the tools table in this README, and AIGuide's tool reference;
+   - the tools table in this reference, and AIGuide's tool reference;
    - the count in `setup/selftest.mjs` (`=== 15`). Update the assertion last, on purpose.
 6. **Rules to keep:**
    - Code in `extension/tools/`, `extension/humanize/` and the shared `extension/lib/` files uses
@@ -1556,7 +1589,8 @@ it is ASP.NET, React or PHP. Keep it as its own repository and use it across pro
 | input, humanize, stealth, `engine/launch.js` | + `npm run test:stealth -- --local-only` and `npm run matrix` |
 | the gate, queues, evidence, watch | + `npm run bench` and `npm run endurance -- --minutes 10` |
 | `desktop/` | `cd desktop; npm test; npm run test:daemon; npm run test:render` |
-| anything the installer packages (`extension/`, `engine/`, `daemon/`, `mcp/`, `runner/`, `lib/`, `package.json`) | `cd desktop; npm run build:win; npm run test:packaged` |
+| anything the installer packages (`extension/`, `engine/`, `daemon/`, `mcp/`, `runner/`, `lib/`, `package.json`) | `cd desktop; npm run build:win; npm run test:packaged` (on macOS or Linux: `build:mac` / `build:linux`) |
+| the updater, the packages or `electron-builder.yml` | + `node desktop/test/update-e2e.mjs --old <older build> --new desktop/dist` (see [desktop/README.md](../desktop/README.md)) |
 
 **Do not simplify past a measured fact without recording why.** Many of the rules above were learned
 the hard way:
