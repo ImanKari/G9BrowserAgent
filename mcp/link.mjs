@@ -48,18 +48,18 @@ export async function describePortHolder(err) {
     body = null;
   }
   if (body?.name === 'g9d') {
-    return `The G9 daemon on port ${PORT} (pid ${body.pid}, v${body.version}) refused this connection: ${err.message}.`;
+    return `The G9BrowserAgent daemon on port ${PORT} (pid ${body.pid}, v${body.version}) refused this connection: ${err.message}.`;
   }
   if (body?.ok === true) {
     return (
-      `Port ${PORT} is held by a G9 v1 bridge (pid ${body.pid ?? '?'}, v${body.version ?? '?'}), not the v2 daemon, so no browser ` +
+      `Port ${PORT} is held by a G9BrowserAgent v1 bridge (pid ${body.pid ?? '?'}, v${body.version ?? '?'}), not the v2 daemon, so no browser ` +
       'tool can work. Close the editor or MCP client that started that bridge (or end node process ' +
       `${body.pid ?? '?'}), then restart this MCP client — the v2 shim starts the daemon by itself. ` +
-      'Also reload the G9 extension so it is v2.'
+      'Also reload the G9BrowserAgent extension so it is v2.'
     );
   }
   return (
-    `Port ${PORT} is in use by another program (${err.message}), so the G9 daemon cannot run there. ` +
+    `Port ${PORT} is in use by another program (${err.message}), so the G9BrowserAgent daemon cannot run there. ` +
     'Free the port, or set G9_PORT in this MCP config to another port (and the same port as the daemon address in the extension panel).'
   );
 }
@@ -128,7 +128,7 @@ export class DaemonLink {
     if (lastError?.code === 'ECONNREFUSED') {
       await this.#refuseOtherPort();
       throw new Error(
-        `The G9 daemon did not start on port ${PORT} within ${START_WINDOW_MS / 1000}s. See logs/daemon.log in the G9 data ` +
+        `The G9BrowserAgent daemon did not start on port ${PORT} within ${START_WINDOW_MS / 1000}s. See logs/daemon.log in the G9BrowserAgent data ` +
           `folder, or start it by hand to watch it: node "${DAEMON}" --foreground`,
       );
     }
@@ -141,7 +141,7 @@ export class DaemonLink {
     const other = await runningDaemonFor(home).catch(() => null);
     if (other && other.port !== PORT) {
       throw new Error(
-        `A G9 daemon for this G9 data folder (${home}) already runs on port ${other.port} (pid ${other.pid}), but this MCP ` +
+        `A G9BrowserAgent daemon for this G9BrowserAgent data folder (${home}) already runs on port ${other.port} (pid ${other.pid}), but this MCP ` +
           `client is set to port ${PORT}. One daemon serves one data folder, so none is started here: set G9_PORT=${other.port} ` +
           'in this MCP config (and use the same daemon address in the extension panel), then restart this MCP client.',
       );
@@ -151,7 +151,7 @@ export class DaemonLink {
   #spawnDaemon() {
     try {
       // The daemon outlives this process, so it is started with THIS runtime's stable command
-      // (lib/runtime.mjs): node or the installed G9 executable — or, from a Linux AppImage, the
+      // (lib/runtime.mjs): node or the installed G9BrowserAgent executable — or, from a Linux AppImage, the
       // .AppImage file itself, never a path inside this process's temporary mount.
       const home = resolveHome(process.env.G9_HOME);
       if (isAppImageRuntime()) ensureBootstrap(home);
@@ -182,7 +182,7 @@ export class DaemonLink {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         ws.close(1000, 'no welcome');
-        reject(new Error(`The G9 daemon on port ${PORT} accepted the connection but never answered hello.`));
+        reject(new Error(`The G9BrowserAgent daemon on port ${PORT} accepted the connection but never answered hello.`));
       }, 5_000);
       const onFirst = (msg) => {
         if (msg.type !== 'welcome') return;
@@ -202,7 +202,7 @@ export class DaemonLink {
       ws.on('message', onFirst);
       ws.on('close', () => {
         clearTimeout(timer);
-        reject(new Error('The G9 daemon closed the connection during the handshake.'));
+        reject(new Error('The G9BrowserAgent daemon closed the connection during the handshake.'));
       });
       ws.on('error', () => {});
       ws.send({
@@ -236,7 +236,7 @@ export class DaemonLink {
     const reason = info?.reason ? ` (${info.reason})` : '';
     for (const [id, entry] of this.pending) {
       clearTimeout(entry.timer);
-      entry.reject(new Error(`The connection to the G9 daemon closed mid-call${reason}. Retry the call — the daemon restarts on demand.`));
+      entry.reject(new Error(`The connection to the G9BrowserAgent daemon closed mid-call${reason}. Retry the call — the daemon restarts on demand.`));
       this.pending.delete(id);
     }
   }
@@ -248,7 +248,7 @@ export class DaemonLink {
       const id = this.nextId++;
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`The G9 daemon did not answer "${tool}" within ${Math.round(ms / 1000)}s.`));
+        reject(new Error(`The G9BrowserAgent daemon did not answer "${tool}" within ${Math.round(ms / 1000)}s.`));
       }, ms);
       this.pending.set(id, { resolve, reject, timer });
       // The socket can close between ensure() and here (the daemon restarted);
@@ -257,7 +257,7 @@ export class DaemonLink {
       if (!sent) {
         clearTimeout(timer);
         this.pending.delete(id);
-        reject(new Error('The connection to the G9 daemon dropped. Retry the call.'));
+        reject(new Error('The connection to the G9BrowserAgent daemon dropped. Retry the call.'));
       }
     });
   }

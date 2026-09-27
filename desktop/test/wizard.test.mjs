@@ -12,7 +12,7 @@ import { threeClicks, extensionsPageCommand, browserCandidates, installExtension
 const t = suite('desktop: first-run wizard');
 const root = tmpDir();
 t.cleanup(() => rmrf(root));
-const home = path.join(root, 'G9');
+const home = path.join(root, 'G9BrowserAgent');
 const layout = homeLayout(home);
 const res = path.join(root, 'resources');
 fs.mkdirSync(path.join(res, 'extension'), { recursive: true });
@@ -34,9 +34,9 @@ function fakeClient({ connected = true } = {}) {
         case 'engines.versions':
           return { browsers: [{ kind: 'edge', path: 'C:/Edge/msedge.exe', version: '153.0.1' }], pinned: { version: '153.0.7000.0' }, cft: [] };
         case 'engines.installCft':
-          return { version: args.version, path: 'G9/engines/cft/chrome.exe' };
+          return { version: args.version, path: 'G9BrowserAgent/engines/cft/chrome.exe' };
         case 'profiles.list':
-          return { profiles: [{ name: 'automation', dir: 'G9/profiles/automation' }] };
+          return { profiles: [{ name: 'automation', dir: 'G9BrowserAgent/profiles/automation' }] };
         case 'profiles.warm':
           return { ok: true, pid: 1234 };
         case 'extension.install':
@@ -60,7 +60,7 @@ function wizard(over = {}) {
     resources: resourcePaths(res),
     // Pinned to Windows: the registry policies and the msedge.exe paths are Windows facts, and this
     // suite also runs on macOS and Linux agents.
-    app: { isPackaged: true, execPath: 'C:/Programs/G9/G9.exe', resourceRoot: res, port: 8765, homeOverride: null, platform: 'win32' },
+    app: { isPackaged: true, execPath: 'C:/Programs/G9BrowserAgent/G9BrowserAgent.exe', resourceRoot: res, port: 8765, homeOverride: null, platform: 'win32' },
     deps: {
       clipboardWrite: (x) => clip.push(x),
       spawn: (cmd, args, opts) => { spawned.push({ cmd, args, opts }); return { on() {}, unref() {} }; },
@@ -96,7 +96,7 @@ t.test('1. browsers: the daemon\'s list first, the desktop\'s own probe fills ga
   assert.deepEqual(c.calls.at(-1), ['engines.installCft', { version: '153.0.7000.0' }]);
   const offline = wizard({ client: fakeClient({ connected: false }) }).w;
   assert.equal((await offline.browsers()).source, 'desktop');
-  await assert.rejects(offline.installCft(), /needs the G9 daemon/);
+  await assert.rejects(offline.installCft(), /needs the G9BrowserAgent daemon/);
 });
 
 t.test('2. profile: listed through the daemon; warm opens it headed, and only for an http(s) sign-in page', async () => {
@@ -124,7 +124,7 @@ t.test('3. policies: status and apply go through the injected reg runner and the
 t.test('4. MCP: detected clients with their plan (no whole-file text sent to the page); register writes the packaged entry', () => {
   const { w } = wizard();
   const m = w.mcp();
-  assert.deepEqual(m.entry, { command: 'C:/Programs/G9/G9.exe', args: [`${res.replace(/\\/g, '/')}/mcp/shim.mjs`], env: { ELECTRON_RUN_AS_NODE: '1' } });
+  assert.deepEqual(m.entry, { command: 'C:/Programs/G9BrowserAgent/G9BrowserAgent.exe', args: [`${res.replace(/\\/g, '/')}/mcp/shim.mjs`], env: { ELECTRON_RUN_AS_NODE: '1' } });
   const cursor = m.clients.find((c) => c.id === 'cursor');
   assert.equal(cursor.installed, true);
   assert.equal(cursor.status, 'create');
@@ -182,7 +182,7 @@ t.test('5. extension: the folder is the DAEMON\'s G9_HOME/extension when the dae
     resources: resourcePaths(res),
     // Pinned to Windows: the registry policies and the msedge.exe paths are Windows facts, and this
     // suite also runs on macOS and Linux agents.
-    app: { isPackaged: true, execPath: 'C:/Programs/G9/G9.exe', resourceRoot: res, port: 8765, homeOverride: null, platform: 'win32' },
+    app: { isPackaged: true, execPath: 'C:/Programs/G9BrowserAgent/G9BrowserAgent.exe', resourceRoot: res, port: 8765, homeOverride: null, platform: 'win32' },
     deps: { clipboardWrite: (x) => clip.push(x), findBrowsers: async () => [], extensionDir: () => daemonExt },
   });
   const info = await w.extension();
@@ -218,7 +218,7 @@ t.test('macOS and Linux: browsers are found where they install, and the picker s
 t.test('3. policies on macOS and Linux: not applicable, said plainly, and nothing runs reg.exe', async () => {
   const ran = [];
   for (const platform of ['darwin', 'linux']) {
-    const { w } = wizard({ ctor: { app: { isPackaged: true, execPath: '/opt/G9/g9', resourceRoot: res, port: 8765, homeOverride: null, platform } } });
+    const { w } = wizard({ ctor: { app: { isPackaged: true, execPath: '/opt/G9BrowserAgent/g9browseragent', resourceRoot: res, port: 8765, homeOverride: null, platform } } });
     w.deps.regRun = async (args) => { ran.push(args); return { code: 0, stdout: '', stderr: '' }; };
     const r = await w.policies();
     assert.equal(r.applicable, false);
@@ -230,13 +230,13 @@ t.test('3. policies on macOS and Linux: not applicable, said plainly, and nothin
 });
 
 t.test('4. MCP on macOS: an app running from App Translocation or the disk image is not registered (the path dies next start)', () => {
-  const translocated = '/private/var/folders/xy/T/AppTranslocation/1234-ABCD/d/G9.app/Contents/MacOS/G9';
+  const translocated = '/private/var/folders/xy/T/AppTranslocation/1234-ABCD/d/G9BrowserAgent.app/Contents/MacOS/G9BrowserAgent';
   const { w } = wizard({ ctor: { app: { isPackaged: true, execPath: translocated, resourceRoot: res, port: 8765, homeOverride: null, platform: 'darwin' } } });
   assert.match(w.mcp().blocked, /App Translocation/);
   assert.throws(() => w.registerMcp('claude-code'), /Applications folder/);
-  const fromImage = wizard({ ctor: { app: { isPackaged: true, execPath: '/Volumes/G9 3.1.0/G9.app/Contents/MacOS/G9', resourceRoot: res, port: 8765, homeOverride: null, platform: 'darwin' } } });
+  const fromImage = wizard({ ctor: { app: { isPackaged: true, execPath: '/Volumes/G9BrowserAgent 3.1.0/G9BrowserAgent.app/Contents/MacOS/G9BrowserAgent', resourceRoot: res, port: 8765, homeOverride: null, platform: 'darwin' } } });
   assert.match(fromImage.w.mcp().blocked, /disk image/);
-  const installed = wizard({ ctor: { app: { isPackaged: true, execPath: '/Applications/G9.app/Contents/MacOS/G9', resourceRoot: res, port: 8765, homeOverride: null, platform: 'darwin' } } });
+  const installed = wizard({ ctor: { app: { isPackaged: true, execPath: '/Applications/G9BrowserAgent.app/Contents/MacOS/G9BrowserAgent', resourceRoot: res, port: 8765, homeOverride: null, platform: 'darwin' } } });
   assert.equal(installed.w.mcp().blocked, null);
 });
 

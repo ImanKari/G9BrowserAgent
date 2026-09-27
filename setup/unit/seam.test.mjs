@@ -575,7 +575,7 @@ await test('Node smoke: no chrome here, tools/index.js runs browser_snapshot on 
   assert.equal(listed.tabs[0].tabId, tabId, 'tab rows are keyed tabId');
   assert.equal(listed.tabs[0].url, 'https://shop.example.test/', 'no redaction in v2');
 
-  await assert.rejects(runtime.runTool('browser_tabs', { action: 'claim', tabId }), /handled by the G9 daemon/);
+  await assert.rejects(runtime.runTool('browser_tabs', { action: 'claim', tabId }), /handled by the G9BrowserAgent daemon/);
   await assert.rejects(runtime.runTool('browser_tabs', { action: 'pin', tabId }), /removed in v2/);
   await assert.rejects(runtime.runTool('browser_nope', {}), /Unknown tool/);
 
@@ -1126,7 +1126,7 @@ async function extensionSide() {
   ];
   let nextTab = 100;
   const debuggerAttached = new Set();
-  // What document.visibilityState answers in G9's world (the live-watch watchdog reads it).
+  // What document.visibilityState answers in G9BrowserAgent's world (the live-watch watchdog reads it).
   let pageVisibility = 'visible';
   // Whether document.readyState answers "complete" (a reload's load wait); off by default, so the
   // tests that never needed it keep their timing.
@@ -1270,7 +1270,7 @@ async function extensionSide() {
   const state = await import(pathToFileURL(join(EXT, 'lib', 'state.js')).href);
 
   await until(() => calls.setTitle.length, 'bootstrap');
-  assert.deepEqual(calls.setTitle, ['G9 Browser Agent v2.0.0']);
+  assert.deepEqual(calls.setTitle, ['G9BrowserAgent v2.0.0']);
   ok('bootstrap puts the version on the toolbar button');
   assert.equal(calls.sidePanel, 1);
   await until(() => calls.alarms.length, 'heartbeat alarm');
@@ -1573,7 +1573,7 @@ async function extensionSide() {
   assert.match(waited.error, /No download completed within/);
   ok('chrome.downloads: a download whose referrer belongs to another site is never claimed by the watched tab');
 
-  // Nothing watched: the person's own downloads are not G9's to report.
+  // Nothing watched: the person's own downloads are not G9BrowserAgent's to report.
   ws.deliver({ type: 'call', id: 73, tool: 'browser_network', args: { action: 'stop_downloads', tabId: 11 } });
   assert.equal((await reply(73)).ok, true);
   const mine = { id: 9, url: 'https://elsewhere.test/holiday.jpg', finalUrl: 'https://elsewhere.test/holiday.jpg', referrer: '', filename: '', state: 'in_progress', startTime: new Date().toISOString(), bytesReceived: 0, totalBytes: 5 };
@@ -1594,7 +1594,7 @@ async function extensionSide() {
   assert.deepEqual(handoff.result.sessionStorage, [['step', '2']]);
   assert.equal(handoff.result.origin, 'https://shop.example.test');
   const storageRead = calls.commands.find((c) => c.method === 'Runtime.evaluate' && String(c.params.expression).includes('sessionStorage'));
-  assert.equal(storageRead.params.contextId, 5, 'storage read in G9\'s isolated world');
+  assert.equal(storageRead.params.contextId, 5, 'storage read in G9BrowserAgent\'s isolated world');
   ok('handoff_export: cookies for the host and its parents, storage read in the isolated world');
 
   // --- live watch: frames and the pointer track go to the daemon --------------

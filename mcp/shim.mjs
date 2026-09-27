@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * The G9 MCP shim — what an AI client launches (ARCHITECTURE §10).
+ * The G9BrowserAgent MCP shim — what an AI client launches (ARCHITECTURE §10).
  *
  *   agent ──stdio MCP──▶ shim ──WS /g9──▶ g9d (one per machine) ──▶ engines
  *

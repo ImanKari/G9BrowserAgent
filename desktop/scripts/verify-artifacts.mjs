@@ -10,9 +10,9 @@
  *     every machine;
  *   - `path`/`sha512` (the legacy top-level fields some updaters read) name one of those files.
  * With --expect it also requires each listed platform's metadata and installers to be present:
- *   win   latest.yml, G9-Setup-<v>.exe (+ .blockmap)
+ *   win   latest.yml, G9BrowserAgent-Setup-<v>.exe (+ .blockmap)
  *   mac   latest-mac.yml, a .dmg and a .zip for x64 and arm64
- *   linux latest-linux.yml, G9-x86_64.AppImage (no version in its name: it updates in place) and the .deb
+ *   linux latest-linux.yml, G9BrowserAgent-x86_64.AppImage (no version in its name: it updates in place) and the .deb
  * Exit 0 when everything holds, 1 with every problem listed otherwise. No dependencies.
  */
 
@@ -148,9 +148,9 @@ export function verifyArtifacts(dir, { version, expect = [] } = {}) {
   }
   const v = version ?? '*';
   const need = {
-    win: [METADATA.win, `G9-Setup-${v}.exe`, `G9-Setup-${v}.exe.blockmap`],
-    mac: [METADATA.mac, `G9-${v}-mac-x64.dmg`, `G9-${v}-mac-arm64.dmg`, `G9-${v}-mac-x64.zip`, `G9-${v}-mac-arm64.zip`],
-    linux: [METADATA.linux, 'G9-x86_64.AppImage', `G9_${v}_amd64.deb`],
+    win: [METADATA.win, `G9BrowserAgent-Setup-${v}.exe`, `G9BrowserAgent-Setup-${v}.exe.blockmap`],
+    mac: [METADATA.mac, `G9BrowserAgent-${v}-mac-x64.dmg`, `G9BrowserAgent-${v}-mac-arm64.dmg`, `G9BrowserAgent-${v}-mac-x64.zip`, `G9BrowserAgent-${v}-mac-arm64.zip`],
+    linux: [METADATA.linux, 'G9BrowserAgent-x86_64.AppImage', `G9BrowserAgent_${v}_amd64.deb`],
   };
   for (const p of expect) {
     for (const n of need[p] ?? [`(unknown platform ${p})`]) if (!has(n)) problems.push(`${p}: ${n} is missing`);

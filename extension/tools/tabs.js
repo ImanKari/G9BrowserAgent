@@ -356,7 +356,7 @@ export async function detachAllTabs() {
   const results = await detachMany(held);
   // A tab this extension debugs but lost from attachedTabs (a record kept by an older build, a
   // race) is released too — detach only succeeds on OUR sessions, so a tab that DevTools, another
-  // extension or another G9 install debugs fails here and is left out, silently: never reported
+  // extension or another G9BrowserAgent install debugs fails here and is left out, silently: never reported
   // as "still attached" by us, never detached from them.
   if (platform.name === 'extension') {
     const extras = (await attachedTabIds().catch(() => [])).filter((id) => !held.includes(id));
@@ -407,7 +407,7 @@ export async function listTabs() {
     windowId: t.windowId ?? null,
     windowState: windowState.get(t.windowId) ?? null,
     current: t.id === state.currentTabId,
-    // Held by G9 AND confirmed by the browser. Either alone can drift.
+    // Held by G9BrowserAgent AND confirmed by the browser. Either alone can drift.
     attached: platform.name === 'extension' ? state.attachedTabs.includes(t.id) && truth.has(t.id) : truth.has(t.id),
     attachable: isAttachable(t.url || t.pendingUrl || ''),
     status: t.status ?? null,
@@ -539,7 +539,7 @@ export async function popout(tabId = null, { width, height, left, top, focus = f
     note: visible === false
       ? 'The tab moved into its own window without reloading, but that window is NOT visible right now ' +
         '(the page reports visibilityState "hidden"): it is covered or minimised, so Chromium is not ' +
-        'rendering it and G9 refuses input to it. Bring it to the front (browser_tabs action:"focus"), ' +
+        'rendering it and G9BrowserAgent refuses input to it. Bring it to the front (browser_tabs action:"focus"), ' +
         'or turn the WindowOcclusionEnabled policy off so a covered window keeps rendering (docs/INSTALL.md).'
       : 'The tab moved into its own window without reloading. It keeps rendering while that window is on ' +
         'screen. Never minimise it: a minimised window is hidden and Chromium delivers no input to it. A ' +
@@ -563,7 +563,7 @@ async function createPopoutWindow(tabId, focused, source, requested) {
   const base = { tabId, focused, state: 'normal' };
   const preferred = popoutGeometry(source, requested);
   const size = { width: preferred.width, height: preferred.height };
-  // Only an explicit POSITION is the caller's to keep; a size alone still lets G9 find a place
+  // Only an explicit POSITION is the caller's to keep; a size alone still lets G9BrowserAgent find a place
   // the browser accepts (the live test asks for 900x700 and no position).
   const placedByCaller = requested.left != null || requested.top != null;
   const attempts = placedByCaller
@@ -652,7 +652,7 @@ function hostAndParents(host) {
  * Cookies are every cookie that applies to the tab's host — host-only cookies
  * for exactly that host, and domain cookies set on it or any parent — across
  * ALL paths, because the flow may go anywhere on the site next. Storage is read
- * in G9's isolated world: the page's own globals are never touched, and an
+ * in G9BrowserAgent's isolated world: the page's own globals are never touched, and an
  * overridden `Storage.prototype` on the page cannot lie to the read.
  *
  * In-memory page state does not transfer; the receiving engine reloads the URL.

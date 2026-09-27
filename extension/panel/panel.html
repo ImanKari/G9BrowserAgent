@@ -5,14 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <!-- The version is appended at runtime from the manifest (ui.js titleFor),
        so the detached window's title bar always names the build it runs. -->
-  <title>G9 Browser Agent</title>
+  <title>G9BrowserAgent</title>
   <link rel="stylesheet" href="panel.css" />
 </head>
 <body>
   <header class="hd">
     <div class="brand">
       <img src="icon48.png" alt="" width="20" height="20" />
-      <span class="name">G9 Browser Agent</span>
+      <span class="name">G9BrowserAgent</span>
       <button id="versionBadge" class="ver" type="button" title="About this version">v</button>
     </div>
     <button id="detachPanel" class="icon" type="button"
@@ -58,7 +58,7 @@
         <span class="pill" id="daemonPill" hidden></span>
         <button class="link push" id="daemonToggle" type="button" aria-expanded="false" aria-controls="daemonSettings">settings</button>
       </div>
-      <p class="muted" id="daemonHint">Waiting for the local G9 daemon.</p>
+      <p class="muted" id="daemonHint">Waiting for the local G9BrowserAgent daemon.</p>
       <p class="warn" id="daemonWarn" hidden></p>
       <div class="btnrow" id="daemonRetryRow" hidden>
         <button id="reconnectBtn" class="sm" type="button">Reconnect now</button>
@@ -82,7 +82,7 @@
           </span>
         </div>
         <ul class="list" id="agentList"></ul>
-        <p class="help" id="agentEmpty" hidden>No agent is connected. Open your AI client — its G9 tools connect through the daemon.</p>
+        <p class="help" id="agentEmpty" hidden>No agent is connected. Open your AI client — its G9BrowserAgent tools connect through the daemon.</p>
       </div>
 
       <!-- Folded by default: every browser the daemon drives is worth one line
@@ -149,8 +149,8 @@
                 title="Opens the page in its own window, in front, without reloading it. It keeps rendering while it is on screen. Do not minimise it. If another window will cover it completely, turn the WindowOcclusionEnabled policy off first.">⧉ Pop out tab</button>
         <span class="help">Own window, keeps rendering — don't minimise it.</span>
         <button id="handoffTab" class="sm" type="button"
-                title="Continues in a browser G9 launches; the page reloads there with its cookies and storage. In-page state that was never saved stays behind.">⇢ Send to background</button>
-        <span class="help">Reloads in a browser G9 launches.</span>
+                title="Continues in a browser G9BrowserAgent launches; the page reloads there with its cookies and storage. In-page state that was never saved stays behind.">⇢ Send to background</button>
+        <span class="help">Reloads in a browser G9BrowserAgent launches.</span>
       </div>
       <div class="result" id="tabResult" role="status" hidden></div>
     </section>
@@ -162,7 +162,7 @@
         <div class="seg">
           <label title="Instant, exact input as in v1, unless the agent asks for human input. Fastest; easiest for a bot detector to spot."><input type="radio" name="inputMode" value="off" /><b>Direct</b> <span class="muted">Instant, exact input as in v1, unless the agent asks for human input. Fastest; easiest for a bot detector to spot.</span></label>
           <label title="Curved mouse paths, natural clicks and typing rhythm. The default; an agent can still ask for direct input."><input type="radio" name="inputMode" value="human" /><b>Human</b> <span class="muted">Curved mouse paths, natural clicks and typing rhythm. The default; an agent can still ask for direct input.</span></label>
-          <label title="In your own browser this is about input only: while G9 is attached the browser shows its debugging bar, which pages can notice. Use a launched browser for pages that must not."><input type="radio" name="inputMode" value="stealth" /><b>Stealth</b> <span class="muted">Human input with no scripted shortcuts, and page console capture off. Always used: an agent cannot ask for less. Slowest; your own browser still shows its debugging bar while attached.</span></label>
+          <label title="In your own browser this is about input only: while G9BrowserAgent is attached the browser shows its debugging bar, which pages can notice. Use a launched browser for pages that must not."><input type="radio" name="inputMode" value="stealth" /><b>Stealth</b> <span class="muted">Human input with no scripted shortcuts, and page console capture off. Always used: an agent cannot ask for less. Slowest; your own browser still shows its debugging bar while attached.</span></label>
         </div>
         <!-- The selected option's words, for the eye; a screen reader already
              hears them as part of the option's label. -->
@@ -188,7 +188,7 @@
           <button class="link" id="snippetToggle" type="button" aria-expanded="false" aria-controls="snippet">show</button>
         </span>
       </div>
-      <p class="help">G9 Desktop registers your AI clients. For a manual setup, add this to your MCP client's config — the shim starts the daemon when it needs it.</p>
+      <p class="help">G9BrowserAgent Desktop registers your AI clients. For a manual setup, add this to your MCP client's config — the shim starts the daemon when it needs it.</p>
       <pre class="snippet" id="snippet" hidden></pre>
     </section>
 
@@ -365,7 +365,7 @@
     <section class="card hero">
       <img src="icon128.png" alt="" width="44" height="44" />
       <div class="herotext">
-        <div class="heroname">G9 Browser Agent</div>
+        <div class="heroname">G9BrowserAgent</div>
         <div class="herover" id="aboutVersion">v</div>
         <div class="help" id="aboutUpdated"></div>
       </div>

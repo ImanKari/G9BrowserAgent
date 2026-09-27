@@ -14,7 +14,7 @@ import { createRng, planGap } from '../humanize/index.js';
 import { clearBuffers, network } from './observe.js';
 
 /**
- * Every page read here runs in G9's isolated world (lib/world.js). The idle
+ * Every page read here runs in G9BrowserAgent's isolated world (lib/world.js). The idle
  * watcher below is the case that made this matter: it used to hang a
  * MutationObserver and a `window.__g9Idle` object off the page's own window,
  * where the page — and anything fingerprinting it — could see both. In the

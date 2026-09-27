@@ -1,7 +1,7 @@
 /**
  * The README screenshots, from a real run — never mock data or a hand-arranged UI.
  *
- *   node setup/docs-screenshots.mjs [--out docs/assets] [--app <packaged G9 executable>] [--browser <chrome/edge path>]
+ *   node setup/docs-screenshots.mjs [--out docs/assets] [--app <packaged G9BrowserAgent executable>] [--browser <chrome/edge path>]
  *                                   [--engine edge|chrome|cft]   (the launched browser for Watch; default auto)
  *
  * What happens, all on this machine and all disposable:
@@ -17,7 +17,7 @@
  *     launched browser live with the cursor drawn from the pointer track.
  *
  * Privacy: run it where the machine's user name and paths are neutral (the screenshots show the
- * G9 home folder, the program folder and, in Settings, the OS user name). The published images
+ * G9BrowserAgent home folder, the program folder and, in Settings, the OS user name). The published images
  * were made in a container as user "demo" (see docs/assets/README.md). Nothing here signs in anywhere,
  * and the only site visited is the local Demo Shop.
  */
@@ -205,7 +205,7 @@ async function main() {
   const tabs = await agent.call('browser_tabs', { action: 'list' });
   const tab = (tabs.tabs ?? tabs).find((t) => String(t.url ?? '').startsWith(SHOP));
   await agent.call('browser_tabs', { action: 'attach', tabId: tab.tabId });
-  // It opened behind about:blank: G9 refuses input to a hidden tab, and says to bring it forward.
+  // It opened behind about:blank: G9BrowserAgent refuses input to a hidden tab, and says to bring it forward.
   await agent.call('browser_tabs', { action: 'focus', tabId: tab.tabId });
   const started = await agent.call('browser_recording', { action: 'start', tabId: tab.tabId, name: 'Checkout — place an order' });
   const recId = started?.id ?? started?.recording?.id ?? started?.recordingId ?? null;
@@ -261,6 +261,9 @@ async function main() {
     const cdp = await Cdp.connect(target.webSocketDebuggerUrl);
     const csend = (m, p) => cdp.send(m, p);
     await waitFor('the app to connect', async () => (await cdp.eval('window.g9.invoke("state").then((s) => s.connection?.status)')) === 'connected');
+    // The footer shows the update status: photograph the result of the check, not "checking…".
+    await waitFor('the update check to finish', async () => !['checking', 'idle', undefined, null].includes(await cdp.eval('window.g9.invoke("state").then((s) => s.update?.status)')), 90_000)
+      .catch((err) => log(`update status: ${err.message}`));
     // A launched browser for Watch, driven by the agent so the cursor moves.
     const launched = await agent.call('browser_engine', { action: 'launch', headless: true, ...(opt('--engine') ? { browser: opt('--engine') } : {}) });
     // The recorded flow, replayed there: the run the Runs view shows (steps, checks, replay).

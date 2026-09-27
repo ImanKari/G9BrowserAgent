@@ -1,9 +1,9 @@
 // engine/profile.js — Engine 2's browser profiles: G9_HOME/profiles/<name>/ (+ <name>.json).
 //
-// A profile is a browser user-data-dir that G9 owns. It is never a person's own browser profile:
+// A profile is a browser user-data-dir that G9BrowserAgent owns. It is never a person's own browser profile:
 // Chrome 136+ refuses remote debugging on the default dir, and App-Bound Encryption (Chrome 127+)
 // makes a person's cookies undecryptable by any other process or copy (AIGuide §2.8.1). So a site login
-// for Engine 2 is made ONCE, by a person, in a headed window on the G9 profile — warm() — and then
+// for Engine 2 is made ONCE, by a person, in a headed window on the G9BrowserAgent profile — warm() — and then
 // reused by every run on that profile. The same fact means a profile copied to another machine
 // loses its cookies; profiles are per machine.
 //
@@ -346,7 +346,7 @@ export async function clearSessionRestore(name, { home = g9Home(), dir = null } 
  * close the browser, then stamps `warmedAt`. → { name, dir, url, warmedAt, exit, browser, argv }
  *
  * The window is the same browser, switches and profile the runs will use (launch.js), so the
- * session a person creates here is the session the runs inherit. G9 sends nothing to the page:
+ * session a person creates here is the session the runs inherit. G9BrowserAgent sends nothing to the page:
  * the pipe is only used to learn the version and, if asked, to close the browser.
  *
  * opts: browser ('auto'|'edge'|'chrome'|'cft'|path), windowSize, lang, extraArgs,
@@ -365,7 +365,7 @@ export async function warm(name, url, {
   const launchBrowser = launch ?? (await import('./launch.js')).launchBrowser;
   // componentUpdate: a person's first launch of a browser is when it fetches its components — the
   // Widevine CDM among them (launch.js COMPONENT_UPDATE_SWITCH); the stealth runs on this profile use it.
-  // stealth 'stealth': a PERSON drives this window and G9 sends nothing to the page, so decision
+  // stealth 'stealth': a PERSON drives this window and G9BrowserAgent sends nothing to the page, so decision
   // D-a's "off/human tell the truth" (about agent-driven runs) does not apply. Without it the
   // debugging pipe turned AutomationControlled on and every page of the sign-in window reported
   // navigator.webdriver === true — the one-time sign-in ran in a browser that said it was automated,
@@ -378,7 +378,7 @@ export async function warm(name, url, {
     componentUpdate: true,
     stealth: 'stealth',
   });
-  // A window G9 closed (abort, timeout) is not a finished login: only a person closing it counts.
+  // A window G9BrowserAgent closed (abort, timeout) is not a finished login: only a person closing it counts.
   let cancelledBy = null;
   const cancel = (why) => { cancelledBy = cancelledBy ?? why; handle.close().catch(() => {}); };
   const onAbort = () => cancel('aborted');

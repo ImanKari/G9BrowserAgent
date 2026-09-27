@@ -9,22 +9,64 @@
  *     live. Packaged: `process.resourcesPath` (electron-builder extraResources). Dev: the repo root,
  *     one level above desktop/. Both have the same layout, so nothing else branches on it.
  *
- * Keep this path-agnostic: no hard-coded backslashes (macOS/Linux are not supported yet, AIGuide §8.3); `path` does the joining.
+ * Keep this path-agnostic: no hard-coded backslashes (Windows, macOS and Linux run it); `path` does the joining.
  */
 
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 export const DEFAULT_PORT = 8765;
 
-/** G9_HOME: env override, else %LOCALAPPDATA%\G9 on Windows, else ~/.g9 (ARCHITECTURE_V2 §1). */
+/** G9_HOME: env override, else %LOCALAPPDATA%\G9BrowserAgent on Windows, else ~/.g9browseragent (ARCHITECTURE_V2 §1). Pure. */
 export function g9Home({ env = process.env, platform = process.platform, homedir = os.homedir() } = {}) {
   if (env.G9_HOME && String(env.G9_HOME).trim()) return path.resolve(String(env.G9_HOME).trim());
+  return defaultHomes({ env, platform, homedir }).home;
+}
+
+// ---- the one-time move from the pre-3.2.1 folder name: a copy of lib/home.mjs, which the packaged
+// app cannot import at load time; desktop/test/paths.test.mjs keeps the two in step.
+
+export const MIGRATION_MARKER = 'migrated-from.json';
+
+/** The default home and the pre-3.2.1 one (%LOCALAPPDATA%\G9, ~/.g9). Pure. */
+export function defaultHomes({ env = process.env, platform = process.platform, homedir = os.homedir() } = {}) {
   if (platform === 'win32') {
     const local = env.LOCALAPPDATA || path.join(homedir, 'AppData', 'Local');
-    return path.join(local, 'G9');
+    return { home: path.join(local, 'G9BrowserAgent'), legacy: path.join(local, 'G9') };
   }
-  return path.join(homedir, '.g9');
+  return { home: path.join(homedir, '.g9browseragent'), legacy: path.join(homedir, '.g9') };
+}
+
+/** Whether a folder is G9's data home: something only G9 writes there. */
+export function looksLikeG9Home(dir, { exists = fs.existsSync } = {}) {
+  return ['settings.json', 'daemon.json', 'desktop.json', path.join('extension', 'manifest.json'), 'daemon.lock']
+    .some((f) => exists(path.join(dir, f)));
+}
+
+/**
+ * Use `home`; if it does not exist and `legacy` is G9's, rename `legacy` to it first (atomic; a
+ * failure — files held open by an older daemon — keeps `legacy` in use until a later start).
+ * @returns {{ home: string, migratedFrom?: string, error?: string }}
+ */
+export function adoptLegacyHome({ home, legacy }, { fsApi = fs, now = () => new Date() } = {}) {
+  if (fsApi.existsSync(home) || !legacy || !fsApi.existsSync(legacy) || !looksLikeG9Home(legacy, { exists: fsApi.existsSync })) return { home };
+  try {
+    fsApi.renameSync(legacy, home);
+  } catch (err) {
+    if (fsApi.existsSync(home) && !fsApi.existsSync(legacy)) return { home };
+    return { home: legacy, error: `${err.code ?? 'error'}: ${err.message}` };
+  }
+  try {
+    fsApi.writeFileSync(path.join(home, MIGRATION_MARKER), `${JSON.stringify({ from: legacy, to: home, at: now().toISOString() }, null, 2)}\n`);
+  } catch { /* the move itself succeeded */ }
+  return { home, migratedFrom: legacy };
+}
+
+/** The home this app uses: G9_HOME when set, else the default after the one-time move. */
+export function resolveAppHome({ env = process.env, platform = process.platform, homedir = os.homedir(), fsApi = fs } = {}) {
+  if (env.G9_HOME && String(env.G9_HOME).trim()) return { home: path.resolve(String(env.G9_HOME).trim()) };
+  return adoptLegacyHome(defaultHomes({ env, platform, homedir }), { fsApi });
 }
 
 /** The daemon port: G9_PORT when it is a valid TCP port, else 8765. */

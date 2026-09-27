@@ -310,7 +310,7 @@ function onWatchPush(d) {
     live.tabId = null;
     renderControls();
     renderEmpty('Watching stopped', d.reason === 'quit'
-      ? 'G9 is closing.'
+      ? 'G9BrowserAgent is closing.'
       : d.reason === 'daemon-restarted'
         // Handles are per daemon instance: the same number is another tab now (desktop review).
         ? 'The daemon restarted, so tab numbers start again. Pick the tab again.'

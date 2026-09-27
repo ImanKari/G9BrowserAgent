@@ -1,6 +1,6 @@
-# G9 desktop
+# G9BrowserAgent desktop
 
-The G9 v2 desktop app: a tray icon, a window to watch and steer what the agents do, the first-run
+The G9BrowserAgent v2 desktop app: a tray icon, a window to watch and steer what the agents do, the first-run
 setup, the installer and the updater. It is **the shell, never an engine** (D4 and R5, AIGuide §2): Electron's
 Chromium only ever shows this app's own screens. Pages under test run in real Edge, Chrome or Chrome
 for Testing that the daemon (`g9d`) launches; the Watch view shows their screencast frames on a
@@ -18,7 +18,7 @@ bridge, the app names it and leaves it alone.
 
 ```powershell
 cd desktop
-npm ci             # electron, electron-builder, electron-updater: the only npm dependencies in G9
+npm ci             # electron, electron-builder, electron-updater: the only npm dependencies in G9BrowserAgent
 npm start          # the app (scripts/start.mjs clears ELECTRON_RUN_AS_NODE first, see below)
 npm test           # every test/*.test.mjs, plain node, no window, no browser, never port 8765
 npm run test:daemon  # the live contract: this repo's real g9d on a temp G9_HOME and a port in 18000-18999
@@ -42,9 +42,9 @@ a window. `test:daemon` (`test/daemon-contract.mjs`) starts `daemon/g9d.mjs` its
 the app's own client, normalizers and wizard: handshake, settings round-trip, halt/resume events,
 schedule add/list/remove, versions/profiles, `extension.install`, `--smoke` under node and under
 Electron, restart-when-idle through the app's launcher, and shutdown. It never launches a browser.
-`test:packaged` (`test/packaged.mjs`) checks the build itself: `G9.exe --smoke --launch` starts the
-daemon from `resources/` as `G9.exe` + `ELECTRON_RUN_AS_NODE=1`, the exact MCP entry the wizard writes
-for that build answers `initialize`, `tools/list` and `browser_status`, the runner runs under `G9.exe`,
+`test:packaged` (`test/packaged.mjs`) checks the build itself: `G9BrowserAgent.exe --smoke --launch` starts the
+daemon from `resources/` as `G9BrowserAgent.exe` + `ELECTRON_RUN_AS_NODE=1`, the exact MCP entry the wizard writes
+for that build answers `initialize`, `tools/list` and `browser_status`, the runner runs under `G9BrowserAgent.exe`,
 and `shutdown` frees the port. It removes every directory holding `node.exe` from the PATH it gives the
 build, and checks that with nothing listening the packaged shim starts the packaged daemon itself.
 `test:render` (`test/render-check.mjs`) runs `main.mjs --check-render` against the real g9d, once on an
@@ -73,8 +73,8 @@ Flags of `main.mjs`:
 | Watch | Pick a tab, see it live: JPEG frames scaled to fit, a cursor sprite interpolated between pointer samples, a ring on each press. View only. Watching pauses while the window is hidden or minimized. When the daemon could not start the stream (the tab closed or navigated during the start, or an unwatch overtook it), the view says "That tab is not being watched" with the daemon's reason (or, when it gives none, asks you to pick the tab again) instead of waiting for a first frame (2.0.2). (3.2) When an agent calls `browser_tabs action:"watch"`, the view opens on that tab by itself (the daemon's `watchRequest`). The extension has a live view of its own (the side panel's Live view), for machines without this app. |
 | Runs | Every run the daemon recorded (replays, calibrations, scheduled suites, watch sessions): verdict, steps (a scheduled run lists each flow of the runner's report, with Open report for its `report.html`, opened by Windows in your default browser), surprises, and a replay of the frames with the cursor. Export video records that replay into `runs/<runId>/video.webm`. |
 | Approvals | Flows whose last run has surprises, with what differed. Approve calls `browser_recording action:"approve"` with `by` = your sign-in user name, supplied by the main process. Nothing approves on its own; every approval asks once more. |
-| Schedule | Suites the daemon runs by itself: daily at a time or every N minutes, with engine options. Every option the form shows becomes an explicit runner flag, so a later change of the defaults never changes a scheduled suite — except a browser left at "auto", which passes no `--browser` and so follows the daemon's `defaultBrowser`. Run now, Remove (addressed by `entryId`). The last result is the suite's worst verdict. In an installed app, a warning appears while there is an entry and G9 does not start at sign-in, because after a restart nothing else starts the daemon. |
-| Settings | The daemon's settings (`settings.get` / `settings.set`), the raw JSON for everything else, the updater, the daemon connection, "Start G9 when I sign in" (installed builds: a login item with `--hidden`), and this app's folders. **Shut down daemon** stops it and the app does not start it again by itself: **Reconnect** brings it back (an agent's next call also starts it). |
+| Schedule | Suites the daemon runs by itself: daily at a time or every N minutes, with engine options. Every option the form shows becomes an explicit runner flag, so a later change of the defaults never changes a scheduled suite — except a browser left at "auto", which passes no `--browser` and so follows the daemon's `defaultBrowser`. Run now, Remove (addressed by `entryId`). The last result is the suite's worst verdict. In an installed app, a warning appears while there is an entry and G9BrowserAgent does not start at sign-in, because after a restart nothing else starts the daemon. |
+| Settings | The daemon's settings (`settings.get` / `settings.set`), the raw JSON for everything else, the updater, the daemon connection, "Start G9BrowserAgent when I sign in" (installed builds: a login item with `--hidden`), and this app's folders. **Shut down daemon** stops it and the app does not start it again by itself: **Reconnect** brings it back (an agent's next call also starts it). |
 | Setup | The first-run wizard, runnable again at any time. |
 
 Human input (Settings, the launch form, the schedule form) takes a level (`off`, `human`, `stealth`)
@@ -95,7 +95,7 @@ Everything the wizard does is written to `G9_HOME/logs/install.log`.
 1. **Browsers.** Edge and Chrome found on this machine (from the daemon's `engines.versions`, or the
    app's own probe when the daemon is down) and the pinned Chrome for Testing, with Install. Once CfT
    is installed, `browser:"auto"` picks it over Edge and Chrome. Windows Firewall may then ask once
-   about the new `chrome.exe`; either answer is fine, because G9 uses a pipe, not a port
+   about the new `chrome.exe`; either answer is fine, because G9BrowserAgent uses a pipe, not a port
    (`docs/INSTALL.md`).
 2. **Automation profile.** Lists profiles; "Open the automation profile" asks the daemon to open it
    headed (`profiles.warm`) so you can sign in once. Unattended runs then start signed in.
@@ -122,15 +122,15 @@ Everything the wizard does is written to `G9_HOME/logs/install.log`.
 4. **AI clients.** Claude Code (`~/.claude.json`, `mcpServers`), Cursor (`~/.cursor/mcp.json`),
    VS Code (`<config>/Code/User/mcp.json`, `servers`) and Claude Desktop
    (`<config>/Claude/claude_desktop_config.json`), where `<config>` is `%APPDATA%`,
-   `~/Library/Application Support` or `$XDG_CONFIG_HOME` (`~/.config`). The entry is `g9-browser`: the
+   `~/Library/Application Support` or `$XDG_CONFIG_HOME` (`~/.config`). The entry is `g9browseragent`: the
    app's executable with `ELECTRON_RUN_AS_NODE=1` and `resources/mcp/shim.mjs` when installed (a Linux
    AppImage: the `.AppImage` file, `G9_HOME/bin/g9-run.mjs`, `mcp/shim.mjs`, `--no-sandbox`),
    `node <repo>/mcp/shim.mjs` in development. On macOS the step refuses while the app runs from a disk
    image or a translocated copy, because that path is gone at the next start. The file is backed up (`<file>.g9-backup-<time>`) before any write; everything
-   else in it is kept; a *different* existing `g9-browser` entry (for example v1's
+   else in it is kept; a *different* existing `g9browseragent` entry (for example v1's
    `bridge/src/server.js`) is shown as a diff and replaced only when you confirm; a file with
    comments asks before they are dropped; a file that does not parse is never written. **Remove**
-   takes the `g9-browser` entry out again, after the same backup. Registration was tested on
+   takes the `g9browseragent` entry out again, after the same backup. Registration was tested on
    temporary files only.
 5. **Extension.** The daemon copies the bundled extension to `G9_HOME/extension` (`extension.install`),
    the path goes on the clipboard, and the button opens `edge://extensions` or `chrome://extensions` by
@@ -142,9 +142,9 @@ Everything the wizard does is written to `G9_HOME/logs/install.log`.
 ## Packages and updates
 
 ```bash
-npm run build:win     # on Windows → dist/G9-Setup-<version>.exe (+ .blockmap) and latest.yml
-npm run build:mac     # on macOS   → dist/G9-<version>-mac-{arm64,x64}.{dmg,zip} and latest-mac.yml
-npm run build:linux   # on Linux   → dist/G9-x86_64.AppImage, dist/G9_<version>_amd64.deb and latest-linux.yml
+npm run build:win     # on Windows → dist/G9BrowserAgent-Setup-<version>.exe (+ .blockmap) and latest.yml
+npm run build:mac     # on macOS   → dist/G9BrowserAgent-<version>-mac-{arm64,x64}.{dmg,zip} and latest-mac.yml
+npm run build:linux   # on Linux   → dist/G9BrowserAgent-x86_64.AppImage, dist/G9BrowserAgent_<version>_amd64.deb and latest-linux.yml
 npm run verify:artifacts   # every file latest*.yml lists: present, its size, its SHA-512
 ```
 
@@ -157,17 +157,17 @@ icons, builds, and then checks every `app.asar` it produced: each production dep
 another folder: the "older build" the update test installs first.
 
 * **Windows:** NSIS, assisted, **per user**, no administrator rights, fixed folder
-  (`%LOCALAPPDATA%\Programs\G9`). `electron-builder.yml`: `perMachine: false`, `allowElevation: false`,
+  (`%LOCALAPPDATA%\Programs\G9BrowserAgent`). `electron-builder.yml`: `perMachine: false`, `allowElevation: false`,
   `allowToChangeInstallationDirectory: false`, `requestedExecutionLevel: asInvoker`;
   `build/installer.nsh` forces the per-user mode. The uninstaller removes the program folder only:
-  `G9_HOME` is outside it, and `deleteAppDataOnUninstall: false` keeps `%APPDATA%\G9`.
+  `G9_HOME` is outside it, and `deleteAppDataOnUninstall: false` keeps `%APPDATA%\G9BrowserAgent`.
 * **macOS:** a DMG to install from and a ZIP for the updater, for `arm64` and `x64`. Signed ad hoc
   only (`identity: '-'`, hardened runtime off): not notarized, so Gatekeeper asks on the first start.
   `CSC_IDENTITY_AUTO_DISCOVERY=false` keeps a build machine's own certificates out of it.
-* **Linux:** an AppImage named without a version, `G9-x86_64.AppImage`, because electron-updater
+* **Linux:** an AppImage named without a version, `G9BrowserAgent-x86_64.AppImage`, because electron-updater
   replaces an AppImage in place only when its name carries no version (otherwise it writes a new
   versioned file and deletes the old one, and every MCP entry naming the old file breaks); and a .deb
-  (`/opt/G9`, command `g9`, package `g9-desktop`).
+  (`/opt/G9BrowserAgent`, command `g9browseragent`, package `g9browseragent`, which replaces the pre-3.2.1 `g9-desktop`).
 * `resources/` carries `extension/`, `engine/`, `daemon/`, `mcp/`, `runner/`, `lib/` and the root
   `package.json`, so a QA machine needs no Node, no git and no npm.
 * **Code signing:** none. Windows SmartScreen and macOS Gatekeeper ask once; see
@@ -184,13 +184,13 @@ another folder: the "older build" the update test installs first.
   host. `updateChannel` `beta` also takes prereleases.
 * **Install mode** (`installMode`) — `auto` on Windows and a Linux AppImage: it checks on start and
   every 6 hours, downloads by itself (SHA-512 checked), then asks: install now, install when you quit
-  G9, not now, or skip this version (a skipped version is never downloaded again). `manual` on macOS
+  G9BrowserAgent, not now, or skip this version (a skipped version is never downloaded again). `manual` on macOS
   (Squirrel.Mac installs only into a Developer-ID-signed app) and a .deb (needs root): the same check,
   no download, a notification once per version, and **Open the release page**.
 * **Never mid-run** — installing restarts the daemon, so it waits until the daemon reports no run in
   progress and no launched browser; a busy daemon defers it (re-checked every minute), and quitting
   while busy leaves it for the next quit. `autoInstallOnAppQuit` is off, because the installer closes
-  every G9 process it finds.
+  every G9BrowserAgent process it finds.
 * **After an update** the app refreshes `G9_HOME/extension` (`extension.install`), the extension
   reloads once idle, and an older daemon is restarted once it is idle. A daemon that sees an older
   extension connect while `G9_HOME/extension` already holds the new version asks it to reload, once.

@@ -1,6 +1,6 @@
 // engine/launch.js — start a real Edge/Chrome/CfT with a private CDP pipe, and stop it cleanly.
 //
-// Engine 2 (decisions D2/D3, AIGuide §2.0) is a stock browser process that G9 starts and owns. It is driven over
+// Engine 2 (decisions D2/D3, AIGuide §2.0) is a stock browser process that G9BrowserAgent starts and owns. It is driven over
 // --remote-debugging-pipe: the browser's fd 3/4 carry CDP, so there is no debugging port for
 // anything else on the machine to find, and the browser identifies no differently from one a person
 // started (no --enable-automation, ever). Headless by default: `--headless=new` is the full browser
@@ -72,7 +72,7 @@ export const FIXED_SWITCHES = Object.freeze([
  * a deviation from the designed list, recorded like msImplicitSignin and --disable-sync above.
  *
  * Edge and Chrome get the Widevine CDM through the component updater. With the switch, no
- * G9-launched Edge or Chrome ever had Widevine — not even on a warmed profile that had already
+ * G9BrowserAgent-launched Edge or Chrome ever had Widevine — not even on a warmed profile that had already
  * downloaded it: `requestMediaKeySystemAccess('com.widevine.alpha', …)` rejected while PlayReady
  * worked (stealth suite, round 3: 9/9 Edge runs; raw probe on Edge and Chrome 153: without the
  * switch the CDM lands in the profile within ~60 s of its first launch and is reported from then on;
@@ -112,7 +112,7 @@ export const GRACEFUL_EXIT_MS = 30_000;
  * Switches for one browser KIND only.
  *
  * Chrome for Testing: `--disable-frame-rate-limit`. Measured on the owner's machine (live round 2
- * and a controlled probe, 2026-09-22, headless, temp profiles, the same G9 switches): CfT
+ * and a controlled probe, 2026-09-22, headless, temp profiles, the same G9BrowserAgent switches): CfT
  * 153.0.8010.52 ran requestAnimationFrame at a steady 100.5 ms — 10 frames per second, headless and
  * headed — while Chrome 153.0.8010.53 and Edge 153.0.4234.32 ran at 10.5 ms. A renderer's input is
  * frame-aligned, so every mouse event reached the page on a 100 ms beat and each CDP dispatch took
@@ -155,11 +155,11 @@ export const KIND_SWITCHES = Object.freeze({ cft: Object.freeze(['--disable-fram
 // command line (base/command_line.cc), so "--ENABLE-AUTOMATION" is --enable-automation to the
 // browser and must be refused just the same.
 const REFUSED = [
-  [/^--enable-automation(=|$)/i, 'it sets navigator.webdriver and the "controlled by automated test software" bar; G9 never identifies as automation'],
+  [/^--enable-automation(=|$)/i, 'it sets navigator.webdriver and the "controlled by automated test software" bar; G9BrowserAgent never identifies as automation'],
   [/^--remote-debugging-port(=|$)/i, 'a debugging port lets any local process drive this browser; Engine 2 uses the private pipe'],
   [/^--remote-debugging-address(=|$)/i, 'Engine 2 has no debugging port'],
   [/^--remote-debugging-pipe(=|$)/i, 'launchBrowser always passes it'],
-  [/^--remote-debugging-io-pipes(=|$)/i, 'it moves CDP off fd 3/4, so the browser would never answer on the pipe G9 reads'],
+  [/^--remote-debugging-io-pipes(=|$)/i, 'it moves CDP off fd 3/4, so the browser would never answer on the pipe G9BrowserAgent reads'],
   [/^--user-data-dir(=|$)/i, 'use the profileDir option'],
   [/^--headless(=|$)/i, 'use the headless option'],
   [/^--window-size(=|$)/i, 'use the windowSize option'],
@@ -377,6 +377,9 @@ export function noSandboxWanted({ platform = process.platform, env = process.env
  */
 export function sandboxHint(output) {
   const text = String(output ?? '');
+  if (/Running as root without --no-sandbox is not supported/i.test(text)) {
+    return '\nThe browser refuses to run as root with its sandbox (Chromium\'s own rule). Run G9BrowserAgent as a normal user; in a disposable container, G9_BROWSER_NO_SANDBOX=1 in the daemon\'s environment starts launched browsers without the sandbox.';
+  }
   const helper = /make sure that (\S+) is owned by root and has mode 4755/.exec(text)?.[1];
   if (!helper && !/No usable sandbox|SUID sandbox helper/i.test(text)) return '';
   return '\nThis Linux system cannot start the browser\'s sandbox. ' +
@@ -400,7 +403,7 @@ const USER_DATA_SWITCH = '--user-data-dir=';
 
 /**
  * Does this command line run with --user-data-dir = `profileDir` EXACTLY? A plain substring test is
- * not enough: G9 profiles are siblings under one folder, so the dir of profile "qa" is a prefix of
+ * not enough: G9BrowserAgent profiles are siblings under one folder, so the dir of profile "qa" is a prefix of
  * the dir of profile "qa-2", and a substring sweep after stopping "qa" would kill the browser of an
  * unrelated, running engine. The dir must be the switch's whole value, and where the value ends
  * depends on its quoting: Node quotes the whole argument (`"--user-data-dir=C:\a b"`), Chromium
@@ -548,7 +551,7 @@ export async function launchBrowser({
   if (profileDir) {
     dir = path.resolve(profileDir);
     if (isDefaultUserDataDir(dir)) {
-      throw new Error(`Refusing to launch on ${dir}: that is (or is inside) a browser's default user-data directory. Engine 2 only uses G9 profiles (engine/profile.js) or temporary directories.`);
+      throw new Error(`Refusing to launch on ${dir}: that is (or is inside) a browser's default user-data directory. Engine 2 only uses G9BrowserAgent profiles (engine/profile.js) or temporary directories.`);
     }
     await mkdir(dir, { recursive: true });
     const use = await profileInUse(dir);
@@ -707,7 +710,7 @@ export async function launchBrowser({
         killed = killTree(child.pid);
         await Promise.race([exited, delay(5000)]);
       }
-      conn.close(`${label}: closed by G9`);
+      conn.close(`${label}: closed by G9BrowserAgent`);
       live.delete(handle);
 
       // Children normally exit with the browser; a GPU or utility process can lag by a moment.

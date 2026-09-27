@@ -3,10 +3,10 @@
   Writes the extension's icons (extension/panel/icon16/32/48/128.png) from one square artwork PNG.
 
 .DESCRIPTION
-  The artwork is the owner's (U9, AIGuide §6.10): a detailed scene, a browser window with "G9", a
+  The artwork is the owner's (U9, AIGuide §6.10): a detailed scene, a browser window with "G9BrowserAgent", a
   robot, a cursor and an orbit, on a transparent background. 32, 48 and 128 px show all of it,
   cropped to the drawing. At 16 px (the toolbar at 100 % display scaling) that scene is a blur, so
-  16 px shows only the browser window with "G9" (-SmallCrop), the one part that stays readable.
+  16 px shows only the browser window with "G9BrowserAgent" (-SmallCrop), the one part that stays readable.
 
   Downscaling halves the image step by step, then does one final high-quality bicubic resize,
   in premultiplied alpha so that transparent edges do not turn dark. Windows only (System.Drawing),
@@ -20,7 +20,7 @@
   2026-09-25 artwork (1254x1254, drawing inside 50..1178 x 96..1124, plus a small margin).
 
 .PARAMETER SmallCrop
-  x, y, size of the square to use for 16 px: the browser window with "G9" in the same artwork.
+  x, y, size of the square to use for 16 px: the browser window with "G9BrowserAgent" in the same artwork.
 #>
 param(
   [Parameter(Mandatory = $true)][string]$Source,

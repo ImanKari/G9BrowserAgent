@@ -2,7 +2,7 @@
  * Where the mouse is, per tab — and where it has been.
  *
  * CDP input moves no real cursor, so "where the pointer is" exists only as far
- * as G9 remembers it. v1 remembered nothing: every click teleported to its
+ * as G9BrowserAgent remembers it. v1 remembered nothing: every click teleported to its
  * target, which is both a bot signal (a pointer that appears from nowhere) and
  * a gap in the evidence (a video of a run showed things happening with no
  * visible cause). v2 keeps two things here:

@@ -6,7 +6,7 @@
        (connect-src 'none' — the daemon is reached only through the main process). -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <meta name="color-scheme" content="light dark">
-  <title>G9</title>
+  <title>G9BrowserAgent</title>
   <link rel="stylesheet" href="styles.css">
   <script type="module" src="app.js"></script>
 </head>
@@ -16,8 +16,10 @@
     <nav class="rail" aria-label="Sections">
       <div class="brand">
         <span class="brand-mark" aria-hidden="true"></span>
-        <span class="brand-name">G9</span>
-        <span class="brand-version" id="app-version" title="Version of this app">…</span>
+        <span class="brand-text">
+          <span class="brand-name">G9BrowserAgent</span>
+          <span class="brand-version" id="app-version" title="Version of this app">…</span>
+        </span>
       </div>
       <ul class="nav" id="nav">
         <li><button type="button" data-view="agents">Agents</button></li>

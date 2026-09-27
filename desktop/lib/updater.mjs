@@ -27,7 +27,7 @@
  *     re-checked every minute; the person can also quit without installing, and the downloaded
  *     update waits for the next quit.
  *   - autoInstallOnAppQuit is OFF: electron-updater would otherwise install on any quit, killing
- *     the daemon (G9.exe) mid-run, because the installer closes every G9.exe it finds.
+ *     the daemon (G9BrowserAgent.exe) mid-run, because the installer closes every G9BrowserAgent.exe it finds.
  *
  * The electron-updater object is injected (`autoUpdater`), so this whole state machine is tested
  * with a fake and plain node.
@@ -83,7 +83,7 @@ export function feedConfig({ mode = 'official', url, channel } = {}) {
   return {
     provider: 'generic',
     url: u.endsWith('/') ? u : `${u}/`,
-    // G9's channel names are stable/beta; electron-updater's stable channel is called 'latest'.
+    // G9BrowserAgent's channel names are stable/beta; electron-updater's stable channel is called 'latest'.
     channel: channel === 'beta' ? 'beta' : 'latest',
   };
 }
@@ -101,7 +101,7 @@ export function installMode({ platform = process.platform, appImage = false } = 
 
 /** Why an installation updates by hand, in the words the UI uses. Pure. */
 export function manualReason({ platform = process.platform } = {}) {
-  if (platform === 'darwin') return 'macOS installs updates only into apps signed with an Apple Developer ID, and G9 is not signed yet';
+  if (platform === 'darwin') return 'macOS installs updates only into apps signed with an Apple Developer ID, and G9BrowserAgent is not signed yet';
   if (platform === 'linux') return 'a .deb package is replaced with the system package manager, which needs your password';
   return 'this installation cannot replace itself';
 }
@@ -119,15 +119,15 @@ export function describeUpdate(s) {
     case 'idle': return 'Updates: waiting for the first check';
     case 'checking': return 'Updates: checking…';
     case 'up-to-date': return `Updates: up to date (${s.currentVersion})`;
-    case 'available-manual': return `Updates: G9 ${s.version} is available — download it from the release page`;
-    case 'skipped': return `Updates: G9 ${s.version} was skipped — a newer release will be offered`;
+    case 'available-manual': return `Updates: G9BrowserAgent ${s.version} is available — download it from the release page`;
+    case 'skipped': return `Updates: G9BrowserAgent ${s.version} was skipped — a newer release will be offered`;
     case 'available': return `Updates: ${s.version} found, downloading…`;
     case 'downloading': return `Updates: downloading ${s.version ?? ''} ${Math.round(s.percent ?? 0)}%`.replace(/\s+/g, ' ').trim();
     case 'downloaded': return `Updates: ${s.version} is ready to install`;
     case 'deferred': return `Updates: ${s.version} waits for the daemon to be idle (${(s.reasons ?? []).join('; ')})`;
     case 'installing': return `Updates: installing ${s.version}…`;
     case 'error': return /\b404\b|No published versions|ERR_UPDATER_LATEST_VERSION_NOT_FOUND|CHANNEL_FILE_NOT_FOUND/.test(s.error ?? '')
-      ? `Updates: no G9 release is published at ${s.source === 'custom' ? 'the custom address' : 'the official releases'} yet`
+      ? `Updates: no G9BrowserAgent release is published at ${s.source === 'custom' ? 'the custom address' : 'the official releases'} yet`
       : `Updates: the last check failed (${String(s.error ?? '').trim()})`;
     default: return 'Updates: unknown';
   }
@@ -336,7 +336,7 @@ export class UpdateController extends EventEmitter {
     return this.snapshot();
   }
 
-  /** "Install when I quit G9" (the prompt's second answer, also a Settings button). */
+  /** "Install when I quit G9BrowserAgent" (the prompt's second answer, also a Settings button). */
   installOnQuitChoice() {
     if (!['downloaded', 'deferred'].includes(this.state.status)) return this.snapshot();
     this.installOnQuit = true;
@@ -413,13 +413,13 @@ export class UpdateController extends EventEmitter {
       this.log?.warn?.('Stopping the daemon before install failed', String(err?.message ?? err));
     }
     this.log?.info?.('Installing the update', { version: this.state.version });
-    // isSilent: the person already chose; isForceRunAfter: reopen G9 unless we are quitting anyway.
+    // isSilent: the person already chose; isForceRunAfter: reopen G9BrowserAgent unless we are quitting anyway.
     this.updater.quitAndInstall(true, !quitting);
     return this.snapshot();
   }
 
   /**
-   * Called when the person quits G9. With a downloaded update and an idle daemon: install.
+   * Called when the person quits G9BrowserAgent. With a downloaded update and an idle daemon: install.
    * Busy: do not install (the next quit will), and say why.
    * @returns {Promise<'installing'|'deferred'|'none'>}
    */

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * LIVE test of Engine 1 — the G9 extension in a real browser — v2.
+ * LIVE test of Engine 1 — the G9BrowserAgent extension in a real browser — v2.
  *
  * Unlike selftest.mjs (which fakes the extension and proves only the plumbing),
  * this drives real CDP against real pages. It is an MCP client itself, speaking
@@ -136,7 +136,7 @@ class Mcp {
 
 // ------------------------------------------------------------------- CDP
 
-/** The test browser's own DevTools endpoint: for what no G9 tool does (and must not). */
+/** The test browser's own DevTools endpoint: for what no G9BrowserAgent tool does (and must not). */
 class Cdp {
   constructor(url) {
     this.id = 0;
@@ -243,7 +243,7 @@ async function activateTarget(url) {
 
 // ------------------------------------------------------------------- run
 
-console.log('\n\x1b[1mG9 Browser Agent — LIVE test (Engine 1, v' + VERSION + ')\x1b[0m');
+console.log('\n\x1b[1mG9BrowserAgent — LIVE test (Engine 1, v' + VERSION + ')\x1b[0m');
 console.log(`\x1b[90mdaemon port ${PORT} · shim ${path.relative(ROOT, SHIM)} · ${CDP_PORT ? `browser CDP ${CDP_PORT}` : 'no browser CDP (checks that need it are skipped)'}\x1b[0m`);
 
 const child = spawn(process.execPath, [SHIM], {
@@ -269,7 +269,7 @@ const activateMain = async () => {
   const row = ((await call('browser_tabs', { action: 'list' }).catch(() => ({}))).tabs ?? []).find((r) => r.tabId === mainTab);
   if (row?.url) await activateTarget(row.url);
 };
-/** Names G9 must never leave in a page's MAIN world; `pageOwned` are the fixture's own. */
+/** Names G9BrowserAgent must never leave in a page's MAIN world; `pageOwned` are the fixture's own. */
 const mainWorldLeaks = async (tabId, pageOwned = []) => {
   const names = await evalIn(tabId, 'Object.getOwnPropertyNames(window).filter((n) => /^__g9|g9emit|__g9rec|__g9loc/i.test(n))');
   return (names ?? []).filter((n) => !pageOwned.includes(n));
@@ -316,7 +316,7 @@ try {
   const init = await mcp.request('initialize', {
     protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'g9-livetest', version: VERSION },
   });
-  if (init.result?.serverInfo?.name === 'g9-browser-agent') ok('MCP handshake through mcp/shim.mjs', `server v${init.result.serverInfo.version}`);
+  if (init.result?.serverInfo?.name === 'G9BrowserAgent') ok('MCP handshake through mcp/shim.mjs', `server v${init.result.serverInfo.version}`);
   else { bad('MCP handshake', short(init)); throw new Error('cannot continue'); }
   check(init.result.serverInfo.version === VERSION, 'shim reports v' + VERSION, init.result.serverInfo.version);
   mcp.notify('notifications/initialized');
@@ -336,7 +336,7 @@ try {
     ok('extension engine connected to the daemon', (status.engines ?? []).filter((e) => e.kind === 'extension').map((e) => e.engineId ?? e.id).join(', '));
   } else {
     bad('extension never connected', `waited ${WAIT_FOR_EXTENSION_MS / 1000}s: ${short(status)}`);
-    console.log('\n  Is the browser open with the G9 v2 extension, on daemon port ' + PORT + '?\n');
+    console.log('\n  Is the browser open with the G9BrowserAgent v2 extension, on daemon port ' + PORT + '?\n');
     throw new Error('no extension');
   }
   check(status.daemon?.port === PORT, 'daemon is the one on G9_PORT', `port ${status.daemon?.port}, pid ${status.daemon?.pid}`);
@@ -766,7 +766,7 @@ try {
         `${level}: a click on a page that cancels pointerdown is delivered, and the page got it`,
         err ? `error "${short(err.message, 160)}"` : `delivery=${r?.delivery}, page pointerdown ${b.cancelDowns}→${a.cancelDowns}, click ${b.cancelClicks}→${a.cancelClicks}, compat mousedown ${b.cancelMouseDowns}→${a.cancelMouseDowns} (suppressed by the spec)`);
 
-      // 2. The target is veiled the moment the pointer arrives — after G9's
+      // 2. The target is veiled the moment the pointer arrives — after G9BrowserAgent's
       //    obstruction check passed — so the press lands on the veil.
       await call('browser_interact', { action: 'hover', ref: away, humanize: level, seed: `away-${level}` });
       await evalIn(mainTab, 'window.armTrap()');
@@ -826,13 +826,13 @@ try {
       // Resize events are judged per step. The page ALREADY saw two at load,
       // and that is not the screenshot's doing: while chrome.debugger is
       // attached anywhere, the browser shows its "started debugging this
-      // browser" infobar, and every cross-document load in EVERY tab (one G9
+      // browser" infobar, and every cross-document load in EVERY tab (one G9BrowserAgent
       // never attached included) sees innerHeight jump ~1-40 px and come back
       // ~170 ms in; the same headless Edge with no extension shows none
       // (measured round 3, 808 px viewport vs 760). It is Engine 1's, it is
       // printed here, and it is not judged.
       const start = await read();
-      console.log(`  \x1b[90mload-time resize events (the debugger infobar, not a G9 call): ${JSON.stringify(start.resizes)}\x1b[0m`);
+      console.log(`  \x1b[90mload-time resize events (the debugger infobar, not a G9BrowserAgent call): ${JSON.stringify(start.resizes)}\x1b[0m`);
       const vp = await call('browser_screenshot', { area: 'viewport' });
       await sleep(250);
       const afterVp = await read();
@@ -875,14 +875,14 @@ try {
   });
 
   // ---------------------------------------------------------------- recording
-  await section('10. Recording in G9\'s isolated world, replay with a verdict, main world clean', async () => {
+  await section('10. Recording in G9BrowserAgent\'s isolated world, replay with a verdict, main world clean', async () => {
     if (!FIXTURES) return skip('isolated recorder', NO_FIXTURES);
     await call('browser_navigate', { action: 'goto', url: PAGE + 'clean.html', waitUntil: 'load' });
     check((await mainWorldLeaks(mainTab)).length === 0, 'main world clean before recording');
     // Every own name of window, not only the __g9* pattern: a helper that
     // leaked under any other name would pass a name filter.
     const globalsBefore = await evalIn(mainTab, 'Object.getOwnPropertyNames(window)');
-    const started = await call('browser_recording', { action: 'start', name: 'G9 live isolated recorder' });
+    const started = await call('browser_recording', { action: 'start', name: 'G9BrowserAgent live isolated recorder' });
     check(!!started, 'recording started', short(started, 100));
     const during = await mainWorldLeaks(mainTab);
     check(during.length === 0, 'main world clean WHILE recording (recorder and binding live in world "g9")', during.join(', ') || 'no __g9* names, no binding');
@@ -927,7 +927,7 @@ try {
 
   await section('11. Recorder assertions, run history and export on the test page', async () => {
     if (!onTestPage) return skip('assertion flow', 'not on the test page');
-    await call('browser_recording', { action: 'start', name: 'G9 live assertion flow' });
+    await call('browser_recording', { action: 'start', name: 'G9BrowserAgent live assertion flow' });
     const liveSnap = await call('browser_snapshot');
     const envRef = refOf(liveSnap.tree, /combobox.*Environment/i);
     if (envRef) await call('browser_interact', { action: 'select', ref: envRef, values: 'Production' });
@@ -936,7 +936,7 @@ try {
     await call('browser_recording', {
       action: 'update', id: recorded.id, suite: 'Live smoke', folder: 'setup',
       tags: ['live', 'regression'], environment: { name: 'local', variables: { expectedEnv: 'prd' } },
-      parameters: { expectedTitle: 'G9 Agent Test Page' },
+      parameters: { expectedTitle: 'G9BrowserAgent Test Page' },
     });
     const host = new URL(mainUrl).host;
     await call('browser_recording', { action: 'assert', id: recorded.id, assertion: 'url', contains: host, operator: 'contains' });
@@ -965,7 +965,7 @@ try {
     // A flow with a semantic baseline and a navigate step, so every replay
     // produces traffic and console output to compare. A flow that does nothing
     // gives the detector nothing to observe, which would prove nothing.
-    await call('browser_recording', { action: 'start', name: 'G9 live regression memory' });
+    await call('browser_recording', { action: 'start', name: 'G9BrowserAgent live regression memory' });
     await call('browser_navigate', { action: 'reload' });
     const flow = await call('browser_recording', { action: 'stop' });
     await call('browser_recording', { action: 'assert', id: flow.id, assertion: 'aria' });
@@ -1018,7 +1018,7 @@ try {
     // Reload first: the pinning above leaves a HAR-served page and a pruned
     // console, and the wizard would be testing those leftovers.
     await call('browser_navigate', { action: 'goto', url: mainUrl, waitUntil: 'load' });
-    await call('browser_recording', { action: 'start', name: 'G9 live wizard' });
+    await call('browser_recording', { action: 'start', name: 'G9BrowserAgent live wizard' });
     const wizardFlow = await call('browser_recording', { action: 'stop' });
     const before = await call('browser_recording', { action: 'get', id: wizardFlow.id });
     const advice = await call('browser_recording', { action: 'suggest', id: wizardFlow.id });
@@ -1032,7 +1032,7 @@ try {
     await call('browser_recording', { action: 'delete', id: wizardFlow.id });
 
     // The FlowSpec round trip, against a real recording rather than a fixture.
-    await call('browser_recording', { action: 'start', name: 'G9 live flowspec' });
+    await call('browser_recording', { action: 'start', name: 'G9BrowserAgent live flowspec' });
     const specFlow = await call('browser_recording', { action: 'stop' });
     await call('browser_recording', { action: 'assert', id: specFlow.id, assertion: 'url', operator: 'contains', expected: '127.0.0.1' });
     const exported = await call('browser_recording', { action: 'export_spec', id: specFlow.id });
@@ -1051,7 +1051,7 @@ try {
     const s = await call('browser_snapshot');
     const target = refOf(s.tree, /button "Press me"/);
     const note = refOf(s.tree, /textbox "Note"/);
-    const issue = await call('browser_issue', { action: 'create', title: 'G9 live video + pointer check', withScreenshot: false });
+    const issue = await call('browser_issue', { action: 'create', title: 'G9BrowserAgent live video + pointer check', withScreenshot: false });
     await call('browser_issue', { action: 'video_start', id: issue.id });
     // Pointer work while it records: a humanized hover and click make a track.
     await call('browser_interact', { action: 'hover', ref: note });
@@ -1436,11 +1436,11 @@ try {
     if (!cdp || !EXT_ID) return skip('version in extension pages', NO_CDP);
     const p = await openPanel();
     const ui = await p.evaluate('({ title: document.title, badge: document.getElementById("versionBadge")?.textContent, brand: document.querySelector(".hd .name")?.textContent })');
-    check(ui.title === `G9 Browser Agent v${VERSION}` && ui.badge === `v${VERSION}`, 'side panel: title and header badge name the version', short(ui));
+    check(ui.title === `G9BrowserAgent v${VERSION}` && ui.badge === `v${VERSION}`, 'side panel: title and header badge name the version', short(ui));
     const w = await openPage(extUrl('panel/welcome.html'));
     await sleep(300);
     const wel = await w.evaluate('({ title: document.title, ver: document.getElementById("ver")?.textContent, footer: document.getElementById("footer")?.textContent })');
-    check(wel.title.startsWith(`G9 Browser Agent v${VERSION}`) && wel.ver === `v${VERSION}` && wel.footer.includes(`v${VERSION}`),
+    check(wel.title.startsWith(`G9BrowserAgent v${VERSION}`) && wel.ver === `v${VERSION}` && wel.footer.includes(`v${VERSION}`),
       'welcome page: title, big version and footer', short(wel));
     await w.close();
     const manifest = JSON.parse(await readFile(path.join(EXT_DIR ?? path.join(ROOT, 'extension'), 'manifest.json'), 'utf8'));
@@ -1485,7 +1485,7 @@ try {
 
     // Stop while an action is IN FLIGHT: long humanized typing (seconds of
     // keystrokes) must end at the Stop, fail, and send nothing more. The page
-    // is read over the browser's own DevTools, because every G9 tool is
+    // is read over the browser's own DevTools, because every G9BrowserAgent tool is
     // blocked while halted — which is the point.
     if (FIXTURES) {
       await call('browser_navigate', { action: 'goto', url: PAGE + 'clicks.html?stop=1', waitUntil: 'load' });
@@ -1528,7 +1528,7 @@ try {
       : bad(`${lines.length} disconnect(s) during the run`, short(lines.slice(0, 3).join(' | '), 300));
   });
 
-  // Main world, at the end of everything: nothing G9 did may be visible to the page.
+  // Main world, at the end of everything: nothing G9BrowserAgent did may be visible to the page.
   await section('22. Main world after the whole run', async () => {
     await call('browser_navigate', { action: 'goto', url: mainUrl, waitUntil: 'load' });
     await call('browser_snapshot');

@@ -1,12 +1,12 @@
-# Installing and operating G9
+# Installing and operating G9BrowserAgent
 
-This is the operator guide: how G9 gets onto a machine, what it changes there, how to keep it
+This is the operator guide: how G9BrowserAgent gets onto a machine, what it changes there, how to keep it
 running with nobody at the keyboard, how to update it and how to take it off again. It covers
 the desktop packages for Windows, macOS and Linux (the normal way, no Node needed) and the
 repository install (developers). The [README](../README.md) is the short, illustrated version.
 
 What was checked, and how: every statement about behaviour is from the code in this repository.
-Numbers come from G9's own test runs on the owner's workstation (Windows 11 Pro 10.0.26200,
+Numbers come from G9BrowserAgent's own test runs on the owner's workstation (Windows 11 Pro 10.0.26200,
 Edge 153.0.4234.32, Chrome 153.0.8010.53, Chrome for Testing 153.0.8010.52, Node 22.15.0) on
 2026-09-22, unless another date is given. Since 3.1.0 the release pipeline also installs and updates
 every package on hosted Windows, macOS and Ubuntu machines (`desktop/test/update-e2e.mjs`), and the
@@ -23,7 +23,8 @@ install.
 - [The extension: load once, updated by reload](#the-extension-load-once-updated-by-reload)
 - [Windows Firewall and Chrome for Testing](#windows-firewall-and-chrome-for-testing)
 - [Edge implicit sign-in](#edge-implicit-sign-in)
-- [Upgrading a machine that runs G9 v1](#upgrading-a-machine-that-runs-g9-v1)
+- [Upgrading a machine that runs G9BrowserAgent v1](#upgrading-a-machine-that-runs-g9browseragent-v1)
+- [Upgrading from G9 (3.2.0 and earlier)](#upgrading-from-g9-320-and-earlier)
 - [A browser on a server (Docker, MCP over HTTP)](#a-browser-on-a-server-docker-mcp-over-http)
 - [Unattended machines](#unattended-machines)
 - [Updates and update hosting](#updates-and-update-hosting)
@@ -36,8 +37,8 @@ install.
 
 | What | Where | Notes |
 |---|---|---|
-| The app (Electron 44) and everything it runs | Windows: `%LOCALAPPDATA%\Programs\G9\G9.exe`, per user, no administrator rights. macOS: `/Applications/G9.app` (`Contents/Resources/`). Linux: the `G9-x86_64.AppImage` file where you put it, or `/opt/G9/g9` from the .deb | `resources` holds `extension`, `engine`, `daemon`, `mcp`, `runner`, `lib` and the root `package.json`; the app's own executable with `ELECTRON_RUN_AS_NODE=1` runs them, so the machine needs no Node. The Windows folder is electron-builder's per-user default, and the installer does not let you change it. |
-| G9's data: `G9_HOME` | `%LOCALAPPDATA%\G9` on Windows, `~/.g9` on macOS and Linux, or the `G9_HOME` environment variable | `settings.json` (daemon settings), `extension/` (the folder the browser loads), `engines/` (Chrome for Testing), `profiles/` (launched-browser profiles, with their site logins), `runs/` (evidence: frames, pointer tracks, reports), `logs/` (`daemon.log`, `install.log`, `desktop.log`, `policies.json`), `desktop.json`, `engine-versions.log`, and on a Linux AppImage `bin/g9-run.mjs` (below). |
+| The app (Electron 44) and everything it runs | Windows: `%LOCALAPPDATA%\Programs\G9BrowserAgent\G9BrowserAgent.exe`, per user, no administrator rights. macOS: `/Applications/G9BrowserAgent.app` (`Contents/Resources/`). Linux: the `G9BrowserAgent-x86_64.AppImage` file where you put it, or `/opt/G9BrowserAgent/g9browseragent` from the .deb | `resources` holds `extension`, `engine`, `daemon`, `mcp`, `runner`, `lib` and the root `package.json`; the app's own executable with `ELECTRON_RUN_AS_NODE=1` runs them, so the machine needs no Node. The Windows folder is electron-builder's per-user default, and the installer does not let you change it. |
+| G9BrowserAgent's data: `G9_HOME` | `%LOCALAPPDATA%\G9BrowserAgent` on Windows, `~/.g9browseragent` on macOS and Linux, or the `G9_HOME` environment variable | `settings.json` (daemon settings), `extension/` (the folder the browser loads), `engines/` (Chrome for Testing), `profiles/` (launched-browser profiles, with their site logins), `runs/` (evidence: frames, pointer tracks, reports), `logs/` (`daemon.log`, `install.log`, `desktop.log`, `policies.json`), `desktop.json`, `engine-versions.log`, and on a Linux AppImage `bin/g9-run.mjs` (below). |
 | The daemon `g9d` | a process, not a service | listens on `127.0.0.1:8765`, or on `G9_PORT`. The shim and the desktop app always pass `G9_PORT` (default 8765) to a daemon they start, so the `port` setting applies only to a daemon started by hand without it. The first MCP shim or the desktop app starts it when nothing listens. It exits by itself after `idleExitMinutes` (default 60) with no client, no launched browser and no enabled schedule entry. |
 | The extension (Engine 1) | `G9_HOME\extension`, loaded unpacked into your Edge or Chrome | optional. It is only needed for agents to drive tabs in **your** browser. Launched browsers (Engine 2) need no extension. |
 
@@ -55,11 +56,11 @@ their update metadata and update-tested before they are published:
 
 | File | For | Update metadata |
 |---|---|---|
-| `G9-Setup-<version>.exe` (+ `.blockmap`) | Windows x64 | `latest.yml` |
-| `G9-<version>-mac-arm64.dmg`, `G9-<version>-mac-x64.dmg` | macOS: install from these | `latest-mac.yml` (lists the `.zip`s) |
-| `G9-<version>-mac-arm64.zip`, `G9-<version>-mac-x64.zip` | macOS: the updater's format | |
-| `G9-x86_64.AppImage` | Linux x64, any distribution | `latest-linux.yml` |
-| `G9_<version>_amd64.deb` | Debian, Ubuntu x64 | (not read by the updater) |
+| `G9BrowserAgent-Setup-<version>.exe` (+ `.blockmap`) | Windows x64 | `latest.yml` |
+| `G9BrowserAgent-<version>-mac-arm64.dmg`, `G9BrowserAgent-<version>-mac-x64.dmg` | macOS: install from these | `latest-mac.yml` (lists the `.zip`s) |
+| `G9BrowserAgent-<version>-mac-arm64.zip`, `G9BrowserAgent-<version>-mac-x64.zip` | macOS: the updater's format | |
+| `G9BrowserAgent-x86_64.AppImage` | Linux x64, any distribution | `latest-linux.yml` |
+| `G9BrowserAgent_<version>_amd64.deb` | Debian, Ubuntu x64 | (not read by the updater) |
 | `SHA256SUMS.txt` | the SHA-256 of every file above | |
 
 To build them yourself: `cd desktop && npm ci && npm run build:win` (`build:mac`, `build:linux`), each
@@ -69,16 +70,16 @@ app.
 
 ### Windows
 
-`Get-AuthenticodeSignature` reports `NotSigned` for the installer (and for `win-unpacked\G9.exe` and
+`Get-AuthenticodeSignature` reports `NotSigned` for the installer (and for `win-unpacked\G9BrowserAgent.exe` and
 `resources\elevate.exe`).
 
 It is an NSIS installer that installs **per user**: the manifest asks for `asInvoker`, and
 electron-builder is set to `perMachine: false`, `allowElevation: false` and
 `allowToChangeInstallationDirectory: false`. `build/installer.nsh` forces the current-user mode, so
 the "install for all users" page never appears. It creates a desktop and a Start menu shortcut
-(`G9`) and starts the app when it finishes. The desktop suite checked the payload file by file:
+(`G9BrowserAgent`) and starts the app when it finishes. The desktop suite checked the payload file by file:
 `extension`, `engine`, `daemon`, `mcp`, `runner` and `lib` in the installer equal the repository,
-and the packaged `G9.exe` ran the MCP shim, the daemon and a full `runner run` on headless Edge
+and the packaged `G9BrowserAgent.exe` ran the MCP shim, the daemon and a full `runner run` on headless Edge
 **with no `node.exe` on the PATH** (3 of 3 runs, 2026-09-22).
 
 #### SmartScreen: the installer is not signed
@@ -95,41 +96,41 @@ prompt for everyone.
 ### macOS
 
 Two disk images, one per processor: `arm64` (Apple silicon) and `x64` (Intel). Open the one for your
-Mac, drag **G9** into **Applications**, and start it from there.
+Mac, drag **G9BrowserAgent** into **Applications**, and start it from there.
 
 - **Not signed with an Apple Developer ID, not notarized.** The build signs the app ad hoc (identity
   `-`, so it runs on Apple silicon at all) with the hardened runtime off. Gatekeeper therefore stops
   the first start: right-click → **Open** → **Open**, or System Settings → Privacy & Security →
   **Open Anyway**. A browser download may also be refused as *"damaged"*: that is the quarantine
-  flag, removed by `xattr -dr com.apple.quarantine /Applications/G9.app`. With an Apple Developer ID,
+  flag, removed by `xattr -dr com.apple.quarantine /Applications/G9BrowserAgent.app`. With an Apple Developer ID,
   set `mac.identity`, turn `hardenedRuntime` on and notarize in `desktop/electron-builder.yml`.
 - **Start it from Applications.** An unsigned app opened from a disk image or from Downloads runs from
   a randomized read-only copy (App Translocation, `/private/var/folders/…/AppTranslocation/…`) or from
   `/Volumes/…`. An MCP entry naming that path breaks at the next start, so the wizard refuses to
-  register the AI clients until G9 runs from a stable place, and says so.
+  register the AI clients until G9BrowserAgent runs from a stable place, and says so.
 - **Updates are installed by hand.** macOS's updater (Squirrel.Mac) installs only into an app signed
-  with a Developer ID. G9 checks the releases as on the other systems, downloads nothing, and tells
+  with a Developer ID. G9BrowserAgent checks the releases as on the other systems, downloads nothing, and tells
   you (a notification and **Settings → Updates**, with **Open the release page**).
-- The app menu has the usual **Quit G9** (Cmd+Q); closing the window keeps G9 in the menu bar, and
-  clicking the Dock icon brings it back. "Start G9 when I sign in" is a login item that starts it
+- The app menu has the usual **Quit G9BrowserAgent** (Cmd+Q); closing the window keeps G9BrowserAgent in the menu bar, and
+  clicking the Dock icon brings it back. "Start G9BrowserAgent when I sign in" is a login item that starts it
   hidden.
 
 ### Linux
 
-- **AppImage** (`G9-x86_64.AppImage`, any x64 distribution with a desktop). `chmod +x` it and start
+- **AppImage** (`G9BrowserAgent-x86_64.AppImage`, any x64 distribution with a desktop). `chmod +x` it and start
   it. It needs FUSE 2 (`libfuse2`; `libfuse2t64` on Ubuntu 24.04). **Keep the file name**: the updater
   replaces a file named without a version in place, and the MCP entries and the autostart entry name
-  that file. An AppImage runs from a temporary mount that disappears when it exits, so G9 never writes
+  that file. An AppImage runs from a temporary mount that disappears when it exits, so G9BrowserAgent never writes
   a path inside it anywhere: the MCP entries, the daemon and the scheduled runs start
   `<the .AppImage> <G9_HOME>/bin/g9-run.mjs <script> --no-sandbox` in Node mode, and that small
   bootstrap (written by the app, `lib/runtime.mjs`) finds the scripts in the current mount. The
   trailing `--no-sandbox` is there because the AppImage's own launcher adds that switch on systems
   without unprivileged user namespaces (Ubuntu 24.04, containers), where Node would otherwise reject
   it; the bootstrap drops it.
-- **.deb** (`G9_<version>_amd64.deb`, Debian and Ubuntu): `sudo apt install ./G9_<version>_amd64.deb`.
-  It installs to `/opt/G9` with the command `g9` and a menu entry (package name `g9-desktop`).
-  Updates are installed by hand the same way; G9 checks and tells you.
-- "Start G9 when I sign in" writes `~/.config/autostart/g9.desktop` (XDG autostart).
+- **.deb** (`G9BrowserAgent_<version>_amd64.deb`, Debian and Ubuntu): `sudo apt install ./G9BrowserAgent_<version>_amd64.deb`.
+  It installs to `/opt/G9BrowserAgent` with the command `g9browseragent` and a menu entry (package name `g9browseragent`; it replaces the pre-3.2.1 `g9-desktop`).
+  Updates are installed by hand the same way; G9BrowserAgent checks and tells you.
+- "Start G9BrowserAgent when I sign in" writes `~/.config/autostart/g9browseragent.desktop` (XDG autostart).
 - There is no Linux arm64 build.
 
 ### The setup wizard
@@ -155,14 +156,14 @@ run again, and every action and its result is written to `G9_HOME\logs\install.l
    [AI clients](#ai-clients-mcp-registration).
 5. **Browser extension.** Copies the extension to `G9_HOME/extension`, puts that path on the
    clipboard and opens `edge://extensions` or `chrome://extensions` in the browser it found (a
-   browser refuses to open these pages from a link, so G9 starts the browser's executable with the
+   browser refuses to open these pages from a link, so G9BrowserAgent starts the browser's executable with the
    page). Then you make three clicks: **Developer mode** (on the left side in Edge, top right in
    Chrome) → **Load unpacked** → paste the path (Ctrl+V; on macOS Cmd+Shift+G, then Cmd+V, in the
    folder picker) → **Select Folder**.
 
 To check the result, start a new session in your AI client and ask it to call `browser_status`.
-Without a client, run the app with `--smoke` (`G9.exe --smoke` from the install folder; on macOS
-`/Applications/G9.app/Contents/MacOS/G9 --smoke`; on Linux `./G9-x86_64.AppImage --smoke` or `g9 --smoke`). It connects to the daemon, prints
+Without a client, run the app with `--smoke` (`G9BrowserAgent.exe --smoke` from the install folder; on macOS
+`/Applications/G9BrowserAgent.app/Contents/MacOS/G9BrowserAgent --smoke`; on Linux `./G9BrowserAgent-x86_64.AppImage --smoke` or `g9browseragent --smoke`). It connects to the daemon, prints
 one line of JSON and exits 0 (or 1 on failure). It never starts a daemon. Add `--launch` to start one
 when nothing listens.
 
@@ -170,16 +171,16 @@ when nothing listens.
 
 ## Background policies (HKCU)
 
-**Windows only.** macOS and Linux have no equivalent that G9 sets: there too a covered or minimized
+**Windows only.** macOS and Linux have no equivalent that G9BrowserAgent sets: there too a covered or minimized
 window and a background tab stop rendering, so use a launched (headless) engine for unattended work.
 
 These are for **Engine 1 only**: your own Edge or Chrome, driven through the extension. Chromium
 stops rendering a covered, locked or background page and drops CDP input to it. The policies keep
 a covered window rendering and stop background tabs from being frozen, discarded or throttled.
-Engine 2 (the browsers G9 launches) needs none of them: it sets the matching launch switches itself
+Engine 2 (the browsers G9BrowserAgent launches) needs none of them: it sets the matching launch switches itself
 (`engine/README.md`).
 
-G9 writes them **only under `HKCU`**: `HKCU\Software\Policies\Microsoft\Edge` and
+G9BrowserAgent writes them **only under `HKCU`**: `HKCU\Software\Policies\Microsoft\Edge` and
 `HKCU\Software\Policies\Google\Chrome`. There is no code path that writes `HKLM`. Before
 changing anything it records the previous value of every entry, or notes that there was none, in
 `G9_HOME\logs\policies.json`. **Undo** puts back exactly that: a value that existed is rewritten
@@ -188,7 +189,7 @@ with its original type and data, and a value that did not exist is deleted.
 | Value (REG_DWORD) | What it does | Chrome | Edge |
 |---|---|---|---|
 | `WindowOcclusionEnabled` = 0 | A window that is covered, on a locked screen or on another virtual desktop is no longer treated as hidden, so it keeps painting and input still reaches it. A **minimized** window still stops rendering. This is also what keeps a popped-out tab's window (the panel's **Pop out tab**, `browser_tabs action:"popout"`) rendering while another window covers it completely; the popout's result and note point here. | 90+ (Windows) | Documented by Microsoft, Windows 89+ |
-| `HighEfficiencyModeEnabled` = 0 | Memory Saver does not discard tabs that are not in front. | 108+ | **No Microsoft Edge policy of this name** (no page on Microsoft Learn, 2026-09-22). Edge's own settings for this are `SleepingTabsEnabled` (88+) and `EfficiencyModeEnabled` (106+), and G9 does not set either. |
+| `HighEfficiencyModeEnabled` = 0 | Memory Saver does not discard tabs that are not in front. | 108+ | **No Microsoft Edge policy of this name** (no page on Microsoft Learn, 2026-09-22). Edge's own settings for this are `SleepingTabsEnabled` (88+) and `EfficiencyModeEnabled` (106+), and G9BrowserAgent does not set either. |
 | `IntensiveWakeUpThrottlingEnabled` = 0 | Background tabs keep normal JavaScript timers (instead of at most one wake-up per minute after 5 minutes in the background). | 85+ | Documented by Microsoft, 85+. Microsoft notes that the value is read when a renderer starts, so restart the browser. |
 | `BackgroundTabFreezingEnabled` = 0 | Background tabs are not frozen. | **155+**: Chrome 153 does not know it yet and lists it as unknown | **No Microsoft Edge policy of this name** (2026-09-22) |
 | `DeveloperToolsAvailability` = 1 | Developer tools and the debugger API are allowed everywhere. The extension cannot work without `chrome.debugger`, and a machine policy that disallows DevTools would stop it. | 68+ | Documented by Microsoft, 77+ (1 = "Allow using the developer tools") |
@@ -211,15 +212,15 @@ Edge 153 and Chrome 153 stayed visible (142–143 animation frames per 1.5 s) wi
 **Permissions.** On a default Windows install, `HKCU\Software\Policies` is readable but not writable
 for the user; only Administrators may write it (checked on the owner's machine, 2026-09-21). So
 **Apply** usually ends in one UAC prompt. The elevated step is a single `.cmd` batch that writes only
-the HKCU values, with every argument quoted and `%` doubled. G9 then reads the values back as you. If
-the approval came from a different Windows account, that account's `HKCU` was written instead, and G9
+the HKCU values, with every argument quoted and `%` doubled. G9BrowserAgent then reads the values back as you. If
+the approval came from a different Windows account, that account's `HKCU` was written instead, and G9BrowserAgent
 reports that rather than success. Restart the browser after Apply or Undo.
 
 ---
 
 ## AI clients (MCP registration)
 
-The wizard registers one entry, named **`g9-browser`**, in each client it finds. `<config>` is
+The wizard registers one entry, named **`g9browseragent`**, in each client it finds. `<config>` is
 `%APPDATA%` on Windows, `~/Library/Application Support` on macOS and `$XDG_CONFIG_HOME` (default
 `~/.config`) on Linux; `~` is your home folder (`%USERPROFILE%` on Windows):
 
@@ -233,20 +234,20 @@ The wizard registers one entry, named **`g9-browser`**, in each client it finds.
 For an installed app, the entry runs the bundled shim with the app itself:
 
 ```json
-"g9-browser": {
-  "command": "C:/Users/<you>/AppData/Local/Programs/G9/G9.exe",
-  "args": ["C:/Users/<you>/AppData/Local/Programs/G9/resources/mcp/shim.mjs"],
+"g9browseragent": {
+  "command": "C:/Users/<you>/AppData/Local/Programs/G9BrowserAgent/G9BrowserAgent.exe",
+  "args": ["C:/Users/<you>/AppData/Local/Programs/G9BrowserAgent/resources/mcp/shim.mjs"],
   "env": { "ELECTRON_RUN_AS_NODE": "1" }
 }
 ```
 
-On macOS the command is `/Applications/G9.app/Contents/MacOS/G9` with
-`…/Contents/Resources/mcp/shim.mjs`; from the .deb, `/opt/G9/g9` with `/opt/G9/resources/mcp/shim.mjs`.
+On macOS the command is `/Applications/G9BrowserAgent.app/Contents/MacOS/G9BrowserAgent` with
+`…/Contents/Resources/mcp/shim.mjs`; from the .deb, `/opt/G9BrowserAgent/g9browseragent` with `/opt/G9BrowserAgent/resources/mcp/shim.mjs`.
 A Linux AppImage's entry names the `.AppImage` file itself, never its temporary mount:
 
 ```json
-"g9-browser": {
-  "command": "/home/<you>/Applications/G9-x86_64.AppImage",
+"g9browseragent": {
+  "command": "/home/<you>/Applications/G9BrowserAgent-x86_64.AppImage",
   "args": ["/home/<you>/.g9/bin/g9-run.mjs", "mcp/shim.mjs", "--no-sandbox"],
   "env": { "ELECTRON_RUN_AS_NODE": "1" }
 }
@@ -254,17 +255,17 @@ A Linux AppImage's entry names the `.AppImage` file itself, never its temporary 
 
 `G9_PORT` is added to `env` only when it differs from 8765, and `G9_HOME` whenever the app itself
 was started with `G9_HOME` set. A development build writes `"command": "node"` with
-`<repo>/mcp/shim.mjs`. On macOS the wizard refuses to register while G9 runs from a disk image or a
+`<repo>/mcp/shim.mjs`. On macOS the wizard refuses to register while G9BrowserAgent runs from a disk image or a
 translocated copy ([macOS](#macos)).
 
 How the wizard writes the file:
-- It **backs up** the file first (`<file>.g9-backup-<time>`), changes only `g9-browser`, re-reads
+- It **backs up** the file first (`<file>.g9-backup-<time>`), changes only `g9browseragent`, re-reads
   the file just before writing, writes it atomically and reads it back.
-- An existing `g9-browser` entry that differs (for example v1's `bridge/src/server.js`) is shown as
+- An existing `g9browseragent` entry that differs (for example v1's `bridge/src/server.js`) is shown as
   a diff, and replaced only when you confirm.
 - A file with comments (VS Code's is JSONC) asks first, because writing it back drops the comments.
 - A file that does not parse is never written. The wizard shows the entry for you to paste instead.
-- **Remove** in the same step deletes only the `g9-browser` entry, also after a backup.
+- **Remove** in the same step deletes only the `g9browseragent` entry, also after a backup.
 
 After registering, restart the client: start a new Claude Code session (or `/mcp`), restart Cursor
 or toggle the server in its MCP settings, start the server once from VS Code's *MCP: List Servers*,
@@ -311,25 +312,25 @@ What the live suites measured about the reload (2026-09-22):
   unpacked** button. If the extension is off after an update, turn it on again on `chrome://extensions`
   or press **Reload** there.
 
-Edge may show a prompt about extensions in developer mode. Keep them on: G9 is one of them.
+Edge may show a prompt about extensions in developer mode. Keep them on: G9BrowserAgent is one of them.
 
 On a managed (domain or Entra-joined) machine, IT can install the extension with the
 `ExtensionInstallForcelist` policy and a self-hosted CRX and update URL, instead of Load unpacked
 (the other option is an unlisted Chrome Web Store / Edge Add-ons listing, which the browser
-updates itself). G9 ships no CRX or update manifest for that. **Not verified here.**
+updates itself). G9BrowserAgent ships no CRX or update manifest for that. **Not verified here.**
 
 ---
 
 ## Windows Firewall and Chrome for Testing
 
 Edge and Chrome come with firewall rules that their installers register. Chrome for Testing is a zip
-that G9 extracts to `G9_HOME\engines\cft-<version>\chrome-win64\chrome.exe`, so it has no rule. Windows
+that G9BrowserAgent extracts to `G9_HOME\engines\cft-<version>\chrome-win64\chrome.exe`, so it has no rule. Windows
 Defender Firewall then asks "Allow access?" the first time that program listens for **inbound**
 connections. Each new path asks once: a new CfT version, or a new `G9_HOME`.
 
-**Either answer is fine for G9.** The prompt is about inbound connections only. G9 drives the
+**Either answer is fine for G9BrowserAgent.** The prompt is about inbound connections only. G9BrowserAgent drives the
 browser over a private pipe (`--remote-debugging-pipe`), never over a network port, and outbound
-traffic is not affected. G9 does not change the firewall itself (that needs administrator rights).
+traffic is not affected. G9BrowserAgent does not change the firewall itself (that needs administrator rights).
 Instead, the first launch of CfT from a new path carries a warning saying all this
 (`engine/firewall.js`). The paths already seen are kept in `G9_HOME\engines\firewall-seen.json`, so
 the warning appears once per path.
@@ -356,7 +357,7 @@ Get-NetFirewallApplicationFilter | Where-Object Program -like '*\engines\cft-*' 
 
 **What happened.** Edge signs the first profile of every new user data folder in to the Windows
 user's Microsoft account by itself, and turns full sync on: passwords, history, open tabs and
-extensions. The live suites of 2026-09-22 (round 2) found this in the Engine 2 profiles G9 had
+extensions. The live suites of 2026-09-22 (round 2) found this in the Engine 2 profiles G9BrowserAgent had
 created:
 - a fresh headless profile had `account_info` set and 137,266 bytes of `Sync Data`;
 - `--disable-sync` alone did not keep it signed out;
@@ -366,7 +367,7 @@ created:
 
 Test browsing from those runs may be in that account's synced history.
 
-**What G9 does now.** Every launched browser gets three protections:
+**What G9BrowserAgent does now.** Every launched browser gets three protections:
 - `--disable-features=msImplicitSignin`. Given from a profile's first start, it keeps the profile
   signed out: 0 accounts in 6/6 fresh profiles when the fix was made. Chrome and CfT ignore the
   name.
@@ -408,11 +409,11 @@ To clean up:
   `edge://sync-internals` (device info), should list the test profiles. **Not verified here.**
 
 Edge also has a policy for this, `ImplicitSignInEnabled` = 0 (Windows, Edge 93+, Microsoft Learn).
-G9 does not set it: it would also change the person's own Edge, and it was not tested.
+G9BrowserAgent does not set it: it would also change the person's own Edge, and it was not tested.
 
 ---
 
-## Upgrading a machine that runs G9 v1
+## Upgrading a machine that runs G9BrowserAgent v1
 
 - v1's bridge and the v2 daemon both use `127.0.0.1:8765` by default. While a v1 bridge holds the
   port, the v2 daemon cannot start there. Every tool then fails with a message that names the
@@ -422,13 +423,13 @@ G9 does not set it: it would also change the person's own Edge, and it was not t
   starts, because both pass `G9_PORT`.
 - A v2 daemon refuses the v1 extension (close code 4001, "reload the v2 extension"). Load or reload
   the v2 extension from `G9_HOME\extension`.
-- The wizard recognises a v1 `g9-browser` MCP entry (`bridge/src/server.js`) and offers to replace
+- The wizard recognises a v1 `g9browseragent` MCP entry (`bridge/src/server.js`) and offers to replace
   it. A config that still points at `bridge/src/server.js` keeps working in a repository checkout,
   because that file now starts `mcp/shim.mjs`.
 
 ---
 
-## Upgrading from G9 2.x to 3.0
+## Upgrading from G9BrowserAgent 2.x to 3.0
 
 3.0 changed the side panel, the extension's auto-attach setting and issue index, and two messages
 from the daemon (decisions U1–U10, AIGuide §6.10). Nothing changed in the MCP entry, the policies, the profiles or the
@@ -451,7 +452,7 @@ engines.
   **Project sites**. Recorded flows and issues need nothing: the issue index is completed from the
   stored issues the first time it is read.
 
-## Upgrading to G9 3.2
+## Upgrading to G9BrowserAgent 3.2
 
 - **Reload the extension and restart the daemon**, as for 3.0. With a daemon older than 3.2 still running, the
   live view says the daemon is older than 3.2, the Repository card uses the daemon's own project
@@ -464,9 +465,62 @@ engines.
 
 ---
 
+## Upgrading from G9 (3.2.0 and earlier)
+
+3.2.1 renamed the product from **G9** to **G9BrowserAgent**. An installed G9 finds and installs 3.2.1
+like any other update (Windows, AppImage) or tells you about it (macOS, .deb). What the rename
+changes on a machine, and what the new version does about it by itself:
+
+| What | Before 3.2.1 | Now | What happens to an existing install |
+|---|---|---|---|
+| Windows program | `%LOCALAPPDATA%\Programs\G9\G9.exe` | `…\Programs\G9BrowserAgent\G9BrowserAgent.exe` | The update installs into the folder the app already has (the installer keeps its install location), as `G9BrowserAgent.exe`; shortcuts are renamed. Measured: 3.2.0 → 3.2.1 through the app's own updater, 21 of 21 checks (`desktop/test/update-e2e.mjs`, 2026-09-27). |
+| macOS app | `G9.app` | `G9BrowserAgent.app` | Updates are manual here: drag the new app into Applications and delete `G9.app`. |
+| AppImage | `G9-x86_64.AppImage` | `G9BrowserAgent-x86_64.AppImage` | The updater replaces the file you have in place and keeps its name. |
+| .deb | package `g9-desktop`, `/opt/G9`, command `g9` | package `g9browseragent`, `/opt/G9BrowserAgent`, command `g9browseragent` | The new package declares that it replaces `g9-desktop`: `sudo apt install ./G9BrowserAgent_<v>_amd64.deb` upgrades. |
+| Data folder (`G9_HOME`) | `%LOCALAPPDATA%\G9`, `~/.g9` | `%LOCALAPPDATA%\G9BrowserAgent`, `~/.g9browseragent` | Moved (one rename), below. `G9_HOME` set by hand is used as it is and never moved. |
+| AI clients' MCP entry | `g9-browser` | `g9browseragent` | Moved at the app's start, below. |
+| Start at sign-in | `G9.exe --hidden`, `~/.config/autostart/g9.desktop` | the new executable, `g9browseragent.desktop` | Carried over at the app's start, if it was on. |
+| Electron's own folder and the update cache | `%APPDATA%\G9`, `g9-desktop-updater` | `%APPDATA%\G9BrowserAgent`, `g9browseragent-updater` | Not carried over, and nothing is lost: they hold Electron's caches and downloaded updates only (the app's settings, `desktop.json`, are in the data folder). Delete the old folders when you like. |
+
+**The data folder** (`lib/home.mjs`; the desktop app has a copy in `desktop/lib/paths.mjs`). The
+folder's owners — the daemon at its start and the desktop app, when `G9_HOME` is not set — rename the
+old folder to the new name (anything else, an MCP shim or the engine's helpers, only looks: the old
+folder until it has moved, the new one after), when the new one does not exist yet and the old one
+is recognisably G9's (its `settings.json`, `daemon.json`, `desktop.json`, `daemon.lock` or
+`extension/manifest.json`; a stranger's `~/.g9` is never touched). A rename is atomic, so two
+processes cannot both do it. On Windows it fails while something holds a file in the folder — an older
+daemon, a launched browser, the desktop app's own log — and then nothing is moved: the old folder stays
+in use, by every component alike, until a start at which nothing holds it (usually the next sign-in).
+On macOS and Linux the rename succeeds even then; an older daemon still running writes on into the
+moved folder through the files it has open. The move leaves `migrated-from.json` in the new folder.
+The desktop app reads it once: it says where the data went, and sends **Setup → Browser extension**
+back to "to do", because the browser knows an unpacked extension by its folder — remove the old
+extension and **Load unpacked** again from `<new folder>\extension`. Your recordings, runs, issues, the
+launched browsers' profiles (with their logins) and Chrome for Testing move with the folder.
+
+**AI clients** (`desktop/lib/mcp-register.mjs`, `migrateRegistrations`), at every start of the installed
+app, never of a development build or a translocated macOS app:
+- an entry under the old name `g9-browser` moves to `g9browseragent` — as it is, when every file it
+  names still exists (a repository checkout, a fork: someone's choice), or pointing at this app when
+  one of them is gone (`G9.exe` after the rename, a bootstrap in the old data folder);
+- an entry under `g9browseragent` that names a file which no longer exists is pointed at this app;
+- an entry whose files all exist and that differs is left alone, and so is a file with comments (VS
+  Code's `mcp.json`): Setup shows those, as always;
+- every file is backed up first (`<file>.g9-backup-<time>`), and only the one entry changes.
+Restart the AI clients once afterwards. **Remove** in Setup removes both names.
+
+**What keeps its name.** The environment variables (`G9_HOME`, `G9_PORT`, …), the daemon's process name
+and protocol (`g9d`, `/g9`, `/health`'s `"name": "g9d"`, so a new app still recognises an old daemon and
+the other way round), the runner (`runner/g9.mjs`), the project file (`g9.project.json`), the exported
+recordings' format (`g9-browser-agent/bundle`, so older exports still import) and the paths inside the
+Docker image (`/opt/g9`). Renaming those would break every script and configuration that names them,
+and none of them is shown to a person as the product's name.
+
+---
+
 ## A browser on a server (Docker, MCP over HTTP)
 
-Since 3.2, G9 also runs on a server as a **browser node**: a container with a web desktop you watch
+Since 3.2, G9BrowserAgent also runs on a server as a **browser node**: a container with a web desktop you watch
 (and take over, for a sign-in), its Chromium carrying the extension, the daemon, and an MCP endpoint
 over HTTP for agents on other machines. One container per account. Building, running, the reverse
 proxy and the security rules are in [docker/README.md](../docker/README.md).
@@ -485,16 +539,16 @@ without a token of at least 24 characters. The daemon itself stays on loopback.
 
 ## Unattended machines
 
-The steps below are written for Windows, where G9 was measured. On macOS and Linux the same rules
-hold with the system's own tools: an account that signs in by itself with no screen lock, "Start G9
-when I sign in" (a login item on macOS, `~/.config/autostart/g9.desktop` on Linux), and G9's own
+The steps below are written for Windows, where G9BrowserAgent was measured. On macOS and Linux the same rules
+hold with the system's own tools: an account that signs in by itself with no screen lock, "Start G9BrowserAgent
+when I sign in" (a login item on macOS, `~/.config/autostart/g9browseragent.desktop` on Linux), and G9BrowserAgent's own
 scheduler or `cron`/`launchd` running the runner with the app in Node mode. None of that was tested on
 macOS or Linux.
 
 **What runs without anyone there.** Launched browsers (Engine 2) run headless by default. They have
 no window, so the Windows states that hide a window (covered, minimized, locked, another virtual
 desktop) do not apply to them. The owner's machine was never locked for a test, so a locked session
-was **not measured**. G9 is made of user-session processes (the daemon, the shim, the runner, the
+was **not measured**. G9BrowserAgent is made of user-session processes (the daemon, the shim, the runner, the
 browsers), so a **logged-off** user runs nothing. Engine 1 and headed launched browsers need a real,
 unlocked, un-minimized desktop. In the P8 matrix, a minimized headed Engine 2 window rendered about
 1 frame per 1.5 s, and a click on it took 28 s.
@@ -511,13 +565,13 @@ unlocked, un-minimized desktop. In the P8 matrix, a minimized headed Engine 2 wi
    back to the console instead: from an elevated prompt *inside* the RDP session, run
    `tscon %sessionname% /dest:console`. (`query session` shows the id if `%sessionname%` is not set.)
    Headless runs should not need this. **Not verified here.**
-3. **Keep the daemon running.** In the app, **Settings** → "Start G9 when I sign in" adds a login
-   item that starts `G9.exe --hidden` in the tray, and the app starts the daemon. In an installed app,
+3. **Keep the daemon running.** In the app, **Settings** → "Start G9BrowserAgent when I sign in" adds a login
+   item that starts `G9BrowserAgent.exe --hidden` in the tray, and the app starts the daemon. In an installed app,
    the Schedule view warns while this is off and at least one entry exists, because after a restart
    nothing else starts the daemon. The daemon does
    not idle-exit while any schedule entry is enabled or a scheduled run is running.
 4. **Schedule the suites.** Use either of these:
-   - **G9's scheduler** (**Schedule** view, or the daemon's `schedule.*` admin ops). An entry runs
+   - **G9BrowserAgent's scheduler** (**Schedule** view, or the daemon's `schedule.*` admin ops). An entry runs
      daily at a local time, or every N minutes (1 minute to 31 days). Every option in the form
      becomes an explicit runner flag, except a browser left at "auto" (the run then follows the
      daemon's `defaultBrowser`). Each run is filed under `G9_HOME\runs\<runId>\`, with the
@@ -525,16 +579,16 @@ unlocked, un-minimized desktop. In the P8 matrix, a minimized headed Engine 2 wi
      starts, so a run missed while the daemon was down runs **once** when it comes back, not once per
      missed slot. It works only while the daemon runs (step 3).
    - **Windows Task Scheduler.** An installed machine has no `node`: the runner is
-     `resources\runner\g9.mjs`, run by `G9.exe` as Node. Task Scheduler cannot set an environment
+     `resources\runner\g9.mjs`, run by `G9BrowserAgent.exe` as Node. Task Scheduler cannot set an environment
      variable itself, so wrap the command in `cmd`. Note that there is no space before `&&`:
      ```
      Program:    %SystemRoot%\System32\cmd.exe
-     Arguments:  /d /c "set ELECTRON_RUN_AS_NODE=1&& "%LOCALAPPDATA%\Programs\G9\G9.exe" "%LOCALAPPDATA%\Programs\G9\resources\runner\g9.mjs" run suite:nightly --report D:\qa\nightly --quiet"
+     Arguments:  /d /c "set ELECTRON_RUN_AS_NODE=1&& "%LOCALAPPDATA%\Programs\G9BrowserAgent\G9BrowserAgent.exe" "%LOCALAPPDATA%\Programs\G9BrowserAgent\resources\runner\g9.mjs" run suite:nightly --report D:\qa\nightly --quiet"
      Start in:   the folder that holds g9.project.json (or pass --project <file>)
      ```
      This form was run against the built `win-unpacked` copy with `help` (exit 0). A full `run`
-     under `G9.exe` passed through the app's own scheduler (3/3 runs, desktop suite). Task Scheduler
-     itself was **not exercised**. Choose "Run only when user is logged on": G9 was only ever run in
+     under `G9BrowserAgent.exe` passed through the app's own scheduler (3/3 runs, desktop suite). Task Scheduler
+     itself was **not exercised**. Choose "Run only when user is logged on": G9BrowserAgent was only ever run in
      an interactive session, and its data, profiles and daemon are per user. The runner's exit code
      is the task's *Last Run Result*: 0 pass, 1 product failure or error, 2 automation failure,
      3 surprise, 4 could not run (`runner/README.md`).
@@ -568,11 +622,11 @@ unlocked, un-minimized desktop. In the P8 matrix, a minimized headed Engine 2 wi
   | Package | Install mode | What happens |
   |---|---|---|
   | Windows (NSIS) | automatic | downloads in the background, verifies the SHA-512 from `latest.yml`, then asks |
-  | Linux AppImage | automatic | the same; the new AppImage replaces `G9-x86_64.AppImage` in place |
+  | Linux AppImage | automatic | the same; the new AppImage replaces `G9BrowserAgent-x86_64.AppImage` in place |
   | macOS | manual | the app is not signed with a Developer ID, and Squirrel.Mac installs only into a signed app: nothing is downloaded; a notification and **Open the release page** |
   | Linux .deb | manual | replacing it needs root: the same notice |
 
-- **The prompt.** **Install now**, **Install when I quit G9**, **Not now**, or **Skip this version**.
+- **The prompt.** **Install now**, **Install when I quit G9BrowserAgent**, **Not now**, or **Skip this version**.
   A skipped version is never downloaded again; a newer one is offered as usual. Closing the dialog
   means "not now".
 - **Never mid-run.** Installing restarts the daemon, so it waits until the daemon reports no active
@@ -597,7 +651,7 @@ unlocked, un-minimized desktop. In the P8 matrix, a minimized headed Engine 2 wi
   of the same source (a lower version) is installed, pointed at a local feed that serves the new
   packages, and updated through its own updater. The scenarios: a corrupt download is refused by its
   SHA-512 and nothing is installed; a download cut off repeatedly still completes; a skipped version
-  is not downloaded; a busy daemon defers the install; **Install when I quit G9**; install and
+  is not downloaded; a busy daemon defers the install; **Install when I quit G9BrowserAgent**; install and
   restart into the new version with a new daemon; the extension folder refreshed and a connected
   extension reloaded (and a reload waits for a call in flight); no version mismatch left; on macOS,
   the manual notice; and, against the published release on GitHub, a fresh install with no update
@@ -611,7 +665,7 @@ unlocked, un-minimized desktop. In the P8 matrix, a minimized headed Engine 2 wi
   the feed back after every publish.
 
 **Chrome for Testing** is pinned in `engine/versions.json` (153.0.8010.52) and changes only when
-someone re-pins it and ships a new G9. The Engines view shows the pinned and installed versions, and
+someone re-pins it and ships a new G9BrowserAgent. The Engines view shows the pinned and installed versions, and
 installs the pinned one. Every install is checked against the pin and logged to
 `G9_HOME\engine-versions.log`. Installed Edge and Chrome update themselves. Every run records the
 browser version it used (`engine.json`).
@@ -620,14 +674,14 @@ browser version it used (`engine.json`).
 
 ## Repository (developer) install
 
-For working on G9 itself. You need Node 22 or newer. The core has **no npm dependencies**; only
+For working on G9BrowserAgent itself. You need Node 22 or newer. The core has **no npm dependencies**; only
 `desktop/` has them (Electron, electron-builder, electron-updater).
 
 On macOS and Linux there is no install script: run `npm test`, point the MCP client at
 `node <repo>/mcp/shim.mjs`, and load `<repo>/extension` unpacked. On Windows:
 
 ```powershell
-git clone https://github.com/ImanKari/G9BrowserAgent.git g9-browser-agent; cd g9-browser-agent
+git clone https://github.com/ImanKari/G9BrowserAgent.git; cd G9BrowserAgent
 .\setup\install.ps1                      # checks Node, runs the tests, writes setup\mcp.json
 .\setup\install.ps1 -WriteProjectConfig  # also writes .mcp.json in the repo root (Claude Code's project config)
 .\setup\install.ps1 -Port 9000 -SkipTests
@@ -640,7 +694,7 @@ git clone https://github.com/ImanKari/G9BrowserAgent.git g9-browser-agent; cd g9
    88. The unit suites include real headless launches of Edge and the cached CfT;
    `G9_UNIT_NO_BROWSER=1` skips them. That takes about 5 minutes; `npm run check:all` runs the same
    checks 4 at a time in about 2.5 ([REFERENCE.md, Tests](REFERENCE.md#choosing-what-to-run));
-3. writes an MCP entry `g9-browser` → `node <repo>/mcp/shim.mjs` with `G9_HOST`/`G9_PORT`. It goes to
+3. writes an MCP entry `g9browseragent` → `node <repo>/mcp/shim.mjs` with `G9_HOST`/`G9_PORT`. It goes to
    `setup\mcp.json`, and with `-WriteProjectConfig` also to `.mcp.json`. A v1 `.mcp.json` is backed
    up to `.mcp.json.v1.bak`; any other existing `.mcp.json` is left alone;
 4. prints the manual step: load `<repo>\extension` unpacked. This is the repository folder, not
@@ -659,37 +713,37 @@ as plain Node. `npm start` removes it; for other commands run from such a shell,
 
 ## Uninstall
 
-Undo what G9 changed outside its own folders **before** removing the app, while the app can still
+Undo what G9BrowserAgent changed outside its own folders **before** removing the app, while the app can still
 do it:
 1. **Setup** → Background policies → **Undo**. This restores exactly the values recorded in
    `logs\policies.json`, and may ask for the same administrator approval as Apply. Then restart the
    browsers.
-2. **Setup** → AI clients → **Remove** for each client. This removes only `g9-browser`, after a backup.
-3. **Settings** → turn off "Start G9 when I sign in".
-4. In Edge or Chrome, remove the G9 extension on the extensions page. Its local data (recordings,
+2. **Setup** → AI clients → **Remove** for each client. This removes only `g9browseragent`, after a backup.
+3. **Settings** → turn off "Start G9BrowserAgent when I sign in".
+4. In Edge or Chrome, remove the G9BrowserAgent extension on the extensions page. Its local data (recordings,
    settings) goes with it.
 5. Stop launched engines (**Engines** → Stop), then **Settings** → **Shut down daemon**. Each browser
    is asked to close cleanly first, so its profile keeps its logins: that usually takes under a second,
-   but G9 waits up to 30 s on a busy machine before it kills the browser (measured up to 17.9 s under
+   but G9BrowserAgent waits up to 30 s on a busy machine before it kills the browser (measured up to 17.9 s under
    heavy load, 2026-09-24).
 
-Then remove the app: on Windows, **Settings** → **Apps** → **G9** → Uninstall; on macOS, move
-`/Applications/G9.app` to the Trash; a Linux AppImage, delete the file (and
-`~/.config/autostart/g9.desktop`); a .deb, `sudo apt remove g9-desktop`.
+Then remove the app: on Windows, **Settings** → **Apps** → **G9BrowserAgent** → Uninstall; on macOS, move
+`/Applications/G9BrowserAgent.app` to the Trash; a Linux AppImage, delete the file (and
+`~/.config/autostart/g9browseragent.desktop`); a .deb, `sudo apt remove g9browseragent`.
 
 The Windows uninstaller removes the program folder only (it ran, silently, on the owner's
 workstation in the update test). These stay behind for you to delete by hand when you are sure (the
 macOS and Linux places in brackets):
-- `G9_HOME` (`%LOCALAPPDATA%\G9` [`~/.g9`]: launched-browser profiles with their site logins, run
+- `G9_HOME` (`%LOCALAPPDATA%\G9BrowserAgent` [`~/.g9browseragent`]: launched-browser profiles with their site logins, run
   evidence, settings, the extension folder, the Chrome for Testing engines). The uninstaller never
   touches it;
-- Electron's own data folder (`%APPDATA%\G9` [`~/Library/Application Support/G9`, `~/.config/G9`]),
+- Electron's own data folder (`%APPDATA%\G9BrowserAgent` [`~/Library/Application Support/G9BrowserAgent`, `~/.config/G9BrowserAgent`]),
   kept because the installer is set to `deleteAppDataOnUninstall: false`;
-- the updater's download cache (`%LOCALAPPDATA%\g9-desktop-updater` [`~/Library/Caches/g9-desktop-updater`,
-  `~/.cache/g9-desktop-updater`]), if an update was ever downloaded: nothing in the uninstaller names it;
+- the updater's download cache (`%LOCALAPPDATA%\g9browseragent-updater` [`~/Library/Caches/g9browseragent-updater`,
+  `~/.cache/g9browseragent-updater`]), if an update was ever downloaded: nothing in the uninstaller names it;
 - the `*.g9-backup-*` copies next to the AI-client configs;
 - firewall rules for CfT paths (see above; removing them needs an administrator).
 
-A repository install has no uninstaller. Remove the `g9-browser` entries from your MCP configs (and
+A repository install has no uninstaller. Remove the `g9browseragent` entries from your MCP configs (and
 `.mcp.json` if `-WriteProjectConfig` wrote it), remove the extension from the browser, stop the
 daemon (it also exits by itself after an idle hour), and delete `G9_HOME`.

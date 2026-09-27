@@ -168,10 +168,10 @@ function renderUpdates(s) {
     const r = await api.invoke('updater.install');
     if (r?.status === 'deferred') toast(`Waiting: ${(r.reasons ?? []).join('; ')}. It installs by itself when the daemon is idle.`);
   }));
-  const onQuit = h('button', { type: 'button', class: 'btn', hidden: !['downloaded', 'deferred'].includes(u.status) || u.installOnQuit }, 'Install when I quit G9');
+  const onQuit = h('button', { type: 'button', class: 'btn', hidden: !['downloaded', 'deferred'].includes(u.status) || u.installOnQuit }, 'Install when I quit G9BrowserAgent');
   onQuit.addEventListener('click', () => busy(onQuit, async () => {
     await api.invoke('updater.installOnQuit');
-    toast(`G9 ${u.version} installs the next time you quit G9 while nothing runs.`);
+    toast(`G9BrowserAgent ${u.version} installs the next time you quit G9BrowserAgent while nothing runs.`);
   }));
   // Manual installs (macOS, .deb): the release is found here, and downloaded from its page.
   const manual = u.status === 'available-manual';
@@ -180,16 +180,16 @@ function renderUpdates(s) {
   const skip = h('button', { type: 'button', class: 'btn ghost', hidden: !(manual || ['downloaded', 'deferred'].includes(u.status)) || u.skipped === u.version }, 'Skip this version');
   skip.addEventListener('click', () => busy(skip, async () => {
     await api.invoke('updater.skip');
-    toast(`G9 ${u.version} will not be offered again; a newer release will.`);
+    toast(`G9BrowserAgent ${u.version} will not be offered again; a newer release will.`);
   }));
-  const where = u.source === 'custom' ? `from ${u.url ?? 'your custom address'}` : u.source === 'off' ? null : 'from the official G9 releases on GitHub';
+  const where = u.source === 'custom' ? `from ${u.url ?? 'your custom address'}` : u.source === 'off' ? null : 'from the official G9BrowserAgent releases on GitHub';
   const how = app.installMode === 'manual'
-    ? `This installation updates by hand: ${app.manualReason ?? 'it cannot replace itself'}. G9 still checks and tells you when a release is out.`
+    ? `This installation updates by hand: ${app.manualReason ?? 'it cannot replace itself'}. G9BrowserAgent still checks and tells you when a release is out.`
     : 'Downloads in the background, then asks. Installing waits until no run is in progress and no launched browser is open.';
   const help = u.status === 'not-configured'
     ? 'Update source is "custom" but no address is set. Set "Custom update URL" above to an https folder that holds latest.yml and the installers, or switch the source back to "official".'
     : u.status === 'off'
-      ? 'Set "Update source" above to "official" to be told about new G9 releases.'
+      ? 'Set "Update source" above to "official" to be told about new G9BrowserAgent releases.'
       : u.status === 'dev'
         ? 'This is a development build (run from the repository): update it with git pull. Installed builds update themselves.'
         : `Checks ${where} on start and every 6 hours${u.lastCheckAt ? `; last check ${new Date(u.lastCheckAt).toLocaleString()}` : ''}. ${how}`;
@@ -243,13 +243,13 @@ function renderApp(s) {
     atLoginWhy.textContent = li.supported ? 'Scheduled suites need the daemon; after a restart this is what starts it.' : li.reason;
   }).catch(() => {});
   atLogin.addEventListener('change', () => api.invoke('desktop.loginItem.set', { enabled: atLogin.checked })
-    .then((li) => toast(li.openAtLogin ? 'G9 starts in the tray when you sign in.' : 'G9 no longer starts at sign-in.'))
+    .then((li) => toast(li.openAtLogin ? 'G9BrowserAgent starts in the tray when you sign in.' : 'G9BrowserAgent no longer starts at sign-in.'))
     .catch((err) => {
       atLogin.checked = !atLogin.checked;
       toastError(err);
     }));
   replace(appEl,
-    h('div', { class: 'field' }, h('label', { class: 'check' }, atLogin, 'Start G9 when I sign in (in the tray)'), atLoginWhy),
+    h('div', { class: 'field' }, h('label', { class: 'check' }, atLogin, 'Start G9BrowserAgent when I sign in (in the tray)'), atLoginWhy),
     h('dl', { class: 'kv' },
       h('dt', null, 'Version'), h('dd', null, a.version ?? '—'),
       h('dt', null, 'Build'), h('dd', null, a.packaged ? 'Installed' : 'Development (from the repository)'),

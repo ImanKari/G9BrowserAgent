@@ -78,7 +78,7 @@ function emit(event, data) {
 const DOWNLOAD_PROGRESS_EMIT_MS = 1_000;
 const lastDownloadEmit = new Map();
 platform.downloads.onEvent((evt) => {
-  downloads.ingest(evt).catch((err) => console.error('[G9] download capture failed', err));
+  downloads.ingest(evt).catch((err) => console.error('[G9BrowserAgent] download capture failed', err));
   if (evt?.state === 'in_progress' && lastDownloadEmit.has(evt.id)) {
     if (Date.now() - lastDownloadEmit.get(evt.id) < DOWNLOAD_PROGRESS_EMIT_MS) return;
   }
@@ -100,8 +100,8 @@ function requireTabId(args) {
 }
 
 const HALTED =
-  'The user pressed Stop. Every browser action is blocked until they press Resume (in the G9 side panel ' +
-  'or the G9 app) — you cannot lift this yourself. Tell them, and wait.';
+  'The user pressed Stop. Every browser action is blocked until they press Resume (in the G9BrowserAgent side panel ' +
+  'or the G9BrowserAgent app) — you cannot lift this yourself. Tell them, and wait.';
 
 /** One-line human description for the activity log. */
 export function summarize(tool, args = {}) {
@@ -180,7 +180,7 @@ export const TOOLS = {
         case 'release':
         case 'handoff':
           throw new Error(
-            `action:"${action}" is handled by the G9 daemon (tab ownership and hand-off span every engine) and ` +
+            `action:"${action}" is handled by the G9BrowserAgent daemon (tab ownership and hand-off span every engine) and ` +
               'reached an engine directly. Call it through the daemon — the MCP shim does that — not on the engine.',
           );
         default:
@@ -258,7 +258,7 @@ export const TOOLS = {
     run: async ({ tabId, args }) => {
       if (args.action === 'evaluate') {
         // The MAIN world, deliberately: the agent is asking about the page's own
-        // JavaScript, which G9's isolated world cannot see.
+        // JavaScript, which G9BrowserAgent's isolated world cannot see.
         if (!args.expression) throw new Error('action:"evaluate" needs an expression.');
         const value = await evaluate(tabId, args.expression);
         return { value: value === undefined ? '(undefined)' : value };
@@ -535,7 +535,7 @@ export async function status(args = {}) {
       warnings.push(
         'The current tab is BEHIND another tab in its browser window (one the page opened — a target=_blank link or ' +
           'window.open). A tab behind another is rendered a frame at a time: a humanized click took about 21 s and a ' +
-          'screenshot 24–46 s there, against about 4 s and under 0.1 s in front. On a headless engine G9 brings it to ' +
+          'screenshot 24–46 s there, against about 4 s and under 0.1 s in front. On a headless engine G9BrowserAgent brings it to ' +
           'the front before input and screenshots; on a headed one, browser_tabs action:"focus" restores full speed ' +
           '(or close the tab in front).',
       );
@@ -583,7 +583,7 @@ export async function status(args = {}) {
       : target
         ? 'Ready. Start with browser_snapshot to see the page, then use the refs it returns.'
         : 'No tab to act on. Open one with browser_tabs action:"open", or ask the user to attach one ' +
-          '(the G9 side panel, or auto-attach).',
+          '(the G9BrowserAgent side panel, or auto-attach).',
   };
 }
 
@@ -786,6 +786,6 @@ async function log(entry) {
     const record = await logActivity(entry);
     emit('activity', record);
   } catch (err) {
-    console.error('[G9] activity log failed', err);
+    console.error('[G9BrowserAgent] activity log failed', err);
   }
 }

@@ -33,7 +33,7 @@ export function mount(el) {
   refresh.addEventListener('click', () => busy(refresh, () => load()));
   replace(el,
     viewHead('Approvals',
-      'Flows whose last run found something new or missing. Approving adds that run to the flow\'s known world, so the same behaviour stops being reported. Only a person approves; G9 never does it by itself.',
+      'Flows whose last run found something new or missing. Approving adds that run to the flow\'s known world, so the same behaviour stops being reported. Only a person approves; G9BrowserAgent never does it by itself.',
       [refresh]),
     h('div', { class: 'section' }, listEl));
   load();

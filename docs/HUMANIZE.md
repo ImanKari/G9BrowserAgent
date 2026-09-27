@@ -1,6 +1,6 @@
 # Human input — `extension/humanize/`
 
-G9 drives pages with trusted CDP input (`Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`). v1
+G9BrowserAgent drives pages with trusted CDP input (`Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`). v1
 sent the minimum: one `mouseMoved` onto the element's exact centre, a press and a release in the same
 millisecond, 12 ms between typed characters, one 1400 px wheel event. Every one of those is a machine
 signature. This library plans the same actions the way a hand does them, and plans them
@@ -188,7 +188,7 @@ the aim point. Samples that did not move are dropped — a mouse reports movemen
 **The pixel grid.** A real mouse moves in whole *device* pixels, so on a 125 % display its CSS
 coordinates are multiples of 0.8, never 101.0 (= 126.25 device px). Every coordinate is snapped to
 1/dpr of the viewport passed in (`viewport.dpr`, or `devicePixelRatio`/`deviceScaleFactor`);
-without it, integers. **G9 3.1.0 does not pass it yet:** `tools/interact.js` `layoutViewport()`
+without it, integers. **G9BrowserAgent 3.1.0 does not pass it yet:** `tools/interact.js` `layoutViewport()`
 returns `{ width, height }` only, so delivered coordinates are whole CSS pixels. That is correct only
 at 100 % display scaling. The change was left out on purpose, because it alters replay determinism
 and the unit baselines.
@@ -508,7 +508,7 @@ notch size), and the recorder's exact sample shape is read correctly.
    (`daemon/router.js`):
    - **Fitted from a recording in the extension:** saved in the extension's store **and** the
      launched-engine store, so the name works in both.
-   - **Fitted from a recording in a launched engine:** saved in the launched-engine store only. G9
+   - **Fitted from a recording in a launched engine:** saved in the launched-engine store only. G9BrowserAgent
      3.1.0 has no message that installs it into the extension, so `humanize:"team-qa"` in the
      person's own browser fails with "Unknown humanize profile".
 
@@ -535,7 +535,7 @@ profile and stores it where `levelFor` finds it. Do not add team profiles to `pr
 
 Plans are exact. What reaches the page also depends on the browser's frame rate and on how fast
 each CDP command returns. The numbers below were read by **page-side listeners** (event
-timestamps, not G9's own report) on the owner's workstation on 2026-09-22, with Windows 11, Edge
+timestamps, not G9BrowserAgent's own report) on the owner's workstation on 2026-09-22, with Windows 11, Edge
 153.0.4234.32, Chrome 153.0.8010.53 and Chrome for Testing (CfT) 153.0.8010.52. The run names are
 the ones `docs/STEALTH.md` defines:
 - **live round 2**: before the fixes;
@@ -555,7 +555,7 @@ every 8–16 ms.
 CfT's renderer ran `requestAnimationFrame` every 100.5 ms against 10.5 ms for Edge and Chrome.
 Input is frame-aligned, so humanized paths arrived as 10 Hz jumps. Each `mouseMoved` took 35–54 ms
 to dispatch (Edge 7–16 ms, Chrome 7.6 ms), and a humanized click took 3,473–5,213 ms on CfT against
-629–1155 ms on Edge (live round 2). G9 passes `--disable-frame-rate-limit` to CfT only
+629–1155 ms on Edge (live round 2). G9BrowserAgent passes `--disable-frame-rate-limit` to CfT only
 (`engine/launch.js` `KIND_SWITCHES`; measured rAF 17.4 ms, 7.7 ms per dispatch). A person's own CfT
 under Engine 1 has no such switch, and a humanized path reached the page there as 4–5 mousemoves,
 against 17–23 on Edge (live round 3).
@@ -599,7 +599,7 @@ The rule protects the hold from below only: a planned 60–140 ms hold cannot fa
 slow release can still make it longer than planned, as with CfT's 151 ms.
 
 **Pressure.** In live round 2, `pointerdown.pressure` was 0 in 50/50 runs: CDP's `force` defaults to
-0, which Blink passes through. Since G9 sends `force: 0.5` while a button is held, the page reads
+0, which Blink passes through. Since G9BrowserAgent sends `force: 0.5` while a button is held, the page reads
 0.5 on `pointerdown`, 0 on `pointerup`, and 0 on idle moves, at every level including `off`. This
 held in every run of the Engine 2 live test, the Engine 1 live suite (9 final runs) and the stealth
 suite, and in this guide's run.
@@ -624,8 +624,8 @@ hovers and clicks right after a scroll missed, each reported "delivered". Since 
 - the reported position equalled `scrollY` right after the call and 800 ms later (Engine 2 live test).
 
 **A page that cancels `pointerdown`** gets `pointerdown`, `pointerup` and `click`, but no
-`mousedown` (the Pointer Events rule). G9 reports that click as delivered at every level. This held
-in every run since the fix; before it, G9 called it not delivered in 22/22 runs.
+`mousedown` (the Pointer Events rule). G9BrowserAgent reports that click as delivered at every level. This held
+in every run since the fix; before it, G9BrowserAgent called it not delivered in 22/22 runs.
 
 **Another agent reading the same tab** does not change the timing. With snapshots from a second
 agent every ~100 ms, the same seeded human click took 941–1016 ms, against 938–964 ms alone (Engine
@@ -664,7 +664,7 @@ agent every ~100 ms, the same seeded human click took 941–1016 ms, against 938
   recorded resting place round to whole notches. Near the end of a page the overshoot needs `room`,
   or its scroll-back moves the page.
 - **The same seed reproduces a plan, not a session.** A plan also depends on where the pointer starts
-  (the path's length, its Fitts duration, every later draw) and on the viewport. G9 keeps the pointer
+  (the path's length, its Fitts duration, every later draw) and on the viewport. G9BrowserAgent keeps the pointer
   position per tab, so the same seed on a tab whose pointer is elsewhere gives another path: a replay
   homes the pointer to a seed-derived point before step 1 and reports it as `pointerStart`, and a
   single action reproduces only from the same position.

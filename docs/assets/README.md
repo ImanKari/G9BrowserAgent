@@ -1,7 +1,7 @@
 # README pictures
 
 The screenshots in [README.md](../../README.md) and [README.fa.md](../../README.fa.md) come from a
-real run of G9, made by [`setup/docs-screenshots.mjs`](../../setup/docs-screenshots.mjs): a private
+real run of G9BrowserAgent, made by [`setup/docs-screenshots.mjs`](../../setup/docs-screenshots.mjs): a private
 daemon, the real extension in headless Chrome, an agent talking to the real MCP shim, and the packaged
 Linux desktop app on the same daemon. Nothing is mocked or arranged by hand.
 
@@ -22,7 +22,7 @@ are neutral, with Chrome installed:
 ```bash
 cd desktop && npm ci && node scripts/build.mjs --linux && cd ..
 xvfb-run -a -s "-screen 0 1440x960x24" \
-  node setup/docs-screenshots.mjs --out docs/assets --app desktop/dist/linux-unpacked/g9
+  node setup/docs-screenshots.mjs --out docs/assets --app desktop/dist/linux-unpacked/g9browseragent
 ```
 
 Without `--app`, only the Demo Shop and the side panel are photographed. Review every picture before

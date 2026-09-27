@@ -21,7 +21,7 @@ import {
 } from '../lib/store.js';
 import { serialize } from '../lib/state.js';
 import { platform } from '../lib/platform.js';
-// Page reads run in G9's isolated world: same DOM, none of the page's globals.
+// Page reads run in G9BrowserAgent's isolated world: same DOM, none of the page's globals.
 import { inWorld } from '../lib/world.js';
 import * as screencast from '../lib/screencast.js';
 import * as pointer from '../lib/pointer.js';

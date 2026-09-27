@@ -129,7 +129,7 @@ function junit(run) {
   const errors = run.flows.filter((f) => f.verdict === 'FAIL_AUTOMATION' || f.verdict === 'ERROR').length;
 
   return `<?xml version="1.0" encoding="UTF-8"?>
-<testsuites name="G9" tests="${cases.length}" failures="${failures}" errors="${errors}" time="${((run.durationMs ?? 0) / 1000).toFixed(3)}">
+<testsuites name="G9BrowserAgent" tests="${cases.length}" failures="${failures}" errors="${errors}" time="${((run.durationMs ?? 0) / 1000).toFixed(3)}">
   <testsuite name="${esc(run.suite ?? 'g9')}" tests="${cases.length}" failures="${failures}" errors="${errors}" timestamp="${new Date(run.startedAt).toISOString()}">
 ${properties(run)}${cases.join('\n')}
   </testsuite>
@@ -238,7 +238,7 @@ function runFacts(run) {
   if (run.humanize?.seed != null) {
     bits.push(`seed حرکت <code dir="ltr">${escHtml(run.humanize.seed)}</code>${run.humanize.level ? ` (${escHtml(run.humanize.level)})` : ''}`);
   }
-  if (run.daemon?.version) bits.push(`G9 <span dir="ltr">v${escHtml(run.daemon.version)}</span>`);
+  if (run.daemon?.version) bits.push(`G9BrowserAgent <span dir="ltr">v${escHtml(run.daemon.version)}</span>`);
   return bits.length ? `<p class="meta">${bits.join(' · ')}</p>` : '';
 }
 

@@ -1,13 +1,13 @@
 /**
- * G9's private JavaScript world inside a page.
+ * G9BrowserAgent's private JavaScript world inside a page.
  *
- * Everything G9 evaluates for its own purposes — the input witness, the
+ * Everything G9BrowserAgent evaluates for its own purposes — the input witness, the
  * recorder, the locator engine, text extraction, QA reads, replay's element
  * resolution — runs HERE, in an isolated world named `g9`, and never in the
  * page's own (main) world. Same DOM, separate JavaScript globals: a variable
- * G9 sets is invisible to the page, a listener G9 adds cannot be seen by
+ * G9BrowserAgent sets is invisible to the page, a listener G9BrowserAgent adds cannot be seen by
  * `getEventListeners`-style probes in the page, and the page cannot tamper
- * with G9's helpers. v1 evaluated in the main world and left `__g9loc`,
+ * with G9BrowserAgent's helpers. v1 evaluated in the main world and left `__g9loc`,
  * `__g9target`, `__g9rec` and the recorder binding on the page's `window`,
  * where any MutationObserver or bot detector could find them (rule R4, AIGuide §2.9).
  *
@@ -41,12 +41,12 @@
  * sent through here first checks that marker and throws `G9_STALE_WORLD` if it
  * is missing. Reading an absent global in the wrong world creates nothing
  * there, so a stale id that happens to name the page's main world costs one
- * failed call and a transparent retry — never G9 code running on the page's
+ * failed call and a transparent retry — never G9BrowserAgent code running on the page's
  * globals. The marker lives in the isolated world only.
  *
  * The guard throws a STRING, not `new Error(…)`: in the wrong world `Error` is
  * the page's own binding, which a page can replace, so constructing one would
- * run page-controlled code — and tell a detector that G9 was there. A global
+ * run page-controlled code — and tell a detector that G9BrowserAgent was there. A global
  * read and a primitive throw are all the page's world ever sees of it.
  *
  * ## Caching and invalidation
@@ -167,7 +167,7 @@ function dropEntry(tabId, sessionId, contextId) {
 // ------------------------------------------------------------------ context
 
 /**
- * The execution context id of G9's world in a frame.
+ * The execution context id of G9BrowserAgent's world in a frame.
  *
  * `frameId` null means the main frame of the given session: the top document
  * for the page session, the frame's own document for a cross-origin child
@@ -194,7 +194,7 @@ function createEntry(tabId, sessionId, frameId) {
     const tree = await send(tabId, 'Page.getFrameTree', {}, { sessionId });
     const root = tree?.frameTree?.frame;
     if (!root?.id) {
-      throw new Error('The page reported no frame tree, so G9 cannot create its isolated world there.');
+      throw new Error('The page reported no frame tree, so G9BrowserAgent cannot create its isolated world there.');
     }
     mainFrames.set(sessKey(tabId, sessionId), root.id);
 
@@ -228,7 +228,7 @@ function createEntry(tabId, sessionId, frameId) {
       returnByValue: true,
     }, { sessionId });
     if (marked?.exceptionDetails) {
-      throw new Error(`Could not initialise G9's isolated world: ${describeException(marked.exceptionDetails)}`);
+      throw new Error(`Could not initialise G9BrowserAgent's isolated world: ${describeException(marked.exceptionDetails)}`);
     }
 
     const entry = { contextId, frameId: frame.id, loaderId: frame.loaderId ?? null, at: Date.now() };
@@ -252,7 +252,7 @@ function findFrame(node, frameId, depth = 0) {
 }
 
 /**
- * contextFor, but PROVEN to still name G9's world (the guard runs in it first).
+ * contextFor, but PROVEN to still name G9BrowserAgent's world (the guard runs in it first).
  *
  * For callers that hand the id to a command with no guard of its own —
  * `Runtime.addBinding({executionContextId})`. A cached id that went stale in a
@@ -338,8 +338,8 @@ function explain(err) {
   const msg = String(err?.message ?? err);
   if (msg.includes(STALE_MARK) || NEVER_RAN.test(msg)) {
     const out = new Error(
-      'The page replaced its document while G9 was reading it (a navigation or a frame reload), ' +
-        'and G9 could not re-establish its isolated world there. Try again once the page has settled.',
+      'The page replaced its document while G9BrowserAgent was reading it (a navigation or a frame reload), ' +
+        'and G9BrowserAgent could not re-establish its isolated world there. Try again once the page has settled.',
     );
     out.cause = err;
     return out;
@@ -360,7 +360,7 @@ export function guardExpression(expression) {
   return `if (globalThis[${JSON.stringify(MARK)}] !== ${JSON.stringify(TOKEN)}) throw ${JSON.stringify(STALE_MARK)};\n${expression}`;
 }
 
-/** Wrap a function declaration so it refuses to run outside G9's world. */
+/** Wrap a function declaration so it refuses to run outside G9BrowserAgent's world. */
 export function guardFunction(fnDecl) {
   return `function () {
   if (globalThis[${JSON.stringify(MARK)}] !== ${JSON.stringify(TOKEN)}) throw ${JSON.stringify(STALE_MARK)};
@@ -369,7 +369,7 @@ export function guardFunction(fnDecl) {
 }
 
 /**
- * Evaluate an expression in G9's world.
+ * Evaluate an expression in G9BrowserAgent's world.
  *
  * `returnByValue` true (default) returns the plain value. With
  * `returnByValue:false` the RemoteObject itself is returned — `{ objectId,
@@ -399,9 +399,9 @@ export async function inWorld(tabId, expression, {
 }
 
 /**
- * Call a function with `this` bound to a remote object G9 already holds in
+ * Call a function with `this` bound to a remote object G9BrowserAgent already holds in
  * its world — a witness promise, say. The object's own context decides where
- * it runs, and the guard still refuses anything that is not G9's world. No
+ * it runs, and the guard still refuses anything that is not G9BrowserAgent's world. No
  * retry: an object does not outlive its context, so a stale one is simply gone
  * and the error says so.
  */
@@ -421,14 +421,14 @@ export async function callOnObject(tabId, objectId, fnDecl, args = [], sessionId
 }
 
 /**
- * Call a function with `this` bound to a DOM node, inside G9's world.
+ * Call a function with `this` bound to a DOM node, inside G9BrowserAgent's world.
  *
  * `DOM.resolveNode({backendNodeId, executionContextId})` wraps the node in
  * the g9 world, so everything the function touches — `window`, expandos on the
- * node, listeners it adds — belongs to G9's world, not the page's. For a node
+ * node, listeners it adds — belongs to G9BrowserAgent's world, not the page's. For a node
  * inside a same-origin iframe the function still compiles in the top frame's
  * g9 world (the context the node was resolved in), and `this.ownerDocument.
- * defaultView` is that iframe's window IN THE G9 WORLD: exactly the realm
+ * defaultView` is that iframe's window IN THE G9BrowserAgent WORLD: exactly the realm
  * semantics v1's main-world `callOnNode` had, one world over.
  *
  * `sessionId` null asks the snapshot table which frame process owns the node,

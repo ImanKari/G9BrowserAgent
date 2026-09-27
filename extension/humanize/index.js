@@ -1,5 +1,5 @@
 /**
- * G9 human input library — extension/humanize/ (ARCHITECTURE_V2 §6).
+ * G9BrowserAgent human input library — extension/humanize/ (ARCHITECTURE_V2 §6).
  *
  * Pure functions: no I/O, no timers, no clocks, no globals, no browser or
  * Node APIs (rule R2), so the extension's service worker and the daemon

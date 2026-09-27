@@ -103,7 +103,7 @@ const tabs = {
   },
   /**
    * Launched engines bring a headless tab that is behind another to the front before input
-   * (platform-cdp). A person's own browser is never rearranged by G9 itself: the answer is
+   * (platform-cdp). A person's own browser is never rearranged by G9BrowserAgent itself: the answer is
    * 'unknown', and browser_status says when the current tab is not in front.
    */
   async ensureFront() {
@@ -501,7 +501,7 @@ function emitDownload(evt) {
     try {
       fn(evt);
     } catch (err) {
-      console.error('[G9] download listener failed', err);
+      console.error('[G9BrowserAgent] download listener failed', err);
     }
   }
 }
@@ -692,10 +692,10 @@ try {
   const d = globalThis.chrome?.downloads ?? globalThis.browser?.downloads;
   if (d?.onCreated) {
     d.onCreated.addListener((item) => {
-      onDownloadCreated(item).catch((err) => console.error('[G9] download capture failed', err));
+      onDownloadCreated(item).catch((err) => console.error('[G9BrowserAgent] download capture failed', err));
     });
     d.onChanged.addListener((delta) => {
-      onDownloadChanged(delta).catch((err) => console.error('[G9] download capture failed', err));
+      onDownloadChanged(delta).catch((err) => console.error('[G9BrowserAgent] download capture failed', err));
     });
   }
 } catch {
@@ -710,7 +710,7 @@ const downloads = {
     if (!downloads.available) {
       throw new Error(
         'Download tracking needs the "downloads" permission, which this build of the extension does not ' +
-          'have. Reload the G9 v2 extension from its folder.',
+          'have. Reload the G9BrowserAgent v2 extension from its folder.',
       );
     }
     await updateWatched((watched) => {

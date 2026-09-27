@@ -60,7 +60,7 @@ async function readManifestVersion(dir) {
 export async function installExtension({ from, target, log = () => {} }) {
   const source = path.resolve(from);
   const version = await readManifestVersion(source);
-  if (!version) throw new Error(`${source} does not look like the G9 extension (no readable manifest.json).`);
+  if (!version) throw new Error(`${source} does not look like the G9BrowserAgent extension (no readable manifest.json).`);
 
   const previousVersion = await readManifestVersion(target);
   const staging = `${target}.new`;

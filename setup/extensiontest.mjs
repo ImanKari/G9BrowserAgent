@@ -248,7 +248,7 @@ function liftFunctions(source, names, deps = {}) {
 /** A random loopback port in 18000-18999 (never 8765: a person's daemon or v1 bridge may be there). */
 const testPort = () => 18000 + Math.floor(Math.random() * 1000);
 
-console.log('\nG9 Browser Agent — extension regression test (v2)\n');
+console.log('\nG9BrowserAgent — extension regression test (v2)\n');
 
 await test('normalizer collapses click/click/dblclick into one double click', () => {
   const target = { locators: [{ kind: 'testid', value: 'save' }] };
@@ -538,7 +538,7 @@ await test('every dispatching interaction witnesses that the page received it', 
   // moves — the listener is gone by the time the counter is read, and a
   // caption that typed perfectly gets reported as a failure. That inverse
   // failure is as damaging as the original: retrying a click posts twice.
-  // v2 arms a promise that lives entirely inside one context (G9's isolated
+  // v2 arms a promise that lives entirely inside one context (G9BrowserAgent's isolated
   // world) and settles THAT promise. Run the real expression against a
   // stand-in page: it must leave nothing behind in the page, ignore a
   // synthetic event, answer on a trusted one, and remove its listeners.
@@ -849,13 +849,13 @@ await test("D-b in your own browser: the panel's Input is the default level, and
 
 await test('snapshot reports the real document title', async () => {
   axNodes = [
-    { nodeId: '1', role: { value: 'RootWebArea' }, name: { value: 'G9 Agent Test Page' }, childIds: ['2'] },
+    { nodeId: '1', role: { value: 'RootWebArea' }, name: { value: 'G9BrowserAgent Test Page' }, childIds: ['2'] },
     { nodeId: '2', role: { value: 'button' }, name: { value: 'Sign in' }, backendDOMNodeId: 42, childIds: [] },
   ];
   const result = await snapshotModule.snapshot(7, {});
   // It read docInfo.root.title for four versions. CDP's Node type has no such
   // field, so this was "" on every page ever snapshotted.
-  assert.equal(result.title, 'G9 Agent Test Page');
+  assert.equal(result.title, 'G9BrowserAgent Test Page');
 });
 
 await test('overflow findings name the cause, not the elements it stretched', async () => {
@@ -1087,7 +1087,7 @@ await test('calibration marks what differs between two identical runs as volatil
 await test('FlowSpec is canonical, validated, and refuses to carry a secret', () => {
   const recording = {
     id: 'rec_1', name: 'Create a task', suite: 'smoke', tags: ['b', 'a'],
-    parameters: { title: { type: 'string', default: 'G9-x' }, password: { type: 'secretRef', required: true } },
+    parameters: { title: { type: 'string', default: 'G9BrowserAgent-x' }, password: { type: 'secretRef', required: true } },
     steps: [
       { id: 's1', type: 'navigate', url: 'https://app.test/' },
       { id: 's2', type: 'click', target: { locators: [{ kind: 'testid', value: 'save' }], fingerprint: { role: 'button', name: 'Save' } } },
@@ -1610,7 +1610,7 @@ await test('one daemon on one port: nothing to discover, and /health identifies 
   assert.deepEqual(classifyOrigin('chrome-extension://abcdefghijklmnop'), { ok: true, kind: 'extension' });
   assert.deepEqual(classifyOrigin(''), { ok: true, kind: 'native' });
 
-  const server = new WsServer({ port: testPort(), health: () => ({ name: 'g9d', home: 'C:/Users/someone/G9' }) });
+  const server = new WsServer({ port: testPort(), health: () => ({ name: 'g9d', home: 'C:/Users/someone/G9BrowserAgent' }) });
   for (let attempt = 0; ; attempt++) {
     try {
       await server.listen();
@@ -1800,7 +1800,7 @@ await test('the daemon keeps its configured port, and explains a held one instea
       .catch((err) => { child.kill(); throw err; });
     assert.equal(exit, 1, 'a daemon that cannot have its port exits with an error');
     const log = await readFile(path.join(home, 'logs', 'daemon.log'), 'utf8');
-    assert.match(log, new RegExp(`port ${port} is held by a G9 v1 bridge \\(pid 4242, v1\\.9\\.2\\)`), 'the holder is named');
+    assert.match(log, new RegExp(`port ${port} is held by a G9BrowserAgent v1 bridge \\(pid 4242, v1\\.9\\.2\\)`), 'the holder is named');
     assert.match(log, /set G9_PORT/, 'and the way out is said');
     assert.doesNotMatch(log, /listening on/, 'it never listened anywhere else');
   } finally {
@@ -2485,7 +2485,7 @@ await test("the agent's own window is never mistaken for the page under test", a
   browserModel.tabs.set(8, { id: 8, url: 'http://example.test/work', title: 'Work', windowId: 1, active: true, status: 'complete' });
   browserModel.windows.get(1).focused = false;
   browserModel.windows.set(5, { id: 5, type: 'popup', state: 'normal', focused: true });
-  browserModel.tabs.set(50, { id: 50, url: 'chrome-extension://g9/panel/panel.html', title: 'G9', windowId: 5, active: true, status: 'complete' });
+  browserModel.tabs.set(50, { id: 50, url: 'chrome-extension://g9/panel/panel.html', title: 'G9BrowserAgent', windowId: 5, active: true, status: 'complete' });
   try {
     await stateModule.setState({ currentTabId: null, sessions: {} });
     // getAll has no ordering, so the last ordinary window has to be remembered as

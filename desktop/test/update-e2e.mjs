@@ -4,7 +4,7 @@
  *   node test/update-e2e.mjs --old <dir> --new <dir> [--feed local|official] [--only a,b] [--report <file>] [--keep]
  *
  *   --old   a folder with the OLDER build's installer for this OS (scripts/build.mjs --as-version):
- *           Windows G9-Setup-<v>.exe, Linux G9-x86_64.AppImage, macOS G9-<v>-mac-<arch>.zip
+ *           Windows G9BrowserAgent-Setup-<v>.exe, Linux G9BrowserAgent-x86_64.AppImage, macOS G9BrowserAgent-<v>-mac-<arch>.zip
  *   --new   the NEWER release: its installers and latest*.yml, exactly what a release publishes.
  *           With --feed local (default) it is served on 127.0.0.1 as the app's custom update feed,
  *           with faults injected on purpose. With --feed official it is only read for its version:
@@ -111,7 +111,8 @@ function readMeta(dir) {
 function oldArtifact() {
   const names = fs.readdirSync(OLD_DIR);
   const pick = {
-    win32: (n) => /^G9-Setup-.+\.exe$/.test(n),
+    // Either name: an older build may still be G9-Setup-<v>.exe (before 3.2.1).
+    win32: (n) => /^(G9BrowserAgent|G9)-Setup-.+\.exe$/.test(n),
     linux: (n) => /\.AppImage$/.test(n),
     darwin: (n) => n.endsWith(`-mac-${process.arch === 'arm64' ? 'arm64' : 'x64'}.zip`),
   }[PLATFORM];
@@ -167,7 +168,7 @@ class Feed {
     }
     if (name === '' || name === 'page') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      res.end('<!doctype html><title>G9 update test</title><h1>G9 update test page</h1>');
+      res.end('<!doctype html><title>G9BrowserAgent update test</title><h1>G9BrowserAgent update test page</h1>');
       return;
     }
     const file = path.join(this.dir, name);
@@ -221,17 +222,30 @@ class Feed {
 
 // ------------------------------------------------------------------ install, launch, uninstall
 
+// The product's names, newest first: G9BrowserAgent since 3.2.1, G9 before it. An update from an
+// older build replaces G9.exe with G9BrowserAgent.exe (in the same folder), so the executable is
+// looked up whenever it is needed, not remembered from the install.
+const NAMES = ['G9BrowserAgent', 'G9'];
+
 function winUninstallers() {
-  return [
-    path.join(process.env.LOCALAPPDATA ?? '', 'Programs', 'G9', 'Uninstall G9.exe'),
-  ];
+  return NAMES.map((n) => path.join(process.env.LOCALAPPDATA ?? '', 'Programs', n, `Uninstall ${n}.exe`));
 }
 
 class Install {
   constructor(tmp) {
     this.tmp = tmp;
     this.dir = path.join(tmp, 'app');
-    this.exe = null;
+    this.file = null; // Linux: the AppImage
+  }
+
+  /** The installed app's executable, as it is now (its name changes with an update across 3.2.1). */
+  get exe() {
+    if (PLATFORM === 'linux') return this.file;
+    if (!this.root) return null;
+    const found = PLATFORM === 'win32'
+      ? NAMES.map((n) => path.join(this.root, `${n}.exe`)).find((p) => fs.existsSync(p))
+      : NAMES.map((n) => path.join(this.dir, `${n}.app`, 'Contents', 'MacOS', n)).find((p) => fs.existsSync(p));
+    return found ?? null;
   }
 
   install(file) {
@@ -240,21 +254,20 @@ class Install {
       // NSIS: /S silent, /D=<dir> (last, unquoted). Per user: no elevation.
       const r = spawnSync(file, ['/S', `/D=${this.dir}`], { stdio: 'ignore', timeout: 300_000, windowsHide: true });
       if (r.status !== 0) throw new Error(`The installer exited ${r.status}`);
-      const candidates = [path.join(this.dir, 'G9.exe'), path.join(process.env.LOCALAPPDATA ?? '', 'Programs', 'G9', 'G9.exe')];
-      this.exe = candidates.find((p) => fs.existsSync(p));
-      if (!this.exe) throw new Error(`G9.exe was not found after installing (looked in ${candidates.join(', ')})`);
-      this.root = path.dirname(this.exe);
+      const dirs = [this.dir, ...NAMES.map((n) => path.join(process.env.LOCALAPPDATA ?? '', 'Programs', n))];
+      this.root = dirs.find((d) => NAMES.some((n) => fs.existsSync(path.join(d, `${n}.exe`))));
+      if (!this.root) throw new Error(`The app was not found after installing (looked in ${dirs.join(', ')})`);
     } else if (PLATFORM === 'linux') {
-      // Under the name it is published with (G9-x86_64.AppImage): the updater replaces a file IN
+      // Under the name it is published with (G9BrowserAgent-x86_64.AppImage): the updater replaces a file IN
       // PLACE only when its name carries no version, which is what this checks.
-      this.exe = path.join(this.dir, path.basename(file));
-      fs.copyFileSync(file, this.exe);
-      fs.chmodSync(this.exe, 0o755);
+      this.file = path.join(this.dir, path.basename(file));
+      fs.copyFileSync(file, this.file);
+      fs.chmodSync(this.file, 0o755);
       this.root = this.dir;
     } else {
       execFileSync('ditto', ['-x', '-k', file, this.dir]);
-      this.exe = path.join(this.dir, 'G9.app', 'Contents', 'MacOS', 'G9');
-      this.root = path.join(this.dir, 'G9.app');
+      this.root = NAMES.map((n) => path.join(this.dir, `${n}.app`)).find((d) => fs.existsSync(d));
+      if (!this.root) throw new Error(`No app bundle in ${file}`);
       // A download from the internet carries the quarantine flag; this zip did not come from one.
       spawnSync('xattr', ['-dr', 'com.apple.quarantine', this.root]);
     }
@@ -274,7 +287,7 @@ class Install {
 
   uninstall() {
     if (PLATFORM === 'win32') {
-      for (const u of [path.join(this.root ?? this.dir, 'Uninstall G9.exe'), ...winUninstallers()]) {
+      for (const u of [...NAMES.map((n) => path.join(this.root ?? this.dir, `Uninstall ${n}.exe`)), ...winUninstallers()]) {
         if (fs.existsSync(u)) spawnSync(u, ['/S'], { stdio: 'ignore', timeout: 120_000, windowsHide: true });
       }
     }
@@ -438,7 +451,7 @@ async function main() {
     : (mode === 'manual' ? ['manual'] : ['corrupt', 'interrupted', 'skip', 'busy', 'install', 'reload-busy']);
   const only = opt('--only');
   const scenarios = only ? all.filter((s) => only.split(',').includes(s)) : all;
-  log(`G9 update e2e on ${PLATFORM}/${process.arch}: ${old.version} → ${NEW} (${FEED} feed, ${mode} install) — ${scenarios.join(', ')}`);
+  log(`G9BrowserAgent update e2e on ${PLATFORM}/${process.arch}: ${old.version} → ${NEW} (${FEED} feed, ${mode} install) — ${scenarios.join(', ')}`);
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'g9-update-e2e-'));
   const home = path.join(tmp, 'home');
@@ -449,6 +462,16 @@ async function main() {
   const pageServer = feed ?? await new Feed(tmp).start(); // the test pages, also for --feed official
   const env = { ...process.env, G9_HOME: home, G9_PORT: String(port) };
   delete env.ELECTRON_RUN_AS_NODE;
+  // A user profile of its own: the app writes AI clients' configs (~/.claude.json, …\Claude\…) at
+  // start (3.2.1: mcp-register migrateRegistrations) — never this machine's own.
+  const profile = path.join(tmp, 'profile');
+  const profileEnv = PLATFORM === 'win32'
+    ? { USERPROFILE: profile, APPDATA: path.join(profile, 'AppData', 'Roaming'), LOCALAPPDATA: path.join(profile, 'AppData', 'Local') }
+    : { HOME: profile, XDG_CONFIG_HOME: path.join(profile, '.config'), XDG_CACHE_HOME: path.join(profile, '.cache') };
+  for (const d of [profile, ...Object.values(profileEnv)]) fs.mkdirSync(d, { recursive: true });
+  Object.assign(env, profileEnv);
+  const claudeJson = path.join(profile, '.claude.json');
+  const fwd = (s) => String(s).replace(/\\/g, '/');
   const inst = new Install(tmp);
   const cleanups = [];
   let app = null;
@@ -459,9 +482,10 @@ async function main() {
   // Where the app keeps its own Electron data (userData) and electron-updater its download cache —
   // removed at the end only when this run created them.
   const userDataDirs = {
-    win32: [path.join(process.env.APPDATA ?? '', 'G9'), path.join(process.env.LOCALAPPDATA ?? '', 'g9-desktop-updater')],
-    darwin: [path.join(os.homedir(), 'Library', 'Application Support', 'G9'), path.join(os.homedir(), 'Library', 'Caches', 'g9-desktop-updater')],
-    linux: [path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'G9'), path.join(os.homedir(), '.cache', 'g9-desktop-updater')],
+    // Both names: an older build (G9, g9-desktop-updater) may be what this run installs first.
+    win32: [...NAMES.map((n) => path.join(process.env.APPDATA ?? '', n)), path.join(process.env.LOCALAPPDATA ?? '', 'g9browseragent-updater'), path.join(process.env.LOCALAPPDATA ?? '', 'g9-desktop-updater')],
+    darwin: [...NAMES.map((n) => path.join(os.homedir(), 'Library', 'Application Support', n)), path.join(os.homedir(), 'Library', 'Caches', 'g9browseragent-updater'), path.join(os.homedir(), 'Library', 'Caches', 'g9-desktop-updater')],
+    linux: [...NAMES.map((n) => path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), n)), path.join(os.homedir(), '.cache', 'g9browseragent-updater'), path.join(os.homedir(), '.cache', 'g9-desktop-updater')],
   }[PLATFORM].filter((d) => !fs.existsSync(d));
 
   try {
@@ -476,6 +500,14 @@ async function main() {
     const desktop = { wizard: { completedAt: now, steps: {} }, ...(feed ? { update: { mode: 'off', url: feed.url, channel: 'stable' } } : {}) };
     fs.writeFileSync(path.join(home, 'desktop.json'), JSON.stringify(desktop, null, 2));
     if (feed) fs.writeFileSync(path.join(home, 'settings.json'), JSON.stringify({ updateMode: 'off', updateUrl: feed.url }, null, 2));
+
+    // An AI client registered the way G9 up to 3.2.0 did it: under 'g9-browser', naming this install.
+    if (PLATFORM !== 'darwin') {
+      const oldEntry = PLATFORM === 'win32'
+        ? { type: 'stdio', command: fwd(inst.exe), args: [fwd(path.join(inst.root, 'resources', 'mcp', 'shim.mjs'))], env: { ELECTRON_RUN_AS_NODE: '1' } }
+        : { type: 'stdio', command: fwd(inst.exe), args: [fwd(path.join(home, 'bin', 'g9-run.mjs')), 'mcp/shim.mjs', '--no-sandbox'], env: { ELECTRON_RUN_AS_NODE: '1' } };
+      fs.writeFileSync(claudeJson, JSON.stringify({ mcpServers: { 'g9-browser': oldEntry, other: { command: 'other-mcp' } }, projects: { keep: true } }, null, 2));
+    }
 
     app = new App({ exe: inst.exe, env, cdpPort }).start();
     await app.connect();
@@ -510,9 +542,9 @@ async function main() {
     const useFeed = () => app.invoke('admin', { op: 'settings.set', args: { patch: { updateMode: 'custom', updateUrl: feed.url } } });
     // electron-updater keeps a verified download in <cache>/pending and does not fetch it again.
     const updaterCache = {
-      win32: path.join(process.env.LOCALAPPDATA ?? '', 'g9-desktop-updater'),
-      darwin: path.join(os.homedir(), 'Library', 'Caches', 'g9-desktop-updater'),
-      linux: path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'g9-desktop-updater'),
+      win32: path.join(env.LOCALAPPDATA ?? '', 'g9browseragent-updater'),
+      darwin: path.join(os.homedir(), 'Library', 'Caches', 'g9browseragent-updater'),
+      linux: path.join(env.XDG_CACHE_HOME ?? '', 'g9browseragent-updater'),
     }[PLATFORM];
     const clearDownloads = () => fs.rmSync(path.join(updaterCache, 'pending'), { recursive: true, force: true });
     const settled = (what) => app.waitUpdater(what, (x) => ['error', 'downloaded', 'skipped', 'up-to-date'].includes(x.status), 600_000);
@@ -641,6 +673,14 @@ async function main() {
         record('install: the extension reloaded and reconnected at the new version', !row.versionMismatch, `extension ${row.version}, no versionMismatch`);
         const status = await daemon.call('browser_status', {}, { timeoutMs: 60_000 });
         record('install: browser_status reports no version mismatch', !status?.versionMismatch, JSON.stringify(status?.versions ?? status?.version ?? '').slice(0, 160));
+      }
+      if (fs.existsSync(claudeJson)) {
+        // 3.2.1: the AI client's entry follows the app — under its new name, starting what is installed now.
+        const cfg = JSON.parse(fs.readFileSync(claudeJson, 'utf8'));
+        const e = cfg.mcpServers?.g9browseragent;
+        record('install: the AI client entry is "g9browseragent" and starts the installed app',
+          !!e && !cfg.mcpServers['g9-browser'] && fwd(e.command) === fwd(inst.exe) && cfg.mcpServers.other?.command === 'other-mcp' && cfg.projects?.keep === true,
+          e ? `${e.command} ${JSON.stringify(e.args)}` : JSON.stringify(Object.keys(cfg.mcpServers ?? {})));
       }
     }
 

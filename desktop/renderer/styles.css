@@ -1,4 +1,4 @@
-/* G9 desktop — a compact control room for browser automation.
+/* G9BrowserAgent desktop — a compact control room for browser automation.
    One bold element: the Stop control, which turns the whole bar into a red band when agents are
    halted. Everything else stays quiet. Light/dark follow the OS. Built for 1100×720 and up. */
 
@@ -113,19 +113,22 @@ a { color: var(--accent); }
   border-bottom: 1px solid var(--line-2);
 }
 .brand-mark {
+  flex: none; /* never squeezed by a long name */
   width: 20px; height: 20px; border-radius: 5px; background: var(--accent);
   -webkit-mask: none;
   position: relative;
 }
 .brand-mark::after {
-  /* the cursor glyph: the one thing G9 draws that pages never see */
+  /* the cursor glyph: the one thing G9BrowserAgent draws that pages never see */
   content: ""; position: absolute; left: 6px; top: 3px; width: 10px; height: 14px; background: var(--accent-ink);
   clip-path: polygon(0 0, 0 78%, 20% 60%, 34% 92%, 47% 86%, 33% 56%, 58% 56%);
 }
-.brand-name { font: 600 16px/1 var(--font-display); letter-spacing: 0.01em; }
+/* "G9BrowserAgent" does not fit the rail beside a version badge: the version goes under the name. */
+.brand-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.brand-name { font: 600 15px/1.1 var(--font-display); letter-spacing: 0.01em; white-space: nowrap; }
 .brand-version {
-  margin-left: auto; font: 500 11px/1 var(--mono); color: var(--muted);
-  padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px;
+  align-self: flex-start; font: 500 10px/1 var(--mono); color: var(--muted);
+  padding: 2px 5px; border: 1px solid var(--line); border-radius: 4px;
 }
 
 .nav { list-style: none; margin: 8px 0; padding: 0 8px; display: flex; flex-direction: column; gap: 1px; }

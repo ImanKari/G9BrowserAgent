@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * g9d — the G9 daemon. One per machine, on 127.0.0.1:8765 by default.
+ * g9d — the G9BrowserAgent daemon. One per machine, on 127.0.0.1:8765 by default.
  *
  * Usually nobody starts this by hand: the first MCP shim that finds no daemon
  * spawns it (detached, hidden), and it exits by itself after an idle period
@@ -10,7 +10,7 @@
  *   node daemon/g9d.mjs [--port N] [--home DIR] [--foreground]
  *
  *   --port        overrides G9_PORT and settings.port
- *   --home        overrides G9_HOME (default %LOCALAPPDATA%\G9, or ~/.g9)
+ *   --home        overrides G9_HOME (default %LOCALAPPDATA%\G9BrowserAgent, or ~/.g9browseragent)
  *   --foreground  log to stderr as well as G9_HOME/logs/daemon.log, and never
  *                 idle-exit (a person started it and is watching; Ctrl+C stops it)
  *
@@ -48,7 +48,8 @@ function parseArgs(argv) {
 }
 
 const args = parseArgs(process.argv.slice(2));
-const home = resolveHome(args.home ?? process.env.G9_HOME);
+// The daemon owns the data home: it may move the pre-3.2.1 folder to the new name (lib/home.mjs).
+const home = resolveHome(args.home ?? process.env.G9_HOME, { migrate: true });
 // Every Node component — and every engine/* module this process imports —
 // must agree on where profiles and Chrome for Testing live.
 process.env.G9_HOME = home;
@@ -128,7 +129,7 @@ try {
       log.close?.();
       process.exit(0);
     }
-    const holder = body?.ok ? `a G9 v1 bridge (pid ${body.pid ?? '?'}, v${body.version ?? '?'})` : 'another program';
+    const holder = body?.ok ? `a G9BrowserAgent v1 bridge (pid ${body.pid ?? '?'}, v${body.version ?? '?'})` : 'another program';
     log(`[g9d] cannot listen: port ${port} is held by ${holder}. Close it (for a v1 bridge: close the editor or MCP client that started it), or set G9_PORT.`);
   } else {
     log(`[g9d] cannot start: ${err?.stack ?? err}`);

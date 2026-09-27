@@ -47,7 +47,7 @@ function renderAgents(s) {
   if (!s.agents.length) {
     replace(listEl, empty(
       'No agent is connected',
-      'An AI client connects the first time one of its agents uses a browser tool. If your client never shows up here, register G9 with it in Setup.',
+      'An AI client connects the first time one of its agents uses a browser tool. If your client never shows up here, register G9BrowserAgent with it in Setup.',
       [h('button', { type: 'button', class: 'btn', onclick: () => go('setup') }, 'Open Setup')],
     ));
     return;

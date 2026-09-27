@@ -679,7 +679,7 @@ export function refsFrom(tree) {
  *
  * `spa: true` is the single-page-app variant (setup/endurance.mjs): no navigation — the same
  * document takes every pass — and the fields are cleared before typing so their contents do not
- * grow. Anything G9 leaves behind in a document (a witness listener not released) then piles up
+ * grow. Anything G9BrowserAgent leaves behind in a document (a witness listener not released) then piles up
  * pass after pass instead of being thrown away with the document by the next goto.
  */
 export async function runFlow(agent, { tabId, url, seed, record, humanize = 'human', spa = false, selectValue = 'stg', scrollDirection = 'down' }) {
@@ -890,7 +890,7 @@ async function main() {
   const gated = args.gated === undefined ? 16 : Number(args.gated) || 0;
   const sampleMs = Number(args['sample-ms'] ?? 2000);
   const root = await makeRoot('bench');
-  log(`P8 bench — root ${root}, levels ${levels.join(',')}, iterations ${iterations}, browser ${browser}, G9 ${VERSION}, node ${process.version}`);
+  log(`P8 bench — root ${root}, levels ${levels.join(',')}, iterations ${iterations}, browser ${browser}, G9BrowserAgent ${VERSION}, node ${process.version}`);
   const report = {
     date: new Date().toISOString(), g9: VERSION, node: process.version, os: `${os.type()} ${os.release()}`,
     cpu: os.cpus()[0]?.model, logicalCpus: os.cpus().length, totalMemGB: Math.round(os.totalmem() / 1024 ** 3 * 10) / 10,

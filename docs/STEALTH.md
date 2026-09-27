@@ -1,4 +1,4 @@
-# Stealth — what G9 can hide, what it cannot, and how to check
+# Stealth — what G9BrowserAgent can hide, what it cannot, and how to check
 
 This is the owner-facing guide to the stealth levels (decision D10, AIGuide §2.0), and their
 specification. The code is:
@@ -10,13 +10,13 @@ Detectors change. Re-measure before you rely on anything below.
 
 **Where the numbers come from.** Everything was measured on the owner's workstation on 2026-09-22,
 except the final pass and the CfT frame-rate A/B of 2026-09-23: Windows 11 Pro 10.0.26200, Edge
-153.0.4234.32, Chrome 153.0.8010.53, and Chrome for Testing (CfT) 153.0.8010.52, which is G9's pinned
+153.0.4234.32, Chrome 153.0.8010.53, and Chrome for Testing (CfT) 153.0.8010.52, which is G9BrowserAgent's pinned
 build. 2.0.2, 2.0.3, 3.0.0, 3.0.1 and 3.1.0 changed no launch switch, stealth rule or input dispatch since that
 final pass (they changed replay, evidence pruning, watch ordering, the browser close budget, the
 Engine 1 popout, whose effect on a page is noted [below](#what-the-tools-do-differently-at-stealth),
 and in 3.0.0 the side panel). One 3.0.0 change matters in the person's own browser: Engine 1's
 auto-attach now defaults to **Project sites** on a new install, so a tab on the site of a connected
-agent's `g9.project.json` environment has G9 attached from its first load, as **All tabs** did for
+agent's `g9.project.json` environment has G9BrowserAgent attached from its first load, as **All tabs** did for
 every site. An install upgraded from 2.x keeps its setting.
 
 | Name used below | What ran |
@@ -41,7 +41,7 @@ every site. An install upgraded from 2.x keeps its setting.
 4. **`stealth` costs something.** You get no page console capture, slower runs, and you need a
    headed desktop for the strict cases.
 5. **Nothing here works on a person's own desktop while they use it.** That is why Engine 2 (a
-   browser G9 launches) exists. Engine 1 (the extension in the person's browser) is for authoring;
+   browser G9BrowserAgent launches) exists. Engine 1 (the extension in the person's browser) is for authoring;
    see [Engine 1 and stealth](#engine-1-the-extension-and-stealth-input-rules-only).
 
 ## The three levels
@@ -60,10 +60,10 @@ true. `createContext` says so in the context's `warnings`, and the tab's status 
 
 | | `off` | `human` | `stealth` |
 |---|---|---|---|
-| Input | v1's direct CDP events | human paths, timing, wheel and typing | as `human`, with no shortcut a page can see: no `DOM.focus`, no programmatic scroll (G9 fails and says why instead), no `Input.insertText` unless `fast:true` |
-| `navigator.webdriver` | `true` (the pipe sets it; G9 warns at launch) | `true` | `false` **when the ENGINE was launched at stealth**. This is the one switch stealth adds, `--disable-blink-features=AutomationControlled` (decision D-a), and a launch switch cannot be applied per context: a stealth context inside an engine launched at `off`/`human` still reports `true`, and says so in its `warnings`. The same switch is now used for `browser_engine action:"warm"`, so the one-time sign-in window does not announce itself as automated |
-| `Runtime` domain | on | on | **never enabled**: page `console.*` is not captured (`browser_console` says so), and G9's own evaluation runs in its isolated world |
-| Main world | G9's own helpers stay out of it at every level (the witness, recorder and text extraction live in an isolated world). The one deliberate exception is `browser_console action:"evaluate"`, which runs in the page's main world, where the page can see it. | same | same |
+| Input | v1's direct CDP events | human paths, timing, wheel and typing | as `human`, with no shortcut a page can see: no `DOM.focus`, no programmatic scroll (G9BrowserAgent fails and says why instead), no `Input.insertText` unless `fast:true` |
+| `navigator.webdriver` | `true` (the pipe sets it; G9BrowserAgent warns at launch) | `true` | `false` **when the ENGINE was launched at stealth**. This is the one switch stealth adds, `--disable-blink-features=AutomationControlled` (decision D-a), and a launch switch cannot be applied per context: a stealth context inside an engine launched at `off`/`human` still reports `true`, and says so in its `warnings`. The same switch is now used for `browser_engine action:"warm"`, so the one-time sign-in window does not announce itself as automated |
+| `Runtime` domain | on | on | **never enabled**: page `console.*` is not captured (`browser_console` says so), and G9BrowserAgent's own evaluation runs in its isolated world |
+| Main world | G9BrowserAgent's own helpers stay out of it at every level (the witness, recorder and text extraction live in an isolated world). The one deliberate exception is `browser_console action:"evaluate"`, which runs in the page's main world, where the page can see it. | same | same |
 
 ## The environment checklist
 
@@ -81,10 +81,10 @@ Before a stealth-critical suite, check each point:
    takes their keyboard.
 4. **A warm persona profile that is not signed in to a browser account.** Keep one profile per
    persona, warmed once by a person (`browser_engine action:"warm"`) with logins to the **sites**
-   only. G9 refuses a signed-in profile at stealth.
+   only. G9BrowserAgent refuses a signed-in profile at stealth.
 5. **Locale, time zone and network tell one story.** Give `locale` and `timezone` at launch, so they
    are saved with the profile. Keep the egress where such a person would be; do not use a datacenter
-   proxy unless the scenario needs one. G9's consistency check warns about a mismatch, but it cannot
+   proxy unless the scenario needs one. G9BrowserAgent's consistency check warns about a mismatch, but it cannot
    change the host: on this workstation, en-US with Asia/Tehran was flagged in every run, and the
    public IP was classed as "hosting".
 6. **Tools that stay invisible.** Do not use `browser_console action:"evaluate"` (it runs in the
@@ -101,35 +101,35 @@ Before a stealth-critical suite, check each point:
 
 ### The local detector page (`setup/fixtures/stealth-local.html`)
 
-This page was written against G9 itself. Each check names who could fix a failure:
-- **g9**: a G9 leak or broken promise;
+This page was written against G9BrowserAgent itself. Each check names who could fix a failure:
+- **g9**: a G9BrowserAgent leak or broken promise;
 - **headless**, **cdp** or **browser**: inherent to headless Chromium, to CDP input, or to the binary;
 - **host** or **harness**: this machine, or how the test launched the browser.
 
 | Configuration | Verdict on the final code | What detected it |
 |---|---|---|
 | `edge-headed-stealth` | **undetected** (every final pass) | nothing |
-| `edge-headless-stealth` | detected | only `ua-headless` (class headless): the user agent says `HeadlessChrome/153.0.0.0`. In this guide's run: 65 checks passed, 1 failed, 0 G9-class. |
+| `edge-headless-stealth` | detected | only `ua-headless` (class headless): the user agent says `HeadlessChrome/153.0.0.0`. In this guide's run: 65 checks passed, 1 failed, 0 G9BrowserAgent-class. |
 | `edge-headless-stealth-de` (`de-DE`, Europe/Berlin) | detected | the headless user agent only; the locale checks pass (below) |
-| `cft-headless-stealth` | detected | the headless user agent (0 G9-class failures) |
-| `cft-headed-stealth` | undetected in live round 3 (run B, before the Widevine and popup checks existed); not in the final passes of 2026-09-22. Final pass (2.0.1): detected | the missing Widevine only (63 checks passed, 1 failed, 0 G9-class) |
+| `cft-headless-stealth` | detected | the headless user agent (0 G9BrowserAgent-class failures) |
+| `cft-headed-stealth` | undetected in live round 3 (run B, before the Widevine and popup checks existed); not in the final passes of 2026-09-22. Final pass (2.0.1): detected | the missing Widevine only (63 checks passed, 1 failed, 0 G9BrowserAgent-class) |
 | `edge-headless-human`, `cft-headless-human` (controls) | detected, **as intended** | `navigator.webdriver` true, and the Runtime console probe hit |
 
-Every final pass had **0 G9-class failures** in every stealth configuration. The controls prove the
+Every final pass had **0 G9BrowserAgent-class failures** in every stealth configuration. The controls prove the
 page can see a bot: `navigator.webdriver` was true in 14/14 of them in live round 3, and the Runtime
 probe hit 55–63 times per run.
 
 The final pass of 2026-09-23 (2.0.1) agreed: `edge-headed-stealth` undetected (65 passed, 0 failed,
 2 warnings); `edge-headless-stealth` and `edge-headless-stealth-de` detected by the headless user agent
 only; `cft-headless-stealth` by the user agent and the missing Widevine; `cft-headed-stealth` by the
-missing Widevine only; 0 G9-class failures in any stealth configuration; both human controls detected.
+missing Widevine only; 0 G9BrowserAgent-class failures in any stealth configuration; both human controls detected.
 
 What stealth gets right, measured in live round 3:
 - **`navigator.webdriver`** is `false` in 40/40 stealth runs, from the native getter (not an own
   property), and also inside a cross-site frame.
 - **The Runtime side channel** (a `console.debug` of an Error with a `name` getter) had 0 hits in
   40/40 stealth runs, in dedicated workers, and in the cross-site frame in all 54 runs.
-- **Main world:** 0 G9 globals, 0 foreign DOM nodes, 0 main-world DOM calls, 0 listener stacks and 0
+- **Main world:** 0 G9BrowserAgent globals, 0 foreign DOM nodes, 0 main-world DOM calls, 0 listener stacks and 0
   untrusted events in every stealth run, the cross-site frame included.
 - **Read tools:** the sweep of every read tool at stealth made 520 calls in 20 sweeps with 0 page-visible
   changes. This guide's run: 26 calls, 0. A main-world evaluate is the control that proves the page
@@ -171,13 +171,13 @@ public-detector table is that run.
 | Headed stealth, CfT (off-screen) | pass | pass | pass | pass | pass | flagged: brand (Google Chrome not presented; "Chrome for Testing") |
 | Human-level controls | detected ("WebDriver (New)") | headless 67–100 % | Robot | automated | bad | `navigatorWebdriver` red |
 
-The pixelscan verdict on headed Edge is **not traced to G9**:
+The pixelscan verdict on headed Edge is **not traced to G9BrowserAgent**:
 - through the harness it was flagged 4/4, twice with interaction and twice with `--no-interact`;
 - headed Chrome passed 2/2;
 - in raw probes on headed off-screen Edge with **nothing attached until 30 s after the load**, it was
   still flagged 2/2.
 
-Host facts that show on every run and are not G9's:
+Host facts that show on every run and are not G9BrowserAgent's:
 - the time zone (Asia/Tehran) does not match the public IP (a Netherlands hosting range), so
   pixelscan reports "Timezone spoofed" and "Proxy detected";
 - `navigator.connection` varied between slow-2g and 4g.
@@ -201,7 +201,7 @@ dedicated desktop ([the environment checklist](#the-environment-checklist)). The
     6/8, headless 0/8.
   - Since then: 0 of 54 local runs in live round 3, none in the final passes, and none in this
     guide's run (`1920x1032` at 123 ms).
-  - It was not shown to be in G9's control. The launch warning still mentions it.
+  - It was not shown to be in G9BrowserAgent's control. The launch warning still mentions it.
 - **Weak CDP-input signals:**
   - `pointerrawupdate` fires exactly as often as `pointermove`, and `getCoalescedEvents()` always has
     length 1: one dispatched event per frame, never coalesced (14/14 runs in live round 3);
@@ -244,11 +244,11 @@ dedicated desktop ([the environment checklist](#the-environment-checklist)). The
 
 How the popup and frame fixes work:
 - **Held until prepared.** Every new target (popup, page-opened tab, cross-site frame, worker) is
-  held by the browser until G9 has sent it its settings. G9 then resumes it with
+  held by the browser until G9BrowserAgent has sent it its settings. G9BrowserAgent then resumes it with
   `Runtime.runIfWaitingForDebugger`. That is a command, not `Runtime.enable`, so the console probe
   stayed at 0 hits at stealth, in popups and frames too.
 - **Cross-site popups.** A cross-site `window.open()` popup starts in its opener's renderer, where a
-  second locale override is refused, so G9 sets its locale again when the popup's own document
+  second locale override is refused, so G9BrowserAgent sets its locale again when the popup's own document
   commits. Its very first script can still see the browser's default: with `--lang=de-DE` that is
   Intl `de`, which is what a German Edge reports anyway.
 - **External extensions.** With component updates on (stealth), Edge records this machine's
@@ -261,13 +261,13 @@ How the popup and frame fixes work:
 - **Edge** is the best-measured choice. Its one caveat: rebrowser notes that Edge does not present
   "Google Chrome" in userAgentData. That is Edge telling the truth, and no switch can change it
   without creating a worse contradiction.
-- **Chrome** behaved like Edge in every G9 measurement: mousemove cadence 13.9 ms and a humanized
+- **Chrome** behaved like Edge in every G9BrowserAgent measurement: mousemove cadence 13.9 ms and a humanized
   click in 1,022 ms in live round 2, and it passed pixelscan headed (2/2).
 - **Chrome for Testing** is pinned and reproducible, but detectors read its brand (a red flag on
   rebrowser, headed runs included) and the Chromium build ships no Widevine key system, which they
   read too. Its renderer also ran at **10 frames per second** on this machine: `requestAnimationFrame`
   every 100.5 ms, headless and headed, against 10.5 ms for Edge and Chrome. Every mouse event
-  therefore reached pages on a 100 ms beat. G9 passes `--disable-frame-rate-limit` to CfT only; with
+  therefore reached pages on a 100 ms beat. G9BrowserAgent passes `--disable-frame-rate-limit` to CfT only; with
   it, frames came every 17.4 ms and the page saw mousemove every 16.8–17.3 ms. The cause of the
   10 Hz renderer was not isolated, and it is not the Windows Firewall prompt that was pending when it
   was first measured: with that prompt answered, an interleaved A/B on 2026-09-23 (4 rounds of
@@ -295,14 +295,14 @@ How the popup and frame fixes work:
   profile that ran for more than about 20 s. Synced extensions then injected scripts into every page
   (globals, a custom element, main-world `dispatchEvent` calls, all visible to detectors), and in one
   headed run they slowed input until it stopped arriving.
-  - **What G9 does now:** it launches every browser with `--disable-features=msImplicitSignin` (new
+  - **What G9BrowserAgent does now:** it launches every browser with `--disable-features=msImplicitSignin` (new
     profiles stay signed out; 0 accounts in every profile checked since) and `--disable-sync`.
   - **A profile that is already signed in stays signed in.** Launching it is refused at stealth
     (7–12 ms, before any browser starts) and warned about otherwise. Sign out in it (warm it, then
     the browser's profile menu → Sign out) or make a new profile. `docs/INSTALL.md` says how to check
     a profile, and how to clean up what an account already synced.
 - **Chrome for Testing reopened the previous run's tabs** on every relaunch of a reused profile.
-  G9 now clears the saved session before each launch and closes any start-up page it did not open;
+  G9BrowserAgent now clears the saved session before each launch and closes any start-up page it did not open;
   the launch result names them.
 
 ## Engine 1 (the extension) and stealth: input rules only
@@ -310,15 +310,15 @@ How the popup and frame fixes work:
 The extension drives the person's own browser through `chrome.debugger`. While any debugger session
 exists, the browser shows its "started debugging this browser" infobar in every window, and lays it
 out again at every cross-document navigation. Measured in live round 3 on headless Edge 153, comparing
-the browser with the G9 extension against the same browser without it:
+the browser with the G9BrowserAgent extension against the same browser without it:
 
 - **The viewport is shorter:** `innerHeight` was 760–761 px with the extension and 808 px without.
 - **Every cross-document load in that browser sees 2 transient `resize` events 148–301 ms in.** This
-  holds for the tab G9 drives and for any other, whether G9, the page's own script or another CDP
+  holds for the tab G9BrowserAgent drives and for any other, whether G9BrowserAgent, the page's own script or another CDP
   client navigated it. The height moves by +1…+40 px and back, for example
-  `155ms:1256x763, 165ms:1256x760`. All 15 G9-driven loads showed it.
+  `155ms:1256x763, 165ms:1256x760`. All 15 G9BrowserAgent-driven loads showed it.
 
-This is the browser's doing, not a G9 command, and G9 cannot remove it. A person's browser does not
+This is the browser's doing, not a G9BrowserAgent command, and G9BrowserAgent cannot remove it. A person's browser does not
 run with the switch that hides the infobar (`--silent-debugger-extension-api`). A
 policy-installed (`ExtensionInstallForcelist`) extension should avoid the infobar (AIGuide §2.8.2); that was **not
 measured**.
@@ -359,7 +359,7 @@ Two more Engine 1 facts:
   than the ref is an error (`delivery:"missed"`) and is never repeated. An error message starts with
   a tag such as `[delivery: not-delivered; tab hidden]`.
 - **Input to a hidden tab** is refused before anything is sent. Pointer and wheel input would not
-  reach it (measured: never even answered). Key input would, but nobody could see what it does, so G9
+  reach it (measured: never even answered). Key input would, but nobody could see what it does, so G9BrowserAgent
   refuses it too. The error names the remedies an agent has: `browser_tabs action:"focus"`,
   `"popout"` or `"handoff"`. A popout moves the tab into a window of another size (by default half
   the source window's width and three quarters of its height, unless `width`/`height` are given), so
@@ -412,7 +412,7 @@ A broken extractor for a public page is a warning, while a detected verdict is a
 | `--extra-arg <switch>` | repeatable, for controlled experiments only |
 | `--no-interact` | public pages are loaded and read only; tells a behaviour verdict from an environment one |
 | `--no-sweep`, `--no-popup`, `--no-children`, `--no-product-checks` | skip those checks |
-| `--allow-sync` | do not add the harness's own `--disable-sync` (G9 passes it anyway) |
+| `--allow-sync` | do not add the harness's own `--disable-sync` (G9BrowserAgent passes it anyway) |
 | `--keep-home`, `--verbose` | keep the temporary home; print more |
 
 **How long it takes:** this guide's run (one local configuration, including a 48 s warm-up) took about

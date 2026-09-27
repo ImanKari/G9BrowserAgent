@@ -291,7 +291,7 @@ await test('manifest: version equals package.json, Chrome 125+, downloads permis
   // The toolbar title names the MAJOR version (sw.js sets the exact one at runtime). Derived from
   // the manifest's own version, so a major bump cannot leave a stale literal behind again.
   const major = manifest.version.split('.')[0];
-  assert.equal(manifest.action.default_title, `G9 Browser Agent v${major}`);
+  assert.equal(manifest.action.default_title, `G9BrowserAgent v${major}`);
   assert.match(manifest.description, /\bv[23]\b/, 'the description names the engine architecture (v2 onwards)');
   assert.ok(manifest.description.length <= 132, 'store descriptions are capped at 132 characters');
   assert.equal(manifest.background.service_worker, 'sw.js');
@@ -331,7 +331,7 @@ await test('no trace of the four modes, the workspace allowlist or bridge discov
 await test('the version is shown in the header, the window title, the About tab and the welcome page', () => {
   const header = panelHtml.slice(panelHtml.indexOf('<header'), panelHtml.indexOf('</header>'));
   assert.match(header, /id="versionBadge"/, 'a version badge in the header');
-  assert.match(header, /G9 Browser Agent/);
+  assert.match(header, /G9BrowserAgent/);
   for (const id of ['aboutVersion', 'aboutExt', 'aboutPrev', 'aboutWhen', 'aboutBrowser', 'aboutDaemon', 'aboutConn']) {
     assert.ok(htmlIds(panelHtml).includes(id), `About shows ${id}`);
   }
@@ -694,9 +694,9 @@ await test('3.2 live view: the cursor is drawn by the desktop\'s own code, the p
 await test('ui.js: the title carries the version, and a Stop', async () => {
   const ui = await import(pathToFileURL(path.join(ROOT, PANEL_DIR, 'ui.js')).href);
   assert.equal(ui.VERSION, '2.0.0');
-  assert.equal(ui.titleFor(null), 'G9 Browser Agent v2.0.0');
-  assert.equal(ui.titleFor({ halted: false }), 'G9 Browser Agent v2.0.0');
-  assert.equal(ui.titleFor({ halted: true }), 'Stopped · G9 Browser Agent v2.0.0');
+  assert.equal(ui.titleFor(null), 'G9BrowserAgent v2.0.0');
+  assert.equal(ui.titleFor({ halted: false }), 'G9BrowserAgent v2.0.0');
+  assert.equal(ui.titleFor({ halted: true }), 'Stopped · G9BrowserAgent v2.0.0');
 });
 
 await test('ui.js: the browser is named by its own brand and full build', async () => {
@@ -965,7 +965,7 @@ await test('welcome.js: ?updated=1 says "Updated from vX to vY"', async () => {
     answers: { about: { ok: true, version: '2.0.0', previousVersion: '1.7.21', updatedAt: Date.UTC(2026, 8, 21), browser: 'Edge 153' } },
   });
   assert.equal(els.ver.textContent, 'v2.0.0');
-  assert.equal(title, 'G9 Browser Agent v2.0.0 — updated');
+  assert.equal(title, 'G9BrowserAgent v2.0.0 — updated');
   assert.equal(els.updated.hidden, false);
   assert.equal(els.fromVer.textContent, 'v1.7.21');
   assert.equal(els.toVer.textContent, 'v2.0.0');
@@ -976,7 +976,7 @@ await test('welcome.js: ?updated=1 says "Updated from vX to vY"', async () => {
 await test('welcome.js: a fresh install shows no update banner; an update with no record does not invent a "from"', async () => {
   const fresh = await runWelcome({ search: '', answers: {} });
   assert.ok(!fresh.els.updated || fresh.els.updated.hidden === true, 'the banner stays hidden (the HTML starts it hidden)');
-  assert.equal(fresh.title, 'G9 Browser Agent v2.0.0 — installed');
+  assert.equal(fresh.title, 'G9BrowserAgent v2.0.0 — installed');
   assert.equal(fresh.els.ver.textContent, 'v2.0.0');
   assert.deepEqual(fresh.sent, [], 'nothing to ask on a fresh install');
 
@@ -993,7 +993,7 @@ await test('welcome.js: a fresh install shows no update banner; an update with n
   assert.equal(fallback.els.fromVer.textContent, 'v1.7.20');
 });
 
-await test('welcome.js: "Open the G9 panel" opens the side panel inside the click, with a window fallback', async () => {
+await test('welcome.js: "Open the G9BrowserAgent panel" opens the side panel inside the click, with a window fallback', async () => {
   const opened = [];
   const { els } = await runWelcome({ search: '', answers: {}, sidePanel: { open: (o) => (opened.push(o), Promise.resolve()) } });
   els.openPanel.on();
@@ -1507,7 +1507,7 @@ const TRANSPORT_TESTS = [
 
   ['welcome.problem stops reconnecting until connectNow(), even across a worker restart', async (g) => {
     const t = await g.fresh();
-    const problem = 'Another G9 build is connected as this browser. Reload the extension.';
+    const problem = 'Another G9BrowserAgent build is connected as this browser. Reload the extension.';
     const ws = await connectWelcomed(t, { problem });
     assert.equal(ws.readyState, 2, 'the client closes a refused socket');
     assert.equal(t.isConnected(), false);
@@ -1544,7 +1544,7 @@ const TRANSPORT_TESTS = [
     const ws = await connectWelcomed(t, { version: '1.7.21', id: undefined, serverPath: 'G:/x/bridge/src/server.js' });
     assert.equal(ws.readyState, 2);
     const st = await g.state.getState();
-    assert.match(st.bridge.lastError, /G9 v1 bridge \(v1\.7\.21\)/);
+    assert.match(st.bridge.lastError, /G9BrowserAgent v1 bridge \(v1\.7\.21\)/);
     assert.equal(st.bridge.connected, false);
     ws.finishClose();
     await flush();
@@ -1591,7 +1591,7 @@ const TRANSPORT_TESTS = [
     await flush();
     assert.equal(FakeWebSocket.instances.length, 0, 'a v1 bridge displaces its client on ANY upgrade');
     const st = await g.state.getState();
-    assert.match(st.bridge.lastError, /held by a G9 v1 bridge \(v1\.7\.21, pid 5512\)/);
+    assert.match(st.bridge.lastError, /held by a G9BrowserAgent v1 bridge \(v1\.7\.21, pid 5512\)/);
     assert.match(st.bridge.lastError, /left alone/);
     assert.equal(t.isReconnectPending(), true);
 
@@ -1641,7 +1641,7 @@ const TRANSPORT_TESTS = [
     ws.finishClose();
     await flush();
     const st = await g.state.getState();
-    assert.match(st.bridge.lastError, /never answered the handshake — it is not a G9 v2 daemon/);
+    assert.match(st.bridge.lastError, /never answered the handshake — it is not a G9BrowserAgent v2 daemon/);
     assert.equal(t.isReconnectPending(), true, 'an ordinary failure: the backoff goes on');
   }],
 

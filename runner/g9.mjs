@@ -9,7 +9,7 @@
  * code, and a report directory.
  *
  * It speaks MCP through `mcp/shim.mjs` — the same shim an agent uses — to the
- * one G9 daemon on this machine. That is deliberate: the runner can do nothing
+ * one G9BrowserAgent daemon on this machine. That is deliberate: the runner can do nothing
  * an agent could not do, so ownership, the Stop button and every refusal apply
  * to an unattended run exactly as to an agent.
  *
@@ -76,7 +76,7 @@ function parseArgs(argv) {
 }
 
 const HELP = `
-g9 — run recorded G9 flows without an agent
+g9 — run recorded G9BrowserAgent flows without an agent
 
   g9 list                              what flows exist (repository and browser stores)
   g9 run <target> [options]            replay one flow, a suite, a tag, or all
@@ -103,7 +103,7 @@ Engine:
   --humanize-seed <n>   reproduce a run's exact motion (the report records every seed)
   --stealth <level>     off | human | stealth (launched engine)
   --keep-engine         leave an engine this run launched running afterwards
-  --port <n>            the G9 daemon's port (default: G9_PORT, else 8765)
+  --port <n>            the G9BrowserAgent daemon's port (default: G9_PORT, else 8765)
 
 Run options:
   --env <name>          environment label recorded in the report
@@ -189,7 +189,7 @@ async function connect(options) {
     await client.initialize();
   } catch (err) {
     client.close();
-    throw new Error(`The G9 MCP shim did not start: ${err.message}`);
+    throw new Error(`The G9BrowserAgent MCP shim did not start: ${err.message}`);
   }
 
   let status;
@@ -199,7 +199,7 @@ async function connect(options) {
     client.close();
     // The shim's message already names the cause (a v1 bridge on the port, a
     // daemon that could not start) — pass it through rather than guess.
-    throw new Error(`G9 is not reachable.\n  ${String(err.message ?? err).replace(/^browser_status: /, '')}`);
+    throw new Error(`G9BrowserAgent is not reachable.\n  ${String(err.message ?? err).replace(/^browser_status: /, '')}`);
   }
   if (status.halted?.global || status.halted?.mine) {
     client.close();
@@ -450,7 +450,7 @@ async function commandRun({ options }) {
       if (!ext) {
         throw new Error(
           'No extension engine is connected, so --engine extension has nothing to run in. Open the browser with ' +
-            'the G9 extension (v2) enabled, or run with the default --engine launched.',
+            'the G9BrowserAgent extension (v2) enabled, or run with the default --engine launched.',
         );
       }
       run.engine = { engineId: ext.engineId, kind: 'extension', browser: ext.browser ?? null, version: ext.version ?? null };

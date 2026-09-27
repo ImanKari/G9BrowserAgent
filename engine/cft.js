@@ -11,7 +11,7 @@
 //   ensure({ version, onProgress, cacheDir, … }) → { version, path, … }   idempotent
 //   latestStable()              → what Google currently calls Stable (for the Engines screen)
 //
-// Trust model (engine/README.md has the long form): the sha256 in versions.json was computed by G9
+// Trust model (engine/README.md has the long form): the sha256 in versions.json was computed by G9BrowserAgent
 // from the first download (trust on first use), cross-checked against the MD5 that Google's storage
 // declares in `x-goog-hash`. Every later install must match it byte for byte. A version that is not
 // pinned installs with whatever hash it has, and that hash is written to engine-versions.log so the
@@ -41,7 +41,7 @@ export const ENDPOINTS = {
 };
 
 const VERSIONS_FILE = fileURLToPath(new URL('./versions.json', import.meta.url));
-const USER_AGENT = 'g9-browser-agent (engine/cft.js; +https://github.com/GoogleChromeLabs/chrome-for-testing)';
+const USER_AGENT = 'G9BrowserAgent (engine/cft.js; +https://github.com/GoogleChromeLabs/chrome-for-testing)';
 const INSTALL_MARKER = '.g9-install.json';
 
 /** CfT platform key for this machine. */
@@ -810,7 +810,7 @@ export async function acquireLock(lockPath, { waitMs = 30 * 60_000, isDone, timi
       continue;
     }
     if (Date.now() > deadline) {
-      throw new Error(`Another G9 process (pid ${holder?.pid ?? 'unknown'}) is still installing into ${path.dirname(lockPath)}.`);
+      throw new Error(`Another G9BrowserAgent process (pid ${holder?.pid ?? 'unknown'}) is still installing into ${path.dirname(lockPath)}.`);
     }
     await new Promise((r) => setTimeout(r, timing.pollMs));
   }

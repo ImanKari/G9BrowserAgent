@@ -23,9 +23,9 @@
  *              that fails its assertion, and a schedule entry run once through the runner.
  * Other options: --themes dark,light (default both), --browser edge|chrome|cft|auto (default edge),
  * --out <dir> (copy the PNGs and the window samples there; otherwise they go with the temp folder),
- * --packaged (the window of dist/win-unpacked/G9.exe instead of the repo's app: its renderer comes
+ * --packaged (the window of dist/win-unpacked/G9BrowserAgent.exe instead of the repo's app: its renderer comes
  * out of app.asar over g9app://, and on the empty home it starts the daemon from resources/ as
- * G9.exe + ELECTRON_RUN_AS_NODE — only the build shows whether those still work).
+ * G9BrowserAgent.exe + ELECTRON_RUN_AS_NODE — only the build shows whether those still work).
  *
  * Safety: everything lives in one temp folder (both G9_HOMEs, the Electron profile, the project);
  * ports are random in 18000-18999, never 8765; the browsers are headless; the Electron window is at
@@ -67,7 +67,7 @@ const THEMES = opt('themes', 'dark,light').split(',').filter((t) => ['dark', 'li
 const BROWSER = opt('browser', 'edge');
 const OUT = opt('out', null);
 const PACKAGED = ARGV.includes('--packaged');
-const PACKAGED_EXE = path.join(APP_DIR, 'dist', 'win-unpacked', process.platform === 'win32' ? 'G9.exe' : 'G9');
+const PACKAGED_EXE = path.join(APP_DIR, 'dist', 'win-unpacked', process.platform === 'win32' ? 'G9BrowserAgent.exe' : 'G9BrowserAgent');
 
 if (!fs.existsSync(G9D)) {
   console.log(`desktop: render check — SKIPPED: ${G9D} does not exist`);
@@ -294,7 +294,7 @@ function startLab() {
   let changed = false;
   const hits = {};
   const page = () => `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>G9 render lab</title>
+<html lang="en"><head><meta charset="utf-8"><title>G9BrowserAgent render lab</title>
 <style>
   body { font: 15px/1.5 system-ui, sans-serif; margin: 0; background: #f6f7f9; color: #1c2230; }
   header { background: #274c77; color: #fff; padding: 14px 28px; font-weight: 600; letter-spacing: .02em; }

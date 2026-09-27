@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>G9 Agent Test Page</title>
+  <title>G9BrowserAgent Test Page</title>
   <style>
     :root {
       --bg: #f6f6f9; --card: #fff; --ink: #1a1a20; --muted: #6b6b7a;
@@ -52,7 +52,7 @@
   <button id="hidden-assertion-target" hidden>Hidden assertion fixture</button>
 <main>
   <div>
-    <h1>G9 Agent Test Page</h1>
+    <h1>G9BrowserAgent Test Page</h1>
     <p class="lede">Every section below hides a defect the agent should find.</p>
   </div>
 
@@ -424,7 +424,7 @@
       // so a press aimed at it lands on the track underneath. e2runReset()
       // puts it back and re-arms it. It reacts to a MOVE over it, not to
       // pointerover: a scroll that slides it under a resting pointer fires
-      // boundary events (no pointermove), and moved it before G9 even aimed.
+      // boundary events (no pointermove), and moved it before G9BrowserAgent even aimed.
       window.e2run = { armed: true, moved: 0, clicks: 0 };
       window.e2runReset = () => {
         $('e2Run').style.left = '8px';

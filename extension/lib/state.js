@@ -350,7 +350,7 @@ export async function migrateLegacySettings() {
   const autoPort = Number.isInteger(port) && port >= V1_AUTO_PORTS.from && port <= V1_AUTO_PORTS.to;
   if (autoPort) kept.bridge.v1AutoPort = true;
   await platform.storage.local.set({ settings: kept });
-  const note = autoPort ? ` The daemon address keeps port ${port} from v1; if the G9 daemon is not there, G9 switches to 8765 once it finds the daemon there.` : '';
+  const note = autoPort ? ` The daemon address keeps port ${port} from v1; if the G9BrowserAgent daemon is not there, G9BrowserAgent switches to 8765 once it finds the daemon there.` : '';
   return (settings.mode
     ? `Removed the v1 control mode ("${settings.mode}") from settings: v2 has no modes — attaching a tab gives full access.`
     : 'Removed obsolete v1 settings.') + note + autoNote;

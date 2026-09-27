@@ -48,15 +48,15 @@ const notes = `## Download
 
 | System | File | Updates |
 |---|---|---|
-| Windows 10/11 (x64) | \`G9-Setup-${version}.exe\` — per user, no administrator rights | Automatic: G9 checks these releases, downloads in the background and asks before installing |
-| macOS 12+ (Apple silicon) | \`G9-${version}-mac-arm64.dmg\` | G9 tells you when a release is out; download it and replace the app (the app is not signed with an Apple Developer ID yet, so macOS cannot install updates into it) |
-| macOS 12+ (Intel) | \`G9-${version}-mac-x64.dmg\` | As above |
-| Linux (x64) | \`G9-x86_64.AppImage\` — keep this file name: updates replace the file in place | Automatic, like Windows |
-| Debian/Ubuntu (x64) | \`G9_${version}_amd64.deb\` | G9 tells you; install the new .deb with your package manager |
+| Windows 10/11 (x64) | \`G9BrowserAgent-Setup-${version}.exe\` — per user, no administrator rights | Automatic: G9BrowserAgent checks these releases, downloads in the background and asks before installing |
+| macOS 12+ (Apple silicon) | \`G9BrowserAgent-${version}-mac-arm64.dmg\` | G9BrowserAgent tells you when a release is out; download it and replace the app (the app is not signed with an Apple Developer ID yet, so macOS cannot install updates into it) |
+| macOS 12+ (Intel) | \`G9BrowserAgent-${version}-mac-x64.dmg\` | As above |
+| Linux (x64) | \`G9BrowserAgent-x86_64.AppImage\` — keep this file name: updates replace the file in place | Automatic, like Windows |
+| Debian/Ubuntu (x64) | \`G9BrowserAgent_${version}_amd64.deb\` | G9BrowserAgent tells you; install the new .deb with your package manager |
 
-The installers are **not code-signed**: Windows SmartScreen and macOS Gatekeeper ask once before the first start. See the README for what to click, and for the browser extension (loaded once, updated by G9 itself).
+The installers are **not code-signed**: Windows SmartScreen and macOS Gatekeeper ask once before the first start. See the README for what to click, and for the browser extension (loaded once, updated by G9BrowserAgent itself).
 
-\`latest.yml\`, \`latest-mac.yml\` and \`latest-linux.yml\` are the update metadata G9 reads; the \`.zip\` and \`.blockmap\` files are for the updater.
+\`latest.yml\`, \`latest-mac.yml\` and \`latest-linux.yml\` are the update metadata G9BrowserAgent reads; the \`.zip\` and \`.blockmap\` files are for the updater.
 
 ## What changed in ${version}
 

@@ -50,7 +50,7 @@ async function connect() {
     where = { ok: false, error: String(err?.message ?? err) };
   }
   if (!where?.ok) {
-    setConn('warn', where?.error ?? 'The G9 daemon is not connected.');
+    setConn('warn', where?.error ?? 'The G9BrowserAgent daemon is not connected.');
     return scheduleRetry();
   }
   let ws;
@@ -95,7 +95,7 @@ function onMessage(msg) {
       if (msg.problem || !msg.id) {
         // A daemon older than 3.2 has no viewer role: say what fixes it, not the protocol's words.
         setConn('err', /Unknown role/i.test(msg.problem ?? '')
-          ? `The running daemon (v${msg.version ?? '?'}) is older than 3.2 and has no live view. Restart it after updating G9.`
+          ? `The running daemon (v${msg.version ?? '?'}) is older than 3.2 and has no live view. Restart it after updating G9BrowserAgent.`
           : msg.problem ?? 'The daemon refused the live view.');
         return;
       }

@@ -205,7 +205,7 @@ function fixtures() {
     updatedAt: now - 2 * day,
     bridge: {
       host: '127.0.0.1', port: OWNER_PORT, connected: true, daemonVersion: VERSION, engineId: 'engine-1', daemonPid: 4242,
-      connectedAt: now - 3 * hour, repoRoot: 'C:/Users/qa/g9-browser-agent', lastError: null,
+      connectedAt: now - 3 * hour, repoRoot: 'C:/Users/qa/G9BrowserAgent', lastError: null,
     },
     currentTabId: 101,
     attachedTabs: [101, 102, 104],
@@ -527,6 +527,27 @@ async function main() {
       }
     };
 
+    // A page's load event, or — when it does not come — what is still loading, said by name. A page
+    // whose DOM is parsed and whose scripts ran is renderable; the checks below judge the rendering.
+    // (3.2.1: the panel's first load on the hosted agent's Edge 153 never fired "load" within 15 s.)
+    const pageLoaded = async (loaded, what) => {
+      try {
+        await loaded;
+        return;
+      } catch (err) {
+        if (err?.code !== 'TIMEOUT') throw err;
+      }
+      const why = await evaluate(`JSON.stringify({ readyState: document.readyState,
+        images: [...document.images].filter((i) => !i.complete).map((i) => i.src).slice(0, 5),
+        resources: performance.getEntriesByType('resource').filter((e) => !e.responseEnd).map((e) => e.name).slice(0, 5),
+        scripts: document.scripts.length })`).catch((e) => `unreadable: ${e.message}`);
+      if (/"readyState":"(interactive|complete)"/.test(why)) {
+        console.log(`  WARN ${what}: no load event within 15 s, continuing with the parsed page ${why}`);
+        return;
+      }
+      throw new Error(`${what}: the page did not load within 15 s ${why}`);
+    };
+
     let stubScript = null;
     let selfChecked = false;
     const combos = [];
@@ -547,7 +568,7 @@ async function main() {
       phase = `${tag} load`;
       const loaded = conn.waitForEvent('Page.loadEventFired', { sessionId, timeoutMs: 15_000 });
       await send('Page.navigate', { url: `${origin}/panel/panel.html${width > 400 ? '?detached=1' : ''}` });
-      await loaded;
+      await pageLoaded(loaded, `[${tag}] panel.html`);
 
       const shoot = async (name) => {
         await delay(250);
@@ -709,7 +730,7 @@ async function main() {
         ok(`[${tag}] agentUnblocked removes the toast`);
       }
       const title = await evaluate('document.title');
-      if (title !== `G9 Browser Agent v${VERSION}`) fail(`[${tag}] document.title is "${title}"`);
+      if (title !== `G9BrowserAgent v${VERSION}`) fail(`[${tag}] document.title is "${title}"`);
     }
 
     // (3.2) The live view: the page an agent's browser_tabs action:"watch" opens.
@@ -725,7 +746,7 @@ async function main() {
       }));
       const loaded = conn.waitForEvent('Page.loadEventFired', { sessionId, timeoutMs: 15_000 });
       await send('Page.navigate', { url: `${origin}/panel/watch.html?tab=21&agent=cursor` });
-      await loaded;
+      await pageLoaded(loaded, `[watch ${tag}] watch.html`);
       await waitFor("document.querySelectorAll('.watch-tile').length === 1 && document.getElementById('wConn').textContent.includes('Connected')", 'the first tile and the viewer link');
       await waitFor("[...document.getElementById('wPicker').options].some((o) => o.value === '22')", 'the picker listing the other tabs');
       await evaluate("(document.getElementById('wPicker').value = '22', document.getElementById('wAdd').click(), true)");

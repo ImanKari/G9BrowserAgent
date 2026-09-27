@@ -462,7 +462,7 @@ export async function exportBundle({ includeAttachments = true } = {}) {
  */
 export async function importBundle(bundle, { mode = 'merge' } = {}) {
   if (!bundle || bundle.format !== 'g9-browser-agent/bundle') {
-    throw new Error('Not a G9 bundle: expected format "g9-browser-agent/bundle".');
+    throw new Error('Not a G9BrowserAgent bundle: expected format "g9-browser-agent/bundle".');
   }
 
   if (mode === 'replace') {

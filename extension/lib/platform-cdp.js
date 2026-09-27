@@ -155,9 +155,9 @@ function emit(set, ...args) {
   for (const fn of set) {
     try {
       const out = fn(...args);
-      if (out && typeof out.catch === 'function') out.catch((err) => console.error('[G9] platform-cdp listener failed', err));
+      if (out && typeof out.catch === 'function') out.catch((err) => console.error('[G9BrowserAgent] platform-cdp listener failed', err));
     } catch (err) {
-      console.error('[G9] platform-cdp listener failed', err);
+      console.error('[G9BrowserAgent] platform-cdp listener failed', err);
     }
   }
 }
@@ -253,7 +253,7 @@ function adoptSession(engine, tab) {
     if (typeof config.prepareTab === 'function') {
       tab.ready = Promise.resolve()
         .then(() => config.prepareTab(tab.tabId, { targetInfo: engine.targets.get(tab.targetId) ?? null, waitingForDebugger: false }))
-        .catch((err) => console.error(`[G9] platform-cdp: preparing tab ${tab.tabId} failed`, err));
+        .catch((err) => console.error(`[G9BrowserAgent] platform-cdp: preparing tab ${tab.tabId} failed`, err));
     }
     resolveAttachWaiters(engine, tab.targetId);
     return;
@@ -317,12 +317,12 @@ function sameWindow(a, b) {
 /**
  * Is this tab the one in front of its REAL browser window?
  *
- * Windows here are synthetic (one per context), but the browser's are real: every page G9 opens has
+ * Windows here are synthetic (one per context), but the browser's are real: every page G9BrowserAgent opens has
  * one of its own (createTabIn), and a page the PAGE opens (target=_blank, window.open) joins its
  * opener's window IN FRONT of it. A tab behind another in its window is driven at a fraction of
  * the frame rate even headless: the opener behind a page-opened tab took 20.9 s per humanized
  * click and 24–46 s per screenshot (P8 matrix, round 3, 4/4), and nothing said so — the tab list
- * reported every G9-opened tab active:false (the synthetic rule: newest of the context) whether or
+ * reported every G9BrowserAgent-opened tab active:false (the synthetic rule: newest of the context) whether or
  * not anything was in front of it. So: the most recently activated live tab of its real window
  * (tab.realWindowId, learned when its session attaches). Unknown window → the synthetic rule.
  */
@@ -364,7 +364,7 @@ function toTab(tab) {
     title: tab.title,
     windowId: windowIdFor(tab.engineId, tab.browserContextId),
     active: !tab.removed && isActive(tab),
-    // A page G9 opened got a real window of its own (createTabIn). `active` says whether it is
+    // A page G9BrowserAgent opened got a real window of its own (createTabIn). `active` says whether it is
     // still the one in front of it (a page-opened tab joins it in front — isActive).
     ...(tab.ownWindow ? { ownWindow: true } : {}),
     status: tab.status,
@@ -459,7 +459,7 @@ function prepareThenResume(engine, sessionId, work, label) {
   const budget = new Promise((resolve) => { timer = setTimeout(resolve, PREPARE_BUDGET_MS); });
   const prepared = Promise.resolve()
     .then(work)
-    .catch((err) => console.error(`[G9] platform-cdp: preparing ${label} failed; resuming it unprepared`, err));
+    .catch((err) => console.error(`[G9BrowserAgent] platform-cdp: preparing ${label} failed; resuming it unprepared`, err));
   return Promise.race([prepared, budget]).finally(() => {
     clearTimeout(timer);
     resume(engine, sessionId);
@@ -924,7 +924,7 @@ async function createTabIn(engine, browserContextId, url, { active = false } = {
     url: url || 'about:blank',
     newWindow: true,
     background: !active,
-    // Never take the OS keyboard focus: G9 needs none (pages get focus emulation), and a
+    // Never take the OS keyboard focus: G9BrowserAgent needs none (pages get focus emulation), and a
     // headed engine's new window must not steal the keyboard from the person at the desk.
     focus: false,
     ...(bounds ?? {}),
@@ -955,7 +955,7 @@ async function createTabIn(engine, browserContextId, url, { active = false } = {
   const tabId = engine.pageTabs.get(targetId);
   if (tabId == null) throw new Error(`The browser created target ${targetId} but it never became a tab.`);
   const tab = tabsById.get(tabId);
-  // G9 asked for this page: the manager's start-up sweep never takes it for a stray.
+  // G9BrowserAgent asked for this page: the manager's start-up sweep never takes it for a stray.
   tab.createdByG9 = true;
   // Its preparation (context defaults, the tool layer) is done — or the budget ran out — and it
   // has been resumed: a caller that navigates it next gets a prepared first document.
@@ -1748,7 +1748,7 @@ const downloads = {
   /**
    * Stops attributing to this tab. The context's download behaviour is left as
    * it is: the daemon configures every context when it creates it
-   * (configureContextDownloads: G9's folder, events on), and resetting it to
+   * (configureContextDownloads: G9BrowserAgent's folder, events on), and resetting it to
    * 'default' here would send later downloads back to the profile's own folder.
    */
   async end(tabId) {

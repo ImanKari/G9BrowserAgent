@@ -1,10 +1,10 @@
-# AIGuide — G9 Browser Agent
+# AIGuide — G9BrowserAgent
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
 **Status:** v3.2.0, 2026-09-26. 3.2.0 adds the live view (a headless tab watched from the person's
 browser, opened by an agent if it wishes), flow libraries per project and site with the approvals and
-baselines that travel with the flows (§6.10), and puts G9 on a server: MCP over HTTP with a bearer
+baselines that travel with the flows (§6.10), and puts G9BrowserAgent on a server: MCP over HTTP with a bearer
 token (`mcp/http.mjs`) and `docker/`, a browser node image (a web desktop you watch, its Chromium
 carrying the extension, the daemon, the endpoint), one container per account (§5, §6.7, §9). On a
 node, the extension's own storage does not survive a browser start (§8.4). On 3.2.0, `check.mjs --release`:
@@ -46,13 +46,13 @@ wrong — fix it. Owner-facing guides: [docs/STEALTH.md](docs/STEALTH.md), [docs
 
 ## 1. What this is
 
-G9 lets any number of AI agents drive real Chromium browsers at DevTools depth through MCP, with
+G9BrowserAgent lets any number of AI agents drive real Chromium browsers at DevTools depth through MCP, with
 human-like input and evidence a person can review afterwards. v2 has two engines behind one tool layer:
 
 - **Engine 1 — the extension.** An MV3 extension in the QA person's own Edge or Chrome: their profile,
   cookies and logins. For authoring (recording), exploring and attended runs.
 - **Engine 2 — a launched browser.** A stock Edge, Chrome or Chrome for Testing (CfT) that the daemon
-  starts on a G9-owned profile and drives over `--remote-debugging-pipe`, headless by default. For
+  starts on a G9BrowserAgent-owned profile and drives over `--remote-debugging-pipe`, headless by default. For
   unattended runs, parallel agents and long flows. Headless, it has no window on the person's desktop,
   so the states that stop a window rendering (minimized, covered, locked, another virtual desktop) do
   not exist for it — a fact from Chromium's source (§2.8.1); a locked session was not measured (§8.2).
@@ -100,7 +100,7 @@ rather than choosing another path.
 
 | # | Decision | Why (short) |
 |---|---|---|
-| D1 | **No Chromium fork.** The execution engine is stock Chrome, Edge or Chrome for Testing, launched and driven by G9 over CDP. | Everything needed is reachable through launch switches, profile preferences, policies and full CDP. A fork costs a permanent build/rebase/sign/distribute cycle (Chrome ships a major every two weeks since 153) and its results are not results on the customer's browser. A two-week fork spike (§8.4) would measure that cost; it was not run. |
+| D1 | **No Chromium fork.** The execution engine is stock Chrome, Edge or Chrome for Testing, launched and driven by G9BrowserAgent over CDP. | Everything needed is reachable through launch switches, profile preferences, policies and full CDP. A fork costs a permanent build/rebase/sign/distribute cycle (Chrome ships a major every two weeks since 153) and its results are not results on the customer's browser. A two-week fork spike (§8.4) would measure that cost; it was not run. |
 | D2 | **Two engines, one tool layer.** Engine 1 = the extension in the QA's own browser (authoring, exploration, attended runs). Engine 2 = a browser process the daemon launches (unattended runs, parallel agents, long flows). Both run the same tool modules and the same FlowSpec. | The tool modules were already pure CDP (`interact`, `snapshot`, `record`, `replay`, `capture`, `navigate`, `qa`, `issues` contained no `chrome.*` call). Only the transport and a few platform calls differ (§4.6). |
 | D3 | **Engine 2 is unaffected by the desktop.** Default: `--headless=new`, no platform window at all. Optional: headed on a dedicated VM or session for stealth-critical scenarios. | Chromium stops rendering and silently drops CDP input for hidden, minimized, occluded, locked-screen or other-virtual-desktop windows (§2.8.1). Headless has no window, so none of those states exist. |
 | D4 | **Electron is the shell, never the engine.** The desktop app (UI, daemon, installer, updater) is Electron. Pages under test never load inside Electron's Chromium. | Third-party components fingerprint the browser identity; Electron is not Chrome. The shell only launches and watches real browsers (§2.5). |
@@ -160,7 +160,7 @@ cost measured; it was not run.
 - Authoring happens where the person works: recording, exploring, filing issues from what is on screen.
 - It carries its costs knowingly: the debugger infobar (measured 2026-09-22 on headless Edge
   153.0.4234.32: the viewport is 760/761 px instead of 808 px, and every cross-document load in the
-  browser — including tabs G9 never attached — sees two `resize` events 148–301 ms in), refused input
+  browser — including tabs G9BrowserAgent never attached — sees two `resize` events 148–301 ms in), refused input
   to hidden tabs (§4.3a), and the MV3 worker lifetime (§4.1). For stealth, Engine 1 applies the input
   rules only (docs/STEALTH.md, "Engine 1 (the extension) and stealth").
 
@@ -170,9 +170,9 @@ Pages under test never load inside Electron's Chromium. Electron is not Chrome: 
 fingerprint differ from the customer's browser and its Chromium lags. WebView2 was ruled out as an
 engine too (§2.8.4: needs an HWND and a UI thread, no headless mode, pauses rendering when not
 visible, does not run in non-interactive sessions, cannot use the person's Edge profile). So Electron
-hosts only G9's own screens, served from the private `g9app://app/` scheme: tray, Watch (the daemon's
+hosts only G9BrowserAgent's own screens, served from the private `g9app://app/` scheme: tray, Watch (the daemon's
 JPEG frames on a `<canvas>`, the cursor drawn from the pointer track), Runs, Approvals, Engines,
-Agents, Schedule, Settings, Setup. It also packages the product: `G9.exe` run with
+Agents, Schedule, Settings, Setup. It also packages the product: `G9BrowserAgent.exe` run with
 `ELECTRON_RUN_AS_NODE=1` executes the daemon, the shim and the runner, so a QA machine needs no Node.
 
 ### 2.6 One daemon, many agents (D5), no modes (D6), local trust (D7)
@@ -309,7 +309,7 @@ and R4, and [Rules for changing this codebase](#rules-for-changing-this-codebase
 ## 3. Repo layout
 
 ```
-g9-browser-agent/
+G9BrowserAgent/
 ├── package.json                  the ONE version (3.2.0) for the whole product; no dependencies; node >=22
 ├── extension/                    Engine 1 (MV3), and the HOME of the shared tool code
 │   ├── manifest.json             3.2.0; minimum_chrome_version 125; permissions in §5
@@ -323,7 +323,7 @@ g9-browser-agent/
 │   │   ├── store.js              recordings + issues (storage.local) and attachment bytes (platform.blobs)
 │   │   ├── refs.js               element refs (eN → backendNodeId, child sessionId)
 │   │   ├── frames.js             cross-origin child sessions (flat auto-attach, recursive)
-│   │   ├── world.js              G9's isolated world 'g9' — every internal evaluation runs here
+│   │   ├── world.js              G9BrowserAgent's isolated world 'g9' — every internal evaluation runs here
 │   │   ├── pointer.js            per-tab pointer position + cursor track (never drawn in the page)
 │   │   ├── screencast.js         one Page.startScreencast per tab, shared by video and live watch
 │   │   ├── humanize.js           the dispatcher: humanize plans → Input.dispatch*, levelFor, hidden checks
@@ -387,7 +387,7 @@ g9-browser-agent/
 ├── README.md  AIGuide.md
 ```
 
-`G9_HOME` (default `%LOCALAPPDATA%\G9`, else `~/.g9`) holds `daemon.json`, `daemon.lock`, `settings.json`,
+`G9_HOME` (default `%LOCALAPPDATA%\G9BrowserAgent`, else `~/.g9browseragent`) holds `daemon.json`, `daemon.lock`, `settings.json`,
 `engine-versions.log`, `engines/cft-<version>/`, `engines/log/`, `engines/firewall-seen.json`, `profiles/<name>/`, `store/`,
 `runs/<runId>/`, `downloads/<contextId>/`, `extension/` (the desktop-managed unpacked copy) and `logs/`
 (ARCHITECTURE_V2 §9).
@@ -471,7 +471,7 @@ Kept from v1, and still load-bearing:
 
 - `checkObscured()` uses `elementsFromPoint` (plural, so `::after` shields are seen) and treats an
   ancestor on top as an obstruction; `<label>` is the one exception. v2 first compares the point with
-  the element's own `getClientRects()`: an element that simply MOVED gets "no longer where G9 measured
+  the element's own `getClientRects()`: an element that simply MOVED gets "no longer where G9BrowserAgent measured
   it … nothing was pressed", not an overlay accusation (round-3 fix).
 - Typing defaults to per-character key events; `fast:true` uses `Input.insertText` (fine for
   controlled inputs, wrong for masked/filtered fields — v1.0.15). `off`/`human` `clear:true` select
@@ -492,10 +492,10 @@ Kept from v1, and still load-bearing:
 **Consequence:** the input witness in `tools/interact.js` (v1's EXT-01 defect is fixed; the v1
 `ReferenceError` account in §9 is history).
 
-- **Armed first, in G9's world.** Before any input goes out, a trusted-events-only capture listener is
+- **Armed first, in G9BrowserAgent's world.** Before any input goes out, a trusted-events-only capture listener is
   armed in the isolated world `g9` — ON the target element when there is one (`callInWorld`), so the
   page can say *where* the event landed, else on the frame (and attached cross-origin frames, for keys).
-  If it cannot be armed, nothing is dispatched: "G9 does not act without a way to tell".
+  If it cannot be armed, nothing is dispatched: "G9BrowserAgent does not act without a way to tell".
 - **Timed from the end of dispatch.** The page is armed with a 10-minute safety net; after dispatch
   `settle()` re-times the verdict to `WITNESS_TIMEOUT_MS` (1.5 s) from that moment. v2.0's first
   witness timed out from arming: an Engine 2 click whose dispatch took ~64 s on a throttled tab was
@@ -520,9 +520,9 @@ The delivery states, and how each reaches the agent:
 — because every relay keeps only the text; the daemon protocol also carries `delivery`, `hit`,
 `hidden` as fields (DAEMON_PROTOCOL §3/§4), and the shim's MCP error shows the tagged text.
 
-**Hidden pages.** Every input action first asks the page's `visibilityState` (one round trip, in G9's
+**Hidden pages.** Every input action first asks the page's `visibilityState` (one round trip, in G9BrowserAgent's
 world). A hidden page gets nothing: pointer and wheel input measurably does not arrive; key events
-would (10/10 hidden pages, live round 3), and refusing them is G9's **policy** — nobody can see what
+would (10/10 hidden pages, live round 3), and refusing them is G9BrowserAgent's **policy** — nobody can see what
 they do, and a type's focus click would be lost. The message names the agent's own remedies:
 `browser_tabs action:"focus"`, `"popout"` (keep it un-minimized) or `"handoff"`. Reads keep working on
 hidden tabs; screenshots of a background or off-screen tab took 44–487 ms, but on a minimized window
@@ -553,12 +553,12 @@ must work everywhere a capability can be reached:
    CDP) **and** `cdp.send()` checks it; the dispatcher checks it between steps, so humanized typing
    stops mid-word (measured: 37–94 ms after Stop, live round 3).
 2. **Only a person resumes.** Admin ops (`resume`, `resumeAgent`) are UI-only; an agent gets "Admin
-   operations are for the G9 desktop app" — and since 2026-09-22 the `ui` role itself is only accepted
+   operations are for the G9BrowserAgent desktop app" — and since 2026-09-22 the `ui` role itself is only accepted
    from a NATIVE connection (no Origin header), so a browser extension cannot say hello as the
    desktop and rewrite the settings the desktop's updater reads. A Stop pressed while the extension
    was disconnected is re-asserted after the welcome; the extension now also tries to connect at once
    when the Stop could not be sent (instead of waiting out a backoff of up to 60 s), and the panel
-   says "Stopped in this browser. The G9 daemon is not connected; it will be told when it connects"
+   says "Stopped in this browser. The G9BrowserAgent daemon is not connected; it will be told when it connects"
    rather than "Agents stopped".
    Stop blocks AGENTS, not the person: the side panel's own Stop-and-save, issue screenshot and tab
    video keep working while Stop is on (`lib/cdp.js asPerson` — reads, captures and clean-up on that
@@ -569,12 +569,12 @@ must work everywhere a capability can be reached:
    desktop and the panel show each call once and the side panel's own actions still appear (F7).
 4. **Ownership.** A tab another connected agent owns is refused to your mutating calls with the owner's
    name; `claim force:true` takes it over and is logged as `takeover`. `browser_engine stop` refuses an
-   extension engine (G9 never closes the person's browser) and a launched engine where another agent
+   extension engine (G9BrowserAgent never closes the person's browser) and a launched engine where another agent
    owns a tab or that another client holds with `acquire`, unless `force`.
 
-Stop acts at guards and step boundaries; it cannot undo side effects. After Stop, G9 still ends and
+Stop acts at guards and step boundaries; it cannot undo side effects. After Stop, G9BrowserAgent still ends and
 releases its own witness listener: `interact.js cleanupSend` sends that clean-up on the live session,
-bounded at 2 s, because taking G9's listener away is not acting on the page; only if that fails does
+bounded at 2 s, because taking G9BrowserAgent's listener away is not acting on the page; only if that fails does
 it stay armed until its 10-minute safety net (§8). The general rule from v1
 still applies: a check that lives at one layer only has a way around it.
 
@@ -594,7 +594,7 @@ test; extending `platform.*` means changing both implementations and ARCHITECTUR
 
 ### 4.7 Isolated worlds only (rule R4)
 
-Everything G9 evaluates for itself — the witness, the recorder and its binding, the locator engine,
+Everything G9BrowserAgent evaluates for itself — the witness, the recorder and its binding, the locator engine,
 snapshot text extraction, `qa.js` reads, replay's element resolution, the navigation idle watcher,
 handoff storage reads, emulation reads — runs in the isolated world `g9` (`lib/world.js`), never in
 the page's main world. v1 left `__g9loc`, `__g9target`, `__g9rec` and the recorder binding on
@@ -635,7 +635,7 @@ the extension it is the panel's Input setting. `docs/STEALTH.md` is the owner's 
   `'off'` — so **only Stealth is a floor**: with the panel at Human or Direct an agent's
   `humanize:"off"` gets direct input; with the panel at Stealth every action gets stealth input.
   Results carry `humanize {level, profile, seed, raisedFrom?, stealthLevel?}` when a level was raised.
-- Consistency beats spoofing: G9 never overrides the UA, Client Hints, platform, plugins or WebGL.
+- Consistency beats spoofing: G9BrowserAgent never overrides the UA, Client Hints, platform, plugins or WebGL.
   What stays detectable (the HeadlessChrome UA, the Engine 1 infobar, …) is in §8.
 
 ### 4.9 Humanize is pure and deterministic
@@ -727,7 +727,7 @@ What is still refused, and why each costs the owner nothing:
 | Malformed/oversized frames (64 MiB cap) close that connection (1009), never the daemon. | A crash inside a socket handler would look like a daemon that never started. |
 | `launchBrowser` refuses `--enable-automation` (always), `--remote-debugging-port/-address/-pipe/-io-pipes`, the switches owned by an option, `AutomationControlled` below stealth, and a default user-data-dir (or one inside it, junctions resolved). | Engine 2 has no debugging port anything else could reach; it never identifies as automation; it never touches a person's browser profile (Chrome 136 rule, App-Bound Encryption). |
 | A profile signed in to a browser account is refused at stealth and warned otherwise. | Its synced passwords, history and extensions would enter agent runs (§9 v2.0.0 entry). |
-| `browser_engine stop` refuses an extension engine, and a launched engine with another agent's tab or another client's `acquire` hold (unless `force`). | G9 never closes the person's browser; one agent does not end another's run silently. |
+| `browser_engine stop` refuses an extension engine, and a launched engine with another agent's tab or another client's `acquire` hold (unless `force`). | G9BrowserAgent never closes the person's browser; one agent does not end another's run silently. |
 | (3.2) The ONE way off loopback is `mcp/http.mjs`, and it refuses to listen on a non-loopback address without a bearer token of at least 24 characters (compared in constant time). A request carrying an `Origin` is 403 unless listed in `G9_MCP_ALLOWED_ORIGINS`; bodies over 64 MiB 413; at most 32 sessions. | The daemon stays password-less and on `127.0.0.1` (D7 is unchanged for it). A browser node on a server is reached by agents elsewhere, so the token is the lock; a web page must not be able to use the endpoint through a visitor's browser (MCP's DNS-rebinding rule). |
 | (3.2) The browser node (`docker/`): ports published on `127.0.0.1` only (a test fails otherwise), `HARDEN_DESKTOP=true` (no terminal, no sudo in the web desktop), no apps panel, no desktop commands, no MCP endpoint without a token; the desktop is reached only through TLS and a password at the reverse proxy. | Whoever reaches the desktop page drives a browser that is signed in to an account; nothing else should be reachable from it. |
 
@@ -828,7 +828,7 @@ not be broken.
 - **`tools/interact.js`** — click/double/right/hover/type/key/scroll/drag/select/upload at three
   levels, the witness and delivery states, obstruction checks, hidden-page refusal, wheel-based reach.
 - **`tools/snapshot.js`** — accessibility tree, pruned (interactive roles always kept, unnamed
-  structure dropped, 900 emitted lines); `a11y+text` extracts text in G9's world; a tree with only
+  structure dropped, 900 emitted lines); `a11y+text` extracts text in G9BrowserAgent's world; a tree with only
   its root while the body has elements is asked for again (a CfT flake mitigation). Every regex escape
   in injected code is doubled (self-test section 17).
 - **`tools/navigate.js`** — goto/reload/back/forward/wait with real conditions; at human/stealth a
@@ -901,7 +901,7 @@ into view first"). Model limits are in §8.
   `checkConsistency` (locale/timezone/Accept-Language).
 - **`firewall.js`** — Chrome for Testing has no Windows Firewall rule of its own, so the first launch
   from each new executable path carries a warning that Windows may ask and that either answer is fine
-  (G9 uses a pipe, not a port); the paths already seen are kept in `G9_HOME/engines/firewall-seen.json`.
+  (G9BrowserAgent uses a pipe, not a port); the paths already seen are kept in `G9_HOME/engines/firewall-seen.json`.
 - **`manager.js` — `EngineManager`, owned by the daemon.** Configures `platform-cdp` (handles, file
   storage and blobs, the downloads `fileInfo` hook, broadcasts), wires `tools/events.js` as `sw.js`
   does, imports every shared module lazily (a broken Engine 2 must not stop the daemon serving the
@@ -949,7 +949,7 @@ into view first"). Model limits are in §8.
   `keepRuns` run folders and never touches an active one; its passes run one at a time through a
   chain, and the delete retries Windows' EPERM/EBUSY (2.0.2).
 - **`scheduler.js`** — entries in `settings.schedule` (daily or every N minutes); a due entry runs the
-  runner as a child with the daemon's own `process.execPath` (under the desktop: G9.exe as Node);
+  runner as a child with the daemon's own `process.execPath` (under the desktop: G9BrowserAgent.exe as Node);
   accepts the runner's and the desktop's entry shapes. Enabled entries hold off idle exit.
 - **`settings.js`** — `G9_HOME/settings.json`: port, defaultBrowser, headless, humanize, stealth,
   maxParallel (8), evidence caps, idleExitMinutes (60), updateUrl (`https://`, or `http://` only on
@@ -1012,7 +1012,7 @@ into view first"). Model limits are in §8.
   fails when the manifest or `desktop/package.json` disagree. **`lib/ws-client.mjs`** — the shim's
   WebSocket (not Node's global one: under `ELECTRON_RUN_AS_NODE` the Node is Electron's, and a native
   client must send no Origin). **`lib/ws-codec.mjs`** — the shared frame codec, 64 MiB cap.
-  **`lib/runtime.mjs`** (3.1.0) — how a G9 script is started by whatever runs G9: plain `node`, the
+  **`lib/runtime.mjs`** (3.1.0) — how a G9BrowserAgent script is started by whatever runs G9BrowserAgent: plain `node`, the
   packaged app with `ELECTRON_RUN_AS_NODE=1`, or a Linux AppImage. An AppImage runs from a mount that
   vanishes when it exits, so nothing may name a path inside it: the command is
   `<$APPIMAGE> <G9_HOME>/bin/g9-run.mjs <script> --no-sandbox`, the bootstrap (`BOOTSTRAP_SOURCE`,
@@ -1046,14 +1046,14 @@ Watch draws frames on a canvas with the cursor from the pointer track, says "not
 tab, and shows the daemon's `problem` when a watch did not start), `lib/` (daemon-client with per-call
 timeouts mirroring DAEMON_PROTOCOL §3 — a copy, checked by
 `daemon.test.mjs`; daemon-launch; extension-install; mcp-register for Claude Code, Cursor, VS Code and
-Claude Desktop, backing up first and never overwriting a `g9-browser` entry silently; policies — HKCU
+Claude Desktop, backing up first and never overwriting a `g9browseragent` entry silently; policies — HKCU
 `WindowOcclusionEnabled=0`, `HighEfficiencyModeEnabled=0`, `IntensiveWakeUpThrottlingEnabled=0`,
 `BackgroundTabFreezingEnabled=0`, `DeveloperToolsAvailability=1`, recorded first for Undo, one UAC
 prompt when HKCU\Software\Policies is not user-writable, Windows only; updater — electron-updater
 from the official GitHub releases by default (`updateMode` official/custom/off), `installMode` auto
 on Windows and an AppImage and manual on macOS and a .deb, restarting the daemon only when no run is
 active and no launched engine is open; wizard). Packaging (3.1.0): `electron-builder.yml` (Windows
-NSIS per-user `asInvoker`; macOS DMG + ZIP, arm64 and x64, ad-hoc signed; Linux `G9-x86_64.AppImage`
+NSIS per-user `asInvoker`; macOS DMG + ZIP, arm64 and x64, ad-hoc signed; Linux `G9BrowserAgent-x86_64.AppImage`
 and a .deb; `publish: github ImanKari/G9BrowserAgent`), `scripts/build.mjs --win|--mac|--linux`
 (host only; `--as-version`/`--out` for the update test's older build), `scripts/verify-artifacts.mjs`
 (every file `latest*.yml` lists, and every production dependency inside each `app.asar`),
@@ -1119,12 +1119,12 @@ tool semantics, to the daemon's ownership or halt model, or to the desktop app.
 | U6 | **Automation** is organised site → suite → flow, with filters and a per-flow drawer | The store index already carried `startUrl`, `suite`, `folder`, `tags`, `lastRun`, `flaky`, `assertionCount`, `environment`; the list rendered flat and used none of it | `recUpdate` also accepts `startUrl` (http(s) only) and `qaTestCaseIds`, and the drawer has a Start URL field (the ids the panel sent were being dropped, and nothing could give an old flow a start URL). Verdict labels are short ("Product fail", "Test fail", "Surprise", "Warnings") to fit one row at 360 px |
 | U7 | **Issues** are organised by site and status, with severity and tags shown and filterable | The issue index carried only id, title, url, status, filedAs and dates; severity and tags lived in the record, so the list could not show or filter them | The index also carries `site` and an `evidence` summary, backfilled once for issues saved before v3 |
 | U8 | One visual system: tokens, components, density, accessibility — still zero-dependency vanilla JS/CSS | `panel.css` defined tokens but applied them unevenly, and helper prose was always expanded | The dark theme's accent is `#9d97f5`, for a contrast of at least 4.5:1 on the dark card |
-| U9 | The icon is replaced with one generated elsewhere from a prompt; G9's work is wiring only | Owner decision | Built in 3.0.1 from the owner's artwork (`setup/make-icons.ps1`, §9). At 16 px the whole drawing is a blur, so that size is a crop of the browser window with "G9" — a deviation from "one design at every size" that the toolbar at 100 % scaling needs |
+| U9 | The icon is replaced with one generated elsewhere from a prompt; G9BrowserAgent's work is wiring only | Owner decision | Built in 3.0.1 from the owner's artwork (`setup/make-icons.ps1`, §9). At 16 px the whole drawing is a blur, so that size is a crop of the browser window with "G9BrowserAgent" — a deviation from "one design at every size" that the toolbar at 100 % scaling needs |
 | U10 | The panel stays a client of the same commands agents use | Existing repo rule: a QA and an agent must never get different results from one button | As decided |
 
-The icon prompt (U9) asked for a toolbar icon for "G9 Browser Agent" that reads at 16 px and looks
+The icon prompt (U9) asked for a toolbar icon for "G9BrowserAgent" that reads at 16 px and looks
 good at 128 px: automation meeting a real browser (a cursor with a browser or tab shape, a stylised
-"G9", or a pointer that doubles as a play or test glyph), no robot face and no gears; flat, geometric,
+"G9BrowserAgent", or a pointer that doubles as a play or test glyph), no robot face and no gears; flat, geometric,
 two or three colours with deep indigo or violet (around `#4f46e5`) as the primary, on a transparent
 background; PNG at 16, 48 and 128 px plus a 512 px master, correct on light and dark toolbars.
 
@@ -1226,8 +1226,8 @@ would test less, so it runs in parallel with the rest instead.
 | `cd desktop && node test/run.mjs` / `node test/daemon-contract.mjs` / `npm run build:win` + `npm run test:packaged` / `npm run test:render` | renderer in a fake DOM, main process against a fake Electron API, updater/policies/registration with fakes (never the real registry or configs); the real daemon's admin contract; the built `win-unpacked` with no `node` on PATH (shim starts the packaged daemon); the real window off-screen | **14/14 files (3.0.0; 22.6 s on 2.0.1); contract 15/15 (2.0.1); build OK (`G9-Setup-3.0.0.exe`, 103,620,667 bytes, 2026-09-25, unsigned, `resources/app-update.yml` present, payload identical to the repository); packaged 7/7 (3.0.0); render check PASS (2.0.1)** — 4 scenarios (empty and populated × dark and light), 23 pictures per populated run, 171 window samples in the last one, 0 ever on screen, 0 ever in the foreground |
 | `node setup/engine2-livetest.mjs [--only …]` | Engine 2 through the product path (daemon + shims + headless Edge), every check against what the page, server or disk saw: tabs, snapshot, interact at three levels, frames, console, inspect, screenshots, emulate, dialogs, downloads (sha256), popups, HAR, recording/replay, video, agents/ownership, reads during actions, slots, 4 parallel contexts, watch, halt, handoff (fake Engine 1 payload), stealth, locale persona, downloads hub, stop | **373 passed, 0 failed** (3.2.0: 330 s) · 372 (3.1.0: 328 s, with the new `viewer` section; 3.0.0: 366, 327 s; 2.0.3: 322 s; 2.0.2: 325 s; on 2.0.1: 330 s) |
 | `node setup/isolated-livetest.mjs` | Engine 1 in a real headless browser: private daemon, temp profile, extension copy with `dev-daemon.json` and a tripwire in place of its built-in default port; runs `setup/livetest.mjs` (27 sections: tabs, snapshot, levels, hidden tabs, witness, scroll settle, stealth screenshots, recording, regression memory, issue video, watch, cross-origin frame, popout, handoff, auto-attach in its three settings, version/welcome, Stop, main-world diff) and renders the panel. `G9_BROWSER` picks Chrome/CfT; `G9_LIVE_SECTIONS` narrows | **212 passed, 0 failed** on Edge (3.2.0, 223 s) · 202 on Edge (3.1.0, with section 28, the live view; daemon, extension and shim all reporting 3.1.0; 198 on 3.0.0; 196 on 2.0.2 and 2.0.3) **and 196 passed, 0 failed on system Chrome 153.0.8010.53** (2.0.1, `G9_BROWSER=chrome`), each with the harness checks (tripwire 0 hits, profile never signed in); CfT sections 12+16 ×20: 20/20 (earlier round) |
-| `node setup/stealthtest.mjs [--matrix] [--local-only] [--configs …] [--repeat N]` | the pre-suite gate ([docs/STEALTH.md](docs/STEALTH.md), "Running the self-test"): local detector page (webdriver, Runtime probe, main-world globals/nodes/calls, listener stacks, untrusted events, cross-site frame, popup, worker, read-tool sweep, press/typing/wheel timing, screen, locale, EME, tabs at end, profile sign-in) + public pages (`stealth-pages.json`); human-level controls must be detected | 2026-09-23, both runs: **0 G9 leaks in every stealth configuration**, both human controls detected. Local page, final tree, 7 configurations: **edge-headed-stealth UNDETECTED**; the rest detected only by browser-inherent signals (the HeadlessChrome UA; CfT's missing Widevine). With the public pages (one full matrix): headed Edge stealth flagged by pixelscan alone (“Automated behavior detected”) and passed by sannysoft, creepjs, browserscan, fingerprint-bot-detection and rebrowser; headed CfT stealth flagged by rebrowser (its brand) alone; every headless stealth run flagged by sannysoft, creepjs, browserscan, pixelscan and fingerprint-bot-detection. Exit 1 by design while headless is detectable |
-| `node setup/matrix.mjs` | P8 background-state matrix, Engine 1 (real extension) and Engine 2, per state: does input/screenshot/screencast reach the page, and does G9's report agree | **exit 0, every cell agrees** (2026-09-23, the full default set: Engine 1 × Edge and Chrome × active/background/minimized/offscreen/hidemid/hidemidheaded, with and without the occlusion switch, and Engine 2 × active/background/popup/minimized/offscreen). The partial-delivery cells report themselves as partial and match the page |
+| `node setup/stealthtest.mjs [--matrix] [--local-only] [--configs …] [--repeat N]` | the pre-suite gate ([docs/STEALTH.md](docs/STEALTH.md), "Running the self-test"): local detector page (webdriver, Runtime probe, main-world globals/nodes/calls, listener stacks, untrusted events, cross-site frame, popup, worker, read-tool sweep, press/typing/wheel timing, screen, locale, EME, tabs at end, profile sign-in) + public pages (`stealth-pages.json`); human-level controls must be detected | 2026-09-23, both runs: **0 G9BrowserAgent leaks in every stealth configuration**, both human controls detected. Local page, final tree, 7 configurations: **edge-headed-stealth UNDETECTED**; the rest detected only by browser-inherent signals (the HeadlessChrome UA; CfT's missing Widevine). With the public pages (one full matrix): headed Edge stealth flagged by pixelscan alone (“Automated behavior detected”) and passed by sannysoft, creepjs, browserscan, fingerprint-bot-detection and rebrowser; headed CfT stealth flagged by rebrowser (its brand) alone; every headless stealth run flagged by sannysoft, creepjs, browserscan, pixelscan and fingerprint-bot-detection. Exit 1 by design while headless is detectable |
+| `node setup/matrix.mjs` | P8 background-state matrix, Engine 1 (real extension) and Engine 2, per state: does input/screenshot/screencast reach the page, and does G9BrowserAgent's report agree | **exit 0, every cell agrees** (2026-09-23, the full default set: Engine 1 × Edge and Chrome × active/background/minimized/offscreen/hidemid/hidemidheaded, with and without the occlusion switch, and Engine 2 × active/background/popup/minimized/offscreen). The partial-delivery cells report themselves as partial and match the page |
 | `node setup/bench.mjs` / `node setup/endurance.mjs --minutes N` | parallelism (1–24 contexts, CPU/RAM per process tree, per-step latency, maxParallel rule) / the flow in a loop with memory and listener sampling after `gc()` | **2026-09-23: 0 failures at every level.** Bench 1/4/8/16 contexts × 5 iterations, flow p50/p95 11,599/12,211 → 12,668/14,233 ms, recommendation maxParallel 8; endurance 10 min, 93 iterations, 0 failures, daemon +0.39 MB/min, browser +1.79 MB/min, listeners flat. Full tables in §9 2.0.1 |
 | `node setup/panel-render.mjs --out <dir>` | (v3) a dev harness, not a suite: the panel served over local http with a stubbed `chrome` and realistic fixtures (three agents in two projects, flows on three sites, issues with evidence, a blocked agent, a malformed stored flow, markup in titles), rendered by headless Edge at 360 and 1000 px, light and dark. Fails on a page error, console error, dialog, horizontal overflow at 360 px, fixture text turned into markup, `[object Object]` or `NaN` on screen, the toast not leaving on `agentUnblocked`, the malformed flow not opening, or ArrowLeft switching Auto-attach | **PASS, 26 pictures** (3.0.0) |
 | `node setup/check.mjs [--all] [--live] [--release] [--plan] [--since ref] [--files …]` | (3.0.1) runs the checks above that the changed files reach, 4 at a time, longest first; live suites one at a time after them and only when asked; progress every 15 s; full output in a temp log (§7.0) | `--all`: **16/16 checks in 142 s**, three runs (3.0.1) |
@@ -1258,10 +1258,10 @@ by being written down.
 
 | Gap | Evidence | Status |
 |---|---|---|
-| Headless is detected by its user agent (`HeadlessChrome` in the UA and `userAgentData`) | every headless stealth run; public pages round 3: sannysoft (User Agent (Old), HEADCHR_UA, CHR_MEMORY), creepjs headless 67 %, browserscan "Robot", pixelscan, Fingerprint bot 3/3 | inherent; G9 does not spoof the UA (consistency beats spoofing). Use headed stealth for strict cases |
+| Headless is detected by its user agent (`HeadlessChrome` in the UA and `userAgentData`) | every headless stealth run; public pages round 3: sannysoft (User Agent (Old), HEADCHR_UA, CHR_MEMORY), creepjs headless 67 %, browserscan "Robot", pixelscan, Fingerprint bot 3/3 | inherent; G9BrowserAgent does not spoof the UA (consistency beats spoofing). Use headed stealth for strict cases |
 | Headed Edge stealth: pixelscan "Automated behavior detected" | round 3: 4/4 via the harness (with and without interaction); headed Chrome passes 2/2; no field attributable | unexplained. The final local self-test is UNDETECTED; public pages were not re-run after the round-3 fixes |
 | Brand checks: rebrowser flags Edge ("no Google Chrome brand", a warning) and CfT ("Chrome for Testing") | round 3 | inherent to the binary |
-| `outerWidth/outerHeight` 0×0 at the load event (a CDP-class signal) | live round 2: Edge headless stealth 8/8, headed 5/8, CfT headless 0/8; live round 3: 0/54 local runs | launch warning and STEALTH.md still mention it; not attributable to G9 code |
+| `outerWidth/outerHeight` 0×0 at the load event (a CDP-class signal) | live round 2: Edge headless stealth 8/8, headed 5/8, CfT headless 0/8; live round 3: 0/54 local runs | launch warning and STEALTH.md still mention it; not attributable to G9BrowserAgent code |
 | Engine 1 debugger infobar: shorter viewport, two `resize` events per load in every tab | §2.4 | only a policy install (`ExtensionInstallForcelist`) or `--silent-debugger-extension-api` removes it; Engine 1 does "input rules only" at stealth; the panel's Stealth option says so |
 | Human-level full-page screenshots resize the viewport (a transient 1×1 the page can see) | live round 3: in 14/14 stealth-suite human controls, and 1/8 Engine 2 suite runs | deliberate at human (default level); disclosed in `pageSaw`; refused at stealth |
 | Context locale in another language than its profile | a per-tab override does not reach dedicated workers; the UA-override approach left the worker on the old language | refused at stealth, warned otherwise; use a profile whose persona has that locale |
@@ -1281,7 +1281,7 @@ by being written down.
 | Locked session, another virtual desktop | not measured — both would disrupt the owner's workstation (the Engine 2 phase, P2, asked for a locked-session run) | open |
 | A call that reaches its deadline may still be running | live round 1; `daemon/router.js`. **Fixed 2026-09-22:** the call is cancelled (an `AbortSignal` into `lib/humanize.js perform` on Engine 2, a `{type:'cancel'}` frame to the extension) and the tab's queue is held until it stops, up to 5 s; only if it does not stop does the answer say it may still be running. `browser_interact`'s deadline also grows with the text it types (450 ms per character), which is what used to make a long humanized type hit the deadline and keep typing into the next call's target | mitigated; a call stuck outside `perform` (a wedged CDP command) can still overlap after the grace |
 | A per-agent halt does not interrupt an Engine 2 call already running | only the global halt is mirrored into launched engines. **Fixed 2026-09-22:** `router.cancelFor(agentId)` aborts that agent's running calls and sends `cancel` for relayed ones | closed |
-| A witness listener may stay armed after Stop | `cdp.send` refuses every command while halted, so the release waited for the 10-minute safety net (live round 2) | mitigated: `interact.js cleanupSend` ends and releases G9's own witness on the live session after Stop, bounded at 2 s; only if that fails does it stay armed until the safety net. It lives in G9's world and reacts only to trusted events |
+| A witness listener may stay armed after Stop | `cdp.send` refuses every command while halted, so the release waited for the 10-minute safety net (live round 2) | mitigated: `interact.js cleanupSend` ends and releases G9BrowserAgent's own witness on the live session after Stop, bounded at 2 s; only if that fails does it stay armed until the safety net. It lives in G9BrowserAgent's world and reacts only to trusted events |
 | D-c limits | after an extension reload/browser restart a tab that navigated during the gap loses its handle (checked by URL on purpose); two browsers sharing a copied profile share one `instanceId` (the newer wins; the other waits for Reconnect); parked 10 min | by design |
 | Handoff moves cookies + local/session storage only; the page reloads | IndexedDB, service-worker state and in-memory state do not travel (listed in every result); a recording's screenshot-baseline attachments are not copied when it is relayed to the launched store | by design (v2.0) |
 | Engine 1 downloads | attribution inferred (`exact`/`probable`/`unknown`), no file hash or content | inherent to `chrome.downloads`; Engine 2 hashes from disk |
@@ -1329,7 +1329,7 @@ by being written down.
   `g9.project.json` environments; with no agent connected it attaches nothing, which the panel says.
 - **The icon (3.0.1).** The extension's icons come from the owner's artwork through
   `setup/make-icons.ps1`; the source PNG is not in the repository (keep it to regenerate). The 16 px
-  size is a crop, the browser window with "G9", because the whole drawing is a blur at 16 px; not
+  size is a crop, the browser window with "G9BrowserAgent", because the whole drawing is a blur at 16 px; not
   looked at in a real toolbar here (the harnesses are headless). The desktop app's icons (tray,
   window, installer) are still drawn in code by `desktop/lib/icon.mjs`, coloured by state.
 - **The live view (3.2).** View only by design: nothing reaches the page from it. The daemon shows an
@@ -1419,7 +1419,7 @@ any item's status.
 
 | ID | Work | Status | What remains |
 |---|---|---|---|
-| EXT-01 | Repair input-delivery verification | **Partly done** — the defect is fixed and verified live. The witness is armed in G9's isolated world before dispatch, hears trusted events only, is timed from the end of dispatch, and results carry `delivery`; `not-delivered`, `missed` and `partial` are errors (§4.3a) | The injected-checker-error and navigation-during-click cases are proven against the `node:vm` fake browser only; a frame removed mid-operation has no test; after Stop a witness can stay armed until its safety ceiling (mitigated, §8.2) |
+| EXT-01 | Repair input-delivery verification | **Partly done** — the defect is fixed and verified live. The witness is armed in G9BrowserAgent's isolated world before dispatch, hears trusted events only, is timed from the end of dispatch, and results carry `delivery`; `not-delivered`, `missed` and `partial` are errors (§4.3a) | The injected-checker-error and navigation-during-click cases are proven against the `node:vm` fake browser only; a frame removed mid-operation has no test; after Stop a witness can stay armed until its safety ceiling (mitigated, §8.2) |
 | EXT-02 | Replace unsupported download tracking | **Partly done** — `chrome.downloads` on Engine 1 (attribution `exact`/`probable`/`unknown`, never guessed), `Browser.setDownloadBehavior` plus a size/sha256/magic-bytes check from disk on Engine 2 | Live-verified on Engine 2 only; cancelled or interrupted transfers, repeated file names and concurrent unrelated downloads not exercised live |
 | EXT-03 | Enforce snapshot generation and frame identity | **Done for renumbering** (2026-09-22): ref numbers are never reused on a page and each caller's last four snapshots stay resolvable (§4.2) | Child-session node identity |
 | EXT-04 | Align screenshot retry and request deadlines | **Partly done** — deadlines follow the call (120 s floor), a stalled capture names its cause, a call that reaches its deadline is cancelled and its tab's queue held until it stops | Attempts are not budgeted from the time left in the call; a call stuck outside `perform` can still overlap after the grace; the relay-timeout text still names a JavaScript dialog as a possible cause; both-attempts-stall and late-reply cases untested |
@@ -1445,7 +1445,7 @@ Recorded on 2026-09-25; none blocks a release.
    is `auto` (the pinned CfT if installed, else Edge, else Chrome). Branded Chrome 153 ignores
    `--load-extension`, and CfT's brand is flagged by a public detector, so stealth runs prefer Edge or
    Chrome.
-2. **A code-signing certificate** for the installer and `G9.exe` (§8.3).
+2. **A code-signing certificate** for the installer and `G9BrowserAgent.exe` (§8.3).
 3. **Where updates are hosted** — an http(s) URL for `updateUrl` ([docs/INSTALL.md](docs/INSTALL.md),
    "Updates and update hosting").
 4. **Whether `runner/drivers/agripad.mjs` is still needed.** Kept as is.
@@ -1465,7 +1465,7 @@ Recorded on 2026-09-25; none blocks a release.
     designed switch list, because stealth runs must be undetectable. Confirm.
 11. **The version cadence.** Every change bumps the version (D12); confirm that cadence for releases.
 12. **`maxParallel` default:** 8 (live round 2) or 12 (round 3's data) on this machine class (§8.3).
-13. **Keys to a hidden page:** G9 refuses them by policy; typing into an already-focused field would be
+13. **Keys to a hidden page:** G9BrowserAgent refuses them by policy; typing into an already-focused field would be
     delivered (§8.2).
 14. **Full-page screenshots at human** resize the viewport (a transient 1×1 the page can see, disclosed
     as `pageSaw`); keep it, or build stitched viewport captures.
@@ -1547,7 +1547,7 @@ pass/fail results are exposed as a flaky signal.
 `Page.addScriptToEvaluateOnNewDocument({worldName:'g9'})` + `Runtime.addBinding`, over the CDP
 session already open, in either engine. Injects before the page's own scripts, survives navigation by
 construction, and gives the injected listener a direct channel back — with **no content script and no
-new permission**; all browser logic still goes through CDP. v2 moved it into G9's isolated world
+new permission**; all browser logic still goes through CDP. v2 moved it into G9BrowserAgent's isolated world
 (§4.7): v1 left `window.__g9rec`, `window.__g9loc` and the `__g9emit` binding where the page could see
 them. The binding is added by `executionContextName` AND by context id, because a binding by name is
 installed only while Runtime is enabled and stealth never enables it (measured on Edge 153); the script
@@ -1804,6 +1804,78 @@ after every step of a forty-step flow doubles the run for evidence nobody reads.
 Entries below describe what was believed or tested at the time. Current capability claims and
 unresolved findings are in §§4, 7 and 8, which supersede historical assertions. Entries dated before
 2026-09-21 describe v1 (the bridge, the four control modes, the workspace allowlist).
+
+### 2026-09-27 — v3.2.1: G9 is G9BrowserAgent
+
+**Why.** The product's name is G9BrowserAgent — the repository's, the GitHub releases' — but the app,
+the extension, the installer and every screen said "G9". The owner asked for one name everywhere,
+before anyone depends on the old one: in the app and the extension, in the files people install and
+in what they read, and for the data folder and the AI clients' entry too.
+
+**What was renamed.** Every mention of the product (1,571, by one script with its exceptions spelled
+out, then read through): the app (`G9BrowserAgent.exe`, `G9BrowserAgent.app`, the Linux command
+`g9browseragent`, `/opt/G9BrowserAgent`, the .deb package `g9browseragent`), the release files
+(`G9BrowserAgent-Setup-<v>.exe`, `G9BrowserAgent-<v>-mac-<arch>.dmg/.zip`,
+`G9BrowserAgent-x86_64.AppImage`, `G9BrowserAgent_<v>_amd64.deb`), the extension (its manifest name and
+toolbar title; the description was shortened to stay within the store's 132 characters, which the
+panel suite checks), the window, tray, notifications, the MCP server's name (`G9BrowserAgent`), the
+AI clients' entry (`g9browseragent`), the data folder (`%LOCALAPPDATA%\G9BrowserAgent`,
+`~/.g9browseragent`), the updater's cache, and the guides, both READMEs and their pictures (made
+again). **Kept, on purpose** (docs/INSTALL.md, "Upgrading from G9"): `G9_*` variables, `g9d` and its
+protocol (a new app must still recognise an old daemon), `runner/g9.mjs`, `g9.project.json`, the
+export format id, the Docker image's `/opt/g9`, and this change log's older entries, which describe
+what those versions were called.
+
+**Existing installs follow by themselves.**
+- The data folder moves once (`lib/home.mjs`, a copy in `desktop/lib/paths.mjs`): one atomic rename
+  by one of its owners — the daemon at its start or the desktop app; every other caller only looks,
+  the old folder until the move and the new one after — only for a folder that is
+  recognisably G9's, and not at all while something holds files in it (Windows) — then the old folder
+  stays in use by every component until a later start. A `migrated-from.json` note makes the app say
+  so once and send Setup back to the extension step: the browser knows an unpacked extension by its
+  folder.
+- AI clients' entries (`migrateRegistrations`): an old-name entry moves to the new name — unchanged
+  when its files exist (a developer's checkout), pointed at the app when they are gone; an entry naming
+  a vanished executable is repointed; commented files and deliberate entries are left for Setup.
+- Start at sign-in follows the new executable (Windows Run key, Linux autostart file).
+- The .deb replaces `g9-desktop` (`fpm --replaces/--conflicts/--provides`).
+
+**Found on the way.**
+- **Only the folder's owners may move it.** The first version moved the old folder from every
+  resolver, and twice that moved the owner's real `%LOCALAPPDATA%\G9`: a one-line check of
+  `resolveHome()`, and later the update test's own browser lookup (`engine/find.js`, run by the
+  harness in the real environment). Both times it was put back at once, unchanged. Now only the
+  daemon at its start and the desktop app move it (`migrate: true`); every other caller only looks —
+  the old folder until the move, the new one after — so a library call, a script or a test never
+  moves a person's data, and all components still agree. After the change, a full `check.mjs --all`
+  and the update test left the real folder where it was. Two daemon tests resolved the real default
+  home too; they now run against a temporary profile. And the update
+  end-to-end test started the packaged app with the real user profile — with the new start-up
+  migration, that would have rewritten this machine's AI-client configs to point at a temporary
+  install. The test now gives the app a profile of its own (`USERPROFILE`/`HOME`/`APPDATA`/`XDG_*`)
+  and seeds an old-style `g9-browser` entry there to check that it follows the rename.
+- The first migration rule repointed every old-name entry at the installed app, which would have
+  silently replaced a developer's entry naming their repository. Now only a stale entry is repointed.
+- `setup/unit/mcp-http.test.mjs` (3.2.0) ended with `process.exit(0)` while its sockets were closing;
+  Node 24 on Windows aborts on that (a libuv assertion). It now exits a moment later.
+
+**The 3.2.0 pipeline failure.** Its log could not be read from here (the credential available reads
+code, not builds). Every stage the pipeline runs was repeated on 3.2.0 instead: all 18 offline checks
+on Windows under Node 22 (the pipeline's version), the Linux job in a clean Node 22 container, and the
+Windows packages with the update test (20 of 20). All passed, so the failure is in a stage that needs
+the pipeline itself — most likely Publish, whose first step validates the Azure DevOps and GitHub
+tokens stored in the pipeline: they were to be revoked after 3.1.1.
+
+**Runs on 3.2.1 (2026-09-27).** `check.mjs --all` 16 of 18 on the owner's workstation — the two others
+fail only there and pass from a clone elsewhere (the self-test's flow library finds the owner's own
+`g9.project.json` in a folder above the repository) and under Node 22 (mcp-http, fixed
+above). The update end to end on Windows 11, **3.2.0 → 3.2.1 across the rename, 21 of 21**: the
+3.2.0 install (`G9.exe`) updated through its own updater, stayed in its folder as
+`G9BrowserAgent.exe`, and its old `g9-browser` AI-client entry was moved to `g9browseragent` and
+pointed at it; every earlier scenario passed too.
+
+Version 3.2.1 in `package.json`, `extension/manifest.json`, `desktop/package.json` and
+`desktop/package-lock.json`.
 
 ### 2026-09-26 — v3.2.0: a live view, approvals that travel, and a browser on a server
 

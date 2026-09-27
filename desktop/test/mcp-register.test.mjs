@@ -4,7 +4,7 @@ import path from 'node:path';
 import { suite, tmpDir, rmrf } from './harness.mjs';
 import {
   ENTRY_NAME, mcpClients, userConfigRoot, unstableExecReason, detectClients, shimEntry, entryForClient, planRegistration, applyRegistration, removeRegistration,
-  stripJsonc, parseConfig, sameEntry, diffLines, inspectClient,
+  stripJsonc, parseConfig, sameEntry, diffLines, inspectClient, LEGACY_ENTRY_NAMES, migrateRegistrations,
 } from '../lib/mcp-register.mjs';
 
 const t = suite('desktop: MCP client registration');
@@ -17,7 +17,7 @@ fs.mkdirSync(appData, { recursive: true });
 const clients = mcpClients({ home, appData });
 const byId = Object.fromEntries(clients.map((c) => [c.id, c]));
 
-const PACKAGED = shimEntry({ isPackaged: true, execPath: 'C:\\Users\\qa\\AppData\\Local\\Programs\\G9\\G9.exe', resourceRoot: 'C:\\Users\\qa\\AppData\\Local\\Programs\\G9\\resources' });
+const PACKAGED = shimEntry({ isPackaged: true, execPath: 'C:\\Users\\qa\\AppData\\Local\\Programs\\G9BrowserAgent\\G9BrowserAgent.exe', resourceRoot: 'C:\\Users\\qa\\AppData\\Local\\Programs\\G9BrowserAgent\\resources' });
 const DEV = shimEntry({ isPackaged: false, execPath: 'electron.exe', resourceRoot: 'G:\\Projects\\G9Products\\g9-browser-agent' });
 
 t.test('the four clients and their user-level config files', () => {
@@ -34,10 +34,10 @@ t.test('detection looks for the client folders', () => {
   assert.deepEqual(d, { 'claude-code': false, cursor: true, vscode: false, 'claude-desktop': false });
 });
 
-t.test('entry: packaged G9.exe + ELECTRON_RUN_AS_NODE + resources/mcp/shim.mjs; dev node + repo shim; forward slashes', () => {
+t.test('entry: packaged G9BrowserAgent.exe + ELECTRON_RUN_AS_NODE + resources/mcp/shim.mjs; dev node + repo shim; forward slashes', () => {
   assert.deepEqual(PACKAGED, {
-    command: 'C:/Users/qa/AppData/Local/Programs/G9/G9.exe',
-    args: ['C:/Users/qa/AppData/Local/Programs/G9/resources/mcp/shim.mjs'],
+    command: 'C:/Users/qa/AppData/Local/Programs/G9BrowserAgent/G9BrowserAgent.exe',
+    args: ['C:/Users/qa/AppData/Local/Programs/G9BrowserAgent/resources/mcp/shim.mjs'],
     env: { ELECTRON_RUN_AS_NODE: '1' },
   });
   assert.deepEqual(DEV, { command: 'node', args: ['G:/Projects/G9Products/g9-browser-agent/mcp/shim.mjs'] });
@@ -144,7 +144,7 @@ t.test('inspectClient never throws on an unreadable path', () => {
   assert.equal(r.status, 'invalid');
 });
 
-t.test('remove takes out only the g9-browser entry, after a backup', () => {
+t.test('remove takes out only the g9browseragent entry, after a backup', () => {
   const c = byId['claude-code'];
   const r = removeRegistration(c);
   assert.equal(r.ok, true);
@@ -217,11 +217,64 @@ t.test('config locations per OS: VS Code and Claude Desktop under %APPDATA%, ~/L
 });
 
 t.test('a Linux AppImage entry names the .AppImage file and the bootstrap, never the temporary mount', () => {
-  const e = shimEntry({ isPackaged: true, execPath: '/tmp/.mount_G9q/g9', resourceRoot: '/tmp/.mount_G9q/resources', appImage: { file: '/home/qa/Apps/G9.AppImage', bootstrap: '/home/qa/.g9/bin/g9-run.mjs' } });
-  assert.deepEqual(e, { command: '/home/qa/Apps/G9.AppImage', args: ['/home/qa/.g9/bin/g9-run.mjs', 'mcp/shim.mjs', '--no-sandbox'], env: { ELECTRON_RUN_AS_NODE: '1' } });
-  assert.equal(unstableExecReason({ execPath: '/Applications/G9.app/Contents/MacOS/G9', platform: 'darwin' }), null);
-  assert.match(unstableExecReason({ execPath: '/private/var/folders/a/T/AppTranslocation/X/d/G9.app/Contents/MacOS/G9', platform: 'darwin' }), /App Translocation/);
-  assert.equal(unstableExecReason({ execPath: 'C:/Users/qa/AppData/Local/Programs/G9/G9.exe', platform: 'win32' }), null);
+  const e = shimEntry({ isPackaged: true, execPath: '/tmp/.mount_G9q/g9', resourceRoot: '/tmp/.mount_G9q/resources', appImage: { file: '/home/qa/Apps/G9BrowserAgent.AppImage', bootstrap: '/home/qa/.g9/bin/g9-run.mjs' } });
+  assert.deepEqual(e, { command: '/home/qa/Apps/G9BrowserAgent.AppImage', args: ['/home/qa/.g9/bin/g9-run.mjs', 'mcp/shim.mjs', '--no-sandbox'], env: { ELECTRON_RUN_AS_NODE: '1' } });
+  assert.equal(unstableExecReason({ execPath: '/Applications/G9BrowserAgent.app/Contents/MacOS/G9BrowserAgent', platform: 'darwin' }), null);
+  assert.match(unstableExecReason({ execPath: '/private/var/folders/a/T/AppTranslocation/X/d/G9BrowserAgent.app/Contents/MacOS/G9BrowserAgent', platform: 'darwin' }), /App Translocation/);
+  assert.equal(unstableExecReason({ execPath: 'C:/Users/qa/AppData/Local/Programs/G9BrowserAgent/G9BrowserAgent.exe', platform: 'win32' }), null);
+});
+
+t.test('3.2.1 rename: an entry under the old name "g9-browser" is moved to "g9browseragent", without a question, and never left twice', () => {
+  assert.deepEqual([...LEGACY_ENTRY_NAMES], ['g9-browser']);
+  const c = byId['claude-code'];
+  const old = { mcpServers: { 'g9-browser': { type: 'stdio', command: 'C:/Users/qa/AppData/Local/Programs/G9/G9.exe', args: ['C:/Users/qa/AppData/Local/Programs/G9/resources/mcp/shim.mjs'], env: { ELECTRON_RUN_AS_NODE: '1' } }, other: { command: 'x' } } };
+  const plan = planRegistration(c, JSON.stringify(old), PACKAGED);
+  assert.equal(plan.status, 'rename');
+  const next = JSON.parse(plan.nextText);
+  assert.equal(next.mcpServers['g9-browser'], undefined, 'the old name is gone');
+  assert.deepEqual(next.mcpServers[ENTRY_NAME], entryForClient(c, PACKAGED));
+  assert.deepEqual(next.mcpServers.other, { command: 'x' }, 'other servers are untouched');
+  // both names present, the new one current: still a rename (the old one is dropped)
+  const both = { mcpServers: { 'g9-browser': old.mcpServers['g9-browser'], [ENTRY_NAME]: entryForClient(c, PACKAGED) } };
+  assert.equal(planRegistration(c, JSON.stringify(both), PACKAGED).status, 'rename');
+  // the new name holding something deliberately different is still asked about
+  const custom = { mcpServers: { 'g9-browser': old.mcpServers['g9-browser'], [ENTRY_NAME]: { command: 'node', args: ['D:/my/fork/mcp/shim.mjs'] } } };
+  assert.equal(planRegistration(c, JSON.stringify(custom), PACKAGED).status, 'different');
+});
+
+t.test('3.2.1 rename: at start, old-name entries move (kept as they are when their files exist), entries naming a vanished executable are repointed, commented files are left alone; remove takes both names', () => {
+  const dir = path.join(root, 'migrate');
+  const h = path.join(dir, 'home');
+  const ad = path.join(dir, 'AppData', 'Roaming');
+  fs.mkdirSync(path.join(h, '.cursor'), { recursive: true });
+  fs.mkdirSync(path.join(ad, 'Code', 'User'), { recursive: true });
+  fs.mkdirSync(path.join(ad, 'Claude'), { recursive: true });
+  const cs = mcpClients({ home: h, appData: ad });
+  const by = Object.fromEntries(cs.map((c) => [c.id, c]));
+  const gone = { command: 'C:/Users/qa/AppData/Local/Programs/G9/G9.exe', args: ['C:/Users/qa/AppData/Local/Programs/G9/resources/mcp/shim.mjs'], env: { ELECTRON_RUN_AS_NODE: '1' } };
+  const kept = { command: process.execPath, args: [path.join(root, 'fork-shim.mjs')] };
+  fs.writeFileSync(kept.args[0], '// a fork');
+  fs.writeFileSync(by['claude-code'].file, JSON.stringify({ mcpServers: { 'g9-browser': { type: 'stdio', ...gone } }, projects: { a: 1 } }, null, 2));
+  fs.writeFileSync(by.cursor.file, JSON.stringify({ mcpServers: { [ENTRY_NAME]: gone } }, null, 2));
+  fs.writeFileSync(by['claude-desktop'].file, JSON.stringify({ mcpServers: { 'g9-browser': kept } }, null, 2));
+  fs.writeFileSync(by.vscode.file, '{\n  // mine\n  "servers": { "g9-browser": { "type": "stdio", "command": "x" } }\n}\n');
+  const rows = migrateRegistrations(cs, PACKAGED);
+  const byClient = Object.fromEntries(rows.map((r) => [r.client, r]));
+  assert.equal(byClient['claude-code'].status, 'repointed', 'old name AND a vanished G9.exe: moved and pointed at this app');
+  assert.equal(byClient.cursor.status, 'repointed');
+  assert.equal(byClient['claude-desktop'].status, 'renamed', 'old name, files still there: only the name changes');
+  assert.equal(byClient.vscode.changed, false, 'a file with comments is left for Setup');
+  const cc = JSON.parse(fs.readFileSync(by['claude-code'].file, 'utf8'));
+  assert.deepEqual(Object.keys(cc.mcpServers), [ENTRY_NAME]);
+  assert.deepEqual(cc.projects, { a: 1 }, "Claude Code's own state is kept");
+  assert.equal(JSON.parse(fs.readFileSync(by.cursor.file, 'utf8')).mcpServers[ENTRY_NAME].command, PACKAGED.command);
+  assert.deepEqual(JSON.parse(fs.readFileSync(by['claude-desktop'].file, 'utf8')).mcpServers, { [ENTRY_NAME]: kept }, "a developer's own command is kept");
+  assert.ok(fs.readdirSync(h).some((f) => f.startsWith('.claude.json.g9-backup-')), 'backed up before the write');
+  assert.deepEqual(migrateRegistrations(cs, PACKAGED).filter((r) => r.changed), [], 'a second start changes nothing');
+  fs.writeFileSync(by.cursor.file, JSON.stringify({ mcpServers: { 'g9-browser': gone, [ENTRY_NAME]: gone, z: 1 } }));
+  const r = removeRegistration(by.cursor);
+  assert.equal(r.changed, true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(by.cursor.file, 'utf8')).mcpServers, { z: 1 });
 });
 
 t.run();

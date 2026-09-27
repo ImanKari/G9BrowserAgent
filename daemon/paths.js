@@ -1,29 +1,24 @@
 /**
- * Where G9 keeps its data, and the daemon's log.
+ * Where G9BrowserAgent keeps its data, and the daemon's log.
  *
  * One data home per machine user (ARCHITECTURE §9): `G9_HOME`, else
- * `%LOCALAPPDATA%\G9` on Windows, else `~/.g9`. Every Node component resolves it
+ * `%LOCALAPPDATA%\G9BrowserAgent` on Windows, else `~/.g9browseragent`. Every Node component resolves it
  * the same way, and the daemon exports it back into `process.env.G9_HOME` at
  * startup so `engine/*` modules (profiles, Chrome for Testing) cannot disagree
  * with it about where a profile lives.
  */
 
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { resolveDefaultHome } from '../lib/home.mjs';
 
 export const DEFAULT_PORT = 8765;
 
-export function resolveHome(explicit = process.env.G9_HOME) {
+export function resolveHome(explicit = process.env.G9_HOME, { migrate = false } = {}) {
   if (explicit && String(explicit).trim()) return path.resolve(String(explicit).trim());
-  // The same fallback as engine/find.js g9Home() and desktop/lib/paths.mjs: on Windows
-  // without LOCALAPPDATA (a service account, a stripped environment), the usual
-  // AppData\Local under the profile — not ~/.g9, where the engine would disagree
-  // about where profiles and Chrome for Testing live.
-  if (process.platform === 'win32') {
-    return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'G9');
-  }
-  return path.join(os.homedir(), '.g9');
+  // The same default as engine/find.js g9Home() and desktop/lib/paths.mjs. `migrate` (only g9d.mjs
+  // at its start) also moves the pre-3.2.1 folder to the new name (lib/home.mjs).
+  return resolveDefaultHome({ env: { ...process.env, G9_HOME: '' }, migrate });
 }
 
 /** The §9 layout, as absolute paths. Directories are created on demand by their users. */

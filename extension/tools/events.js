@@ -27,7 +27,7 @@ import * as netpin from './netpin.js';
 import * as issues from './issues.js';
 import { hooks } from './index.js';
 
-const report = (what) => (err) => console.error(`[G9] ${what} failed`, err);
+const report = (what) => (err) => console.error(`[G9BrowserAgent] ${what} failed`, err);
 
 /** Per-tab session-storage keys that die with the tab. Refs and buffers have their own owners. */
 const TAB_KEYS = (tabId) => [
@@ -54,7 +54,7 @@ export function onCdpEvent(source, method, params = {}) {
 
   // The recorder speaks through a Runtime binding rather than a content script:
   // injected before the page's own code, surviving navigation, over the
-  // debugger session already open (and, in v2, bound in G9's isolated world).
+  // debugger session already open (and, in v2, bound in G9BrowserAgent's isolated world).
   if (method === 'Runtime.bindingCalled' && params.name === record.BINDING) {
     try {
       record.ingestRaw(tabId, JSON.parse(params.payload)).catch(() => {});
@@ -104,7 +104,7 @@ export function onCdpEvent(source, method, params = {}) {
     }
   }
 
-  // A committed navigation invalidates every element ref for that tab, G9's
+  // A committed navigation invalidates every element ref for that tab, G9BrowserAgent's
   // isolated world in it, and everything captured for the document we just
   // left. Pruning here as well as in navigate.js is what closes the gap: the
   // outgoing page keeps emitting until the new one commits, so a

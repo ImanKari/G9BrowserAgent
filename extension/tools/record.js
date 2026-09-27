@@ -28,7 +28,7 @@
  * channel back. No `scripting` permission, no message plumbing, no re-injection
  * on navigate — and it keeps §6's rule that all browser logic goes through CDP.
  *
- * ## v2: the recorder lives in G9's isolated world
+ * ## v2: the recorder lives in G9BrowserAgent's isolated world
  *
  * v1 injected into the page's MAIN world and left `window.__g9rec`,
  * `window.__g9loc` and the `__g9emit` binding where the page — and any bot
@@ -326,7 +326,7 @@ const RECORDER_SOURCE = `
   }, { capture: true, passive: true });
   on('pagehide', flushSamples, true);
 
-  // ---- control surface for the extension (G9's world only) -----------------
+  // ---- control surface for the extension (G9BrowserAgent's world only) -----------------
   globalThis.__g9recFlush = flush;
   /** Everything still undelivered, handed over directly (used at stop). */
   globalThis.__g9recTake = () => {

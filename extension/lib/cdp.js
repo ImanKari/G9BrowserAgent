@@ -364,7 +364,7 @@ const PERSON_METHODS = new Set([
 function personMayPass(tabId, method, params) {
   if (!(personOnTab.get(tabId) > 0)) return false;
   if (PERSON_METHODS.has(method)) return true;
-  // G9's own isolated world only (a contextId): never an expression in the page's main world.
+  // G9BrowserAgent's own isolated world only (a contextId): never an expression in the page's main world.
   return method === 'Runtime.evaluate' && params?.contextId != null;
 }
 
@@ -492,8 +492,8 @@ export async function applyStealthLevel(tabId) {
  * Evaluate an expression in the page's MAIN world and return a plain JS value.
  *
  * This is for `browser_console action:"evaluate"` — the agent asking about the
- * page's own JavaScript. G9's internal page reads use lib/world.js instead, so
- * nothing G9 runs is visible to (or disturbable by) the page's own globals.
+ * page's own JavaScript. G9BrowserAgent's internal page reads use lib/world.js instead, so
+ * nothing G9BrowserAgent runs is visible to (or disturbable by) the page's own globals.
  */
 export async function evaluate(tabId, expression, { awaitPromise = true, returnByValue = true } = {}) {
   const res = await send(tabId, 'Runtime.evaluate', {

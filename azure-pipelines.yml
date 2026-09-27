@@ -166,8 +166,8 @@ stages:
           # No FUSE needed: the AppImage runtime extracts, and sets APPDIR/APPIMAGE the same way.
           export APPIMAGE_EXTRACT_AND_RUN=1
           # The hosted image's Edge and Chrome sandbox helpers are not root-owned with mode 4755 (what
-          # their own packages install), so a browser G9 launches aborts before it starts. Put them
-          # back as a desktop has them: G9's browsers then run sandboxed here, as they do for people.
+          # their own packages install), so a browser G9BrowserAgent launches aborts before it starts. Put them
+          # back as a desktop has them: G9BrowserAgent's browsers then run sandboxed here, as they do for people.
           for h in /opt/microsoft/msedge/msedge-sandbox /opt/google/chrome/chrome-sandbox; do
             if [ -f "$h" ]; then sudo chown root:root "$h" && sudo chmod 4755 "$h"; ls -l "$h"; fi
           done
@@ -183,9 +183,9 @@ stages:
         mkdir -p "$OUT"
         cd desktop/dist
         case "$(target)" in
-          win)   cp G9-Setup-*.exe G9-Setup-*.exe.blockmap latest.yml "$OUT/" ;;
-          mac)   cp G9-*-mac-*.dmg G9-*-mac-*.zip G9-*-mac-*.zip.blockmap latest-mac.yml "$OUT/"; cp G9-*-mac-*.dmg.blockmap "$OUT/" 2>/dev/null || true ;;
-          linux) cp G9-x86_64.AppImage G9_*_amd64.deb latest-linux.yml "$OUT/" ;;
+          win)   cp G9BrowserAgent-Setup-*.exe G9BrowserAgent-Setup-*.exe.blockmap latest.yml "$OUT/" ;;
+          mac)   cp G9BrowserAgent-*-mac-*.dmg G9BrowserAgent-*-mac-*.zip G9BrowserAgent-*-mac-*.zip.blockmap latest-mac.yml "$OUT/"; cp G9BrowserAgent-*-mac-*.dmg.blockmap "$OUT/" 2>/dev/null || true ;;
+          linux) cp G9BrowserAgent-x86_64.AppImage G9BrowserAgent_*_amd64.deb latest-linux.yml "$OUT/" ;;
         esac
         ls -la "$OUT"
       displayName: 'Stage the release files'
@@ -217,7 +217,7 @@ stages:
         V=$(node -p "require('./package.json').version")
         R="$(Pipeline.Workspace)/release"
         node desktop/scripts/verify-artifacts.mjs "$R" --version "$V" --expect win,mac,linux
-        (cd "$R" && sha256sum G9* > SHA256SUMS.txt && cat SHA256SUMS.txt)
+        (cd "$R" && sha256sum G9BrowserAgent* > SHA256SUMS.txt && cat SHA256SUMS.txt)
         # Release notes: this version's change-log entry from AIGuide.md, and how to install.
         node setup/release-notes.mjs --version "$V" --dir "$R" --out "$(Pipeline.Workspace)/notes.md"
       displayName: 'Verify all packages as one release; SHA256SUMS; notes'
@@ -285,7 +285,7 @@ stages:
             Write-Host "##vso[task.logissue type=error]Tag $tag is on $tagged, but this build is ${head}: bump the version in package.json (and its mirrors) to release this commit."
             exit 1
         }
-        git -c user.name='g9-pipeline' -c user.email='pipeline@g9tm.invalid' tag -a $tag -m "G9 $version" $head
+        git -c user.name='g9-pipeline' -c user.email='pipeline@g9tm.invalid' tag -a $tag -m "G9BrowserAgent $version" $head
         git push $remote "refs/tags/$tag"
         if ($LASTEXITCODE -ne 0) { Write-Host "##vso[task.logissue type=error]Could not push tag $tag (AzureDevOps.PAT needs Code: Read & Write)."; exit 1 }
         Write-Host "Tagged $head as $tag."

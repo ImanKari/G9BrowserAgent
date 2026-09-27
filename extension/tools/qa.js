@@ -5,7 +5,7 @@
 
 import { send } from '../lib/cdp.js';
 import { resolveRef } from '../lib/refs.js';
-// Every page read in this file runs in G9's isolated world: the locator engine
+// Every page read in this file runs in G9BrowserAgent's isolated world: the locator engine
 // (window.__g9loc) lives there, invisible to the page, and a page that
 // redefines getComputedStyle or innerText cannot bend what an assertion reads.
 import { inWorld, callInWorld } from '../lib/world.js';
@@ -605,7 +605,7 @@ export async function exportPlaywright(id) {
   const lines = [
     `import { test, expect } from '@playwright/test';`,
     '',
-    'test(' + JSON.stringify(recording.name ?? 'G9 recording') + ', async ({ page }) => {',
+    'test(' + JSON.stringify(recording.name ?? 'G9BrowserAgent recording') + ', async ({ page }) => {',
   ];
   for (const step of recording.steps ?? []) {
     const locator = step.target ? playwrightLocator(step.target) : null;
@@ -630,7 +630,7 @@ export async function exportPlaywright(id) {
       case 'drag': lines.push('  await ' + locator + '.dragTo(' + playwrightLocator(step.to) + ');'); break;
       case 'scroll': lines.push('  await page.evaluate(() => scrollTo(' + (Number(step.x) || 0) + ', ' + (Number(step.y) || 0) + '));'); break;
       case 'assert': lines.push(...playwrightAssertion(step, locator)); break;
-      default: lines.push('  // Unsupported G9 step: ' + JSON.stringify(step.type));
+      default: lines.push('  // Unsupported G9BrowserAgent step: ' + JSON.stringify(step.type));
     }
   }
   lines.push('});', '');
@@ -673,21 +673,21 @@ function playwrightAssertion(step, locator) {
     case 'state':
       if (step.state === 'checked') return ['  await expect(' + locator + ').' + (step.expected === false ? 'not.' : '') + 'toBeChecked();'];
       if (step.state === 'disabled') return ['  await expect(' + locator + ').' + (step.expected === false ? 'not.' : '') + 'toBeDisabled();'];
-      return ['  // G9 state assertion: ' + step.state + ' === ' + JSON.stringify(step.expected ?? true)];
+      return ['  // G9BrowserAgent state assertion: ' + step.state + ' === ' + JSON.stringify(step.expected ?? true)];
     case 'screenshot': return ['  await expect(page).toHaveScreenshot({ maxDiffPixelRatio: ' + (step.threshold ?? 0.08) + ' });'];
     case 'aria': {
-      // Playwright's own semantic snapshot. The G9 baseline is a normalised
+      // Playwright's own semantic snapshot. The G9BrowserAgent baseline is a normalised
       // line list rather than Playwright's YAML, so the export writes the
       // assertion and lets Playwright own the snapshot file — round-tripping
       // our normalisation into their format would produce a snapshot that
       // never matches and a test nobody trusts.
       return [
-        '  // G9 captured ' + (step.ariaBaseline?.length ?? 0) + ' semantic nodes here.',
+        '  // G9BrowserAgent captured ' + (step.ariaBaseline?.length ?? 0) + ' semantic nodes here.',
         '  // Run once with --update-snapshots to let Playwright write its own baseline.',
         '  await expect(page).toMatchAriaSnapshot();',
       ];
     }
-    default: return ['  // G9 ' + step.assertion + ' assertion uses captured browser evidence; translate for your test fixtures.'];
+    default: return ['  // G9BrowserAgent ' + step.assertion + ' assertion uses captured browser evidence; translate for your test fixtures.'];
   }
 }
 

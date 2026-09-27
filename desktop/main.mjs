@@ -1,5 +1,5 @@
 /**
- * G9 desktop — the Electron main process (ARCHITECTURE_V2 §11).
+ * G9BrowserAgent desktop — the Electron main process (ARCHITECTURE_V2 §11).
  *
  * The shell, never the engine (D4, R5): Electron's Chromium only ever loads this app's own renderer
  * files, served from the private `g9app://app/` scheme. There is no BrowserView, no <webview>, no
@@ -22,7 +22,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { g9Home, daemonPort, homeLayout, resourceRoot as resolveResourceRoot, resourcePaths, osUserName } from './lib/paths.mjs';
+import { resolveAppHome, MIGRATION_MARKER, daemonPort, homeLayout, resourceRoot as resolveResourceRoot, resourcePaths, osUserName } from './lib/paths.mjs';
 import { runSmoke } from './lib/smoke.mjs';
 
 const require = createRequire(import.meta.url);
@@ -85,7 +85,7 @@ if (!IN_ELECTRON) {
     );
   } else {
     process.stderr.write(
-      'G9 desktop is an Electron app. Start it with `npm start` in desktop/ (or `npx electron .`).\n' +
+      'G9BrowserAgent desktop is an Electron app. Start it with `npm start` in desktop/ (or `npx electron .`).\n' +
         'If ELECTRON_RUN_AS_NODE is set in your shell, Electron runs as plain Node; `npm start` clears it.\n' +
         'Plain Node supports only `node main.mjs --smoke [--launch]`.\n',
     );
@@ -100,7 +100,7 @@ if (!IN_ELECTRON) {
 } else {
   startApp().catch((err) => {
     try {
-      electron.dialog.showErrorBox('G9 could not start', String(err?.stack ?? err));
+      electron.dialog.showErrorBox('G9BrowserAgent could not start', String(err?.stack ?? err));
     } finally {
       electron.app.exit(1);
     }
@@ -114,7 +114,7 @@ if (!IN_ELECTRON) {
 async function startApp() {
   const { app, BrowserWindow, Tray, Menu, nativeImage, nativeTheme, ipcMain, dialog, shell, clipboard, protocol, session, Notification, screen } = electron;
 
-  // One G9 per user session. A second start (Start menu, autostart) just shows the first one.
+  // One G9BrowserAgent per user session. A second start (Start menu, autostart) just shows the first one.
   if (!CHECKING && !app.requestSingleInstanceLock()) {
     app.quit();
     return;
@@ -131,7 +131,7 @@ async function startApp() {
   if (process.platform === 'win32') app.setAppUserModelId('com.g9.browseragent');
   if (CHECKING) {
     // Chromium's own profile (cache, local storage) for the check lives in the check's folder, not in
-    // %APPDATA%\G9: a diagnostic must never write into the data of the G9 the person actually uses.
+    // %APPDATA%\G9BrowserAgent: a diagnostic must never write into the data of the G9BrowserAgent the person actually uses.
     app.setPath('userData', path.resolve(FLAGS.checkRender, '.electron-user-data'));
     // G9_CHECK_THEME=light|dark renders the check in that scheme regardless of the OS setting.
     if (['light', 'dark'].includes(process.env.G9_CHECK_THEME)) nativeTheme.themeSource = process.env.G9_CHECK_THEME;
@@ -160,7 +160,9 @@ async function startApp() {
   const version = app.getVersion();
   const isPackaged = app.isPackaged;
   const port = daemonPort();
-  const home = g9Home();
+  // G9_HOME, else the default — moved from its pre-3.2.1 name (%LOCALAPPDATA%\G9, ~/.g9) the first time.
+  const homeInfo = resolveAppHome();
+  const home = homeInfo.home;
   const layout = homeLayout(home);
   const root = resolveResourceRoot({ isPackaged, resourcesPath: process.resourcesPath, appDir: APP_DIR });
   const resources = resourcePaths(root);
@@ -175,7 +177,21 @@ async function startApp() {
   // .AppImage file and a stable bootstrap instead (lib/runtime.mjs).
   const appImage = runtime.isAppImageRuntime() ? { file: process.env.APPIMAGE, bootstrap: runtime.ensureBootstrap(home) } : null;
   const appInstallId = runtime.installId({ root });
-  log.info(`G9 desktop ${version} starting`, { packaged: isPackaged, port, home, resourceRoot: root, pid: process.pid, platform: process.platform, appImage: appImage?.file ?? null });
+  log.info(`G9BrowserAgent desktop ${version} starting`, { packaged: isPackaged, port, home, resourceRoot: root, pid: process.pid, platform: process.platform, appImage: appImage?.file ?? null });
+
+  if (homeInfo.error) log.warn('The data folder keeps its old name for now: something still holds files in it (an older daemon?); the move is tried again at the next start', { home, error: homeInfo.error });
+  // The browser knows the extension by its folder, and the folder moved with the data: once, say so
+  // and send Setup back to the extension step.
+  const movedFile = path.join(home, MIGRATION_MARKER);
+  const moved = readJson(movedFile, null);
+  const movedNotice = moved && !moved.acknowledged
+    ? `G9BrowserAgent's data folder is now ${home} (it was ${moved.from}). Load the browser extension again from ${path.join(home, 'extension')}: on the extensions page remove the old one, then Load unpacked. Setup → Browser extension walks you through it.`
+    : null;
+  if (movedNotice) {
+    log.info('The data folder moved to its new name', moved);
+    settings.recordStep('extension', { ok: false, summary: 'The data folder moved: load the extension again from its new place.' });
+    try { fs.writeFileSync(movedFile, `${JSON.stringify({ ...moved, acknowledged: new Date().toISOString() }, null, 2)}\n`); } catch { /* shown again next time */ }
+  }
 
   const ctx = {
     win: null,
@@ -195,7 +211,7 @@ async function startApp() {
       activity: [],
       halted: { global: false },
       daemonMismatch: null,
-      notices: [],
+      notices: movedNotice ? [{ id: 'moved', tone: 'warn', text: movedNotice }] : [],
     },
   };
 
@@ -228,7 +244,7 @@ async function startApp() {
 
   // ------------------------------------------------------------------ pushing to the renderer
 
-  // A dialog parented to the window when it is on screen, free-standing when G9 is in the tray.
+  // A dialog parented to the window when it is on screen, free-standing when G9BrowserAgent is in the tray.
   const messageBox = (options) => (ctx.win && !ctx.win.isDestroyed() && ctx.win.isVisible() ? dialog.showMessageBox(ctx.win, options) : dialog.showMessageBox(options));
 
 
@@ -371,7 +387,7 @@ async function startApp() {
       if (!Notification.isSupported()) return;
       const n = new Notification({
         title: `${run.flowName ?? 'A run'}: ${String(run.verdict).replace(/_/g, ' ').toLowerCase()}`,
-        body: run.surpriseCount?.total ? `${run.surpriseCount.total} surprise(s) to review.` : 'Open G9 to see the steps.',
+        body: run.surpriseCount?.total ? `${run.surpriseCount.total} surprise(s) to review.` : 'Open G9BrowserAgent to see the steps.',
         silent: true,
       });
       n.on('click', () => showWindow('runs'));
@@ -438,9 +454,9 @@ async function startApp() {
     });
     if (action !== 'restart') {
       const why = {
-        'notice-newer': `The daemon on port ${port} is v${daemonVersion}, newer than this app (v${version}) — another G9 (a repository checkout) started it. G9 leaves it running.`,
-        'notice-other-install': `The daemon on port ${port} (v${daemonVersion}) comes from another G9 install${welcome?.repoRoot ? ` at ${welcome.repoRoot}` : ''}. G9 leaves it running.`,
-        'notice-no-autostart': `The daemon on port ${port} is v${daemonVersion} and this app is v${version}, but "Start the daemon" is off, so G9 does not restart it.`,
+        'notice-newer': `The daemon on port ${port} is v${daemonVersion}, newer than this app (v${version}) — another G9BrowserAgent (a repository checkout) started it. G9BrowserAgent leaves it running.`,
+        'notice-other-install': `The daemon on port ${port} (v${daemonVersion}) comes from another G9BrowserAgent install${welcome?.repoRoot ? ` at ${welcome.repoRoot}` : ''}. G9BrowserAgent leaves it running.`,
+        'notice-no-autostart': `The daemon on port ${port} is v${daemonVersion} and this app is v${version}, but "Start the daemon" is off, so G9BrowserAgent does not restart it.`,
       }[action];
       ctx.store.daemonMismatch = { daemonVersion, appVersion: version, kind: action, reasons: [why] };
       clearTimeout(ctx.mismatchTimer);
@@ -541,7 +557,7 @@ async function startApp() {
     // Manual installs (macOS, .deb): say once per version that a release is out, and where.
     notifyManual: ({ version: next, releaseUrl }) => {
       if (CHECKING || !Notification?.isSupported?.()) return;
-      const n = new Notification({ title: `G9 ${next} is available`, body: 'Click to open the release page and download it.', silent: true });
+      const n = new Notification({ title: `G9BrowserAgent ${next} is available`, body: 'Click to open the release page and download it.', silent: true });
       n.on('click', () => { if (releaseUrl) shell.openExternal(releaseUrl).catch(() => {}); });
       n.show();
     },
@@ -553,7 +569,7 @@ async function startApp() {
         const packaged = process.resourcesPath ? path.join(process.resourcesPath, 'app-update.yml') : null;
         if (packaged && fs.existsSync(packaged)) return null;
         const file = path.join(app.getPath('userData'), 'g9-update.yml');
-        if (!fs.existsSync(file)) fs.writeFileSync(file, 'updaterCacheDirName: g9-desktop-updater\n', 'utf8');
+        if (!fs.existsSync(file)) fs.writeFileSync(file, 'updaterCacheDirName: g9browseragent-updater\n', 'utf8');
         return file;
       } catch (err) {
         log.warn('Could not write the update config file', String(err?.message ?? err));
@@ -569,7 +585,7 @@ async function startApp() {
         // says in /health what it is running (activeRuns, launched — F6). Anything else → do not guess.
         if (h.status === 'none') return { busy: false, reasons: [] };
         if (h.status === 'g9d') return activityFromHealth(h.body);
-        return { busy: true, reasons: ['something other than the G9 daemon answers on its port'] };
+        return { busy: true, reasons: ['something other than the G9BrowserAgent daemon answers on its port'] };
       }
       return queryActivity(client, { enginesFallback: ctx.store.engines });
     },
@@ -586,11 +602,11 @@ async function startApp() {
     promptInstall: async ({ version: next }) => {
       const r = await messageBox({
         type: 'info',
-        title: 'G9 update ready',
-        message: `G9 ${next} is downloaded.`,
-        detail: 'Installing restarts G9 and the daemon. It waits until no run is in progress and no launched browser is open.',
+        title: 'G9BrowserAgent update ready',
+        message: `G9BrowserAgent ${next} is downloaded.`,
+        detail: 'Installing restarts G9BrowserAgent and the daemon. It waits until no run is in progress and no launched browser is open.',
         // Four answers: closing the dialog means "Not now", and only the first two install.
-        buttons: ['Install now', 'Install when I quit G9', 'Not now', 'Skip this version'],
+        buttons: ['Install now', 'Install when I quit G9BrowserAgent', 'Not now', 'Skip this version'],
         defaultId: 1,
         cancelId: 2,
       });
@@ -612,9 +628,9 @@ async function startApp() {
     try { host = new URL(next).host; } catch { /* shown as given */ }
     const r = await messageBox({
       type: 'warning',
-      title: 'G9 update address changed',
-      message: `Download G9 updates from ${host}?`,
-      detail: `The G9 daemon's settings now name ${next} as the update address${current ? ` (this app used ${current})` : ''}. ` +
+      title: 'G9BrowserAgent update address changed',
+      message: `Download G9BrowserAgent updates from ${host}?`,
+      detail: `The G9BrowserAgent daemon's settings now name ${next} as the update address${current ? ` (this app used ${current})` : ''}. ` +
         'An update from there is installed as you, so only accept an address you set yourself.',
       buttons: ['Use this address', 'Keep the current one'],
       defaultId: 1,
@@ -656,6 +672,9 @@ async function startApp() {
       extensionDir: () => extensionDir(),
     },
   });
+  // 3.2.1 renamed the app (G9.exe → G9BrowserAgent.exe, G9.app, /opt/G9) and the MCP entry
+  // ('g9-browser' → 'g9browseragent'): bring this app's own entries up to date, once per start.
+  try { wizard.migrateMcp(); } catch (err) { installLog.warn('AI client entries were not updated at start', String(err?.message ?? err)); }
 
   // ------------------------------------------------------------------ IPC
 
@@ -677,9 +696,9 @@ async function startApp() {
   const LOGIN_ARGS = ['--hidden'];
   // Linux has no login-item API: the XDG autostart entry every desktop reads. It names the stable
   // executable — for an AppImage the .AppImage file, not a path inside its temporary mount.
-  const autostartFile = () => path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'autostart', 'g9.desktop');
+  const autostartFile = () => path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'autostart', 'g9browseragent.desktop');
   const loginItem = () => {
-    if (!isPackaged) return { supported: false, openAtLogin: false, reason: 'Only an installed G9 can start itself at sign-in; this is a development build.' };
+    if (!isPackaged) return { supported: false, openAtLogin: false, reason: 'Only an installed G9BrowserAgent can start itself at sign-in; this is a development build.' };
     if (process.platform === 'linux') return { supported: true, openAtLogin: fs.existsSync(autostartFile()), reason: null };
     if (process.platform !== 'win32' && process.platform !== 'darwin') return { supported: false, openAtLogin: false, reason: `Not available on ${process.platform}.` };
     return { supported: true, openAtLogin: !!app.getLoginItemSettings(process.platform === 'win32' ? { args: LOGIN_ARGS } : undefined).openAtLogin, reason: null };
@@ -694,7 +713,7 @@ async function startApp() {
       const exec = appImage?.file ?? process.execPath;
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, [
-        '[Desktop Entry]', 'Type=Application', 'Name=G9', 'Comment=Start G9 in the tray at sign-in',
+        '[Desktop Entry]', 'Type=Application', 'Name=G9BrowserAgent', 'Comment=Start G9BrowserAgent in the tray at sign-in',
         `Exec="${exec.replace(/"/g, '\\"')}" --hidden`, 'X-GNOME-Autostart-enabled=true', 'Terminal=false', '',
       ].join('\n'), 'utf8');
       return;
@@ -702,6 +721,32 @@ async function startApp() {
     // macOS ignores `args`: a login start is recognised by wasOpenedAtLogin instead (startHidden).
     app.setLoginItemSettings(process.platform === 'win32' ? { openAtLogin: !!enabled, args: LOGIN_ARGS } : { openAtLogin: !!enabled });
   };
+  // 3.2.1 renamed the executable (G9.exe → G9BrowserAgent.exe, g9 → g9browseragent) and the Linux
+  // autostart file (g9.desktop). A sign-in start chosen before must keep working: point it here.
+  // macOS needs nothing — its login item follows the app bundle.
+  const migrateLoginItem = () => {
+    if (!isPackaged) return;
+    try {
+      if (process.platform === 'linux') {
+        const legacy = path.join(path.dirname(autostartFile()), 'g9.desktop');
+        if (fs.existsSync(legacy) && /^Name=G9$/m.test(fs.readFileSync(legacy, 'utf8'))) {
+          fs.rmSync(legacy, { force: true });
+          setLoginItem(true);
+          log.info('Start at sign-in moved to the new autostart entry', { from: legacy, to: autostartFile() });
+        }
+      } else if (process.platform === 'win32') {
+        const items = app.getLoginItemSettings({ args: LOGIN_ARGS }).launchItems ?? [];
+        const stale = items.find((i) => i?.path && !fs.existsSync(i.path));
+        if (stale) {
+          setLoginItem(true);
+          log.info('Start at sign-in now starts this executable', { from: stale.path, to: process.execPath });
+        }
+      }
+    } catch (err) {
+      log.warn('Could not carry "Start at sign-in" over to the new name', String(err?.message ?? err));
+    }
+  };
+  migrateLoginItem();
 
   const HANDLERS = {
     state: () => snapshot(),
@@ -804,7 +849,7 @@ async function startApp() {
     'updater.install': () => updater.installWhenIdle(),
     'updater.skip': () => updater.skip(),
     'updater.installOnQuit': () => updater.installOnQuitChoice(),
-    // Quit G9 (the tray's "Quit G9"): installs a downloaded update first when the person chose so.
+    // Quit G9BrowserAgent (the tray's "Quit G9BrowserAgent"): installs a downloaded update first when the person chose so.
     'app.quit': () => {
       setTimeout(() => quitApp().catch?.(() => {}), 50);
       return { quitting: true };
@@ -865,7 +910,7 @@ async function startApp() {
   ipcMain.handle('g9', async (event, op, args) => {
     // Only our own page may call. (There is no other page, but the check costs nothing.)
     const from = event.senderFrame?.url ?? '';
-    if (!from.startsWith('g9app://app/')) return { ok: false, error: 'Refused: not the G9 window.' };
+    if (!from.startsWith('g9app://app/')) return { ok: false, error: 'Refused: not the G9BrowserAgent window.' };
     const handler = Object.hasOwn(HANDLERS, op) ? HANDLERS[op] : null;
     if (!handler) return { ok: false, error: `Unknown operation ${op}` };
     try {
@@ -957,7 +1002,7 @@ async function startApp() {
       minWidth: Math.min(960, area.width),
       minHeight: Math.min(620, area.height),
       show: false,
-      title: `G9 ${version}`,
+      title: `G9BrowserAgent ${version}`,
       icon: appIcon,
       autoHideMenuBar: true,
       backgroundColor: nativeTheme.shouldUseDarkColors ? '#161b24' : '#f3f5f8',
@@ -981,7 +1026,7 @@ async function startApp() {
     win.on('session-end', () => { ctx.quitting = true; });
     win.on('close', (e) => {
       if (ctx.quitting) return;
-      // Closing the window keeps G9 in the tray: the daemon connection, schedule and updater stay up.
+      // Closing the window keeps G9BrowserAgent in the tray: the daemon connection, schedule and updater stay up.
       e.preventDefault();
       const [width, height] = win.getSize();
       settings.patch({ window: { width, height } });
@@ -1077,17 +1122,17 @@ async function startApp() {
     if (key === lastTrayKey) return;
     lastTrayKey = key;
     ctx.tray.setImage(trayImage(state));
-    ctx.tray.setToolTip(`G9 ${version} — ${statusText()}`);
+    ctx.tray.setToolTip(`G9BrowserAgent ${version} — ${statusText()}`);
     ctx.tray.setContextMenu(Menu.buildFromTemplate([
-      { label: `G9 ${version} — ${statusText()}`, enabled: false },
+      { label: `G9BrowserAgent ${version} — ${statusText()}`, enabled: false },
       { type: 'separator' },
-      { label: 'Open G9', click: () => showWindow() },
+      { label: 'Open G9BrowserAgent', click: () => showWindow() },
       { label: 'Watch a tab', click: () => showWindow('watch') },
       { type: 'separator' },
       { label: 'Stop all agents', enabled: connected && !halted, click: () => client.admin('halt', {}).then(() => log.info('Global halt from the tray', { by: user })).catch((e) => log.warn('halt failed', e.message)) },
       { label: 'Resume', enabled: connected && halted, click: () => client.admin('resume', {}).then(() => log.info('Resume from the tray', { by: user })).catch((e) => log.warn('resume failed', e.message)) },
       { type: 'separator' },
-      { label: 'Quit G9', click: () => quitApp() },
+      { label: 'Quit G9BrowserAgent', click: () => quitApp() },
     ]));
   }
 
@@ -1101,9 +1146,9 @@ async function startApp() {
       const reasons = updater.snapshot().reasons ?? [];
       const r = await messageBox({
         type: 'question',
-        title: 'G9 update waiting',
+        title: 'G9BrowserAgent update waiting',
         message: 'An update is ready, but the daemon is busy.',
-        detail: `${reasons.join('; ')}.\n\nInstalling restarts the daemon, which would stop that work. Quit now and the update installs the next time you quit while nothing runs, or keep G9 in the tray and it installs as soon as the daemon is idle.`,
+        detail: `${reasons.join('; ')}.\n\nInstalling restarts the daemon, which would stop that work. Quit now and the update installs the next time you quit while nothing runs, or keep G9BrowserAgent in the tray and it installs as soon as the daemon is idle.`,
         buttons: ['Quit without updating', 'Install when idle'],
         defaultId: 1,
         cancelId: 1,
@@ -1117,7 +1162,7 @@ async function startApp() {
     stopAllWatches('quit');
     updater.stop();
     client.stop();
-    log.info('G9 desktop quitting (the daemon keeps serving agents)');
+    log.info('G9BrowserAgent desktop quitting (the daemon keeps serving agents)');
     app.quit();
   }
 

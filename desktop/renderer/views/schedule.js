@@ -24,7 +24,7 @@ export function mount(el) {
   replace(el,
     viewHead('Schedule', 'Suites the daemon runs on its own on a launched engine: no browser window, no one at the desk. The machine must stay signed in (a locked screen is fine).', [refresh]),
     h('div', { class: 'notice login-hint', hidden: true }, icon('alert', { size: 16 }),
-      h('p', null, 'Schedules run while the G9 daemon runs. After a restart nothing starts it until G9 opens: turn on "Start G9 when I sign in" in Settings.',
+      h('p', null, 'Schedules run while the G9BrowserAgent daemon runs. After a restart nothing starts it until G9BrowserAgent opens: turn on "Start G9BrowserAgent when I sign in" in Settings.',
         ' ', h('button', { type: 'button', class: 'btn small ghost', onclick: () => go('settings') }, 'Open Settings'))),
     h('div', { class: 'section' }, listEl),
     h('div', { class: 'section' }, sectionHead('Add a schedule'), formEl));

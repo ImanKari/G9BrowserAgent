@@ -23,9 +23,9 @@ const updated = params.get('updated') === '1';
 
 $('ver').textContent = `v${version}`;
 $('ver').setAttribute('aria-label', `Version ${version}`);
-document.title = `G9 Browser Agent v${version} — ${updated ? 'updated' : 'installed'}`;
+document.title = `G9BrowserAgent v${version} — ${updated ? 'updated' : 'installed'}`;
 $('status').textContent = updated ? 'is updated in this browser.' : 'is installed in this browser.';
-$('footer').textContent = `G9 Browser Agent v${version}${api?.runtime?.id ? ` · extension id ${api.runtime.id}` : ''}`;
+$('footer').textContent = `G9BrowserAgent v${version}${api?.runtime?.id ? ` · extension id ${api.runtime.id}` : ''}`;
 
 if (updated) showUpdate();
 

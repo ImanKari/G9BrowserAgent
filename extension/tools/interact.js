@@ -144,7 +144,7 @@ const subSeed = (hz, label) => `${hz.seed}:${label}`;
  *
  * - the expression is built by `witnessExpression()` and has no free
  *   identifiers besides page globals (a unit test executes it in node:vm);
- * - it is armed in G9's ISOLATED world (lib/world.js), so the listener and its
+ * - it is armed in G9BrowserAgent's ISOLATED world (lib/world.js), so the listener and its
  *   promise are invisible to the page; `sessionId` is only CDP routing;
  * - it listens in the frame's own window AND every same-process descendant
  *   frame, because a click inside a same-origin iframe is delivered to THAT
@@ -173,7 +173,7 @@ const subSeed = (hz, label) => `${hz.seed}:${label}`;
 //
 // The promise carries `extend(ms, dispatchEnded)`: re-time the verdict to `ms`
 // from NOW (0 ends the witness and removes its listeners at once);
-// `dispatchEnded` says G9 has sent everything. See armWitness for why the
+// `dispatchEnded` says G9BrowserAgent has sent everything. See armWitness for why the
 // verdict is timed from the end of dispatch, not from arming.
 //
 // ## What the page answers
@@ -186,7 +186,7 @@ const subSeed = (hz, label) => `${hz.seed}:${label}`;
 //   the page counted: a click that landed on the spacer the button had just
 //   scrolled away from was "delivered" (live round 2: 22/22 CfT runs), and the
 //   agent proceeded on a click that never reached its target;
-// - `'expired'` — the safety ceiling fired while G9 was still dispatching. It
+// - `'expired'` — the safety ceiling fired while G9BrowserAgent was still dispatching. It
 //   says nothing about the page, so it is never read as "not delivered".
 //
 // `mode:'last'` (hover) judges where the pointer ENDS: a humanized path crosses
@@ -384,7 +384,7 @@ const WITNESS_TIMEOUT_MS = 1500;
 
 /**
  * The in-page safety net of an armed witness: long enough that it can only
- * matter when G9 never comes back to settle it (settle re-times the verdict to
+ * matter when G9BrowserAgent never comes back to settle it (settle re-times the verdict to
  * WITNESS_TIMEOUT_MS from the end of dispatch). It used to be 2 × (grace +
  * plan) + 5 s, and a dispatch slower than that — ~1 s per mouse event on a
  * throttled tab, 64 moves and 19 notches before the press — let it fire
@@ -397,13 +397,13 @@ const WITNESS_TIMEOUT_MS = 1500;
 const WITNESS_CEILING_MS = 10 * 60_000;
 
 /**
- * How long G9 waits for the page's answer AFTER settle() re-timed it. The
+ * How long G9BrowserAgent waits for the page's answer AFTER settle() re-timed it. The
  * page answers within WITNESS_TIMEOUT_MS unless its event loop is stuck; past
  * this, the verdict is "cannot tell", not a hang for the length of the ceiling.
  */
 const SETTLE_WAIT_MS = WITNESS_TIMEOUT_MS + 10_000;
 
-/** Page-side (G9's world): re-time a witness promise; see witnessInPage. */
+/** Page-side (G9BrowserAgent's world): re-time a witness promise; see witnessInPage. */
 const RETIME_FN = 'function (ms, ended) { if (typeof this.extend === "function") this.extend(ms, ended); }';
 
 const GONE = /Execution context was destroyed|Inspected target navigated or closed|Cannot find context|Could not find object with given id|no longer in the document|frame is gone|Target closed|Session with given id not found|detached/i;
@@ -412,14 +412,14 @@ function isHalt(err) {
   return err?.halted === true || /halted by the user|Stop was pressed|pressed Stop/i.test(String(err?.message ?? err));
 }
 
-/** How long a cleanup command sent after Stop may take before G9 stops waiting for it. */
+/** How long a cleanup command sent after Stop may take before G9BrowserAgent stops waiting for it. */
 const HALTED_CLEANUP_MS = 2000;
 
 /**
- * Ending and releasing G9's OWN witness, also after Stop. send() refuses every
+ * Ending and releasing G9BrowserAgent's OWN witness, also after Stop. send() refuses every
  * command while the user's Stop is on, so a witness armed when Stop was
- * pressed stayed listening in G9's world until its safety net, up to 10
- * minutes later (live round 2). Taking G9's listener away is not the agent
+ * pressed stayed listening in G9BrowserAgent's world until its safety net, up to 10
+ * minutes later (live round 2). Taking G9BrowserAgent's listener away is not the agent
  * acting on the page (like netpin answering a paused request), so after Stop
  * it goes out on the live session, bounded so a silent browser cannot hold
  * the call. Without Stop it takes the normal, guarded path.
@@ -465,7 +465,7 @@ async function witnessSessions(tabId, node) {
  * attach check, so a long humanized move can put its mousedown a second or
  * more behind plan. A click that landed would then time out as
  * "not-delivered" — and an agent told a click did not happen clicks again.
- * So the page is armed with a high ceiling (it only matters if G9 never comes
+ * So the page is armed with a high ceiling (it only matters if G9BrowserAgent never comes
  * back), and settle() re-times the verdict to WITNESS_TIMEOUT_MS from the
  * moment dispatch finished; release() ends it at once, listeners and all.
  */
@@ -474,7 +474,7 @@ async function armWitness(tabId, kinds, timeoutMs, sessions = [null], { target =
   // the verdict itself is timed by settle().
   const ceiling = Math.round(Math.max(WITNESS_CEILING_MS, timeoutMs * 2 + 5000));
   const expression = witnessExpression(kinds, ceiling);
-  // Armed ON the element when there is one: `this` is the element in G9's
+  // Armed ON the element when there is one: `this` is the element in G9BrowserAgent's
   // world, so the page can say WHERE the event landed, not only that it did.
   // The element's own frame process is the only session it listens in.
   if (target) sessions = [target.sessionId ?? null];
@@ -498,7 +498,7 @@ async function armWitness(tabId, kinds, timeoutMs, sessions = [null], { target =
     if (isHalt(err)) throw err;
     const e = new Error(
       `Could not arm the input witness, so nothing was dispatched: ${String(err?.message ?? err)}. ` +
-        `G9 does not act without a way to tell whether the page received the input.`,
+        `G9BrowserAgent does not act without a way to tell whether the page received the input.`,
     );
     e.cause = err;
     throw e;
@@ -734,7 +734,7 @@ function missedMessage(action, label, seen, mode) {
   const where = mode === 'last'
     ? `The ${action} reached the page, but the pointer ended over ${seen.hit}${at}, not over "${label}".`
     : `The ${action} reached the page, but not "${label}": it landed on ${seen.hit}${at}.`;
-  return `${where} "${label}" moved, or something covered it, between G9 measuring it and the input arriving ` +
+  return `${where} "${label}" moved, or something covered it, between G9BrowserAgent measuring it and the input arriving ` +
     `(a page still scrolling or animating, an overlay that appeared). The ${action} was NOT repeated` +
     (mode === 'last' ? '.' : ` — whatever ${seen.hit} does on a ${action} may have happened.`) +
     ' Take a fresh browser_snapshot before acting again.';
@@ -751,7 +751,7 @@ function missedMessage(action, label, seen, mode) {
  * for the typing — 30/30 hidden-tab cells in the P8 matrix (round 2), and
  * HIDDEN, the actual cause, was never reached. KEY events do reach a hidden page
  * (P8 matrix, round 3: a bare keyDown landed in the focused field on 10/10
- * hidden pages) — typing and keys are refused here as G9's policy (nobody can
+ * hidden pages) — typing and keys are refused here as G9BrowserAgent's policy (nobody can
  * see what they do, and a type's focus click would be lost), not because the
  * browser drops them; hiddenInputMessage says so. One round trip per action;
  * nothing is dispatched when it fails. A page whose state cannot be read is not
@@ -783,7 +783,7 @@ async function requireVisible(tabId, action) {
  * dispatched but the page never received it" (7/9) about a click whose scroll had partly landed.
  * An agent that trusts either report scrolls twice. Now: what the action is (a click with no press
  * is a click NOT made), how many input events went out before, how far the page actually moved
- * (read in G9's world — reading works on a hidden page), and that one still in flight may land
+ * (read in G9BrowserAgent's world — reading works on a hidden page), and that one still in flight may land
  * later. `before` is requireVisible's reading.
  */
 async function hiddenMidAction(tabId, action, before, err) {
@@ -1300,7 +1300,7 @@ async function checkObscured(tabId, backendNodeId, x, y, sessionId = null) {
        const top = stack[0];
        if (top === this || this.contains(top)) return { ok: true };
 
-       // Is the point still INSIDE the element? One that moved since G9 measured it (an animation,
+       // Is the point still INSIDE the element? One that moved since G9BrowserAgent measured it (an animation,
        // a script reacting to the pointer) is not "covered": whatever is under the point now is simply
        // what took its place — often its own container, which used to be blamed for "painting over
        // it", with advice to click through it with force:true (live round 3). Judged on the
@@ -1308,7 +1308,7 @@ async function checkObscured(tabId, backendNodeId, x, y, sessionId = null) {
        const rects = typeof this.getClientRects === 'function' ? [...this.getClientRects()] : [];
        const inside = rects.some((r) => px >= r.left - 1 && px <= r.right + 1 && py >= r.top - 1 && py <= r.bottom + 1);
        if (rects.length && !inside) {
-         return { ok: false, moved: true, reason: 'it is no longer at the point G9 measured — it moved (an animation, or a script reacting to the pointer)' };
+         return { ok: false, moved: true, reason: 'it is no longer at the point G9BrowserAgent measured — it moved (an animation, or a script reacting to the pointer)' };
        }
 
        // A <label> hands its activation to the control it labels.
@@ -1750,7 +1750,7 @@ async function reachByWheel(tabId, hz, rng, node, label, { beforeInput = null } 
     if (hz.level === 'stealth') {
       throw new Error(
         `"${label}" is outside the visible page, and ${rounds} round(s) of wheel scrolling did not bring it ` +
-          `into view. At the stealth level G9 does not fall back to a programmatic scroll: the page could see a ` +
+          `into view. At the stealth level G9BrowserAgent does not fall back to a programmatic scroll: the page could see a ` +
           `scroll that no wheel produced. Scroll the container that holds it first (browser_interact ` +
           `action:"scroll" with a ref inside that container), or run this step with humanize:"human".`,
       );
@@ -1798,7 +1798,7 @@ export async function bringIntoView(tabId, node, opts = {}) {
     const state = await inWorld(tabId, 'document.visibilityState', { timeoutMs: 5000 }).catch(() => null) ?? await visibilityOf(tabId);
     if (state !== 'hidden') return;
     const error = new Error(
-      'The element is off screen and the tab is HIDDEN, so G9 cannot wheel it into view (a browser delivers no wheel ' +
+      'The element is off screen and the tab is HIDDEN, so G9BrowserAgent cannot wheel it into view (a browser delivers no wheel ' +
         'input to a hidden page). Nothing was scrolled or captured. Show the tab (browser_tabs action:"focus"), move it ' +
         'out of the way with action:"popout" or "handoff", or take area:"viewport", which works while the tab is hidden' +
         (hz.level === 'human' ? '; at human, humanize:"off" scrolls programmatically instead (the page can see that).' : '.'),
@@ -1840,7 +1840,7 @@ async function aimedPlan(tabId, node, reach, { force, label, makePlan, pressOf }
   }
   if (last?.moved) throw movedError(label);
   throw new Error(
-    `"${label}" is not clickable at the points G9 aimed at inside it — ${last?.reason ?? 'something covers it'}. ` +
+    `"${label}" is not clickable at the points G9BrowserAgent aimed at inside it — ${last?.reason ?? 'something covers it'}. ` +
       `Close the overlay first, or pass force:true to click through it.`,
   );
 }
@@ -1856,12 +1856,12 @@ function goneError(label) {
 }
 
 /**
- * The target MOVED between G9 measuring it and the press (checkObscured `moved`). Not an overlay,
+ * The target MOVED between G9BrowserAgent measuring it and the press (checkObscured `moved`). Not an overlay,
  * so no "close the overlay / force:true" advice: forcing would press whatever took its place.
  */
 function movedError(label) {
   return new Error(
-    `"${label}" is no longer where G9 measured it: it moved (an animation, or a script reacting to the pointer) ` +
+    `"${label}" is no longer where G9BrowserAgent measured it: it moved (an animation, or a script reacting to the pointer) ` +
       'between the measurement and the press, so nothing was pressed. Take a fresh browser_snapshot and try again ' +
       '— if it keeps moving away from the pointer, the page is doing that on purpose.',
   );
@@ -1910,7 +1910,7 @@ export async function click(tabId, opts = {}) {
 function unmappedError(label) {
   return new Error(
     `"${label}" is inside a cross-origin frame whose position on the page could not be established, so a ` +
-      `human-like path to it cannot be planned. At the stealth level G9 does not fall back to direct input. ` +
+      `human-like path to it cannot be planned. At the stealth level G9BrowserAgent does not fall back to direct input. ` +
       `Take a fresh browser_snapshot and try again, or run this step with humanize:"human".`,
   );
 }
@@ -2130,7 +2130,7 @@ const FIELD_FACTS = `(el) => {
 
 /**
  * Facts that could not be read. `unknown` makes the typist plan NO typos: a
- * field G9 cannot see may be a password field, and "never in a password
+ * field G9BrowserAgent cannot see may be a password field, and "never in a password
  * field" (docs/HUMANIZE.md, Keyboard) does not become "unless the read failed".
  */
 const UNKNOWN_FIELD = Object.freeze({ focused: false, password: false, numericMask: false, editable: true, unknown: true });
@@ -2150,7 +2150,7 @@ async function fieldFacts(tabId, node) {
 /**
  * The facts of whatever has keyboard focus — for typing without a ref, where
  * the keys land in the focused element. Followed through open shadow roots
- * and same-origin frames; focus inside a frame G9 cannot read from the top
+ * and same-origin frames; focus inside a frame G9BrowserAgent cannot read from the top
  * document (another process) is `unknown`.
  */
 async function focusedFieldFacts(tabId) {
@@ -2196,7 +2196,7 @@ export async function type(tabId, opts = {}) {
   let node = null;
   let facts = null;
   let focusNote = null;
-  // Did G9's own click put the caret there? Then it is wherever the click landed.
+  // Did G9BrowserAgent's own click put the caret there? Then it is wherever the click landed.
   let clickedHere = false;
   if (ref) {
     node = await resolveRef(tabId, ref, url);
@@ -2227,7 +2227,7 @@ export async function type(tabId, opts = {}) {
         if (!(await isFocused(tabId, node))) {
           if (hz.level === 'stealth') {
             throw new Error(
-              `Clicking "${describeNode(node, ref)}" did not give it keyboard focus, and at the stealth level G9 ` +
+              `Clicking "${describeNode(node, ref)}" did not give it keyboard focus, and at the stealth level G9BrowserAgent ` +
                 `does not focus it programmatically (DOM.focus). Something may cover it, or the page moves focus ` +
                 `elsewhere on click. Nothing was typed.`,
             );
@@ -2240,12 +2240,12 @@ export async function type(tabId, opts = {}) {
   }
 
   if (clear) await clearField(tabId, hz, node, ref);
-  // Appending: G9's focus click left the caret wherever it landed, which in a non-empty field is
+  // Appending: G9BrowserAgent's focus click left the caret wherever it landed, which in a non-empty field is
   // often INSIDE the text — " epsilon" typed into "alpha beta gamma delta" became
   // "alpha beta gamma d epsilonelta" at human and stealth (the click aims at a random point),
   // and at off whenever the text reached past the box's centre (interaction review, 2026-09-22).
-  // A person appending presses End first; G9 does the same. A caret the agent placed itself (the
-  // field was already focused, G9 did not click) is left alone.
+  // A person appending presses End first; G9BrowserAgent does the same. A caret the agent placed itself (the
+  // field was already focused, G9BrowserAgent did not click) is left alone.
   let caretNote = null;
   if (!clear && clickedHere && node && str.length && !fast) caretNote = await caretToEnd(tabId, hz, node);
 
@@ -2484,7 +2484,7 @@ async function caretToEnd(tabId, hz, node) {
   }
   const end = await atEnd();
   return end === false
-    ? 'G9 moved the caret to the end of the field before typing, but the field reports it elsewhere (the page moves it).'
+    ? 'G9BrowserAgent moved the caret to the end of the field before typing, but the field reports it elsewhere (the page moves it).'
     : null;
 }
 
@@ -2603,7 +2603,7 @@ async function settledScroll(tabId, node, before, { moveWithinMs = 600, quietMs 
 }
 
 const STILL_SCROLLING_NOTE =
-  'The page was still scrolling when G9 stopped waiting (1.5 s after the last notch), so the position above may ' +
+  'The page was still scrolling when G9BrowserAgent stopped waiting (1.5 s after the last notch), so the position above may ' +
   'not be final. Take a browser_snapshot before acting on geometry.';
 
 export async function scroll(tabId, opts = {}) {
@@ -3012,7 +3012,7 @@ export async function select(tabId, opts = {}) {
   const node = await resolveRef(tabId, ref, url);
   const sessionId = node.sessionId ?? null;
   const wanted = (Array.isArray(values) ? values : [values]).map(String);
-  // The proof object lives on the select's window IN G9'S WORLD: invisible to
+  // The proof object lives on the select's window IN G9BrowserAgent'S WORLD: invisible to
   // the page, and still told about the page's own input/change events.
   const plan = await callInWorld(
     tabId,
@@ -3113,7 +3113,7 @@ export async function select(tabId, opts = {}) {
     await detachProof();
     throw new Error(
       hz.level === 'stealth'
-        ? 'Clicking the <select> did not give it focus, and at the stealth level G9 does not focus it programmatically; no selection keys were sent.'
+        ? 'Clicking the <select> did not give it focus, and at the stealth level G9BrowserAgent does not focus it programmatically; no selection keys were sent.'
         : 'Could not focus the <select>; no selection keys were sent.',
     );
   }

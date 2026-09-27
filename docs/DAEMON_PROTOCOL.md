@@ -28,7 +28,7 @@ v3 side panel (U1–U10, AIGuide §6.10): the `projects` message and the richer 
   a daemon it is not connected to for an update. ***(3.1.0)*** `installId` names the installation the
   daemon runs from (`lib/runtime.mjs installId`: the `.AppImage` file for a Linux AppImage, else the
   resource root, with forward slashes), so the desktop app can tell "same version, other install"
-  (two copies of G9) from its own daemon. CORS header only for extension origins. Any other HTTP
+  (two copies of G9BrowserAgent) from its own daemon. CORS header only for extension origins. Any other HTTP
   path answers 426.
 * `GET /g9` (or legacy `/agent`) with `Upgrade: websocket`. Any other path → 404; an upgrade without a
   `Sec-WebSocket-Key` → 400. ***(as built)*** A body that `/health` cannot build is answered `{ok:false, error}`
@@ -95,7 +95,7 @@ is ignored. An extension whose socket is closed with that reason does not reconn
 take the identity back — two browsers sharing a copied profile would displace each other in turn); the
 panel's Reconnect does. After a resume, the daemon re-sends `{type:'watch', on:true}` for every watched tab of that
 engine (live views lived in the old worker). While parked, a call on its tab fails with "Tab N is in a
-browser whose G9 extension is reconnecting …"; `browser_tabs list` lists its tabs with `reconnecting:true`
+browser whose G9BrowserAgent extension is reconnecting …"; `browser_tabs list` lists its tabs with `reconnecting:true`
 (and the last URL seen), and `engines` rows carry `reconnecting:true, parkedAt, resumeUntil`.
 
 * `role: "runner"` is accepted as an alias of `agent` (the runner is an agent like any other).
@@ -114,7 +114,7 @@ Reply:
 { "type": "welcome", "version": "3.2.0", "installId": "…", "daemonPid": 123, "bootId": "4f2c…", "startedAt": 1758…,
   "id": "agent-3",
   "repoRoot": "G:/…", "project": { "found": true, "path": "…", "environments": {}, "flowsDir": "…" },
-  "halted": { "global": false }, "port": 8765, "home": "C:/Users/…/AppData/Local/G9" }
+  "halted": { "global": false }, "port": 8765, "home": "C:/Users/…/AppData/Local/G9BrowserAgent" }
 ```
 
 `id` is `agent-N`, `engine-N` (extension engines; launched engines are `launched-N`) or `ui-N`.
@@ -169,7 +169,7 @@ per extension.
 daemon aborts it (Engine 2: an `AbortSignal` the tool layer binds to the tab, so `lib/humanize.js
 perform` stops between input steps, exactly as Stop does; Engine 1: a `{type:'cancel', id}` frame,
 §4) and holds that tab's queue for up to 5 s more, until it has stopped. An answer within that grace
-says what was sent (`"browser_interact" did not finish within 120s, so G9 stopped it: …`); if it does
+says what was sent (`"browser_interact" did not finish within 120s, so G9BrowserAgent stopped it: …`); if it does
 not stop, the answer says the call may STILL be running and the next call on that tab could overlap
 it. A call still waiting for a maxParallel slot when its deadline passes is removed from the queue
 and answered `[delivery: not-delivered] … waited Ns for one of maxParallel=K slots … nothing was sent
@@ -204,7 +204,7 @@ to the page` — it never runs later.
   stealth, downloadPath}` → `ContextInfo` + `warnings?` (a locale in another language than the profile's is
   refused at stealth); `versions {download?, version?}` → as admin `engines.versions`; `warm {profile =
   'automation', url?, browser?}` → as admin `profiles.warm`.
-  `stop` refuses an extension engine (G9 never closes the person's browser), and refuses a launched
+  `stop` refuses an extension engine (G9BrowserAgent never closes the person's browser), and refuses a launched
   engine in which another connected agent owns a tab (the refusal names them) unless `force:true`
   (logged, reported to UIs as `takeover` activity). One launch per profile at a time: a launch the
   daemon starts on demand (`open`, handoff, replay `engine:"launched"`) reuses the default engine,
@@ -366,7 +366,7 @@ Daemon → UI: `{type:'event', topic, data}`:
 ## 6. Admin (ui → daemon)
 
 `{type:'admin', id, op, …}` → `{type:'result', id, ok, result|error}`. Agents get
-`ok:false` ("Admin operations are for the G9 desktop app") — an agent can never resume a halt.
+`ok:false` ("Admin operations are for the G9BrowserAgent desktop app") — an agent can never resume a halt.
 
 **Arguments.** They may be spread at the top level of the message or sent as `args:{…}` (both are
 read; `args` wins). The message's own `id` is ALWAYS the request id. An op that is about a schedule
@@ -469,7 +469,7 @@ stealth and humanize seed; screencast `frames/<seq>.jpg` + `frames.jsonl`; `poin
 `downloads.jsonl`; `result.json`), for every UI watch (kind `watch`), and for every scheduled run (kind
 `schedule`, the runner's reports in `report/`; `result.json` carries `exitCode` and the worst `verdict`). A
 scheduled run gets `--project <entry.project, else the daemon's default g9.project.json>` and starts in
-`entry.cwd`, else that project's folder, else the G9 install. Caps come from `settings.evidence` (`maxFrames`,
+`entry.cwd`, else that project's folder, else the G9BrowserAgent install. Caps come from `settings.evidence` (`maxFrames`,
 `maxBytes`, `keepRuns`); frames beyond a cap are counted, not written, and `result.json` says so. The
 replay result carries `evidence: { runId, dir, frames }`. Every new run starts a prune that keeps the newest
 `keepRuns` run folders and never removes an active run; ***(as built, 2.0.2)*** prune passes run one at a

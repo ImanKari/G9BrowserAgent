@@ -39,7 +39,7 @@
  * and had no way to notice.
  *
  * So each snapshot records who took it (`by`: the caller's agentId, else its
- * name, else null for G9's own internal snapshots — qa, replay), and a
+ * name, else null for G9BrowserAgent's own internal snapshots — qa, replay), and a
  * generation survives while it is among that caller's newest KEEP_GENERATIONS.
  * MAX_GENERATIONS caps the whole table so a crowd of agents cannot grow it
  * without bound: the oldest generations beyond the cap are dropped, whoever took
@@ -65,7 +65,7 @@ export const KEEP_GENERATIONS = 4;
  */
 export const MAX_GENERATIONS = 16;
 
-/** Who a snapshot belongs to: an agent id if the caller has one, else its name, else null (G9 itself). */
+/** Who a snapshot belongs to: an agent id if the caller has one, else its name, else null (G9BrowserAgent itself). */
 export function ownerOf(caller) {
   const id = caller?.agentId ?? caller?.name ?? null;
   return id == null || id === '' ? null : String(id);

@@ -155,7 +155,7 @@ export function notConnected(what) {
   const s = store.state?.connection;
   return empty(
     'The daemon is not connected',
-    `${what} comes from the G9 daemon. ${s?.error ? `Last problem: ${s.error}` : 'It is starting or reconnecting.'}`,
+    `${what} comes from the G9BrowserAgent daemon. ${s?.error ? `Last problem: ${s.error}` : 'It is starting or reconnecting.'}`,
     [h('button', { type: 'button', class: 'btn', onclick: () => api.invoke('reconnect').catch(toastError) }, icon('refresh', { size: 15 }), 'Reconnect')],
   );
 }

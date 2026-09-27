@@ -104,7 +104,7 @@ try {
     assert.equal(r.status, 200);
     const sid = r.headers.get('mcp-session-id');
     assert.match(sid, /^[0-9a-f-]{36}$/);
-    assert.equal(r.json.result.serverInfo.name, 'g9-browser-agent');
+    assert.equal(r.json.result.serverInfo.name, 'G9BrowserAgent');
     assert.ok(r.json.result.instructions.length > 100, 'the agent instructions come with it');
     const note = await post({ jsonrpc: '2.0', method: 'notifications/initialized' }, { session: sid });
     assert.equal(note.status, 202, 'a notification gets no body');
@@ -190,4 +190,6 @@ try {
   gw.close();
   server.close();
 }
-process.exit(0);
+// Exit once the sockets closed above are gone: Node 24 on Windows aborts (libuv async.c assertion)
+// when process.exit() runs while a handle is still closing.
+setTimeout(() => process.exit(0), 100);

@@ -285,7 +285,7 @@ export function approvalArgs({ flowId, by, note, runId, engine, expectLastRunAt 
   // (a schedule or an agent replayed the flow while the confirm dialog was open).
   if (expectLastRunAt != null && Number.isFinite(Number(expectLastRunAt))) args.expectLastRunAt = Number(expectLastRunAt);
   const trimmed = String(note ?? '').trim();
-  args.note = trimmed ? trimmed : `Approved in G9 desktop${runId ? ` from run ${runId}` : ''}.`;
+  args.note = trimmed ? trimmed : `Approved in G9BrowserAgent desktop${runId ? ` from run ${runId}` : ''}.`;
   // Pin the store the flow was listed from (the extension's or the launched engines').
   if (engine === 'extension' || engine === 'launched') args.engine = engine;
   return args;

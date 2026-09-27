@@ -1,9 +1,9 @@
 {
   "name": "g9-desktop",
-  "productName": "G9",
-  "desktopName": "g9.desktop",
-  "version": "3.2.0",
-  "description": "G9 desktop shell: tray, watch window, runs, approvals, engines, installer and updater. Never an engine.",
+  "productName": "G9BrowserAgent",
+  "desktopName": "g9browseragent.desktop",
+  "version": "3.2.1",
+  "description": "G9BrowserAgent desktop shell: tray, watch window, runs, approvals, engines, installer and updater. Never an engine.",
   "private": true,
   "type": "module",
   "main": "main.mjs",

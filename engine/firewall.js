@@ -2,16 +2,16 @@
 //
 // Windows Defender Firewall asks "Allow access?" the first time a program that has no firewall
 // rule starts listening for inbound connections. The Chrome and Edge installers add rules for
-// their own executables. Chrome for Testing is a zip that G9 unpacks under
+// their own executables. Chrome for Testing is a zip that G9BrowserAgent unpacks under
 // G9_HOME/engines/cft-<version>/, so it has no rule, and each new path (a new version, or a new
 // G9_HOME) can ask once.
 //
-// The prompt is about INBOUND connections only. G9 drives the browser over a private pipe
+// The prompt is about INBOUND connections only. G9BrowserAgent drives the browser over a private pipe
 // (--remote-debugging-pipe), never over a port, and outbound traffic is not affected, so choosing
-// Allow or Cancel leaves G9 working either way. G9 does not change the firewall itself: that needs
+// Allow or Cancel leaves G9BrowserAgent working either way. G9BrowserAgent does not change the firewall itself: that needs
 // administrator rights and would change the machine's policy. It only says so, once per path.
 //
-// The paths G9 has launched are kept in G9_HOME/engines/firewall-seen.json:
+// The paths G9BrowserAgent has launched are kept in G9_HOME/engines/firewall-seen.json:
 //   { "version": 1,
 //     "paths": { "<resolved path, lower-cased on Windows>": { "path": "<as launched>", "kind": "cft",
 //                                                             "firstLaunchAt": "<ISO time>" } } }
@@ -42,10 +42,10 @@ export function firewallKey(exePath, platform = process.platform) {
 /** The launch warning for a first launch from `exePath`. */
 export function firewallWarning(exePath) {
   return (
-    `Windows may show a one-time Windows Defender Firewall prompt for ${exePath}, because G9 has not ` +
+    `Windows may show a one-time Windows Defender Firewall prompt for ${exePath}, because G9BrowserAgent has not ` +
     'started Chrome for Testing from this path before and it has no firewall rule of its own. Choosing ' +
-    'Allow or Cancel does not affect G9: the prompt is about inbound connections only, and G9 talks to ' +
-    'the browser over a private pipe. G9 does not mention it again for this path.'
+    'Allow or Cancel does not affect G9BrowserAgent: the prompt is about inbound connections only, and G9BrowserAgent talks to ' +
+    'the browser over a private pipe. G9BrowserAgent does not mention it again for this path.'
   );
 }
 

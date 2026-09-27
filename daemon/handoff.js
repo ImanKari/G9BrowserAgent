@@ -8,7 +8,7 @@
  *   1. The extension exports the tab (`browser_tabs action:"handoff_export"`,
  *      daemon-only): URL, cookies for the host and every parent domain
  *      (HttpOnly included, via chrome.cookies), localStorage and sessionStorage
- *      read in G9's isolated world, viewport, user agent.
+ *      read in G9BrowserAgent's isolated world, viewport, user agent.
  *   2. The daemon puts the cookies into a FRESH Engine 2 context with
  *      `Storage.setCookies` — a new context, so the person's session never
  *      leaks into the automation profile and two handoffs never share state.
@@ -94,7 +94,7 @@ export function storageEntries(value) {
 }
 
 /**
- * The page-side seeding script. Runs in G9's isolated world (same storage as
+ * The page-side seeding script. Runs in G9BrowserAgent's isolated world (same storage as
  * the page, none of its globals), only in the top frame, only when the document
  * is on the handed-off origin — so a redirect through a login host cannot
  * receive another site's storage. Evaluated in the PAGE, never in Node.

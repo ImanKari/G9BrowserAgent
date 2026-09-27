@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * P8 background-state matrix — what really reaches a page, per window/tab state, and whether G9's
+ * P8 background-state matrix — what really reaches a page, per window/tab state, and whether G9BrowserAgent's
  * delivery report tells the truth about it.
  *
  *   node setup/matrix.mjs [--engines 1,2] [--browsers edge,chrome] [--repeat 1]
@@ -42,7 +42,7 @@
  * opened through the product in the same context — since round 3 the product gives every page it
  * opens a window of its own, so this tab is no longer behind anything), "popup": the agent's tab
  * after the PAGE opened a tab (target=_blank), which joins the opener's window in front of it —
- * the one way a G9 tab still ends up behind another tab in its own window —, headed minimized and
+ * the one way a G9BrowserAgent tab still ends up behind another tab in its own window —, headed minimized and
  * headed off-screen (the product always passes CalculateNativeWinOcclusion off, so "without" does
  * not exist there). Every Engine 2 row also records browser_status's warnings for the tested tab.
  *
@@ -214,7 +214,7 @@ export function pngStats(buf, probes = []) {
 
 // ─────────────────────────────────────────────────────────────── page ground truth
 
-/** Installed in the page's MAIN world by the harness (never by G9): what the page itself received. */
+/** Installed in the page's MAIN world by the harness (never by G9BrowserAgent): what the page itself received. */
 const LOGGER = `(() => {
   if (window.p8log) return 'already';
   const log = window.p8log = [];
@@ -255,7 +255,7 @@ const PROBE = `new Promise((resolve) => {
 })`;
 
 /**
- * Installed in the G9 extension's service worker (Engine 1) through the harness pipe: wraps
+ * Installed in the G9BrowserAgent extension's service worker (Engine 1) through the harness pipe: wraps
  * chrome.debugger.sendCommand to record every command that took 200 ms or more, or failed, so a
  * slow or stuck operation can be traced to the CDP command that held it. Nothing else changes.
  */
@@ -712,7 +712,7 @@ async function engine1State({ exe, kind, browserName, root, daemon, agent, ui, g
       if (row.windowAtStart && !row.windowAtStart.safe) throw new Error(`window was on screen at start: ${JSON.stringify(row.windowAtStart)} (minimized it)`);
     }
     const worker = await waitFor(async () => (await conn.send('Target.getTargets')).targetInfos.find((t) => t.type === 'service_worker' && /\/sw\.js$/.test(t.url)), 30_000);
-    if (!worker) throw new Error('the G9 extension worker never started');
+    if (!worker) throw new Error('the G9BrowserAgent extension worker never started');
     const { sessionId: swSession } = await conn.send('Target.attachToTarget', { targetId: worker.targetId, flatten: true });
     const sw = pageViaCdp(conn, swSession);
     const engineRow = await waitFor(async () => {
@@ -826,7 +826,7 @@ async function engine2State({ root, agent, ui, serve, guard, state, rep, verifie
     if (state === 'background') {
       // A second tab opened through the product in the same context. Round 2: the product put later
       // tabs of a context IN ITS WINDOW, and the earlier tab, now behind, rendered ~1 frame per
-      // 1.5 s (a click took 85 s). Since round 3 every page G9 opens gets a window of its own
+      // 1.5 s (a click took 85 s). Since round 3 every page G9BrowserAgent opens gets a window of its own
       // (platform-cdp createTabIn, newWindow:true; the list marks it ownWindow), so this row checks
       // that the earlier tab — the one the synthetic window lists as not active — is still driven
       // at full speed. A tab behind another tab in its window is the "popup" state below.
@@ -849,7 +849,7 @@ async function engine2State({ root, agent, ui, serve, guard, state, rep, verifie
     }
     if (state === 'popup') {
       // The PAGE opens a tab (a target=_blank link, clicked through the product). It joins the
-      // opener's window in front of it (platform-cdp createTabIn: only pages G9 opens get a window
+      // opener's window in front of it (platform-cdp createTabIn: only pages G9BrowserAgent opens get a window
       // of their own) — so the agent's tab is now behind another tab in its own window.
       const opener = pageViaProduct(agent, tabId);
       const popUrl = `${serve.url}?p8popup=1`;

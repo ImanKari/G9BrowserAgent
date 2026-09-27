@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * G9 over the network: the MCP Streamable HTTP transport (3.2).
+ * G9BrowserAgent over the network: the MCP Streamable HTTP transport (3.2).
  *
  *   remote agent ──HTTPS (nginx)──▶ this ──WS 127.0.0.1──▶ g9d ──▶ engines
  *
@@ -223,7 +223,7 @@ export async function main(env = process.env) {
   let token = String(env.G9_MCP_TOKEN ?? '').trim();
   if (!token && env.G9_MCP_TOKEN_FILE) token = fs.readFileSync(env.G9_MCP_TOKEN_FILE, 'utf8').trim();
   if (!isLoopback(host)) {
-    if (!token) throw new Error(`Refusing to listen on ${host} without G9_MCP_TOKEN: the G9 daemon has no password, and this endpoint would hand every browser tab to anyone who can reach it.`);
+    if (!token) throw new Error(`Refusing to listen on ${host} without G9_MCP_TOKEN: the G9BrowserAgent daemon has no password, and this endpoint would hand every browser tab to anyone who can reach it.`);
     if (token.length < MIN_TOKEN_LENGTH) throw new Error(`G9_MCP_TOKEN is too short (${token.length} characters; at least ${MIN_TOKEN_LENGTH}).`);
   }
   const allowedOrigins = String(env.G9_MCP_ALLOWED_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -243,7 +243,7 @@ export async function main(env = process.env) {
     server.once('error', reject);
     server.listen(port, host, resolve);
   });
-  log(`[g9-mcp-http] G9 v${VERSION} MCP over HTTP on http://${host.includes(':') ? `[${host}]` : host}:${port}/mcp — ${token ? 'bearer token required' : 'no token (loopback only)'}`);
+  log(`[g9-mcp-http] G9BrowserAgent v${VERSION} MCP over HTTP on http://${host.includes(':') ? `[${host}]` : host}:${port}/mcp — ${token ? 'bearer token required' : 'no token (loopback only)'}`);
   const stop = () => { gw.close(); server.close(); setTimeout(() => process.exit(0), 200).unref(); };
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);

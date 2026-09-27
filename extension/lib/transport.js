@@ -1,5 +1,5 @@
 /**
- * WebSocket link from Engine 1 (this extension) to the local G9 daemon, g9d.
+ * WebSocket link from Engine 1 (this extension) to the local G9BrowserAgent daemon, g9d.
  *
  * Protocol: docs/DAEMON_PROTOCOL.md. Contract: docs/ARCHITECTURE_V2.md §14.
  * One daemon per machine, one port (8765 unless G9_PORT), path `/g9`. v1's port
@@ -248,7 +248,7 @@ export async function connectNow() {
     const { bridge } = await getState();
     if (bridge?.problem) await setState({ bridge: { problem: null } });
   } catch (err) {
-    console.warn('[G9] could not clear the stored refusal', err);
+    console.warn('[G9BrowserAgent] could not clear the stored refusal', err);
   }
   return connect({ force: true });
 }
@@ -324,8 +324,8 @@ export function request(op, payload = {}, { timeoutMs = defaultTimeout(op) } = {
       timeoutMs,
       label: `the request "${op}"`,
       offline:
-        `The G9 daemon is not connected, so "${op}" cannot run. Start your AI client (it starts the ` +
-        'daemon on demand) or G9 Desktop, then try again.',
+        `The G9BrowserAgent daemon is not connected, so "${op}" cannot run. Start your AI client (it starts the ` +
+        'daemon on demand) or G9BrowserAgent Desktop, then try again.',
     },
   );
 }
@@ -358,8 +358,8 @@ export function flowLib(op, payload = {}, { timeoutMs = 15_000 } = {}) {
       timeoutMs,
       label: `the flow-library request "${op}"${flowId != null ? ` for "${flowId}"` : ''}`,
       offline:
-        'The G9 daemon is not connected, so the flow library on disk is unreachable. Start your AI ' +
-        'client (it starts the daemon) or G9 Desktop and try again — recordings in this browser are unaffected.',
+        'The G9BrowserAgent daemon is not connected, so the flow library on disk is unreachable. Start your AI ' +
+        'client (it starts the daemon) or G9BrowserAgent Desktop and try again — recordings in this browser are unaffected.',
     },
   );
 }
@@ -416,7 +416,7 @@ async function open(gen, force) {
     await attemptOpen(gen, force);
   } catch (err) {
     if (gen !== generation || !wantConnection) return;
-    console.error('[G9] connection attempt failed', err);
+    console.error('[G9BrowserAgent] connection attempt failed', err);
     await setState({ bridge: { connected: false, lastError: `connection attempt failed: ${err?.message ?? err}` } }).catch(
       () => {},
     );
@@ -452,7 +452,7 @@ async function attemptOpen(gen, force) {
       await setState({ bridge: { port: DEFAULT_PORT, v1AutoPort: false } });
       await logActivity({
         kind: 'system', ok: true,
-        detail: `Moved the daemon address from ${from} (a port the v1 bridge chose by itself) to ${DEFAULT_PORT}, where the G9 daemon is running.`,
+        detail: `Moved the daemon address from ${from} (a port the v1 bridge chose by itself) to ${DEFAULT_PORT}, where the G9BrowserAgent daemon is running.`,
       }).catch(() => {});
       port = DEFAULT_PORT;
       address = fallback;
@@ -495,10 +495,10 @@ async function attemptOpen(gen, force) {
 
   ws.addEventListener('open', () => onOpen(ws, address));
   ws.addEventListener('message', (event) => {
-    onFrame(ws, event).catch((err) => console.error('[G9] daemon message failed', err));
+    onFrame(ws, event).catch((err) => console.error('[G9BrowserAgent] daemon message failed', err));
   });
   ws.addEventListener('close', (event) => {
-    onClose(ws, event).catch((err) => console.error('[G9] close handling failed', err));
+    onClose(ws, event).catch((err) => console.error('[G9BrowserAgent] close handling failed', err));
   });
   ws.addEventListener('error', () => {
     // 'close' always follows; recording the error here would double-report.
@@ -546,9 +546,9 @@ async function preflight(address) {
 
 function v1BridgeMessage(address, info) {
   return (
-    `${address} is held by a G9 v1 bridge (v${info.version}${info.pid ? `, pid ${info.pid}` : ''}), not the v2 ` +
+    `${address} is held by a G9BrowserAgent v1 bridge (v${info.version}${info.pid ? `, pid ${info.pid}` : ''}), not the v2 ` +
     'daemon. Close the editor or AI client that started it, then press Reconnect — the v2 daemon starts ' +
-    'on demand. G9 did not connect, so that session was left alone.'
+    'on demand. G9BrowserAgent did not connect, so that session was left alone.'
   );
 }
 
@@ -575,7 +575,7 @@ function onOpen(ws, address) {
     if (ws !== socket || welcomed) return;
     closingReason =
       `The server on ${address} accepted the connection but never answered the handshake — it is not ` +
-      'a G9 v2 daemon.';
+      'a G9BrowserAgent v2 daemon.';
     try {
       ws.close(1000, 'no welcome');
     } catch {
@@ -619,7 +619,7 @@ async function deliver(msg) {
   try {
     await handler(msg);
   } catch (err) {
-    console.error('[G9] handler failed', err);
+    console.error('[G9BrowserAgent] handler failed', err);
   }
 }
 
@@ -846,7 +846,7 @@ function versionProblem(version) {
   const major = majorOf(version);
   if (major == null || major >= 2) return null;
   return (
-    `This is a G9 v1 bridge (v${version}), not the v2 daemon. Close the editor or AI client that started ` +
+    `This is a G9BrowserAgent v1 bridge (v${version}), not the v2 daemon. Close the editor or AI client that started ` +
     'it, then press Reconnect — the v2 daemon starts on demand.'
   );
 }

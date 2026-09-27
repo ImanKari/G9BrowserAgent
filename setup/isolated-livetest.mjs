@@ -170,13 +170,13 @@ function fixtures(port) {
   // The witness under test (live round 2 found both): a page that cancels
   // pointerdown (the spec then suppresses mousedown/mouseup; click still
   // arrives), and a target that is covered the moment the pointer ARRIVES —
-  // after G9's obstruction check passed — so the press lands on the veil. The
+  // after G9BrowserAgent's obstruction check passed — so the press lands on the veil. The
   // first is a delivered click; the second must be an error naming the veil,
   // never "delivered", and never repeated.
   const witnessPage = `<!doctype html><html lang="en"><head><meta charset="utf-8">
-    <title>G9 witness fixture</title>${animation}
+    <title>G9BrowserAgent witness fixture</title>${animation}
     <style>#veil { position: fixed; background: rgba(200, 30, 30, 0.35); z-index: 10; }</style></head><body>
-    <h1>G9 witness fixture</h1><span class="spin" aria-hidden="true"></span>
+    <h1>G9BrowserAgent witness fixture</h1><span class="spin" aria-hidden="true"></span>
     <p><button id="cancels">Cancels pointerdown</button></p>
     <p style="margin-top: 60px"><button id="trap">Covered on arrival</button></p>
     <p style="margin-top: 60px"><button id="away">Somewhere else</button></p>
@@ -203,7 +203,7 @@ function fixtures(port) {
       });
       // Armed only by the test, and only once the pointer is elsewhere: Chromium
       // re-runs hover after a layout change, so re-arming with the pointer
-      // resting on the trap would veil it BEFORE G9's check (a correct
+      // resting on the trap would veil it BEFORE G9BrowserAgent's check (a correct
       // "covered" refusal, but not the case under test).
       window.armTrap = () => {
         document.getElementById('veil')?.remove();
@@ -213,23 +213,23 @@ function fixtures(port) {
     </script></body></html>`;
 
   const longTitle =
-    'G9 long title fixture — ' + 'every character of this title must survive the tab list, '.repeat(4) +
+    'G9BrowserAgent long title fixture — ' + 'every character of this title must survive the tab list, '.repeat(4) +
     'ünïcödé ✓ end';
 
   return {
     longTitle,
     routes: {
-      '/clicks.html': () => clickPage('G9 click fixture'),
-      '/background.html': () => clickPage('G9 background fixture'),
-      '/popout.html': () => clickPage('G9 popout fixture'),
-      '/auto.html': () => clickPage('G9 auto-attach fixture'),
+      '/clicks.html': () => clickPage('G9BrowserAgent click fixture'),
+      '/background.html': () => clickPage('G9BrowserAgent background fixture'),
+      '/popout.html': () => clickPage('G9BrowserAgent popout fixture'),
+      '/auto.html': () => clickPage('G9BrowserAgent auto-attach fixture'),
       '/witness.html': () => witnessPage,
       '/long-title.html': () => `<!doctype html><html><head><meta charset="utf-8"><title>${longTitle}</title></head>
         <body><p>long title</p></body></html>`,
-      // No globals of any kind, so "the main world holds nothing of G9's" is
-      // a statement about G9 and not about the fixture.
+      // No globals of any kind, so "the main world holds nothing of G9BrowserAgent's" is
+      // a statement about G9BrowserAgent and not about the fixture.
       '/clean.html': () => `<!doctype html><html lang="en"><head><meta charset="utf-8">
-        <title>G9 clean fixture</title>${animation}</head><body>
+        <title>G9BrowserAgent clean fixture</title>${animation}</head><body>
         <h1>Greeting</h1>
         <p><label>Your name <input id="name" autocomplete="off"></label></p>
         <p><button id="go">Greet</button></p>
@@ -465,7 +465,7 @@ async function waitExtensionWorker(cdp, timeoutMs, debugPort, knownId = null) {
         const session = cdp.session(attached.sessionId);
         await session.send('Runtime.enable');
         const name = await session.evaluate('chrome.runtime.getManifest().name');
-        if (name === 'G9 Browser Agent') return { target, session };
+        if (name === 'G9BrowserAgent') return { target, session };
         notOurs.add(target.targetId);
       } catch {
         // Mid-startup or mid-teardown. Deliberately NOT blacklisted.
@@ -488,7 +488,7 @@ async function waitExtensionWorker(cdp, timeoutMs, debugPort, knownId = null) {
   }
 
   throw new Error(
-    'Timed out waiting for the G9 Browser Agent service worker. Targets visible were:\n  ' +
+    'Timed out waiting for the G9BrowserAgent service worker. Targets visible were:\n  ' +
       (seen.map((t) => `${t.type} ${t.url}`).join('\n  ') || '(none)') +
       '\n  (A browser that ignores --load-extension shows no chrome-extension:// target at all.)',
   );
@@ -684,7 +684,7 @@ async function main() {
     // chrome.runtime.reload() (worker and pages gone after 21 s; the welcome-on-
     // update checks and the daemon's own reload path need that call). Installed
     // as UNPACKED instead — CDP Extensions.loadUnpacked over the pipe, what
-    // "Load unpacked" does and how a person installs G9 — the same reload comes
+    // "Load unpacked" does and how a person installs G9BrowserAgent — the same reload comes
     // back in ~1 s on both — once Developer mode is on, as it is for anyone who
     // loaded an extension unpacked. Off (a fresh profile), Chrome disables it at
     // that reload with DISABLE_UNSUPPORTED_DEVELOPER_EXTENSION (chrome://
@@ -804,7 +804,7 @@ async function main() {
       error: document.getElementById('panelError')?.hidden === false ? document.getElementById('panelError').textContent : '',
       overflow: document.documentElement.scrollWidth > innerWidth,
     })`);
-    const expectedTitle = 'G9 Browser Agent v' + VERSION;
+    const expectedTitle = 'G9BrowserAgent v' + VERSION;
     identity.title === expectedTitle && identity.tabs >= 4 && identity.sessionBody && identity.recordControl && identity.blockedToast
       ? ok('panel rendered its session UI', `title "${identity.title}", ${identity.tabs} section tabs`)
       : bad('panel did not render its session UI', JSON.stringify(identity));

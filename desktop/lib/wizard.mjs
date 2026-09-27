@@ -15,7 +15,7 @@
 
 import os from 'node:os';
 import { policyEntries, policyStatus, applyPolicies, undoPolicies } from './policies.mjs';
-import { mcpClients, detectClients, shimEntry, inspectClient, applyRegistration, removeRegistration, unstableExecReason } from './mcp-register.mjs';
+import { mcpClients, detectClients, shimEntry, inspectClient, applyRegistration, removeRegistration, unstableExecReason, migrateRegistrations } from './mcp-register.mjs';
 import { findBrowserExecutables, installExtension, openExtensionsPage, threeClicks, manifestVersion, EXTENSIONS_PAGE } from './extension-install.mjs';
 import { normalizeVersions, pickList } from '../renderer/lib/engines.js';
 
@@ -23,8 +23,8 @@ export const WIZARD_STEPS = [
   { id: 'browsers', title: 'Browsers', summary: 'Find Edge and Chrome on this machine, and optionally install the pinned Chrome for Testing.' },
   { id: 'profile', title: 'Automation profile', summary: 'Create the automation profile and sign in to your app once, so unattended runs start signed in.' },
   { id: 'policies', title: 'Background policies', summary: 'Keep your own browser rendering when its window is covered, so the extension can act in the background.' },
-  { id: 'mcp', title: 'AI clients', summary: 'Register G9 with the AI clients installed here, so their agents get the browser tools.' },
-  { id: 'extension', title: 'Browser extension', summary: 'Add the G9 extension to your own browser once.' },
+  { id: 'mcp', title: 'AI clients', summary: 'Register G9BrowserAgent with the AI clients installed here, so their agents get the browser tools.' },
+  { id: 'extension', title: 'Browser extension', summary: 'Add the G9BrowserAgent extension to your own browser once.' },
 ];
 export const STEP_IDS = WIZARD_STEPS.map((s) => s.id);
 
@@ -76,7 +76,7 @@ export class Wizard {
   }
 
   #requireDaemon(what) {
-    if (!this.client?.connected) throw new Error(`${what} needs the G9 daemon, which is not connected. Wait for it to start, or press Reconnect.`);
+    if (!this.client?.connected) throw new Error(`${what} needs the G9BrowserAgent daemon, which is not connected. Wait for it to start, or press Reconnect.`);
   }
 
   // ---------------------------------------------------------------- 1. browsers
@@ -135,7 +135,7 @@ export class Wizard {
 
   /**
    * The background policies are Windows registry values (HKCU\Software\Policies); the native
-   * occlusion tracker `WindowOcclusionEnabled` turns off is Chromium's Windows one. G9 writes no
+   * occlusion tracker `WindowOcclusionEnabled` turns off is Chromium's Windows one. G9BrowserAgent writes no
    * policies on macOS or Linux, and the step says so instead of failing on reg.exe.
    */
   #policiesApply() {
@@ -146,7 +146,7 @@ export class Wizard {
     if (!this.#policiesApply()) {
       return {
         applicable: false,
-        reason: 'Nothing to set here: these are Windows registry policies, and G9 sets no browser policies on macOS or Linux. There too, a background tab or a minimized window stops rendering, so keep the tab an agent works in visible — or hand it to a launched browser (headless, which no window state affects).',
+        reason: 'Nothing to set here: these are Windows registry policies, and G9BrowserAgent sets no browser policies on macOS or Linux. There too, a background tab or a minimized window stops rendering, so keep the tab an agent works in visible — or hand it to a launched browser (headless, which no window state affects).',
         rows: [], appliedCount: 0, total: 0, canUndo: false,
       };
     }
@@ -217,6 +217,18 @@ export class Wizard {
     if (unstable) throw new Error(unstable);
     const r = applyRegistration(client, this.entry(), { confirmReplace, confirmDropComments, log: this.log });
     return r;
+  }
+
+  /**
+   * At the installed app's start: move entries under the old name and repoint entries whose
+   * executable is gone (mcp-register.mjs migrateRegistrations). Never from a development build (its
+   * entry names the repository) or from a place that will not exist next time.
+   */
+  migrateMcp() {
+    if (!this.app.isPackaged || this.#unstableReason()) return [];
+    const rows = migrateRegistrations(this.deps.clients(), this.entry(), { log: this.log, ...(this.deps.exists ? { exists: this.deps.exists } : {}) });
+    for (const r of rows) this.log[r.ok ? 'info' : 'warn']?.(`AI client entry ${r.status} at start: ${r.client}`, { file: r.file, message: r.message });
+    return rows;
   }
 
   removeMcp(clientId, { confirmDropComments = false } = {}) {

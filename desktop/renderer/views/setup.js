@@ -17,7 +17,7 @@ const STEP_TEXT = {
   browsers: 'Engines launch a real Edge or Chrome that is already installed. Chrome for Testing is optional: a pinned build that never updates under you, so today\'s run and next month\'s run use the same browser.',
   profile: 'Unattended runs use a separate browser profile, never your own. Open it once, sign in to the app you test, and close the window; later runs start signed in.',
   policies: 'Your own browser stops drawing a window that is covered, locked or on another desktop, and then quietly drops input. These per-user policies keep it drawing. Minimized windows still stop; nothing can change that.',
-  mcp: 'Your AI clients start G9 through a small command. This step writes it into their settings, after a backup, and never overwrites a different entry without showing you the difference.',
+  mcp: 'Your AI clients start G9BrowserAgent through a small command. This step writes it into their settings, after a backup, and never overwrites a different entry without showing you the difference.',
   extension: 'The extension lets agents work in the browser you are already using. Add it once; later updates reach it by themselves.',
 };
 
@@ -27,7 +27,7 @@ export function mount(el, opts = {}) {
   logEl = h('pre', { class: 'log-tail' }, '');
   replace(el,
     viewHead('Setup', opts.firstRun
-      ? 'Welcome to G9. Five steps make this machine ready; each one can be run again later from here.'
+      ? 'Welcome to G9BrowserAgent. Five steps make this machine ready; each one can be run again later from here.'
       : 'Five steps that make this machine ready. Run any of them again at any time.'),
     h('div', { class: 'surface pad' }, stepsEl),
     h('div', { class: 'section' }, h('details', null, h('summary', null, 'Install log (G9_HOME/logs/install.log)'), logEl)));
@@ -201,7 +201,7 @@ async function loadPolicies() {
   replace(body,
     h('div', { class: 'table-wrap' }, h('table', { class: 'grid' },
       h('colgroup', null, h('col', { style: { width: '80px' } }), h('col'), h('col', { style: { width: '100px' } }), h('col', { style: { width: '80px' } }), h('col', { style: { width: '90px' } })),
-      h('thead', null, h('tr', null, h('th', null, 'Browser'), h('th', null, 'Policy (hover for why)'), h('th', null, 'Now'), h('th', null, 'G9 sets'), h('th', null, ''))),
+      h('thead', null, h('tr', null, h('th', null, 'Browser'), h('th', null, 'Policy (hover for why)'), h('th', null, 'Now'), h('th', null, 'G9BrowserAgent sets'), h('th', null, ''))),
       h('tbody', null, rows))),
     h('div', { class: 'row' }, apply, undo, h('span', { class: 'muted small' }, `${r.appliedCount} of ${r.total} set. Written under HKCU only; Undo restores exactly what was there before.`)),
     h('p', { class: 'muted small' }, 'A browser ignores a policy name it does not know. edge://policy and chrome://policy show which ones took effect after the browser restarts.'),
@@ -213,7 +213,7 @@ async function runPolicies(which, button) {
   if (which === 'apply') {
     const ok = await confirm({
       title: 'Apply the browser policies?',
-      body: 'G9 records the current values first, then writes the list under HKCU\\Software\\Policies for Edge and Chrome. Restart the browser for them to take effect. Undo puts back exactly what was there.',
+      body: 'G9BrowserAgent records the current values first, then writes the list under HKCU\\Software\\Policies for Edge and Chrome. Restart the browser for them to take effect. Undo puts back exactly what was there.',
       confirmLabel: 'Apply',
     });
     if (!ok) return;
@@ -226,7 +226,7 @@ async function runPolicies(which, button) {
       title: 'Administrator approval needed',
       content: [
         h('p', null, 'On this machine Windows lets only administrators write HKCU\\Software\\Policies, even for your own account. One Windows prompt runs the same HKCU-only commands with approval.'),
-        h('p', { class: 'muted' }, 'Approve it with your own account. If someone else\'s administrator account approves, the values land in their profile and G9 will tell you.'),
+        h('p', { class: 'muted' }, 'Approve it with your own account. If someone else\'s administrator account approves, the values land in their profile and G9BrowserAgent will tell you.'),
       ],
       buttons: [{ label: 'Cancel', value: false }, { label: 'Show the Windows prompt', value: true, tone: 'primary' }],
       cancelValue: false,
@@ -274,7 +274,7 @@ async function loadMcp() {
     if (c.status === 'same') {
       action = h('button', { type: 'button', class: 'btn small ghost' }, 'Remove');
       action.addEventListener('click', async () => {
-        if (await confirm({ title: `Remove G9 from ${c.label}?`, body: `The g9-browser entry is removed from ${c.file}. A backup is kept next to it.`, confirmLabel: 'Remove', tone: 'danger' })) {
+        if (await confirm({ title: `Remove G9BrowserAgent from ${c.label}?`, body: `The g9browseragent entry is removed from ${c.file}. A backup is kept next to it.`, confirmLabel: 'Remove', tone: 'danger' })) {
           busy(action, async () => {
             let res = await api.invoke('wizard.removeMcp', { client: c.id });
             if (res.needsConfirm === 'comments') {
@@ -290,8 +290,8 @@ async function loadMcp() {
     } else if (c.status === 'invalid') {
       action = h('button', { type: 'button', class: 'btn small' }, 'Show the entry');
       action.addEventListener('click', () => modal({
-        title: `Add G9 to ${c.label} by hand`,
-        content: [h('p', null, c.note), h('pre', { class: 'diff' }, JSON.stringify({ [c.client.key]: { 'g9-browser': c.entry } }, null, 2))],
+        title: `Add G9BrowserAgent to ${c.label} by hand`,
+        content: [h('p', null, c.note), h('pre', { class: 'diff' }, JSON.stringify({ [c.client.key]: { 'g9browseragent': c.entry } }, null, 2))],
         buttons: [{ label: 'Close', value: true, tone: 'primary' }],
       }));
     } else {
@@ -309,14 +309,14 @@ async function loadMcp() {
       h('colgroup', null, h('col', { style: { width: '150px' } }), h('col'), h('col', { style: { width: '140px' } }), h('col', { style: { width: '150px' } })),
       h('thead', null, h('tr', null, h('th', null, 'Client'), h('th', null, 'Settings file'), h('th', null, 'State'), h('th', null, ''))),
       h('tbody', null, rows))),
-    h('details', null, h('summary', null, 'The entry G9 writes'), h('pre', { class: 'diff' }, JSON.stringify({ 'g9-browser': r.entry }, null, 2))));
+    h('details', null, h('summary', null, 'The entry G9BrowserAgent writes'), h('pre', { class: 'diff' }, JSON.stringify({ 'g9browseragent': r.entry }, null, 2))));
   if (r.clients.some((c) => c.status === 'same')) mark('mcp', true, `Registered in ${r.clients.filter((c) => c.status === 'same').map((c) => c.label).join(', ')}.`);
 }
 
 async function register(c, button, flags = {}) {
   if (c.status === 'different' && !flags.confirmReplace) {
     const ok = await modal({
-      title: `Replace the g9-browser entry in ${c.label}?`,
+      title: `Replace the g9browseragent entry in ${c.label}?`,
       content: [
         h('p', null, c.note ?? 'A different entry with the same name is configured.'),
         h('pre', { class: 'diff' }, c.diff.map((d) => h('div', { class: d.op === '-' ? 'del' : d.op === '+' ? 'add' : '' }, `${d.op} ${d.line}`))),
@@ -381,5 +381,5 @@ async function loadExtension() {
     pathBox,
     h('div', { class: 'row' }, ...openers),
     h('ol', { class: 'clicks' }, r.clicks[primary].map((c) => h('li', null, c))),
-    h('p', { class: 'muted small' }, 'Keep this folder where it is: the browser remembers the extension by its folder, and G9 updates the files in place.'));
+    h('p', { class: 'muted small' }, 'Keep this folder where it is: the browser remembers the extension by its folder, and G9BrowserAgent updates the files in place.'));
 }

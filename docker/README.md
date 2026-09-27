@@ -1,12 +1,12 @@
-# G9 browser node — a browser on a server that agents drive and people watch
+# G9BrowserAgent browser node — a browser on a server that agents drive and people watch
 
 One container is one browser identity (one account, one profile). Each contains:
 
 | Part | What it does |
 |---|---|
 | **A web desktop** (LinuxServer.io's Chromium on Selkies) | Shows the browser in a web page: you watch, and step in (sign in, a two-step code). |
-| **Chromium with the G9 extension** (Engine 1) | The browser agents drive, with human-paced input and the recorder, issues and live view panel. Started with the extension loaded and no debugger bar. |
-| **The G9 daemon** | Loopback only, as the desktop user; its data in `/config/g9`. |
+| **Chromium with the G9BrowserAgent extension** (Engine 1) | The browser agents drive, with human-paced input and the recorder, issues and live view panel. Started with the extension loaded and no debugger bar. |
+| **The G9BrowserAgent daemon** | Loopback only, as the desktop user; its data in `/config/g9`. |
 | **MCP over HTTP** (`mcp/http.mjs`, port 8931) | The way in for agents that are not in the container: Claude Code on a laptop, the G9ServerManager assistant. Bearer token required. |
 | **Google Chrome** (Engine 2) | For background work: headless tabs the daemon launches. Watch them in the extension's Live view. |
 
@@ -102,7 +102,7 @@ action:"open"` opens in the desktop's Chromium, where you can watch.
 - **Ports are published on 127.0.0.1 only.** Only nginx, with TLS and passwords, reaches them.
 - **`--no-sandbox`**: Chromium's own sandbox needs user namespaces a container does not give, so the
   container is the sandbox. Do not add `--privileged`, and do not mount the Docker socket.
-- **Your logins live in `data/browserN`** (the Chromium profile and G9's data). Back that folder up
+- **Your logins live in `data/browserN`** (the Chromium profile and G9BrowserAgent's data). Back that folder up
   and treat it like a password store.
 
 ## Operating it
@@ -114,7 +114,7 @@ action:"open"` opens in the desktop's Chromium, where you can watch.
 | Restart | `docker compose restart browser1`. The sign-ins stay (the Chromium profile is in `data/`); open tabs do not come back. |
 | Another account | copy a service with the next ports (9103/9113) and a new token |
 
-Update G9 by rebuilding the image with the new version, then `docker compose up -d`. The data folders
+Update G9BrowserAgent by rebuilding the image with the new version, then `docker compose up -d`. The data folders
 are kept, and the new extension code runs from the first start (the launcher clears Chromium's cached
 copy of the old one).
 
@@ -156,7 +156,7 @@ panel stack.
 - **The panel's assistant** listed both servers' tools ("15 tool(s) from g9-browser-agent 3.2.0"),
   and a gate called `mcp_browser1_browser_tabs`.
 - **The desktop itself**, seen the way a person sees it: the node's own Engine 2 opened the Selkies
-  page on `127.0.0.1:3000` and took a screenshot. It showed Chromium with the G9 welcome page (v3.2.0).
+  page on `127.0.0.1:3000` and took a screenshot. It showed Chromium with the G9BrowserAgent welcome page (v3.2.0).
   Then, with a tab attached by an agent in front, it showed that tab and **no debugger bar**.
 
 **Public names (checked the same day, on the final build).**

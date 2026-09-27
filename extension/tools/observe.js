@@ -190,7 +190,7 @@ function pushConsole(tabId, entry) {
       const dropped = list.length - kept.length;
       kept.push({
         level: 'warning',
-        text: `[G9] console buffer hit the browser storage quota; ${dropped} older entries were dropped.`,
+        text: `[G9BrowserAgent] console buffer hit the browser storage quota; ${dropped} older entries were dropped.`,
         at: Date.now() / 1000,
         seq: (kept[kept.length - 1]?.seq ?? 0) + 1,
       });
@@ -455,7 +455,7 @@ export async function har(tabId, { filter, includeBody = false } = {}) {
   return {
     log: {
       version: '1.2',
-      creator: { name: 'G9 Browser Agent', version: platform.runtime.version() },
+      creator: { name: 'G9BrowserAgent', version: platform.runtime.version() },
       pages: [],
       entries,
     },

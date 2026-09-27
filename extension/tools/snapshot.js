@@ -42,7 +42,7 @@ const looksUnbuilt = (nodes) => (nodes ?? []).filter((n) => n.ignored !== true).
 
 /**
  * `caller` decides which agent's four kept generations this snapshot joins (lib/refs.js): another
- * agent reading the same tab must never age this one's refs out. G9's own internal snapshots (qa,
+ * agent reading the same tab must never age this one's refs out. G9BrowserAgent's own internal snapshots (qa,
  * replay) pass none and share the null owner.
  */
 export async function snapshot(tabId, { mode = 'a11y', maxNodes = 900, includeText = true } = {}, caller = null) {
@@ -237,10 +237,10 @@ function describeProps(node) {
  * and "/api/missing" as "/api/mi ing", from v1.0.0 until it was finally read in
  * v1.0.13. Self-test section 13 now scans for this.
  *
- * Runs in G9's isolated world (lib/world.js): the same DOM and computed
+ * Runs in G9BrowserAgent's isolated world (lib/world.js): the same DOM and computed
  * styles, none of the page's globals — a page that overrides
- * `getComputedStyle` or `NodeFilter` cannot bend what G9 reads, and nothing
- * G9 runs here is visible to the page.
+ * `getComputedStyle` or `NodeFilter` cannot bend what G9BrowserAgent reads, and nothing
+ * G9BrowserAgent runs here is visible to the page.
  */
 async function extractText(tabId) {
   // A document with no <body> yet (still parsing) or none at all (a frameset,

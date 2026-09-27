@@ -139,9 +139,9 @@ t.test('manual mode: checks, never downloads, tells once per version, links the 
 });
 
 t.test('before any release exists, the line says so instead of a bare HTTP error', () => {
-  assert.equal(describeUpdate({ status: 'error', source: 'official', error: 'HttpError: 404 ' }), 'Updates: no G9 release is published at the official releases yet');
-  assert.equal(describeUpdate({ status: 'error', source: 'official', error: 'No published versions on GitHub' }), 'Updates: no G9 release is published at the official releases yet');
-  assert.equal(describeUpdate({ status: 'error', source: 'custom', error: 'Cannot find latest.yml (ERR_UPDATER_CHANNEL_FILE_NOT_FOUND)' }), 'Updates: no G9 release is published at the custom address yet');
+  assert.equal(describeUpdate({ status: 'error', source: 'official', error: 'HttpError: 404 ' }), 'Updates: no G9BrowserAgent release is published at the official releases yet');
+  assert.equal(describeUpdate({ status: 'error', source: 'official', error: 'No published versions on GitHub' }), 'Updates: no G9BrowserAgent release is published at the official releases yet');
+  assert.equal(describeUpdate({ status: 'error', source: 'custom', error: 'Cannot find latest.yml (ERR_UPDATER_CHANNEL_FILE_NOT_FOUND)' }), 'Updates: no G9BrowserAgent release is published at the custom address yet');
   assert.equal(describeUpdate({ status: 'error', error: ' net::ERR_INTERNET_DISCONNECTED ' }), 'Updates: the last check failed (net::ERR_INTERNET_DISCONNECTED)');
 });
 
@@ -262,9 +262,9 @@ t.test('the update config file electron-updater needs is prepared before the fee
   // electron-updater reads app-update.yml before it downloads anything; a build made without a
   // publish feed has none, and every install ended as ENOENT after the check said an update was
   // available (desktop review, 2026-09-22).
-  const { c, u } = controller({ ensureUpdateConfig: () => 'C:/Users/qa/AppData/Roaming/G9/g9-update.yml' });
+  const { c, u } = controller({ ensureUpdateConfig: () => 'C:/Users/qa/AppData/Roaming/G9BrowserAgent/g9-update.yml' });
   await c.configure();
-  assert.equal(u.updateConfigPath, 'C:/Users/qa/AppData/Roaming/G9/g9-update.yml');
+  assert.equal(u.updateConfigPath, 'C:/Users/qa/AppData/Roaming/G9BrowserAgent/g9-update.yml');
   const order = u.calls.map((call) => call[0]);
   assert.ok(order.includes('setFeedURL'), 'and the feed is set after it');
 });

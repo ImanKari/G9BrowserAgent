@@ -1,7 +1,7 @@
 /**
  * Writes build/icon.png (1024×1024) for electron-builder, drawn by lib/icon.mjs — the same code that
- * draws the tray icon at runtime. electron-builder turns the PNG into the .ico for G9.exe and the
- * installer, the .icns of G9.app (which needs at least 512 px) and the Linux desktop icons. The
+ * draws the tray icon at runtime. electron-builder turns the PNG into the .ico for G9BrowserAgent.exe and the
+ * installer, the .icns of G9BrowserAgent.app (which needs at least 512 px) and the Linux desktop icons. The
  * file is generated, not committed (desktop/.gitignore).
  */
 

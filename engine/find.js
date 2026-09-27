@@ -21,20 +21,17 @@ import { constants as fsConstants, existsSync, realpathSync } from 'node:fs';
 import { spawn, spawnSync, execFile } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
+import { resolveDefaultHome } from '../lib/home.mjs';
 
 export const KINDS = ['edge', 'chrome', 'cft'];
 
 /**
- * G9's data home (ARCHITECTURE_V2 §9): `G9_HOME`, else %LOCALAPPDATA%\G9 on Windows, else ~/.g9.
+ * G9BrowserAgent's data home (ARCHITECTURE_V2 §9): `G9_HOME`, else %LOCALAPPDATA%\G9BrowserAgent on Windows, else ~/.g9browseragent.
  * Every engine function also accepts `{ home }` so the daemon can pass its own.
  */
 export function g9Home(env = process.env) {
   if (env.G9_HOME) return path.resolve(env.G9_HOME);
-  if (process.platform === 'win32') {
-    const local = env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
-    return path.join(local, 'G9');
-  }
-  return path.join(os.homedir(), '.g9');
+  return resolveDefaultHome({ env }); // lib/home.mjs: the old folder until the daemon or the app has moved it
 }
 
 /**
@@ -287,7 +284,7 @@ async function isFile(p) {
 const samePath = (a, b) => (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b);
 
 /**
- * Every browser G9 could launch, in preference order within each kind (stable before other
+ * Every browser G9BrowserAgent could launch, in preference order within each kind (stable before other
  * channels, installed CfT newest first). Never starts a browser (except `--version` for CfT on
  * Windows when the exe has no readable version, or on non-Windows).
  * → [{ kind, path, version, channel, source, versionSource }]

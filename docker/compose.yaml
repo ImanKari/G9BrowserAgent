@@ -1,4 +1,4 @@
-# Two G9 browser nodes: one browser identity (account) each, each with its own desktop, profile,
+# Two G9BrowserAgent browser nodes: one browser identity (account) each, each with its own desktop, profile,
 # daemon and MCP endpoint. Everything binds to 127.0.0.1: the desktops go behind a TLS reverse proxy
 # with a password, the MCP endpoints behind the same proxy under /mcp (bearer token) — see
 # docker/README.md. Secrets come from .env next to this file (never commit it):
@@ -9,7 +9,7 @@
 #   TZ=Asia/Tehran
 #
 # A third account is a copy of a service with the next ports (9103/9113) and its own data folder.
-name: g9-browser
+name: g9browseragent
 
 x-node: &node
   image: ${G9_IMAGE:-g9-browser-node:latest}
@@ -49,7 +49,7 @@ services:
     hostname: g9-browser-1
     environment:
       <<: *env
-      TITLE: "G9 Browser 1"
+      TITLE: "G9BrowserAgent Browser 1"
       G9_MCP_TOKEN: ${BROWSER1_MCP_TOKEN:?set BROWSER1_MCP_TOKEN in .env}
     volumes:
       - ./data/browser1:/config
@@ -63,7 +63,7 @@ services:
     hostname: g9-browser-2
     environment:
       <<: *env
-      TITLE: "G9 Browser 2"
+      TITLE: "G9BrowserAgent Browser 2"
       G9_MCP_TOKEN: ${BROWSER2_MCP_TOKEN:?set BROWSER2_MCP_TOKEN in .env}
     volumes:
       - ./data/browser2:/config

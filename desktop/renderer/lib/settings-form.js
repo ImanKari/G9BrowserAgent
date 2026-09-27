@@ -80,7 +80,7 @@ export const SETTINGS_FIELDS = [
   },
   {
     key: 'updateMode', group: 'Updates', label: 'Update source', type: 'select', options: UPDATE_MODES, default: 'official',
-    help: 'official: the published G9 releases on GitHub (nothing to set up). custom: your own https folder, below. off: never check.',
+    help: 'official: the published G9BrowserAgent releases on GitHub (nothing to set up). custom: your own https folder, below. off: never check.',
     paths: ['updateMode', 'update.mode'],
   },
   {
@@ -160,7 +160,7 @@ export function coerceField(field, raw) {
  * '' is valid (not configured). Otherwise an absolute https:// URL — or http:// on the loopback
  * address, for a local test feed. Returns a problem string or null.
  *
- * https, not "http(s)": the installer G9 downloads from this feed is unsigned, so TLS to the feed
+ * https, not "http(s)": the installer G9BrowserAgent downloads from this feed is unsigned, so TLS to the feed
  * host is the only thing that authenticates it (desktop review, 2026-09-22).
  */
 export function validateUpdateUrl(v) {
@@ -172,7 +172,7 @@ export function validateUpdateUrl(v) {
     return 'not a valid URL.';
   }
   const loopback = /^(localhost|127\.0\.0\.1|\[?::1\]?)$/i.test(u.hostname);
-  if (u.protocol === 'http:' && !loopback) return 'use an https:// address: the update is authenticated only by TLS to this host (plain http would let anyone on the path hand G9 an installer). http:// is allowed on localhost for a test feed.';
+  if (u.protocol === 'http:' && !loopback) return 'use an https:// address: the update is authenticated only by TLS to this host (plain http would let anyone on the path hand G9BrowserAgent an installer). http:// is allowed on localhost for a test feed.';
   if (u.protocol !== 'https:' && u.protocol !== 'http:') return 'use an https:// address (the updater downloads over HTTPS; serve a file share through a web server).';
   if (u.username || u.password) return 'do not put credentials in the URL.';
   return null;

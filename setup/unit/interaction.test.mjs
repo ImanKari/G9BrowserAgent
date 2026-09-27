@@ -5,7 +5,7 @@
 // Standalone (ARCHITECTURE_V2 §12.1): node:assert/strict, prints "  PASS <name>"
 // per test, exits non-zero on the first failure. No network, no browser, no
 // port. globalThis.chrome is the fake browser from world.test.mjs, installed
-// before any extension module is imported: every expression G9 sends is
+// before any extension module is imported: every expression G9BrowserAgent sends is
 // EXECUTED in a node:vm context standing in for a page world, and every input
 // event is delivered to the listeners registered in that frame.
 //
@@ -255,7 +255,7 @@ await test('the harness has teeth: v1\'s expression shape throws "sessionId is n
 let clickSent;
 let clickPlan;
 let clickStartedAt;
-await test('humanized click: witness armed in G9\'s world first, then the planned events in order and on schedule', async () => {
+await test('humanized click: witness armed in G9BrowserAgent\'s world first, then the planned events in order and on schedule', async () => {
   await pointer.setPosition(TAB, 640, 400);
   clickStartedAt = Date.now();
   const mark = since();
@@ -264,7 +264,7 @@ await test('humanized click: witness armed in G9\'s world first, then the planne
   assert.deepEqual(res.humanize, { level: 'human', profile: 'human', seed: 12345 });
   const cmds = slice(mark);
 
-  // Armed ON the button (Runtime.callFunctionOn, `this` = the element in G9's world), for
+  // Armed ON the button (Runtime.callFunctionOn, `this` = the element in G9BrowserAgent's world), for
   // pointerdown OR mousedown: a page that cancels pointerdown gets no mousedown (live round 2).
   const arm = cmds.findIndex((c) => c.method === 'Runtime.callFunctionOn' && /const kinds = /.test(c.params.functionDeclaration));
   const firstInput = cmds.findIndex((c) => c.method === 'Input.dispatchMouseEvent');
@@ -443,8 +443,8 @@ await test('Stop pressed mid-plan aborts promptly, says how far it got, and send
     const count = sent.length;
     await sleep(300);
     assert.equal(mouseOf(slice(mark)).length, count, 'nothing dispatched after the stop');
-    // G9's own witness is ended and let go although Stop is on. send() refuses
-    // everything while halted, and the witness stayed armed in G9's world until
+    // G9BrowserAgent's own witness is ended and let go although Stop is on. send() refuses
+    // everything while halted, and the witness stayed armed in G9BrowserAgent's world until
     // its safety net, up to 10 minutes (live round 2).
     const after = slice(mark);
     assert.ok(after.some((c) => c.method === 'Runtime.callFunctionOn' && /this\.extend\(ms, ended\)/.test(c.params.functionDeclaration ?? '') &&
@@ -473,7 +473,7 @@ await test('level off reproduces v1\'s click event for event (plus a real mouse\
   assert.equal(res.delivery, 'delivered');
   assert.deepEqual(res.humanize, { level: 'off' });
   assert.deepEqual(res.pointer, at);
-  // v1 scrolled the element into view first; off keeps that (in G9's world now).
+  // v1 scrolled the element into view first; off keeps that (in G9BrowserAgent's world now).
   assert.ok(slice(mark).some((c) => c.method === 'Runtime.callFunctionOn' && /scrollIntoView/.test(c.params.functionDeclaration) && c.world === 'g9'));
 });
 
@@ -645,7 +645,7 @@ await test('a click hidden while its target is scrolled into view is a click NOT
 await test('the hidden-tab refusal names the remedies the agent has (focus, popout, handoff) and the true physics', async () => {
   // Live round 3: it said "Ask the user … A headed Chromium silently discards CDP input" for a
   // HEADLESS tab, while browser_tabs action:"focus" then delivered the same click (measured). And key
-  // events DO reach a hidden page (P8 matrix, round 3) — refusing them is G9's policy.
+  // events DO reach a hidden page (P8 matrix, round 3) — refusing them is G9BrowserAgent's policy.
   tab.hidden = true;
   try {
     await assert.rejects(interact.key(TAB, { key: 'Enter', humanize: 'off' }), (err) => {
@@ -737,7 +737,7 @@ await test('an element that MOVED after it was measured is reported as moved —
     RUN.moveAfterMeasure = { x: 900 };
     const mark = since();
     await assert.rejects(interact.click(TAB, { ref: 'e31', humanize: 'off' }), (err) => {
-      assert.match(err.message, /"Runaway" is no longer where G9 measured it: it moved/);
+      assert.match(err.message, /"Runaway" is no longer where G9BrowserAgent measured it: it moved/);
       assert.match(err.message, /nothing was pressed/);
       assert.doesNotMatch(err.message, /covered by|force:true|overlay/);
       return true;
@@ -1254,7 +1254,7 @@ await test('a click after a wheel reach aims at where the element CAME TO REST, 
   }
 });
 
-await test('a page still moving when the action starts (a smooth scroll in progress): G9 aims where the element comes to rest', async () => {
+await test('a page still moving when the action starts (a smooth scroll in progress): G9BrowserAgent aims where the element comes to rest', async () => {
   // The next action must not measure once and aim at geometry in motion — the page's own smooth
   // scroll, an animation, or a scroll an earlier action began (reachByWheel's initial settle).
   for (const seed of [51, 52, 53]) {
@@ -2025,8 +2025,8 @@ await test('replay waits (bounded) for the page to go quiet after the last step,
   assert.ok(Date.now() - t1 < 1_000);
 });
 
-await test('main-world cleanliness: nothing G9 ran touched the page\'s own world', () => {
-  // 1. Every evaluation and every node resolution named G9's world.
+await test('main-world cleanliness: nothing G9BrowserAgent ran touched the page\'s own world', () => {
+  // 1. Every evaluation and every node resolution named G9BrowserAgent's world.
   const evals = fake.log.filter((c) => c.method === 'Runtime.evaluate');
   assert.ok(evals.length > 20);
   assert.ok(evals.every((c) => c.params.contextId != null), 'no Runtime.evaluate without a contextId');
@@ -2038,7 +2038,7 @@ await test('main-world cleanliness: nothing G9 ran touched the page\'s own world
   // page's main world (the recorder test above makes one). There the world
   // guard refuses: it reads one global and throws a STRING — no Error is
   // constructed with the page's own (replaceable) constructor — and nothing
-  // else of G9 runs. Those refusals are the only main-world entries allowed.
+  // else of G9BrowserAgent runs. Those refusals are the only main-world entries allowed.
   const refusals = ran.filter((c) => c.world === 'main' && /G9_STALE_WORLD/.test(c.threw?.text ?? ''));
   assert.ok(refusals.length > 0, 'the stale-id case was exercised');
   assert.ok(refusals.every((c) => c.threw.type === 'string'), 'the guard throws a primitive in the wrong world');

@@ -128,7 +128,7 @@ function render() {
   el.aboutSkew.hidden = !skew;
   if (skew) {
     el.aboutSkew.textContent =
-      `Version skew: daemon v${f.daemonVersion}, extension v${f.version}. Update the older one — G9 Desktop updates both.`;
+      `Version skew: daemon v${f.daemonVersion}, extension v${f.version}. Update the older one — G9BrowserAgent Desktop updates both.`;
   }
 }
 

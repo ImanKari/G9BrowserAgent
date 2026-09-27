@@ -1,4 +1,4 @@
-// Unit tests for G9's isolated world (extension/lib/world.js).
+// Unit tests for G9BrowserAgent's isolated world (extension/lib/world.js).
 //
 // Standalone (ARCHITECTURE_V2 §12.1): node:assert/strict, prints "  PASS <name>"
 // per test, exits non-zero on the first failure. No network, no browser, no
@@ -6,7 +6,7 @@
 // module is imported, so the real lib/platform.js → platform-extension.js →
 // cdp.js path carries every command.
 //
-// The fake browser executes what G9 sends: every execution context is a real
+// The fake browser executes what G9BrowserAgent sends: every execution context is a real
 // node:vm context, so an expression that would throw in a page throws here
 // too (that is how EXT-01's `sessionId is not defined` would have been caught).
 // It models the facts world.js depends on, as measured on Edge 153:
@@ -680,7 +680,7 @@ export function createFakeBrowser({ viewport = { width: 1280, height: 800 } } = 
         if (!node) fail('Could not compute box model.');
         const b = viewBox(node);
         const q = [b.x, b.y, b.x + b.width, b.y, b.x + b.width, b.y + b.height, b.x, b.y + b.height];
-        // `moveAfterMeasure`: the element moves away right after G9 measured it (an animation, a
+        // `moveAfterMeasure`: the element moves away right after G9BrowserAgent measured it (an animation, a
         // script reacting to the pointer) — live round 3's runaway button.
         if (node.moveAfterMeasure) { node.box = { ...node.box, ...node.moveAfterMeasure }; node.moveAfterMeasure = null; }
         return { model: { content: q, padding: q, border: q, margin: q, width: b.width, height: b.height } };
@@ -698,7 +698,7 @@ export function createFakeBrowser({ viewport = { width: 1280, height: 800 } } = 
         return { backendNodeId: frame.ownerNodeId, nodeId: frame.ownerNodeId };
       }
       case 'Input.dispatchMouseEvent': {
-        // `hideOnInput`: the person switches tabs just as the input goes out (after G9's
+        // `hideOnInput`: the person switches tabs just as the input goes out (after G9BrowserAgent's
         // visibility check said visible). `dropInput`: input vanishes while the page reports
         // visible (a native dialog or overlay the browser owns).
         if (tab.hideOnInput) { tab.hidden = true; tab.hideOnInput = false; }
@@ -831,7 +831,7 @@ export function createFakeBrowser({ viewport = { width: 1280, height: 800 } } = 
     storage: { session: storageArea(store.session), local: storageArea(store.local), onChanged: autoStub() },
     runtime: {
       id: 'fakeextensionid',
-      getManifest: () => ({ version: '2.0.0', name: 'G9 (fake)' }),
+      getManifest: () => ({ version: '2.0.0', name: 'G9BrowserAgent (fake)' }),
       getURL: (p) => `chrome-extension://fakeextensionid/${p}`,
       sendMessage: () => Promise.resolve(),
       onMessage: autoStub(),
@@ -1036,7 +1036,7 @@ async function main() {
     assert.equal(fake.calls('DOM.resolveNode').length - before, 1);
   });
 
-  await test('callInWorld refuses to run in a context that is not G9\'s (guarded function)', async () => {
+  await test('callInWorld refuses to run in a context that is not G9BrowserAgent\'s (guarded function)', async () => {
     // Simulate a stale cached id that now names the main world, for resolveNode.
     const stale = await world.contextFor(TAB);
     fake.navigate(TAB, { fireEvent: false, crossProcess: true, reuseId: stale });

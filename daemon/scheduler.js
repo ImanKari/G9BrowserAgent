@@ -12,7 +12,7 @@
  * as a CHILD PROCESS with the daemon's own `process.execPath` — so it is the same
  * runner a person would type, speaking MCP through the shim to this daemon like
  * any agent (no private back door), and under the desktop app `process.execPath`
- * is G9.exe with ELECTRON_RUN_AS_NODE=1, so a QA machine needs no Node.
+ * is G9BrowserAgent.exe with ELECTRON_RUN_AS_NODE=1, so a QA machine needs no Node.
  *
  * The result lands in runs/<runId>/ like every other run: engine.json, the
  * runner's reports under report/, result.json with the exit code.
@@ -133,7 +133,7 @@ export function nextRunAt(entry, fromMs = Date.now()) {
  * The argv for one scheduled run (exported for the tests). `project` is the
  * g9.project.json to use when the entry names none: a scheduled run's working
  * directory is not the project, so without it the runner would search upwards
- * from the G9 install and find no flow library.
+ * from the G9BrowserAgent install and find no flow library.
  */
 export function runnerArgv({ runnerPath, entry, reportDir, project = null }) {
   const args = [...(entry.args ?? [])];

@@ -107,7 +107,7 @@ t.test('apply records the previous values FIRST, then sets all ten; undo restore
   assert.deepEqual(prevChrome, { exists: true, type: 'REG_SZ', data: 'legacy' });
   assert.equal(rec.entries.filter((e) => !e.previous.exists).length, 8);
 
-  // Re-applying must not overwrite the recorded originals with G9's own values.
+  // Re-applying must not overwrite the recorded originals with G9BrowserAgent's own values.
   await applyPolicies({ run: reg.run, recordFile, by: 'qa' });
   assert.deepEqual(readRecord(recordFile).entries.find((e) => e.key === EDGE && e.name === 'WindowOcclusionEnabled').previous, prevEdge);
 

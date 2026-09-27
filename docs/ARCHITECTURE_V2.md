@@ -1,6 +1,6 @@
-# G9 v2 — Architecture and internal contracts
+# G9BrowserAgent v2 — Architecture and internal contracts
 
-This file is the **binding contract** between the modules of G9 v2. It refines
+This file is the **binding contract** between the modules of G9BrowserAgent v2. It refines
 the design recorded in [AIGuide.md](../AIGuide.md) §2 (decisions D1–D12, rules R1–R9): where the two disagree, this file wins for
 module boundaries, function signatures, message formats and file locations. Every implementer codes
 against the signatures below; if a signature has to change, change it here in the same change set.
@@ -33,7 +33,7 @@ protocol is in [DAEMON_PROTOCOL.md](DAEMON_PROTOCOL.md), synced the same day.
 | An engine is its socket | **Decision D-c.** The extension sends a random `instanceId` (generated once, `storage.local`); the daemon keeps a disconnected extension's engine id, handles, claims, sessions and current tabs for 10 minutes and gives them back when the same `instanceId` reconnects. | MV3 restarts the worker when it likes and the desktop reloads the extension after every update: each reshuffled every handle, and agents lost their tabs mid-task. |
 | Launch switches: exactly the designed list | ***(as built)*** Also `msImplicitSignin` in `--disable-features` and `--disable-sync`; `--disable-component-update` is left out at stealth `stealth` and when a profile is warmed; `--disable-frame-rate-limit` for Chrome for Testing only (`engine/launch.js` `DISABLED_FEATURES`, `FIXED_SWITCHES`, `fixedSwitchesFor`, `KIND_SWITCHES`). | Measured on Edge 153: fresh profiles signed themselves into the Windows account and synced it (passwords, history, extensions); `--disable-component-update` removed Widevine, a classic automation tell; CfT 153's renderer ran at 10 Hz (100 ms between frames and mouse events), re-confirmed 2026-09-23 in an interleaved A/B (100.5 ms in 8/8 launches without the switch, 17.4 ms in 12/12 with it). |
 | Browser-level auto-attach with `waitForDebuggerOnStart:false` | ***(as built)*** `waitForDebuggerOnStart:true`: every new target is held, prepared (`prepareTab`/`prepareChild`, §3.2) and then resumed. | A `window.open()` popup under browser-level auto-attach wedged its opener (18/18, Edge and Chrome 153); a page-opened tab and a cross-site iframe need the persona and the tool layer's domains before their first script. |
-| Later tabs of a context join its window, as a person's would (F1) | ***(as built)*** Every page G9 opens (`createTab`) gets a window of its own; a page the PAGE opens still joins its opener's window, and a tab left behind another in its real window is brought forward on a headless engine (`tabs.ensureFront`). | A tab behind another in its window is rendered about once per 1.5 s even headless: a humanized click took 85 s, a screenshot 46 s (P8 matrix, round 2); after the change, 4.3 s and 83–115 ms (round 3). |
+| Later tabs of a context join its window, as a person's would (F1) | ***(as built)*** Every page G9BrowserAgent opens (`createTab`) gets a window of its own; a page the PAGE opens still joins its opener's window, and a tab left behind another in its real window is brought forward on a headless engine (`tabs.ensureFront`). | A tab behind another in its window is rendered about once per 1.5 s even headless: a humanized click took 85 s, a screenshot 46 s (P8 matrix, round 2); after the change, 4.3 s and 83–115 ms (round 3). |
 
 ---
 
@@ -56,13 +56,13 @@ extension/sw.js (Engine 1) ───────────WS /g9────�
   worker, as in v1.
 * **Engine 2** = browsers the daemon launched. Tool calls run **inside the daemon process**, using the
   very same `extension/tools/*.js` modules with `platform-cdp`.
-* Data home: `G9_HOME` env, default `%LOCALAPPDATA%\G9` (Windows) / `~/.g9` (other). Layout in §9.
+* Data home: `G9_HOME` env, default `%LOCALAPPDATA%\G9BrowserAgent` (Windows) / `~/.g9browseragent` (other). Layout in §9.
 
 ---
 
 ## 2. Root package and version
 
-* `package.json` at the repo root: `{ "name": "g9-browser-agent", "version": "3.2.0", "private": true,
+* `package.json` at the repo root: `{ "name": "g9browseragent", "version": "3.2.1", "private": true,
   "type": "module", "engines": { "node": ">=22" }, "scripts": { … } }`. No dependencies.
 * `extension/manifest.json.version` **must equal** it; `desktop/package.json.version` **must equal** it.
   `setup/unit/version.test.mjs` enforces both ***(as built)*** and also compares the version in
@@ -123,7 +123,7 @@ platform.tabs = {
   onUpdated(fn: (tabId, changeInfo, tab: Tab) => void): void,
 }
 // Tab = { id, url, title, windowId, active, status: 'loading'|'complete', openerTabId?: number }
-//       platform-cdp Tabs (and its synthetic windows) also carry { engineId, contextId }; (as built) a page G9
+//       platform-cdp Tabs (and its synthetic windows) also carry { engineId, contextId }; (as built) a page G9BrowserAgent
 //       opened carries ownWindow: true, and `active` means "in front of its REAL window" (Browser.getWindowForTarget).
 // cdp: tabs.get re-reads url/title (Target.getTargetInfo, ≤3 s) and tabs.query does one Target.getTargets
 // per engine — measured: headless Edge 153 does not push Target.targetInfoChanged for <title> changes.
@@ -288,7 +288,7 @@ Behaviour:
   page session exists ***(as built: a tab whose session died reports `attached:false`)***.
 * `tabs.create` → `Target.createTarget({url, browserContextId, newWindow:true, background:!active, focus:false,
   left?, top?, width?, height?})`, waits for its attach (and its preparation and resume), returns the Tab.
-  **F1, as built:** EVERY page G9 opens gets a window of its own. Chrome/Edge refuse `newWindow:false` for the
+  **F1, as built:** EVERY page G9BrowserAgent opens gets a window of its own. Chrome/Edge refuse `newWindow:false` for the
   first page of a fresh context ("Failed to open new tab - no browser is open", headless Edge 153), and a later
   page that joined the context's window left the earlier tab behind it, rendered about once per 1.5 s even
   headless (P8 matrix, round 2). A new window copies the bounds of an existing window of that engine (so a
@@ -300,7 +300,7 @@ Behaviour:
   ***(as built)*** `query({active:true, lastFocusedWindow|currentWindow})` returns the most recently
   created/activated tab of the default context (else of any context); `query({active:true})` alone, or with a
   `windowId`, returns every tab that is in front of its own real window — usually several, because every page
-  G9 opens has a window of its own.
+  G9BrowserAgent opens has a window of its own.
 * `windows`: one synthetic window per browser context (`id` = stable small integer), `type:'normal'`,
   `state:'normal'`, `focused:true`. `create` rejects: `"Popping a tab into its own window is an Engine 1
   (extension) action; launched engines have no windows."` ***(as built)*** These synthetic windows are what
@@ -495,7 +495,7 @@ status, openerTabId, session? }` — tab identity is always the key **`tabId`**,
 ## 5. Isolated worlds, witness, pointer, screencast — `extension/lib/{world,pointer,screencast,humanize}.js`
 
 ```ts
-// world.js — G9's private JavaScript world in a page (never the page's own globals)
+// world.js — G9BrowserAgent's private JavaScript world in a page (never the page's own globals)
 export const WORLD = 'g9';
 export async function contextFor(tabId, { sessionId = null, frameId = null } = {}): Promise<number>
   // Page.createIsolatedWorld({frameId: frameId ?? main frame, worldName: WORLD, grantUniveralAccess: true})
@@ -512,7 +512,7 @@ export async function callInWorld(tabId, backendNodeId, fnDecl, args = [], sessi
 export function invalidate(tabId, sessionId = null): void
 // additive: verifiedContextFor(tabId, { sessionId, frameId }) (an id the world guard proved, for
 // Runtime.addBinding by id), callOnObject(tabId, objectId, fnDecl, args, sessionId) (a function on a guarded
-// remote object G9 holds), framesOf(tabId, { sessionId, limit = 30 }), guardExpression, guardFunction
+// remote object G9BrowserAgent holds), framesOf(tabId, { sessionId, limit = 30 }), guardExpression, guardFunction
 ```
 
 * The input witness, the recorder's injected script and binding, snapshot text extraction, `qa.js`
@@ -596,7 +596,7 @@ export async function levelFor(tabId, args): Promise<{ level: 'off'|'human'|'ste
   `document.visibilityState` in world `g9`; on a hidden page (a background tab, a minimized or covered window)
   every input action — pointer, wheel AND keys — is refused as `not-delivered` with `hidden:true` and
   nothing is sent. Measured: pointer and wheel events never reach a hidden page; key events do, so refusing
-  keys is G9's policy (nobody can see what they would do). The message names the agent's remedies
+  keys is G9BrowserAgent's policy (nobody can see what they would do). The message names the agent's remedies
   (`browser_tabs` `focus`, `popout`, `handoff`).
 * **Delivery (the witness).** A dispatching action arms a trusted-events-only listener in world `g9` first;
   the verdict is timed from the END of dispatch (grace `WITNESS_TIMEOUT_MS`, 1.5 s; in-page safety ceiling
@@ -671,7 +671,7 @@ findBrowsers({ home, env, includeRegistry = true } = {}): Promise<Array<{ kind: 
 resolveBrowser(kind = 'auto', { home, env } = {}): Promise<{ kind, path, version, channel, source }>
                                          // auto: pinned CfT if installed, else Edge, else Chrome; kind may also be
                                          // a path or { path, kind?, version? }
-g9Home(env = process.env): string        // G9_HOME, else %LOCALAPPDATA%\G9 (or <home>\AppData\Local\G9), else ~/.g9 —
+g9Home(env = process.env): string        // G9_HOME, else %LOCALAPPDATA%\G9BrowserAgent (or <home>\AppData\Local\G9BrowserAgent), else ~/.g9browseragent —
                                          // daemon/paths.js resolveHome and desktop/lib/paths.mjs follow the same rule
 // additive: realPathOf, manifestVersion; appPathsFromRegistry is async. findBrowsers, resolveBrowser and kindFromPath
 // also take { home } (as built: the other functions take env or a path, not home).
@@ -948,7 +948,7 @@ G9_HOME/
 answers `/health` with a non-g9d body (a v1 bridge), every tool fails with a message naming the pid and
 the fix. Tool calls are forwarded verbatim; the shim adds nothing but `caller.name` from the MCP
 `clientInfo`. `resources`: `g9://guide`, `g9://status`. The shim speaks WebSocket through the
-zero-dependency `lib/ws-client.mjs`, not Node's global `WebSocket`: it also runs as `G9.exe` with
+zero-dependency `lib/ws-client.mjs`, not Node's global `WebSocket`: it also runs as `G9BrowserAgent.exe` with
 `ELECTRON_RUN_AS_NODE` (whose Node is Electron's), and it must never send an `Origin` header.
 
 ***(3.2)*** The shim is split so a second front end shares it:
@@ -980,7 +980,7 @@ once (the daemon drops engines' `relayed` echoes, F7). Its tests live in `deskto
 DAEMON_PROTOCOL §3 (`desktop/lib/daemon-client.mjs callTimeoutMs`); `setup/unit/daemon.test.mjs` checks that
 they never end a call before the daemon's own deadline.
 Packaged resources: `extension/`, `engine/`, `daemon/`, `mcp/`, `runner/`, `lib/`, `package.json`.
-The app's executable (`G9.exe`, `G9.app/Contents/MacOS/G9`, `g9`) with `ELECTRON_RUN_AS_NODE=1` runs
+The app's executable (`G9BrowserAgent.exe`, `G9BrowserAgent.app/Contents/MacOS/G9BrowserAgent`, `g9browseragent`) with `ELECTRON_RUN_AS_NODE=1` runs
 Node scripts (daemon, shim, runner) so a QA machine needs no Node; how a script is started — node, the
 app, or a Linux AppImage through `G9_HOME/bin/g9-run.mjs` — is `lib/runtime.mjs scriptCommand`, shared by
 the shim, the desktop launcher and the MCP registration.

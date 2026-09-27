@@ -1,5 +1,5 @@
 /**
- * The G9 MCP server over one DaemonLink (moved out of mcp/shim.mjs in 3.2, unchanged): the fifteen
+ * The G9BrowserAgent MCP server over one DaemonLink (moved out of mcp/shim.mjs in 3.2, unchanged): the fifteen
  * tool schemas and the instructions (mcp/tools.js), every call forwarded verbatim, plus the two
  * resources. The stdio shim builds one; the HTTP transport (mcp/http.mjs) builds one per session.
  */
@@ -13,7 +13,7 @@ import { VERSION } from '../lib/version.mjs';
  * @param {{ transport?: 'stdio'|'http' }} [o]
  */
 export function createMcpServer(link, { transport = 'stdio' } = {}) {
-  const mcp = new McpServer({ name: 'g9-browser-agent', version: VERSION, instructions: INSTRUCTIONS });
+  const mcp = new McpServer({ name: 'G9BrowserAgent', version: VERSION, instructions: INSTRUCTIONS });
 
   mcp.on('initialize', (clientInfo) => {
     if (clientInfo?.name) link.name = String(clientInfo.name).slice(0, 80);
@@ -46,7 +46,7 @@ export function createMcpServer(link, { transport = 'stdio' } = {}) {
   mcp.resource(
     'g9://guide',
     {
-      name: 'G9 Browser Agent guide',
+      name: 'G9BrowserAgent guide',
       description: 'How to drive the browsers: two engines, perception, refs, ownership, halts, handoff, regression memory.',
       mimeType: 'text/markdown',
     },
@@ -56,7 +56,7 @@ export function createMcpServer(link, { transport = 'stdio' } = {}) {
   mcp.resource(
     'g9://status',
     {
-      name: 'Live G9 status',
+      name: 'Live G9BrowserAgent status',
       description: 'The daemon, engines, agents, and your current tab as JSON (browser_status).',
       mimeType: 'application/json',
     },

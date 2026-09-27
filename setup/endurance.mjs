@@ -17,7 +17,7 @@
  *
  * Per iteration, from the page's own renderer (browser_diagnose what:"memory", Performance
  * metrics): JS event listeners right after the page loaded and again after every interaction of
- * the flow ran. Each interaction arms a witness listener in G9's isolated world; if witnesses
+ * the flow ran. Each interaction arms a witness listener in G9BrowserAgent's isolated world; if witnesses
  * were not released, that difference would grow with every action.
  *
  * Round 3: the listener count is a count of live listener OBJECTS, so garbage not yet collected
@@ -25,7 +25,7 @@
  * now launched with --js-flags=--expose-gc (--no-gc turns it off) and every reading is taken right
  * after gc() in the page, so the numbers are exact. And the LAST --spa-contexts contexts (default
  * 1) run the flow as a single-page app: one document for the whole run, no navigation, fields
- * cleared before typing — a listener G9 leaves behind there is never thrown away with a document,
+ * cleared before typing — a listener G9BrowserAgent leaves behind there is never thrown away with a document,
  * so the count after each pass must stay flat. (The goto flow alone cannot show a per-document
  * leak: the next goto discards it, and the per-flow delta stays constant.)
  *
@@ -43,8 +43,8 @@
  *   - single-page-app contexts: listeners after each pass (after gc) do not grow — last third mean
  *     ≤ first third mean + 5 and least-squares slope ≤ 0.5 listener per pass; DOM nodes: slope
  *     ≤ 2.5 per pass. Not flat, measured (round 3, scratch probe on Edge 153): every edit that
- *     REPLACES a field's text — G9's clear, or the page's own execCommand select+delete+insert
- *     with no G9 input at all — keeps exactly one text node alive after gc() (the browser's undo
+ *     REPLACES a field's text — G9BrowserAgent's clear, or the page's own execCommand select+delete+insert
+ *     with no G9BrowserAgent input at all — keeps exactly one text node alive after gc() (the browser's undo
  *     history, bounded by its depth); setting .value keeps none; snapshot, screenshot, click,
  *     select, wheel and wait keep none. Two cleared fields per pass → 2 nodes per pass is the
  *     browser, anything above 2.5 is something else;

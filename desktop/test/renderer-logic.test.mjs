@@ -78,7 +78,7 @@ t.test('the cursor polygon has its hot spot at the pointer position', () => {
 });
 
 t.test('normalizeRun: a runs.list row of the v2 daemon (replay, schedule, watch, active)', () => {
-  const replay = normalizeRun({ runId: '20260921-093000-replay-ab12', kind: 'replay', label: 'rec_checkout', startedAt: 1000, finishedAt: 61_000, active: false, ok: true, verdict: 'SURPRISE', exitCode: null, frames: 240, dir: 'C:/G9/runs/x' });
+  const replay = normalizeRun({ runId: '20260921-093000-replay-ab12', kind: 'replay', label: 'rec_checkout', startedAt: 1000, finishedAt: 61_000, active: false, ok: true, verdict: 'SURPRISE', exitCode: null, frames: 240, dir: 'C:/G9BrowserAgent/runs/x' });
   assert.equal(replay.kind, 'replay');
   assert.equal(replay.flowId, 'rec_checkout', 'a replay run is labelled with its recording id');
   assert.equal(replay.verdict, 'SURPRISE');
@@ -101,7 +101,7 @@ t.test('normalizeRun: a runs.list row of the v2 daemon (replay, schedule, watch,
 
 t.test('normalizeRun: a runs.get detail (engine.json + result.json) and a runner report with flows', () => {
   const d = normalizeRun({
-    runId: 'r1', dir: 'C:/G9/runs/r1', active: false, files: ['engine.json', 'frames/', 'result.json'],
+    runId: 'r1', dir: 'C:/G9BrowserAgent/runs/r1', active: false, files: ['engine.json', 'frames/', 'result.json'],
     engine: { runId: 'r1', kind: 'replay', label: 'rec_1', tabId: 3, startedAt: 1000, engine: { engineId: 'launched-1' }, recordingId: 'rec_1', humanize: { level: 'human', seed: 42 } },
     result: { finishedAt: 5000, durationMs: 4000, frames: 12, framesDropped: 3, truncated: 'frame cap reached (12 frames)', ok: true, verdict: 'PASS_WITH_WARNING', passed: 5, failed: 0, total: 5, humanize: { level: 'human', seed: 42 }, seed: 42 },
   });
@@ -197,7 +197,7 @@ t.test('approvals: the same flow id in both stores are two flows (details keyed 
 
 t.test('approval args: action approve, flow id, `by` required, note defaulted, store pinned', () => {
   assert.deepEqual(approvalArgs({ flowId: 'A', by: 'qa1', note: '  new banner is expected  ', runId: 'r', engine: 'launched' }), { action: 'approve', id: 'A', by: 'qa1', note: 'new banner is expected', engine: 'launched' });
-  assert.equal(approvalArgs({ flowId: 'A', by: 'qa1', runId: 'r9' }).note, 'Approved in G9 desktop from run r9.');
+  assert.equal(approvalArgs({ flowId: 'A', by: 'qa1', runId: 'r9' }).note, 'Approved in G9BrowserAgent desktop from run r9.');
   assert.equal(approvalArgs({ flowId: 'A', by: 'qa1', engine: 'evil' }).engine, undefined, 'only the two store names');
   assert.throws(() => approvalArgs({ flowId: 'A' }), /name of the person/);
   assert.throws(() => approvalArgs({ by: 'x' }), /flow id/);
@@ -277,7 +277,7 @@ t.test('engines.versions envelopes normalise to browsers + CfT (pinned, installe
   // find.js failing is reported as { error } — the list is then empty, never a crash.
   assert.deepEqual(normalizeVersions({ browsers: { error: 'no registry' }, cft: { pinned: { version: '1' }, installed: [] } }).browsers, []);
   // engines.installCft: the versions report with the installed build under cft.downloaded.
-  assert.deepEqual(installedCft({ cft: { downloaded: { version: '153.0.7000.1', path: 'C:/G9/engines/cft-153.0.7000.1/chrome.exe' } } }, '9'), { version: '153.0.7000.1', path: 'C:/G9/engines/cft-153.0.7000.1/chrome.exe' });
+  assert.deepEqual(installedCft({ cft: { downloaded: { version: '153.0.7000.1', path: 'C:/G9BrowserAgent/engines/cft-153.0.7000.1/chrome.exe' } } }, '9'), { version: '153.0.7000.1', path: 'C:/G9BrowserAgent/engines/cft-153.0.7000.1/chrome.exe' });
   assert.deepEqual(installedCft({}, '9'), { version: '9', path: null });
 });
 

@@ -66,12 +66,12 @@ t.test('a v1 bridge on the port is named and left alone', async () => {
   t.cleanup(() => d.close());
   const r = await runSmoke({ port, version: '2.0.0' });
   assert.equal(r.ok, false);
-  assert.match(r.error, /v1 G9 bridge \(version 1\.7\.21, pid 999\)/);
+  assert.match(r.error, /v1 G9BrowserAgent bridge \(version 1\.7\.21, pid 999\)/);
 });
 
 t.test('a refusing daemon (welcome.problem) is reported, not retried', async () => {
   const port = await freePort();
-  const d = await startFakeDaemon({ port, welcome: { problem: 'Update G9: this daemon is 3.0.0.' } });
+  const d = await startFakeDaemon({ port, welcome: { problem: 'Update G9BrowserAgent: this daemon is 3.0.0.' } });
   t.cleanup(() => d.close());
   const r = await runSmoke({ port, version: '2.0.0' });
   assert.equal(r.ok, false);

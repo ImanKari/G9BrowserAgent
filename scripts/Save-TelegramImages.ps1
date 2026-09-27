@@ -4,7 +4,7 @@
     through its history.
 
 .DESCRIPTION
-    Drives the G9 Browser Agent extension through the same MCP interface an AI
+    Drives the G9BrowserAgent extension through the same MCP interface an AI
     agent uses. It scrolls the channel upwards — which in Telegram means older —
     and writes each photo it finds to a folder beside this script, named after
     the moment the post was published.
@@ -224,7 +224,7 @@ $exitCode = 0
 
 try {
     Write-Host ""
-    Write-Host "G9 — Telegram channel image archive" -ForegroundColor Cyan
+    Write-Host "G9BrowserAgent — Telegram channel image archive" -ForegroundColor Cyan
     Write-Host "  output: $OutDir"
     Write-Host ""
 
@@ -247,7 +247,7 @@ try {
         $status = $null
     }
     if (-not $status -or -not $status.attached) {
-        throw 'No attached tab. Open the G9 side panel and press "Attach & Pin current tab".'
+        throw 'No attached tab. Open the G9BrowserAgent side panel and press "Attach & Pin current tab".'
     }
     Write-Good "Attached: $($status.attached.title)"
 

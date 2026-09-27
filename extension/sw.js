@@ -5,7 +5,7 @@
  * launched engines) and the CDP event fan-out in tools/events.js. What stays
  * here is what only an extension has:
  *   1. Lifecycle — install/update, the heartbeat, auto-attach.
- *   2. The transport to the G9 daemon — `call` messages become runTool calls,
+ *   2. The transport to the G9BrowserAgent daemon — `call` messages become runTool calls,
  *      halts and reloads are applied, frames are streamed to watchers.
  *   3. The side panel's commands.
  *
@@ -78,11 +78,11 @@ replay.onApproved(async (id) => {
 // wires for its launched engines.
 platform.debugger.onEvent(onCdpEvent);
 platform.debugger.onDetach((source, reason) => {
-  onDetach(source, reason).catch((err) => console.error('[G9] detach handling failed', err));
+  onDetach(source, reason).catch((err) => console.error('[G9BrowserAgent] detach handling failed', err));
 });
 platform.tabs.onRemoved((tabId) => {
   // Closing a recording tab ends that recording: a deferred update may go ahead now.
-  onTabRemoved(tabId).catch((err) => console.error('[G9] tab cleanup failed', err)).finally(() => maybeReload().catch(() => {}));
+  onTabRemoved(tabId).catch((err) => console.error('[G9BrowserAgent] tab cleanup failed', err)).finally(() => maybeReload().catch(() => {}));
   // A watched tab that closed: drop the pointer stream (events.js already
   // forgot the screencast, without talking to a tab that no longer exists).
   watchers.get(tabId)?.();
@@ -124,7 +124,7 @@ api.runtime.onStartup.addListener(() => {
   bootstrap();
 });
 api.runtime.onInstalled.addListener((details) => {
-  onInstalled(details).catch((err) => console.error('[G9] install handling failed', err));
+  onInstalled(details).catch((err) => console.error('[G9BrowserAgent] install handling failed', err));
 });
 
 api.alarms.onAlarm.addListener((alarm) => {
@@ -166,7 +166,7 @@ async function applyDevOverride() {
       const config = await response.json();
       if (!Number.isInteger(config.port)) continue;
       await setState({ bridge: { host: config.host ?? '127.0.0.1', port: config.port } });
-      console.log(`[G9] dev daemon override (${file}) active:`, config.host ?? '127.0.0.1', config.port);
+      console.log(`[G9BrowserAgent] dev daemon override (${file}) active:`, config.host ?? '127.0.0.1', config.port);
       return config;
     } catch {
       /* the normal case: this is not a test build */
@@ -182,7 +182,7 @@ function bootstrap() {
   if (!booting) {
     booting = doBootstrap().catch((err) => {
       booting = null;
-      console.error('[G9] bootstrap failed', err);
+      console.error('[G9BrowserAgent] bootstrap failed', err);
     });
   }
   return booting;
@@ -197,7 +197,7 @@ async function doBootstrap() {
   // The version on the toolbar button's tooltip: the fastest way for anyone to
   // confirm which build a browser is actually running after a reload.
   try {
-    await api.action.setTitle({ title: `G9 Browser Agent v${platform.runtime.version()}` });
+    await api.action.setTitle({ title: `G9BrowserAgent v${platform.runtime.version()}` });
   } catch {
     /* cosmetic */
   }
@@ -212,11 +212,11 @@ async function doBootstrap() {
   // Before connect(), never after — see applyDevOverride.
   await applyDevOverride();
 
-  // A reload the G9 app asked for: said in the new session, whose log the reload emptied.
+  // A reload the G9BrowserAgent app asked for: said in the new session, whose log the reload emptied.
   const about = await getAbout().catch(() => ({}));
   if (about.lastReload) {
     const at = new Date(about.lastReload.at).toLocaleTimeString([], { hour12: false });
-    await logActivity({ kind: 'system', ok: true, detail: `Reloaded at ${at} (${about.lastReload.reason ?? 'update from the G9 app'}).` }).catch(() => {});
+    await logActivity({ kind: 'system', ok: true, detail: `Reloaded at ${at} (${about.lastReload.reason ?? 'update from the G9BrowserAgent app'}).` }).catch(() => {});
     await setAbout({ lastReload: null }).catch(() => {});
   }
 
@@ -301,7 +301,7 @@ function openWelcome({ updated }) {
     await api.tabs.update(keep.id, { active: true }).catch(() => {});
     if (keep.windowId != null) await api.windows.update(keep.windowId, { focused: true }).catch(() => {});
     for (const tab of extra) await api.tabs.remove(tab.id).catch(() => {});
-  }).catch((err) => console.error('[G9] could not open the welcome page', err));
+  }).catch((err) => console.error('[G9BrowserAgent] could not open the welcome page', err));
   return welcomeBusy;
 }
 
@@ -318,7 +318,7 @@ const AUTO_ATTACH_LABEL = { off: 'Off', project: 'Project sites', all: 'All tabs
  * per ineligible kind of page.
  *
  * 'project' attaches only a connected agent's project sites (state.projectDomains, the daemon's
- * `projects` push) and, with none known, nothing. It is a filter on what G9 CAPTURES by itself,
+ * `projects` push) and, with none known, nothing. It is a filter on what G9BrowserAgent CAPTURES by itself,
  * never on what can be reached (v2 D6/D7 stand: a tab attached by hand or by an agent is attached,
  * and every tab stays reachable) — so nothing here ever detaches a tab, whatever the mode or the
  * domains become.
@@ -511,7 +511,7 @@ let inFlight = 0;
 let panelOps = 0;
 const PANEL_LONG_OPS = new Set(['recReplay', 'recCalibrate', 'issueRecapture', 'issueCreate', 'issueShot', 'recStop', 'videoStart', 'videoStop', 'recordNow']);
 /**
- * An update reload the G9 app asked for and that has not happened yet. In storage.session, not a
+ * An update reload the G9BrowserAgent app asked for and that has not happened yet. In storage.session, not a
  * variable: MV3 stops an idle worker after ~30 s, and a reload deferred behind a long recording
  * would otherwise die with it — the daemon never asks twice. The reload itself clears it.
  */
@@ -570,8 +570,8 @@ async function maybeReload() {
   reloading = true;
   try {
     // Written where a reload cannot erase it: the new worker logs it into its (empty) session.
-    await setAbout({ lastReload: { at: Date.now(), reason: pending.reason ?? 'update from the G9 app', version: platform.runtime.version() } }).catch(() => {});
-    await logActivity({ kind: 'system', ok: true, detail: 'Reloading the extension (update from the G9 app).' }).catch(() => {});
+    await setAbout({ lastReload: { at: Date.now(), reason: pending.reason ?? 'update from the G9BrowserAgent app', version: platform.runtime.version() } }).catch(() => {});
+    await logActivity({ kind: 'system', ok: true, detail: 'Reloading the extension (update from the G9BrowserAgent app).' }).catch(() => {});
     // Cleared first: the reload empties storage.session anyway, and this way a reload that does not
     // end the worker (a test double) cannot ask again.
     await platform.storage.session.remove(RELOAD_KEY).catch(() => {});
@@ -592,16 +592,16 @@ async function handleDaemonMessage(msg) {
       const { halted: was } = await getState();
       if (was === halted) return undefined;
       await setState({ halted });
-      await logActivity({ kind: 'system', ok: !halted, detail: halted ? 'Stopped from the G9 app' : 'Resumed from the G9 app' });
+      await logActivity({ kind: 'system', ok: !halted, detail: halted ? 'Stopped from the G9BrowserAgent app' : 'Resumed from the G9BrowserAgent app' });
       return undefined;
     }
     case 'cancel':
       // The daemon gave up on this call (its deadline, a dialog on its tab, a per-agent Stop): its
       // input stops at the next step (lib/humanize.js perform), and the answer says what was sent.
-      callControllers.get(msg.id)?.abort(new Error('the G9 daemon cancelled it (it ran past its deadline, or its tab or agent was stopped)'));
+      callControllers.get(msg.id)?.abort(new Error('the G9BrowserAgent daemon cancelled it (it ran past its deadline, or its tab or agent was stopped)'));
       return undefined;
     case 'reload':
-      await platform.storage.session.set({ [RELOAD_KEY]: { at: Date.now(), reason: 'update from the G9 app' } }).catch(() => {});
+      await platform.storage.session.set({ [RELOAD_KEY]: { at: Date.now(), reason: 'update from the G9BrowserAgent app' } }).catch(() => {});
       await maybeReload();
       return undefined;
     case 'agents': {
@@ -985,7 +985,7 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         const address = transport.connectedAddress();
         sendResponse(address
           ? { ok: true, address, version: platform.runtime.version() }
-          : { ok: false, error: 'The G9 daemon is not connected. The live view comes back when it is (an agent\'s first call starts it).' });
+          : { ok: false, error: 'The G9BrowserAgent daemon is not connected. The live view comes back when it is (an agent\'s first call starts it).' });
         break;
       }
       case 'daemonInfo': {

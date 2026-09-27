@@ -17,9 +17,9 @@ import { inWorld, callInWorld } from '../lib/world.js';
 import * as frameSessions from '../lib/frames.js';
 
 /**
- * Every read below that runs JavaScript in the page runs it in G9's isolated
+ * Every read below that runs JavaScript in the page runs it in G9BrowserAgent's isolated
  * world (lib/world.js), never the page's main world: it shares the DOM and the
- * origin's storage, but not the page's globals — so nothing G9 does is visible
+ * origin's storage, but not the page's globals — so nothing G9BrowserAgent does is visible
  * to the page, and a page that overrides a prototype cannot lie to the read.
  */
 

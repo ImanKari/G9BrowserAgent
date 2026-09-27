@@ -138,7 +138,7 @@ t.test('one version: desktop, the root package.json and the extension manifest a
   // instead of pinning a number — pinning 2.0.0 made the 2.0.1 bump fail three suites.
   assert.match(pkg.version, /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/, 'semver');
   assert.equal(pkg.name, 'g9-desktop');
-  assert.equal(pkg.productName, 'G9');
+  assert.equal(pkg.productName, 'G9BrowserAgent');
   assert.equal(pkg.main, 'main.mjs');
   assert.equal(pkg.type, 'module');
   assert.deepEqual(Object.keys(pkg.dependencies), ['electron-updater']);
@@ -154,12 +154,12 @@ t.test('one version: desktop, the root package.json and the extension manifest a
 t.test('package config: Windows per user and assisted; macOS dmg+zip for both archs, ad-hoc; Linux AppImage+deb; the official GitHub feed; resources packed', () => {
   const yml = read('electron-builder.yml');
   for (const line of [
-    'appId: com.g9.browseragent', 'productName: G9', 'oneClick: false', 'perMachine: false', 'allowToChangeInstallationDirectory: false',
-    'artifactName: G9-Setup-${version}.exe', 'executableName: G9', 'include: build/installer.nsh',
+    'appId: com.g9.browseragent', 'productName: G9BrowserAgent', 'oneClick: false', 'perMachine: false', 'allowToChangeInstallationDirectory: false',
+    'artifactName: G9BrowserAgent-Setup-${version}.exe', 'executableName: G9BrowserAgent', 'include: build/installer.nsh',
     // macOS: the zip is what latest-mac.yml describes; both archs; no Developer ID, so ad-hoc.
-    'target: dmg', 'target: zip', 'arch: [x64, arm64]', "identity: '-'", 'artifactName: G9-${version}-mac-${arch}.${ext}',
-    // Linux: the AppImage is the one that updates itself; the .deb installs to /opt/G9.
-    'target: AppImage', 'target: deb', 'executableName: g9', 'artifactName: G9-x86_64.${ext}', 'artifactName: G9_${version}_amd64.${ext}',
+    'target: dmg', 'target: zip', 'arch: [x64, arm64]', "identity: '-'", 'artifactName: G9BrowserAgent-${version}-mac-${arch}.${ext}',
+    // Linux: the AppImage is the one that updates itself; the .deb installs to /opt/G9BrowserAgent.
+    'target: AppImage', 'target: deb', 'executableName: g9', 'artifactName: G9BrowserAgent-x86_64.${ext}', 'artifactName: G9BrowserAgent_${version}_amd64.${ext}',
     // Every build writes latest*.yml and app-update.yml for the official releases.
     'provider: github', 'owner: ImanKari', 'repo: G9BrowserAgent',
   ]) {
@@ -174,8 +174,8 @@ t.test('package config: Windows per user and assisted; macOS dmg+zip for both ar
 
 t.test('the app shows its version: window title, rail badge and tray tooltip', () => {
   const main = read('main.mjs');
-  assert.match(main, /title: `G9 \$\{version\}`/);
-  assert.match(main, /setToolTip\(`G9 \$\{version\}/);
+  assert.match(main, /title: `G9BrowserAgent \$\{version\}`/);
+  assert.match(main, /setToolTip\(`G9BrowserAgent \$\{version\}/);
   assert.match(read('renderer/index.html'), /id="app-version"/);
 });
 

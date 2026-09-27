@@ -306,7 +306,7 @@ export class Router {
   #noEngineError() {
     return new Error(
       'No browser engine is available. Either open a tab with browser_tabs action:"open" url:"…" ' +
-        '(G9 launches a headless Chrome/Edge for it), or ask the user to open their browser with the G9 extension ' +
+        '(G9BrowserAgent launches a headless Chrome/Edge for it), or ask the user to open their browser with the G9BrowserAgent extension ' +
         'enabled so it connects to the daemon.',
     );
   }
@@ -331,7 +331,7 @@ export class Router {
           throw new Error(
             other
               ? `Tab ${n} (${key}) belongs to ${other}, not to the browser this call went to (${engineId}).`
-              : `Tab ${n} (${key}) does not exist. Call browser_tabs action:"list" — tab ids are G9 handles, not Chrome tab ids.`,
+              : `Tab ${n} (${key}) does not exist. Call browser_tabs action:"list" — tab ids are G9BrowserAgent handles, not Chrome tab ids.`,
           );
         }
         return chrome;
@@ -359,9 +359,9 @@ export class Router {
         entry.graceTimer = setTimeout(() => {
           if (!this.pending.delete(id)) return;
           reject(new Error(
-            `"${tool}" did not respond within ${secs}s. G9 asked the extension to stop it, but it has not answered, so it ` +
+            `"${tool}" did not respond within ${secs}s. G9BrowserAgent asked the extension to stop it, but it has not answered, so it ` +
               'may STILL be running on this tab: take a browser_snapshot before sending this tab more input. Likely causes: ' +
-              'the page is stuck loading, the tab is hidden, or a JavaScript dialog G9 did not see is open (browser_dialog handles one).',
+              'the page is stuck loading, the tab is hidden, or a JavaScript dialog G9BrowserAgent did not see is open (browser_dialog handles one).',
           ));
         }, STOP_GRACE_MS);
         entry.graceTimer.unref?.();
@@ -522,7 +522,7 @@ export class Router {
           const err = withDelivery(new Error(
             `[delivery: not-delivered] "${tool}" waited ${secs}s for one of maxParallel=${gate?.max ?? '?'} slots for ` +
               'launched-engine calls, all in use by other calls; nothing was sent to the page. Retry it, or raise ' +
-              'maxParallel in the G9 settings.',
+              'maxParallel in the G9BrowserAgent settings.',
           ), { delivery: 'not-delivered' });
           done();
           entry.abort(err);
@@ -535,9 +535,9 @@ export class Router {
           if (settled) return;
           done();
           reject(new Error(
-            `"${tool}" did not finish within ${secs}s. G9 asked it to stop, but it has not stopped yet, so it may STILL be ` +
+            `"${tool}" did not finish within ${secs}s. G9BrowserAgent asked it to stop, but it has not stopped yet, so it may STILL be ` +
               'running on this tab: take a browser_snapshot before sending this tab more input. Likely causes: the page is ' +
-              'stuck loading, or a JavaScript dialog G9 did not see is open (browser_dialog handles one).',
+              'stuck loading, or a JavaScript dialog G9BrowserAgent did not see is open (browser_dialog handles one).',
           ));
         }, STOP_GRACE_MS);
         graceTimer.unref?.();
@@ -629,7 +629,7 @@ export class Router {
       const handle = Number(args.tabId);
       if (!Number.isInteger(handle) || !this.registry.hasHandle(handle)) {
         throw new Error(
-          `Tab ${args.tabId} does not exist. Call browser_tabs action:"list" — tab ids are G9 handles ` +
+          `Tab ${args.tabId} does not exist. Call browser_tabs action:"list" — tab ids are G9BrowserAgent handles ` +
             '(shared by every engine), not Chrome tab ids.',
         );
       }
@@ -1138,7 +1138,7 @@ export class Router {
       useExtension = !!extClient;
     } else if (engineArg === 'extension' || this.registry.engineKind(engineArg) === 'extension') {
       extClient = this.#extensionClient(engineArg === 'extension' ? null : engineArg);
-      if (!extClient) throw new Error('No extension engine is connected. Open the browser with the G9 extension, or use engine:"launched".');
+      if (!extClient) throw new Error('No extension engine is connected. Open the browser with the G9BrowserAgent extension, or use engine:"launched".');
       useExtension = true;
     } else if (engineArg === 'launched' || this.registry.engineKind(engineArg) === 'launched') {
       useExtension = false;
@@ -1322,7 +1322,7 @@ export class Router {
       case 'stop': {
         if (!args.engineId) throw new Error('action:"stop" needs an engineId (see action:"list").');
         if (this.registry.engineKind(args.engineId) === 'extension') {
-          throw new Error(`${args.engineId} is the person's own browser (the extension). G9 never closes it.`);
+          throw new Error(`${args.engineId} is the person's own browser (the extension). G9BrowserAgent never closes it.`);
         }
         // Another run holds this engine (a runner between flows owns no tab, but still uses it).
         const leased = this.registry.leaseHolders(args.engineId).filter((id) => id !== client.id && this.registry.getClient(id));
@@ -1626,13 +1626,13 @@ export class Router {
 
 /** The answer for a call that ran past its deadline and was stopped (it settled within STOP_GRACE_MS). */
 function overdueMessage(tool, secs, detail) {
-  return `"${tool}" did not finish within ${secs}s, so G9 stopped it: ${detail}`;
+  return `"${tool}" did not finish within ${secs}s, so G9BrowserAgent stopped it: ${detail}`;
 }
 
 /** A call for a tab whose extension is between a disconnect and its reconnect (decision D-c). */
 function reconnectingError(handle, engineId) {
   return new Error(
-    `Tab ${handle} is in a browser whose G9 extension is reconnecting (${engineId}: its service worker restarted or the ` +
+    `Tab ${handle} is in a browser whose G9BrowserAgent extension is reconnecting (${engineId}: its service worker restarted or the ` +
       'extension was reloaded). The tab, your claim on it and its session name are kept for a few minutes; retry in a few ' +
       'seconds. If it keeps failing, ask the user to check that the browser is open.',
   );
@@ -1654,7 +1654,7 @@ function statusHint(status, { engineStatus, g, me }) {
   if (me?.halted) return 'The user stopped this agent. Every tool except browser_status fails until they resume it. Tell them and wait.';
   if (!status.engines.length) {
     return 'No browser engine is running. browser_tabs action:"open" url:"…" launches a headless browser (Engine 2) ' +
-      'and opens the page; or ask the user to open their browser with the G9 extension (Engine 1).';
+      'and opens the page; or ask the user to open their browser with the G9BrowserAgent extension (Engine 1).';
   }
   if (status.you.current != null) {
     return `Ready. Your current tab is ${status.you.current}. Start with browser_snapshot, then act with the refs it returns.`;

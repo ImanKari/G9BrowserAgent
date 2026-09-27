@@ -178,12 +178,12 @@ function renderDaemon(state) {
     // The transport's own short reasons get the fix appended; its long ones
     // (a v1 bridge on the port, a server that never answered) already carry it.
     hint = /^(daemon not reachable|closed \(\d+\))/i.test(b.lastError)
-      ? `${capitalise(b.lastError)}. Your AI client starts the daemon when it connects; G9 Desktop keeps it running.`
+      ? `${capitalise(b.lastError)}. Your AI client starts the daemon when it connects; G9BrowserAgent Desktop keeps it running.`
       : b.lastError;
   } else {
     dot = 'warn';
     label = 'Connecting…';
-    hint = `Looking for the G9 daemon on ${address}.`;
+    hint = `Looking for the G9BrowserAgent daemon on ${address}.`;
   }
 
   el.daemonDot.className = `dot ${dot}`;
@@ -203,7 +203,7 @@ function renderDaemon(state) {
   if (skew) {
     el.daemonWarn.textContent =
       `The daemon is v${daemonVersion} and this extension is v${VERSION}. Update the older one — ` +
-      'G9 Desktop updates both.';
+      'G9BrowserAgent Desktop updates both.';
   }
 
   el.daemonRetryRow.hidden = connected;
@@ -509,7 +509,7 @@ function blockedAlert(e, connected) {
   });
   pop.disabled = busy.popout;
   const hand = btn('⇢ Send to background', 'sm', () => handoff(e.tabId), {
-    title: connected ? 'Continue that tab in a browser G9 launches; the page reloads there' : 'Needs the G9 daemon, which is not connected',
+    title: connected ? 'Continue that tab in a browser G9BrowserAgent launches; the page reloads there' : 'Needs the G9BrowserAgent daemon, which is not connected',
     key: `bhand:${e.tabId}`,
   });
   hand.disabled = busy.handoff || !connected;
@@ -573,7 +573,7 @@ function renderCurrent(state, status) {
     return;
   }
 
-  // Solid green only for a tab G9 really holds; the dashed frame otherwise.
+  // Solid green only for a tab G9BrowserAgent really holds; the dashed frame otherwise.
   el.attached.className = cur.attached === false ? 'attached' : 'attached live';
   const parts = [node('div', 'title', cur.title || '(untitled)'), ...urlLines(cur.url, cur.tabId, width)];
   // A minimised window stops rendering, and input sent to it resolves and
@@ -867,7 +867,7 @@ function renderAutoAttach(state) {
     const daemonVersion = state.bridge?.daemonVersion ?? null;
     const oldDaemon = daemonVersion && Number(String(daemonVersion).replace(/^v/, '').split('.')[0]) < 3;
     setText(el.autoAttachSites, oldDaemon
-      ? `The running daemon (v${daemonVersion}) is too old to send project sites, so this behaves as Off. Restart the daemon after updating G9.`
+      ? `The running daemon (v${daemonVersion}) is too old to send project sites, so this behaves as Off. Restart the daemon after updating G9BrowserAgent.`
       : 'No project sites known yet, so this behaves as Off until an agent whose g9.project.json lists environments connects.');
     el.autoAttachSites.title = '';
     return;
@@ -960,9 +960,9 @@ function sessionsFrom(state, status) {
  */
 export function stopToast(wasHalted, daemonInformed, bridge = {}) {
   if (daemonInformed !== false) return wasHalted ? 'Agents resumed' : 'Agents stopped';
-  if (wasHalted) return 'Resumed in this browser only; the G9 daemon is not connected and may still be stopped';
+  if (wasHalted) return 'Resumed in this browser only; the G9BrowserAgent daemon is not connected and may still be stopped';
   const stuck = bridge?.problem || /superseded|another connection/i.test(String(bridge?.lastError ?? ''));
-  return 'Stopped in this browser. The G9 daemon is not connected; it will be told when it connects' +
+  return 'Stopped in this browser. The G9BrowserAgent daemon is not connected; it will be told when it connects' +
     (stuck ? ' — press Reconnect' : '');
 }
 
@@ -1002,7 +1002,7 @@ function renderLog(activity = []) {
 /**
  * The MCP config for a manual setup. The daemon reports where its code lives
  * in the welcome, so this is a path that works, not a placeholder that fails
- * with "Cannot find module". G9 Desktop writes the same entry for you.
+ * with "Cannot find module". G9BrowserAgent Desktop writes the same entry for you.
  */
 function buildSnippet(state) {
   const root = state.bridge?.repoRoot ? String(state.bridge.repoRoot).replace(/\\/g, '/').replace(/\/+$/, '') : null;
@@ -1012,7 +1012,7 @@ function buildSnippet(state) {
     args: [root ? `${root}/mcp/shim.mjs` : 'REPLACE_WITH_ABSOLUTE_PATH/mcp/shim.mjs'],
   };
   if (port !== DEFAULT_PORT) server.env = { G9_PORT: String(port) };
-  const config = JSON.stringify({ mcpServers: { 'g9-browser': server } }, null, 2);
+  const config = JSON.stringify({ mcpServers: { 'g9browseragent': server } }, null, 2);
   if (root) return config;
   return [
     '// The daemon has not connected yet, so the real path is unknown.',

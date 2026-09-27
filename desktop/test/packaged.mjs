@@ -2,13 +2,13 @@
  * The installed product, before anyone installs it: the unpacked build (dist/win-unpacked, written
  * by `npm run build:win`) is driven exactly as a QA machine would drive it — no Node on the path.
  *
- *   1. `G9.exe --smoke --launch`: the packaged main process finds no daemon, starts one as
- *      G9.exe + ELECTRON_RUN_AS_NODE=1 + resources/daemon/g9d.mjs (ARCHITECTURE_V2 §11), connects
+ *   1. `G9BrowserAgent.exe --smoke --launch`: the packaged main process finds no daemon, starts one as
+ *      G9BrowserAgent.exe + ELECTRON_RUN_AS_NODE=1 + resources/daemon/g9d.mjs (ARCHITECTURE_V2 §11), connects
  *      as role ui, reads the settings, prints one JSON line. No window.
  *   2. The MCP entry the wizard writes for this build (lib/mcp-register.mjs shimEntry), spawned
  *      verbatim: initialize → tools/list → tools/call browser_status over stdio.
- *   3. The runner under G9.exe (`resources/runner/g9.mjs help`), then `list` against the daemon of
- *      step 1: the runner spawns resources/mcp/shim.mjs with its own execPath (G9.exe) and the
+ *   3. The runner under G9BrowserAgent.exe (`resources/runner/g9.mjs help`), then `list` against the daemon of
+ *      step 1: the runner spawns resources/mcp/shim.mjs with its own execPath (G9BrowserAgent.exe) and the
  *      inherited ELECTRON_RUN_AS_NODE, so this is the whole unattended chain with no Node installed.
  *   4. admin shutdown; the port is free again.
  *
@@ -28,7 +28,7 @@ import { shimEntry } from '../lib/mcp-register.mjs';
 
 const APP_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UNPACKED = path.join(APP_DIR, 'dist', 'win-unpacked');
-const EXE = path.join(UNPACKED, 'G9.exe');
+const EXE = path.join(UNPACKED, 'G9BrowserAgent.exe');
 const RESOURCES = path.join(UNPACKED, 'resources');
 const VERSION = JSON.parse(fs.readFileSync(path.join(APP_DIR, 'package.json'), 'utf8')).version;
 
@@ -43,7 +43,7 @@ const port = await freePort();
 const baseEnv = { ...process.env, G9_PORT: String(port), G9_HOME: home, G9_IDLE_EXIT_MS: '20000' };
 delete baseEnv.ELECTRON_RUN_AS_NODE;
 // "No Node on the path" is meant literally: every directory holding a node.exe is dropped from PATH,
-// so a script that spawned `node` (instead of its own execPath, G9.exe) fails here as it would on a
+// so a script that spawned `node` (instead of its own execPath, G9BrowserAgent.exe) fails here as it would on a
 // QA machine. Before round 3 this suite inherited the developer's PATH and could not tell.
 for (const k of Object.keys(baseEnv)) if (k.toLowerCase() === 'path' && k !== 'PATH') delete baseEnv[k];
 baseEnv.PATH = (process.env.PATH ?? process.env.Path ?? '').split(path.delimiter)
@@ -91,7 +91,7 @@ t.test('there is no node on the PATH this suite gives the packaged app', () => {
   assert.notEqual(where.status, 0, `node is still reachable: ${where.stdout}`);
 });
 
-t.test('G9.exe --smoke --launch starts the packaged daemon and reads its settings', async () => {
+t.test('G9BrowserAgent.exe --smoke --launch starts the packaged daemon and reads its settings', async () => {
   const r = await run(EXE, ['--smoke', '--launch']);
   assert.equal(r.code, 0, r.err || r.out);
   const j = JSON.parse(r.out.trim().split('\n').at(-1));
@@ -106,7 +106,7 @@ t.test('G9.exe --smoke --launch starts the packaged daemon and reads its setting
   ours.add(h.body.pid);
 });
 
-t.test('the MCP entry the wizard writes for this build speaks MCP (G9.exe + ELECTRON_RUN_AS_NODE + shim.mjs)', async () => {
+t.test('the MCP entry the wizard writes for this build speaks MCP (G9BrowserAgent.exe + ELECTRON_RUN_AS_NODE + shim.mjs)', async () => {
   const entry = shimEntry({ isPackaged: true, execPath: EXE, resourceRoot: RESOURCES, port, homeOverride: home });
   assert.equal(entry.env.ELECTRON_RUN_AS_NODE, '1');
   const messages = [
@@ -158,13 +158,13 @@ t.test('the MCP entry the wizard writes for this build speaks MCP (G9.exe + ELEC
   assert.match(text, new RegExp(VERSION.replace(/\./g, '\\.')), 'browser_status came from the packaged daemon');
 });
 
-t.test('the runner runs under G9.exe (resources/runner/g9.mjs help)', async () => {
+t.test('the runner runs under G9BrowserAgent.exe (resources/runner/g9.mjs help)', async () => {
   const r = await run(EXE, [path.join(RESOURCES, 'runner', 'g9.mjs'), 'help'], { env: { ...baseEnv, ELECTRON_RUN_AS_NODE: '1' } });
   assert.equal(r.code, 0, r.err);
   assert.match(r.out, /--browser/);
 });
 
-t.test('the runner lists flows under G9.exe through the packaged shim, against this private daemon', async () => {
+t.test('the runner lists flows under G9BrowserAgent.exe through the packaged shim, against this private daemon', async () => {
   // A project of its own inside the temp home, run from there: the runner looks for g9.project.json
   // upwards from its cwd, and must neither climb into this repository nor need one. (The runner
   // reads only *.flow.json files.)
@@ -199,7 +199,7 @@ t.test('admin shutdown stops the packaged daemon and frees the port', async () =
   await until(() => (probeHealth(port).then((h) => h.status === 'none')), { timeoutMs: 5000, what: 'no listener' });
 });
 
-t.test('nothing listening: the packaged shim starts the packaged daemon itself (G9.exe + resources/daemon)', async () => {
+t.test('nothing listening: the packaged shim starts the packaged daemon itself (G9BrowserAgent.exe + resources/daemon)', async () => {
   // What an AI client does on a QA machine before the app ever ran: it spawns the entry the wizard
   // wrote, and the shim finds no daemon and starts one with its own execPath (mcp/shim.mjs).
   assert.equal((await probeHealth(port)).status, 'none', 'the previous test left the port free');
@@ -235,7 +235,7 @@ t.test('nothing listening: the packaged shim starts the packaged daemon itself (
     const ps = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
       `(Get-CimInstance Win32_Process -Filter "ProcessId=${Number(h.body.pid)}") | ForEach-Object { $_.Name + '|' + $_.CommandLine }`], { encoding: 'utf8', windowsHide: true });
     const [name = '', cmd = ''] = ps.stdout.trim().split('|');
-    assert.match(name, /^G9\.exe$/i, `the daemon runs as ${name} (${cmd})`);
+    assert.match(name, /^G9BrowserAgent\.exe$/i, `the daemon runs as ${name} (${cmd})`);
     assert.match(cmd, /resources[\\/]daemon[\\/]g9d\.mjs/i, cmd);
   }
   const c = new DaemonClient({ port, version: VERSION, clientName: 'packaged-check' });

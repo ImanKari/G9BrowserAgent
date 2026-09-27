@@ -7,7 +7,7 @@
  *     machine-wide and belongs to IT. There is no code path that can write outside HKCU.
  *   - Record before change. The previous value of every entry (or "absent") is written to
  *     G9_HOME/logs/policies.json BEFORE the first `reg add`, so a crash halfway through still leaves
- *     an exact Undo. Re-applying never replaces a recorded previous value with G9's own value —
+ *     an exact Undo. Re-applying never replaces a recorded previous value with G9BrowserAgent's own value —
  *     otherwise Undo would "restore" 0 where the person originally had nothing.
  *   - Undo restores exactly: a value that existed is written back with its original type and data;
  *     a value that did not exist is deleted. Entries are only dropped from the record once the
@@ -72,7 +72,7 @@ export function assertHkcu(key) {
   return k;
 }
 
-/** Every (key, value) pair G9 manages. */
+/** Every (key, value) pair G9BrowserAgent manages. */
 export function policyEntries(browsers = POLICY_ROOTS.map((r) => r.browser)) {
   const out = [];
   for (const root of POLICY_ROOTS) {
@@ -98,7 +98,7 @@ export function queryArgs(e) {
 
 export function addArgs(e, type = e.type, data = e.data) {
   const t = String(type);
-  // REG_BINARY too: Undo must be able to put back whatever type the value had before G9, and
+  // REG_BINARY too: Undo must be able to put back whatever type the value had before G9BrowserAgent, and
   // `reg query` prints binary data as the hex string `reg add /t REG_BINARY /d` takes.
   if (!/^REG_(DWORD|QWORD|SZ|EXPAND_SZ|MULTI_SZ|BINARY)$/.test(t)) throw new Error(`Unsupported registry type ${t}`);
   return ['add', assertHkcu(e.key), '/v', checkName(e.name), '/t', t, '/d', String(data), '/f'];
@@ -126,7 +126,7 @@ export function batchQuote(arg) {
   return `"${a.replace(/%/g, '%%')}"`;
 }
 
-/** The command that puts back what was there before G9 (or removes what G9 added). */
+/** The command that puts back what was there before G9BrowserAgent (or removes what G9BrowserAgent added). */
 export function restoreArgs(entry) {
   const prev = entry.previous;
   if (!prev?.exists) return deleteArgs(entry);
@@ -224,7 +224,7 @@ export function readRecord(recordFile) {
 }
 
 /**
- * Status for the Setup view: per entry, the current value, whether it is at G9's value,
+ * Status for the Setup view: per entry, the current value, whether it is at G9BrowserAgent's value,
  * and what Undo would restore.
  */
 export async function policyStatus({ entries = policyEntries(), run = execReg, recordFile }) {
@@ -348,7 +348,7 @@ export async function applyPolicies({
  */
 export async function undoPolicies({ run = execReg, runElevated = null, elevate = false, recordFile, log = null, by = null }) {
   const record = readRecord(recordFile);
-  if (!record.entries.length) return { ok: true, message: 'Nothing to undo: G9 has no recorded policy changes.', restored: [], failed: [] };
+  if (!record.entries.length) return { ok: true, message: 'Nothing to undo: G9BrowserAgent has no recorded policy changes.', restored: [], failed: [] };
   for (const e of record.entries) assertHkcu(e.key);
 
   const results = [];
@@ -396,7 +396,7 @@ export async function undoPolicies({ run = execReg, runElevated = null, elevate 
   writeJsonAtomic(recordFile, next);
   const needsElevation = !elevate && failed.length > 0 && refused.length > 0;
   const message = !failed.length
-    ? `Restored ${restored.length} value(s) to what they were before G9.`
+    ? `Restored ${restored.length} value(s) to what they were before G9BrowserAgent.`
     : needsElevation
       ? refusedMessage(results, 'change')
       : `${failed.length} value(s) could not be restored${results.some((r) => r.code !== 0) ? ` (${firstFailure(results)})` : ''}; they stay recorded so Undo can be retried.`;

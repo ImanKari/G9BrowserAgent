@@ -102,7 +102,7 @@ await test('(3.2) a stop closes Chromium before the desktop, and an update reach
   assert.match(init, /RESTART_APP/, "keeps the watchdog's permissions");
 });
 
-await test('the desktop\'s Chromium loads the G9 extension without the debugger bar', () => {
+await test('the desktop\'s Chromium loads the G9BrowserAgent extension without the debugger bar', () => {
   for (const f of ['docker/root/defaults/autostart', 'docker/root/defaults/autostart_wayland']) {
     const s = read(f);
     assert.match(s, /^\/usr\/local\/bin\/g9-chromium$/m, 'the switches live in the image');
@@ -131,7 +131,7 @@ await test('scripts a Linux shell can run: a shebang, no CR, LF pinned in .gitat
     const s = read(f);
     assert.match(s, /^#!\/(usr\/)?bin\/((with-contenv )?bash|sh)\n/, `${f} has a shebang`);
   }
-  // Every s6 service G9 adds is stripped of CR and its scripts made executable.
+  // Every s6 service G9BrowserAgent adds is stripped of CR and its scripts made executable.
   for (const svc of ['svc-g9d', 'svc-g9mcp', 'svc-g9-quit', 'init-g9-desktop']) assert.ok(dockerfile.includes(`$S/${svc}`), `the Dockerfile handles ${svc}`);
   assert.ok(dockerfile.includes('/usr/local/bin/g9-chromium'));
   assert.match(read('.gitattributes'), /docker\/root\/\*\* text eol=lf/);

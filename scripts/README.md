@@ -9,7 +9,7 @@ something schedulable.
 **Documentation audited against v1.7.21 on 2026-09-12.** These scripts use the existing browser
 connection; they do not provision an isolated profile or make every browser operation background-safe.
 
-**Not updated for v2 (checked against G9 2.0.3 on 2026-09-25, by reading the code; not run).** The
+**Not updated for v2 (checked against G9BrowserAgent 2.0.3 on 2026-09-25, by reading the code; not run).** The
 text below describes v1. `Save-TelegramImages.ps1` does not work with v2 as written: it refuses to
 start when anything listens on its port (v1's one-bridge rule), and in v2 the shared daemon normally
 listens there; and it waits for `browser_status` to report `connected` and `attached`, fields v1 had
@@ -47,7 +47,7 @@ The extension connects to exactly one bridge at a time. If the editor owns the s
 close that MCP client before using the same port. This script explicitly pins `G9_PORT` and checks
 for a conflict; automatic port selection in other bridge clients does not make it share a connection.
 
-Then: open the channel in Telegram Web, click the G9 icon, **Attach & Pin**. Keep the browser,
+Then: open the channel in Telegram Web, click the G9BrowserAgent icon, **Attach & Pin**. Keep the browser,
 extension and selected bridge running. Images are read as page blobs and saved by PowerShell;
 the script does not use the currently broken `browser_network watch_downloads` path.
 

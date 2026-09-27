@@ -7,7 +7,7 @@
 <!--
   The local half of the stealth self-test (docs/STEALTH.md, setup/stealthtest.mjs).
 
-  This page is a detector written against G9 itself: it looks for what G9 controls and could leak
+  This page is a detector written against G9BrowserAgent itself: it looks for what G9BrowserAgent controls and could leak
   (a global or DOM helper in the main world, the Runtime-domain console side channel, main-world
   DOM calls made by someone other than the page, untrusted or teleported input, a locale/timezone/
   Accept-Language story that does not hang together, a screen that does not contain its window)
@@ -20,22 +20,22 @@
   * It keeps the original DOM methods before wrapping them, and uses only those itself, so a call
     through a wrapped method was made by code that is not this page.
   * It never dispatches a synthetic event, so any isTrusted:false event came from outside.
-  * Its element ids start with "sl-" and contain no "g9", so a DOM scan for "g9" finds only G9.
+  * Its element ids start with "sl-" and contain no "g9", so a DOM scan for "g9" finds only G9BrowserAgent.
 
   The verdict is written, base64-encoded JSON, into #sl-result[data-json] a few times a second;
   #sl-result[data-ready="1"] says the asynchronous environment probes have finished. The harness
   reads it with browser_inspect what:"dom" (the DOM domain only, no script in any world).
 
   Query parameters: echo=<url of the harness's header echo server> (for Accept-Language and
-  Client Hints as the server sees them), expect=<json {locale,timezone}> (what G9 was told to set),
+  Client Hints as the server sees them), expect=<json {locale,timezone}> (what G9BrowserAgent was told to set),
   probe=<ms> (how often the Runtime probe runs; default 500), xframe=<url> (embed that page — this
-  one with role=frame from another SITE, so it is an out-of-process frame G9 meets as a child
+  one with role=frame from another SITE, so it is an out-of-process frame G9BrowserAgent meets as a child
   session), popup=<url> (what the "Open popup" button opens with window.open), role=frame|popup
   (this document is such a child: it runs the probes and posts them to its parent/opener instead
   of being a test page; life=<ms> is how long a popup lives before it closes itself).
 
   Measured with it (Edge 153, 2026-09-22): an out-of-process frame does NOT follow the timezone and
-  locale overrides G9 sends to the page session (top Europe/Berlin de-DE, frame = the host's zone
+  locale overrides G9BrowserAgent sends to the page session (top Europe/Berlin de-DE, frame = the host's zone
   and en-US/de); sent to the frame's own session before it runs, they do. And a page's
   window.open() never completes while the browser session auto-attaches with
   waitForDebuggerOnStart:false (see stealthtest.mjs runPopupTest).
@@ -85,7 +85,7 @@
   const baseline = new Set(S.baselineGlobals);
 
   // ---- main-world DOM calls made by someone other than this page ------------------------------
-  // Isolated worlds (where G9 reads the page) have their own wrappers of these prototypes, so a
+  // Isolated worlds (where G9BrowserAgent reads the page) have their own wrappers of these prototypes, so a
   // call from there never reaches the functions below. A call from the MAIN world that is not
   // this page's own is what a "main world execution" detector looks for.
   const HOOKS = [
@@ -160,7 +160,7 @@
   // ---- child documents: a cross-site frame and a popup ----------------------------------------
   // role=frame: this document is the cross-site (out-of-process) iframe the top page embeds;
   // role=popup: it is a tab the top page opened with window.open() after a trusted click. Neither
-  // is a tab G9 opened: G9 meets the frame as a CHILD session of the tab it drives (auto-attach)
+  // is a tab G9BrowserAgent opened: G9BrowserAgent meets the frame as a CHILD session of the tab it drives (auto-attach)
   // and the popup as a new target in the same browser context. Both must get the stealth treatment
   // of the tab that led to them — no Runtime domain, nothing in the main world, webdriver false.
   // A child runs the same probes and hooks as the top page and posts what it saw to the top page
@@ -246,7 +246,7 @@
   // listeners for them either (measured: none arrived), so they are taken on the elements below.
   const BOUNDARY = new Set(['pointerenter', 'pointerleave', 'mouseenter', 'mouseleave']);
   for (const type of TYPES) if (!BOUNDARY.has(type)) window.addEventListener(type, onEvent, { capture: true, passive: true });
-  // What G9's own tools might make the page notice: a viewport resize (a full-page screenshot done by
+  // What G9BrowserAgent's own tools might make the page notice: a viewport resize (a full-page screenshot done by
   // resizing), a visibility flip, the window losing focus.
   S.sideEffects = [];
   const sideEffect = (e) => {
@@ -429,7 +429,7 @@
     })());
     tasks.push((async () => {
       // A dedicated worker has its own navigator and Intl: automation that patches only the window
-      // is caught by the difference. G9 patches nothing, so the two must agree.
+      // is caught by the difference. G9BrowserAgent patches nothing, so the two must agree.
       try {
         const code = `self.onmessage = () => {
           let webgl = null;
@@ -470,7 +470,7 @@
 
   // ---- checks ------------------------------------------------------------------------------------
   // status: pass | fail | warn | info. cls says who could fix a failure:
-  //   g9        something G9 does or could do (a leak, a broken promise)
+  //   g9        something G9BrowserAgent does or could do (a leak, a broken promise)
   //   headless  inherent to headless Chromium (docs/STEALTH.md: run stealth-critical suites headed)
   //   cdp       inherent to CDP input on this Chromium build
   //   host      a fact of this machine (its timezone, its devices)
@@ -529,7 +529,7 @@
     const g9SetBoth = !!(expect.locale && expect.timezone);
     check('timezone-vs-locale-region', tzOk ? 'pass' : (g9SetBoth ? 'fail' : 'warn'), g9SetBoth ? 'g9' : 'host',
       { locale: env.language, region, timeZone: env.intl.timeZone },
-      tzOk ? '' : 'the time zone is not one used in the locale\'s region' + (g9SetBoth ? '' : ' (both come from the host: G9 was not asked to set them)'));
+      tzOk ? '' : 'the time zone is not one used in the locale\'s region' + (g9SetBoth ? '' : ' (both come from the host: G9BrowserAgent was not asked to set them)'));
     if (expect.locale) {
       check('expected-locale', langOf(expect.locale) === navLang && langOf(expect.locale) === intlLang ? 'pass' : 'fail', 'g9',
         { expected: expect.locale, navigator: env.language, intl: env.intl.locale });
@@ -566,7 +566,7 @@
     // Measured (Edge 153, headless and headed): a document loaded by Page.navigate while a CDP session
     // is attached reads outerWidth/outerHeight/screenX/screenY = 0 from its first script until a few
     // ms after `load`; the same page loaded with no session attached reads the real window. So a 0 at
-    // load is the attached debugger showing (cls cdp); a 0 that persists would be G9's own doing.
+    // load is the attached debugger showing (cls cdp); a 0 that persists would be G9BrowserAgent's own doing.
     check('outer-size-at-load', zeroAtLoad ? 'fail' : 'pass', 'cdp', { atLoad: win.outerWidth + 'x' + win.outerHeight + ' @' + win.at + 'ms', screenXYAtLoad: [win.screenX, win.screenY] },
       zeroAtLoad ? 'window.outerWidth/outerHeight read 0 at load (BotD-style "outer size 0" headless tell)' : '');
     check('outer-size-now', zeroNow ? 'fail' : 'pass', 'g9', { now: now.outerWidth + 'x' + now.outerHeight, screenXYNow: [now.screenX, now.screenY] },
@@ -601,7 +601,7 @@
     check('voices', env.voices && env.voices.count > 0 ? 'pass' : 'warn', 'headless', env.voices);
     // Chrome and Edge play Widevine once their component is loaded; a Chromium-branded build
     // (Chrome for Testing: brands "Chromium", "Not_A Brand") does not, with or without the switch
-    // (measured) — that one is the binary's, not G9's.
+    // (measured) — that one is the binary's, not G9BrowserAgent's.
     const branded = brands.some((b) => /Google Chrome|Microsoft Edge/.test(b));
     if (env.eme) check('eme-widevine', env.eme['com.widevine.alpha'] ? 'pass' : 'fail', branded ? 'g9' : 'browser', env.eme,
       env.eme['com.widevine.alpha'] ? '' : (branded ? 'no Widevine key system: DRM video will not play, and detectors know automation launches without it (--disable-component-update)' : 'no Widevine key system (a Chromium-branded build ships none)'));
@@ -609,7 +609,7 @@
     check('media-devices', md && typeof md === 'object' && Object.keys(md).length ? 'pass' : 'warn', 'host', md);
     check('connection-rtt', env.connection && env.connection.rtt === 0 ? 'warn' : 'pass', 'headless', env.connection);
     check('focus-visible', S.focusAtLoad && S.focusAtLoad.hasFocus && S.focusAtLoad.visibility === 'visible' ? 'pass' : 'fail', 'g9', S.focusAtLoad,
-      'G9 turns focus emulation on for every launched page');
+      'G9BrowserAgent turns focus emulation on for every launched page');
     check('user-activation-at-load', S.userActivationAtLoad && S.userActivationAtLoad.hasBeenActive ? 'fail' : 'pass', 'g9', S.userActivationAtLoad,
       'no one has touched the page yet, so it must not have had a user gesture');
     const attrs = (env.documentElementAttributes || []).filter((a) => !/^(lang)$/i.test(a));
@@ -632,7 +632,7 @@
       else other.push(entry);
     }
     check('main-world-globals', suspicious.length ? 'fail' : (other.length ? 'warn' : 'pass'), 'g9', { suspicious, other },
-      suspicious.length ? 'globals added to the page\'s window after it started (G9 promises nothing in the main world)' : '');
+      suspicious.length ? 'globals added to the page\'s window after it started (G9BrowserAgent promises nothing in the main world)' : '');
     const g9Nodes = [];
     for (const el of allElements()) {
       const id = String(el.id || '');

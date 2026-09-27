@@ -124,11 +124,11 @@ async function main() {
   }
 
   // 2. draft
-  const notes = NOTES && fs.existsSync(NOTES) ? fs.readFileSync(NOTES, 'utf8') : `G9 ${VERSION}`;
+  const notes = NOTES && fs.existsSync(NOTES) ? fs.readFileSync(NOTES, 'utf8') : `G9BrowserAgent ${VERSION}`;
   if (!release) {
     // Drafts are invisible to /releases, releases.atom and /releases/latest — to people and to
     // electron-updater — until step 5.
-    release = await gh(`${API}/releases`, { method: 'POST', body: { tag_name: TAG, target_commitish: COMMIT, name: `G9 ${VERSION}`, body: notes, draft: true, prerelease: false } });
+    release = await gh(`${API}/releases`, { method: 'POST', body: { tag_name: TAG, target_commitish: COMMIT, name: `G9BrowserAgent ${VERSION}`, body: notes, draft: true, prerelease: false } });
     say(`Draft created: ${release.html_url}`);
   } else {
     say(`Reusing the draft a previous run left: ${release.html_url}`);
@@ -136,7 +136,7 @@ async function main() {
       await gh(`${API}/releases/assets/${a.id}`, { method: 'DELETE' });
       say(`  removed half-uploaded ${a.name}`);
     }
-    release = await gh(`${API}/releases/${release.id}`, { method: 'PATCH', body: { tag_name: TAG, target_commitish: COMMIT, name: `G9 ${VERSION}`, body: notes } });
+    release = await gh(`${API}/releases/${release.id}`, { method: 'PATCH', body: { tag_name: TAG, target_commitish: COMMIT, name: `G9BrowserAgent ${VERSION}`, body: notes } });
   }
 
   // 3. upload

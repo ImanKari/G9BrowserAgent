@@ -17,7 +17,7 @@ import { clearBuffers } from './observe.js';
 const session = () => platform.storage.session;
 
 // Every page read here (the real user agent, the viewport, readyState) runs in
-// G9's isolated world: same values, and nothing visible to the page.
+// G9BrowserAgent's isolated world: same values, and nothing visible to the page.
 
 /**
  * Clearing the user-agent override is `Emulation.setUserAgentOverride {userAgent: ''}`: measured on

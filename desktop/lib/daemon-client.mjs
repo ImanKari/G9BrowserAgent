@@ -226,7 +226,7 @@ export class DaemonClient extends EventEmitter {
   #notConnectedMessage() {
     const s = this._state;
     const why = s.error ? ` (${s.error})` : '';
-    return `The G9 daemon is not connected on port ${this.port}: ${s.status}${why}.`;
+    return `The G9BrowserAgent daemon is not connected on port ${this.port}: ${s.status}${why}.`;
   }
 
   #connect() {
@@ -340,7 +340,7 @@ export class DaemonClient extends EventEmitter {
   }
 
   #markForeign(foreign) {
-    const message = foreign.message ?? `Port ${this.port} is in use by something that is not the G9 daemon.`;
+    const message = foreign.message ?? `Port ${this.port} is in use by something that is not the G9BrowserAgent daemon.`;
     this.#setState({ status: 'foreign', error: message, foreign });
     this.emit('foreign', foreign);
     // Never touch it; look again slowly so the app recovers by itself once it goes away.

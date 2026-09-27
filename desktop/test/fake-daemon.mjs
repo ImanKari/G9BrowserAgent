@@ -20,7 +20,7 @@ export async function startFakeDaemon({
   const server = http.createServer((req, res) => {
     if (req.url.startsWith('/health')) {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(health ?? { ok: true, name: 'g9d', version, pid: process.pid, port, home: 'C:/fake/G9', engines: 0, agents: 0, extension: false }));
+      res.end(JSON.stringify(health ?? { ok: true, name: 'g9d', version, pid: process.pid, port, home: 'C:/fake/G9BrowserAgent', engines: 0, agents: 0, extension: false }));
       return;
     }
     res.writeHead(404);

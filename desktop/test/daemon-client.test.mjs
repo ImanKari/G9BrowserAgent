@@ -187,7 +187,7 @@ t.test('nothing listening → onRefused is asked; when it launches, the client w
 
 t.test('welcome.problem → "refused", and no reconnect until reconnectNow()', async () => {
   const port = await freePort();
-  const d = await startFakeDaemon({ port, welcome: { problem: 'This daemon is 3.0.0; update G9.' } });
+  const d = await startFakeDaemon({ port, welcome: { problem: 'This daemon is 3.0.0; update G9BrowserAgent.' } });
   t.cleanup(() => d.close());
   const c = client(port);
   c.start();
@@ -205,10 +205,10 @@ t.test('a port that refuses the upgrade and is not g9d → "foreign", never hamm
   const port = await freePort();
   const d = await startFakeDaemon({ port, refuseUpgrade: 426 });
   t.cleanup(() => d.close());
-  const c = client(port, { onUpgradeRefused: async () => ({ kind: 'v1-bridge', message: 'Port is held by a v1 G9 bridge' }) });
+  const c = client(port, { onUpgradeRefused: async () => ({ kind: 'v1-bridge', message: 'Port is held by a v1 G9BrowserAgent bridge' }) });
   c.start();
   await until(() => c.state.status === 'foreign', { what: 'foreign' });
-  assert.match(c.state.error, /v1 G9 bridge/);
+  assert.match(c.state.error, /v1 G9BrowserAgent bridge/);
   c.stop();
 });
 

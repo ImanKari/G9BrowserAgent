@@ -601,7 +601,7 @@ export class Registry extends EventEmitter {
   /** Why this caller may not act right now, or null. `browser_status` is exempt at the router. */
   haltError(agentId) {
     if (this.global.halted) {
-      const where = this.global.by === 'panel' ? ' in the G9 side panel' : this.global.by === 'desktop' ? ' in the G9 desktop app' : '';
+      const where = this.global.by === 'panel' ? ' in the G9BrowserAgent side panel' : this.global.by === 'desktop' ? ' in the G9BrowserAgent desktop app' : '';
       return (
         `The user pressed Stop${where}. Every browser action is blocked until they press Resume — ` +
         'you cannot lift this yourself. Tell them, and wait.'
@@ -610,7 +610,7 @@ export class Registry extends EventEmitter {
     const client = this.clients.get(agentId);
     if (client?.halted) {
       return (
-        `The user stopped this agent (${this.describe(agentId)}) from the G9 desktop app. Every browser ` +
+        `The user stopped this agent (${this.describe(agentId)}) from the G9BrowserAgent desktop app. Every browser ` +
         'action from this agent is blocked until they resume it — you cannot lift this yourself. Tell them, and wait.'
       );
     }

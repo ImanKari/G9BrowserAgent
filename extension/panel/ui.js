@@ -18,7 +18,7 @@
 
 export const api = globalThis.browser ?? globalThis.chrome;
 
-export const PRODUCT = 'G9 Browser Agent';
+export const PRODUCT = 'G9BrowserAgent';
 
 /**
  * The version of THIS extension, from its manifest — the one source.
@@ -114,7 +114,7 @@ export function showPanelError(message, { source = 'action' } = {}) {
   }
   // A refresh hiccup must not overwrite the reason an action just failed.
   if (source === 'refresh' && errorSource === 'action' && !box.hidden) {
-    console.error('[G9 panel]', message);
+    console.error('[G9BrowserAgent panel]', message);
     return;
   }
   box.textContent = String(message);
@@ -127,7 +127,7 @@ export function showPanelError(message, { source = 'action' } = {}) {
   } else {
     box.removeAttribute('title');
   }
-  console.error('[G9 panel]', message);
+  console.error('[G9BrowserAgent panel]', message);
 }
 
 /** Clicking an error dismisses it: it has been read. */

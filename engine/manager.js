@@ -141,7 +141,7 @@ export class EngineManager {
     if (this.initError || !this.cdp) {
       throw new Error(
         `Launched browsers (Engine 2) are unavailable in this daemon: ${this.initError?.message ?? 'not initialised'}. ` +
-          'The extension (Engine 1) still works. Check the daemon log in the G9 data folder.',
+          'The extension (Engine 1) still works. Check the daemon log in the G9BrowserAgent data folder.',
       );
     }
   }
@@ -537,7 +537,7 @@ export class EngineManager {
     // ShowDownloadsHubPopup* features and the "completed" preference did not). Chrome ignores it.
     if (current?.browser?.show_hub_popup_on_download_start !== false) patch['browser.show_hub_popup_on_download_start'] = false;
     // A second barrier behind the per-context Browser.setDownloadBehavior (#configureDownloads):
-    // the profile's own download folder is G9's, never the Windows user's Downloads, and no
+    // the profile's own download folder is G9BrowserAgent's, never the Windows user's Downloads, and no
     // save-as prompt opens. Written only when it differs.
     const profileDownloads = path.join(this.home, 'downloads', `profile-${safeName(profileName)}`);
     if (current?.download?.default_directory !== profileDownloads) patch['download.default_directory'] = profileDownloads;
@@ -553,7 +553,7 @@ export class EngineManager {
     }
     if (!acceptLanguage) {
       // What the browser will actually send: the profile's own setting, read from the file (the
-      // metadata only mirrors what G9 itself wrote there).
+      // metadata only mirrors what G9BrowserAgent itself wrote there).
       acceptLanguage = current?.intl?.accept_languages ?? prof?.meta?.acceptLanguage ?? prof?.meta?.preferences?.['intl.accept_languages'] ?? null;
     }
     try {
@@ -660,9 +660,9 @@ export class EngineManager {
         proxy: opts.proxy ?? null,
         downloadPath,
       });
-      // Unwatched downloads land in G9's own folder, not the owner's (engine review, 2026-09-22:
+      // Unwatched downloads land in G9BrowserAgent's own folder, not the owner's (engine review, 2026-09-22:
       // a click on an attachment link with no watch_downloads saved the file into the profile's
-      // default directory — the Windows user's Downloads — and G9 had no record of it).
+      // default directory — the Windows user's Downloads — and G9BrowserAgent had no record of it).
       await this.#configureDownloads(engineId, defaultContextId, downloadPath);
       for (const tabId of this.registry.handlesOf(engineId)) await this.#applyTabDefaults(tabId).catch(() => {});
       if (!headless && !opts.windowSize) {
@@ -715,14 +715,14 @@ export class EngineManager {
       this.registry.bindHandle(tabId, engineId);
       const info = this.#tabInfo(tabId);
       contextId ??= info?.browserContextId ?? null;
-      // A page G9 itself created (platform-cdp createTab) is never a start-up stray, whoever asked
+      // A page G9BrowserAgent itself created (platform-cdp createTab) is never a start-up stray, whoever asked
       // for it: the sweep closed another agent's freshly opened tab (engine review, 2026-09-22).
       if (info?.createdByG9) continue;
       const tab = await platform.tabs.get(tabId).catch(() => null);
       if (engine && engine.initialBlank == null && tab && /^about:blank/.test(tab.url ?? 'about:blank')) engine.initialBlank = tabId;
       else if (tab) strays.push({ tabId, url: tab.url ?? '' });
     }
-    // Every page at start-up other than G9's own about:blank is one nobody asked for: a restored
+    // Every page at start-up other than G9BrowserAgent's own about:blank is one nobody asked for: a restored
     // session (Chrome for Testing reopened the previous run's tabs on every relaunch, and one of
     // them ended up in front of the agent's — live round 2), a sync or onboarding page. Closed, and
     // named in the launch result, so no agent inherits a tab that loads sites on its own and no
@@ -731,7 +731,7 @@ export class EngineManager {
     if (engine && strays.length && engine.initialBlank != null) {
       for (const stray of strays) {
         await platform.tabs.remove(stray.tabId).catch(() => {});
-        this.registry.dropHandle?.(stray.tabId, 'closed at launch: a page G9 did not open');
+        this.registry.dropHandle?.(stray.tabId, 'closed at launch: a page G9BrowserAgent did not open');
       }
       engine.info.closedAtLaunch = strays.map((s) => s.url);
       const note = `Closed ${strays.length} page(s) the browser opened by itself at start-up (${strays.map((s) => s.url || 'about:blank').slice(0, 4).join(', ')}${strays.length > 4 ? ', …' : ''}).`;
@@ -775,7 +775,7 @@ export class EngineManager {
       screens = [];
     }
     if (!screens.length) {
-      // Older builds: the start-up page (about:blank, G9's isolated world) reads the screen it is on.
+      // Older builds: the start-up page (about:blank, G9BrowserAgent's isolated world) reads the screen it is on.
       const inWorld = pick(this.optional.world, 'inWorld');
       const s = typeof inWorld === 'function'
         ? await inWorld(tabId, '({ availLeft: screen.availLeft, availTop: screen.availTop, availWidth: screen.availWidth, availHeight: screen.availHeight })', { timeoutMs: 3_000 }).catch(() => null)
@@ -972,9 +972,9 @@ export class EngineManager {
   }
 
   /**
-   * Point a context's downloads at G9's own folder, with events on, from the moment it exists —
+   * Point a context's downloads at G9BrowserAgent's own folder, with events on, from the moment it exists —
    * not only after a watch_downloads: until then the browser used the profile's default directory
-   * (the owner's Downloads) and told G9 nothing. `allowAndName` saves each file under its GUID, as
+   * (the owner's Downloads) and told G9BrowserAgent nothing. `allowAndName` saves each file under its GUID, as
    * watch_downloads always has. Returns a warning when the browser refused; never throws.
    */
   async #configureDownloads(engineId, browserContextId, downloadPath) {
@@ -1045,7 +1045,7 @@ export class EngineManager {
    * waitForDebuggerOnStart): its context defaults (focus, locale, timezone), then the tool layer's
    * attach (Network, Log, DOM …, never Runtime at stealth; auto-attach to its frames). Only then
    * does the page run — so a tab the PAGE opened (window.open, target=_blank) loads with the
-   * persona in place and its first load captured, exactly like a tab G9 opened (openTab).
+   * persona in place and its first load captured, exactly like a tab G9BrowserAgent opened (openTab).
    *
    * The commands are SENT here, synchronously, and their answers are NOT awaited before the page
    * is resumed: a target=_blank tab answers nothing while it is held — and every command sent
@@ -1132,7 +1132,7 @@ export class EngineManager {
    * Create a page target and return its handle. Chrome refuses a tab in a
    * browser context that has no window yet ("Failed to open new tab - no
    * browser is open") when asked for newWindow:false. platform-cdp's createTab
-   * handles that itself (F1), for every caller: every page G9 opens gets a
+   * handles that itself (F1), for every caller: every page G9BrowserAgent opens gets a
    * real window of its own (live round 2: a tab that joined another's window
    * fell behind it and was driven at ~1 frame per 1.5 s), taking an existing
    * window's bounds. The retry that lived here became redundant and was
@@ -1586,7 +1586,7 @@ export class EngineManager {
 
   /**
    * Receive a tab from Engine 1 (ARCHITECTURE §7): cookies into a
-   * context, one-shot storage seeding in G9's isolated world, navigate, remove
+   * context, one-shot storage seeding in G9BrowserAgent's isolated world, navigate, remove
    * the seeding script after load.
    */
   async handoffImport(payload, { engineId = null, contextId = null, launch = true, includeStorage = true, matchViewport = false, caller = {} } = {}) {
@@ -1709,7 +1709,7 @@ export class EngineManager {
 
   /**
    * After a handoff: which seeded entries hold their value on the final page,
-   * read in G9's isolated world (it shares the origin's storage, not the page's
+   * read in G9BrowserAgent's isolated world (it shares the origin's storage, not the page's
    * globals). Null when the world module is unavailable or the page cannot be read.
    */
   async #checkSeededStorage(tabId, origin, local, session) {

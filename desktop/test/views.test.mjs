@@ -44,7 +44,7 @@ const extensionRow = { engineId: 'engine-1', kind: 'extension', browser: 'Mozill
 const launchedRow = {
   engineId: 'launched-1', kind: 'launched', browser: { kind: 'edge', path: 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', version: '153.0.3405.12' }, version: '153.0.3405.12',
   headless: true, profile: 'automation', pid: 5150, argv: ['--headless=new'], startedAt: NOW - 30_000,
-  contexts: [{ contextId: 'ctx-1', engineId: 'launched-1', humanize: 'human', stealth: 'off', locale: 'de-DE', timezone: 'Europe/Berlin', proxy: null, downloadPath: 'C:/G9/downloads/ctx-1' }],
+  contexts: [{ contextId: 'ctx-1', engineId: 'launched-1', humanize: 'human', stealth: 'off', locale: 'de-DE', timezone: 'Europe/Berlin', proxy: null, downloadPath: 'C:/G9BrowserAgent/downloads/ctx-1' }],
   tabs: [7],
 };
 const tabRows = [
@@ -57,9 +57,9 @@ const agentRows = [
   { id: 'agent-2', name: 'cursor', pid: 12, owned: [7], current: 7, halted: true, connectedAt: NOW - 30_000 },
 ];
 const runsList = [
-  { runId: '20260921-221000-replay-ab12', kind: 'replay', label: 'rec_checkout', startedAt: NOW - 600_000, finishedAt: NOW - 540_000, active: false, ok: true, verdict: 'SURPRISE', exitCode: null, frames: 3, dir: 'C:/G9/runs/20260921-221000-replay-ab12' },
-  { runId: '20260921-020000-schedule-cd34', kind: 'schedule', label: 'Nightly smoke', startedAt: NOW - 3_600_000, finishedAt: NOW - 3_500_000, active: false, ok: false, verdict: 'FAIL_PRODUCT', exitCode: 1, frames: 0, dir: 'C:/G9/runs/x' },
-  { runId: '20260921-230000-watch-ef56', kind: 'watch', label: 'tab 7', startedAt: NOW - 60_000, finishedAt: NOW - 30_000, active: false, ok: true, verdict: null, exitCode: null, frames: 20, dir: 'C:/G9/runs/y' },
+  { runId: '20260921-221000-replay-ab12', kind: 'replay', label: 'rec_checkout', startedAt: NOW - 600_000, finishedAt: NOW - 540_000, active: false, ok: true, verdict: 'SURPRISE', exitCode: null, frames: 3, dir: 'C:/G9BrowserAgent/runs/20260921-221000-replay-ab12' },
+  { runId: '20260921-020000-schedule-cd34', kind: 'schedule', label: 'Nightly smoke', startedAt: NOW - 3_600_000, finishedAt: NOW - 3_500_000, active: false, ok: false, verdict: 'FAIL_PRODUCT', exitCode: 1, frames: 0, dir: 'C:/G9BrowserAgent/runs/x' },
+  { runId: '20260921-230000-watch-ef56', kind: 'watch', label: 'tab 7', startedAt: NOW - 60_000, finishedAt: NOW - 30_000, active: false, ok: true, verdict: null, exitCode: null, frames: 20, dir: 'C:/G9BrowserAgent/runs/y' },
 ];
 const scheduleEntries = [
   { id: 'sch_1a2b3c4d', name: 'Nightly smoke', target: 'suite:smoke', args: ['--env', 'staging', '--browser', 'auto', '--headless', '--humanize', 'human', '--stealth', 'off', '--profile', 'automation'], daily: '02:00', enabled: true, suite: 'suite:smoke', env: 'staging', at: '02:00', nextRunAt: NOW + 3_600_000, running: false, lastRunAt: NOW - 3_600_000, lastExitCode: 1, lastRunId: '20260921-020000-schedule-cd34', lastRun: { runId: '20260921-020000-schedule-cd34', at: NOW - 3_600_000, finishedAt: NOW - 3_500_000, exitCode: 1, verdict: 'FAIL_PRODUCT' } },
@@ -71,8 +71,8 @@ const recordings = [
 
 function snapshot(patch = {}) {
   return {
-    app: { version: '2.0.0', packaged: false, home: 'C:/G9', desktopHome: 'C:/G9', port: 8765, user: 'qa1', platform: 'win32', resourceRoot: 'G:/repo' },
-    connection: { status: 'connected', port: 8765, url: 'ws://127.0.0.1:8765/g9', error: null, id: 'ui-1', daemonVersion: '2.0.0', daemonPid: 4242, home: 'C:/G9', halted: { global: false } },
+    app: { version: '2.0.0', packaged: false, home: 'C:/G9BrowserAgent', desktopHome: 'C:/G9BrowserAgent', port: 8765, user: 'qa1', platform: 'win32', resourceRoot: 'G:/repo' },
+    connection: { status: 'connected', port: 8765, url: 'ws://127.0.0.1:8765/g9', error: null, id: 'ui-1', daemonVersion: '2.0.0', daemonPid: 4242, home: 'C:/G9BrowserAgent', halted: { global: false } },
     halted: { global: false },
     agents: agentRows.map(normalizeAgent),
     engines: [extensionRow, launchedRow].map(normalizeEngine),
@@ -154,43 +154,43 @@ function answer(op, a) {
     case 'call': return callAnswer(a.tool, a.args ?? {});
     case 'approve': return { id: a.flowId, runs: 3 };
     case 'runs.detail': if (/schedule/.test(a.runId)) return {
-      runId: a.runId, dir: 'C:/G9/runs/x', active: false, files: ['engine.json', 'report/', 'result.json'],
+      runId: a.runId, dir: 'C:/G9BrowserAgent/runs/x', active: false, files: ['engine.json', 'report/', 'result.json'],
       engine: { runId: a.runId, kind: 'schedule', label: 'Nightly smoke', startedAt: NOW - 3_600_000 },
-      result: { finishedAt: NOW - 3_500_000, ok: false, exitCode: 1, verdict: 'FAIL_PRODUCT', verdicts: { PASS: 1, FAIL_PRODUCT: 1 }, reportDir: 'C:/G9/runs/x/report' },
+      result: { finishedAt: NOW - 3_500_000, ok: false, exitCode: 1, verdict: 'FAIL_PRODUCT', verdicts: { PASS: 1, FAIL_PRODUCT: 1 }, reportDir: 'C:/G9BrowserAgent/runs/x/report' },
       report: { flows: [
         { id: 'rec_login', name: 'Login', verdict: 'PASS_WITH_WARNING', passed: 4, total: 4, warnings: ['step 1/4 (click "Sign in") matched only by css. Its stable identifiers no longer work, so this step is one refactor from breaking.'], steps: [{ step: 1, type: 'click', ok: true, matchedBy: 'css' }] },
         { id: 'rec_checkout', name: 'Checkout', verdict: 'FAIL_PRODUCT', passed: 8, total: 9, failureMessage: 'Expected "Thank you"', steps: [{ step: 9, type: 'assert', ok: false, error: 'Expected "Thank you"' }], surprises: [{ kind: 'new', layer: 'network', key: 'POST /api/pay 500', effectiveSeverity: 'fail' }] },
       ] },
     };
     if (/warn/.test(a.runId)) return {
-      runId: a.runId, dir: `C:/G9/runs/${a.runId}`, active: false, files: ['engine.json', 'result.json'],
+      runId: a.runId, dir: `C:/G9BrowserAgent/runs/${a.runId}`, active: false, files: ['engine.json', 'result.json'],
       engine: { runId: a.runId, kind: 'replay', label: 'rec_login', tabId: 7, startedAt: NOW - 300_000 },
       result: { finishedAt: NOW - 280_000, ok: true, verdict: 'PASS_WITH_WARNING', passed: 4, failed: 0, total: 4, ...(a.runId.endsWith('text') ? { warnings: ['step 3/4 passed, but 12 node(s) came back with different numbers — live data, not a structural change.'] } : {}) },
       report: null,
     };
     return {
-      runId: a.runId, dir: `C:/G9/runs/${a.runId}`, active: false, files: ['engine.json', 'frames/', 'frames.jsonl', 'pointer.jsonl', 'result.json'],
+      runId: a.runId, dir: `C:/G9BrowserAgent/runs/${a.runId}`, active: false, files: ['engine.json', 'frames/', 'frames.jsonl', 'pointer.jsonl', 'result.json'],
       engine: { runId: a.runId, kind: 'replay', label: 'rec_checkout', tabId: 7, startedAt: NOW - 600_000, engine: { engineId: 'launched-1' } },
       result: { finishedAt: NOW - 540_000, durationMs: 60_000, frames: 3, framesDropped: 0, ok: true, verdict: 'SURPRISE', passed: 9, failed: 0, total: 9, humanize: { level: 'human', seed: 42 }, seed: 42 },
       report: null,
     };
     case 'runs.local': return {
-      exists: true, dir: 'C:/G9/runs/r',
+      exists: true, dir: 'C:/G9BrowserAgent/runs/r',
       frames: [1, 2, 3].map((seq) => ({ seq, at: 1000 * seq, file: `00000${seq}.jpg`, metadata: { deviceWidth: 1280, deviceHeight: 800, offsetTop: 0 }, pointer: null })),
       pointer: [{ at: 1000, x: 10, y: 10, buttons: 0, type: 'mouseMoved' }, { at: 2000, x: 200, y: 120, buttons: 1, type: 'mousePressed' }],
       result: null, engine: null, video: null,
     };
     case 'runs.frame': return new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
-    case 'runs.openReport': return { path: `C:/G9/runs/${a.runId}/report/report.html` };
-    case 'runs.openFolder': return { path: `C:/G9/runs/${a.runId}` };
+    case 'runs.openReport': return { path: `C:/G9BrowserAgent/runs/${a.runId}/report/report.html` };
+    case 'runs.openFolder': return { path: `C:/G9BrowserAgent/runs/${a.runId}` };
     case 'updater.check':
     case 'updater.state': return snapshot().update;
     case 'wizard.state':
     case 'wizard.mark': return snapshot().wizard;
     case 'wizard.log': return ['2026-09-21T22:00:00.000Z INFO  Setup: browsers detected'];
     case 'wizard.browsers': return { browsers: [{ kind: 'edge', path: 'C:/Edge/msedge.exe', version: '153.0.3405.12' }, { kind: 'chrome', path: 'C:/Chrome/chrome.exe', version: '153.0.7000.4' }], cft: { pinned: '153.0.7000.1', installed: [], pinnedInstalled: false }, source: 'daemon', daemonError: null };
-    case 'wizard.installCft': return { cft: { downloaded: { version: '153.0.7000.1', path: 'C:/G9/engines/cft-153.0.7000.1/chrome.exe' } } };
-    case 'wizard.profile': return { profiles: [{ name: 'automation', dir: 'C:/G9/profiles/automation' }], automation: { name: 'automation', dir: 'C:/G9/profiles/automation' } };
+    case 'wizard.installCft': return { cft: { downloaded: { version: '153.0.7000.1', path: 'C:/G9BrowserAgent/engines/cft-153.0.7000.1/chrome.exe' } } };
+    case 'wizard.profile': return { profiles: [{ name: 'automation', dir: 'C:/G9BrowserAgent/profiles/automation' }], automation: { name: 'automation', dir: 'C:/G9BrowserAgent/profiles/automation' } };
     case 'wizard.warm': return { profile: 'automation', warming: true, pid: 99 };
     case 'wizard.policies': return {
       rows: [{ browser: 'edge', key: 'HKCU\\Software\\Policies\\Microsoft\\Edge', name: 'WindowOcclusionEnabled', type: 'REG_DWORD', desired: 0, why: 'covered windows keep drawing', chrome: '90', current: { exists: false }, applied: false, recordedPrevious: null, command: 'reg add "HKCU\\Software\\Policies\\Microsoft\\Edge" /v WindowOcclusionEnabled /t REG_DWORD /d 0 /f', undoCommand: null }],
@@ -209,8 +209,8 @@ function answer(op, a) {
       ],
     };
     case 'wizard.registerMcp': return { ok: true, changed: true, message: `Replaced in ${a.client}.`, backup: 'x.g9-backup' };
-    case 'wizard.extension': return { source: 'G:/repo/extension', sourceVersion: '2.0.0', target: 'C:/G9/extension', installedVersion: null, browsers: [{ kind: 'edge', path: 'C:/Edge/msedge.exe', page: 'edge://extensions' }], clicks: { edge: ['Developer mode', 'Load unpacked', 'Paste'], chrome: ['a', 'b', 'c'] } };
-    case 'wizard.installExtension': return { path: 'C:/G9/extension', version: '2.0.0', via: 'daemon', reloaded: 1, clipboard: true };
+    case 'wizard.extension': return { source: 'G:/repo/extension', sourceVersion: '2.0.0', target: 'C:/G9BrowserAgent/extension', installedVersion: null, browsers: [{ kind: 'edge', path: 'C:/Edge/msedge.exe', page: 'edge://extensions' }], clicks: { edge: ['Developer mode', 'Load unpacked', 'Paste'], chrome: ['a', 'b', 'c'] } };
+    case 'wizard.installExtension': return { path: 'C:/G9BrowserAgent/extension', version: '2.0.0', via: 'daemon', reloaded: 1, clipboard: true };
     case 'wizard.openExtensionsPage': return { command: 'C:/Edge/msedge.exe', args: ['edge://extensions'], clicks: [] };
     default: throw new Error(`fake bridge: unexpected op ${op}`);
   }
@@ -220,15 +220,15 @@ function adminAnswer(op, a) {
   switch (op) {
     case 'settings.get': return settingsFromDaemon;
     case 'settings.set': return { ...settingsFromDaemon, ...a.patch };
-    case 'engines.versions': return { running: [], browsers: [{ kind: 'edge', path: 'C:/Edge/msedge.exe', version: '153.0.3405.12' }, { kind: 'chrome', path: 'C:/Chrome/chrome.exe', version: '153.0.7000.4' }], cft: { pinned: { version: '153.0.7000.1', platform: 'win64' }, installed: [] }, log: 'C:/G9/engine-versions.log' };
-    case 'engines.installCft': return { cft: { downloaded: { version: '153.0.7000.1', path: 'C:/G9/engines/cft/chrome.exe' } } };
-    case 'profiles.list': return { profiles: [{ name: 'automation', dir: 'C:/G9/profiles/automation' }, { name: 'berlin', dir: 'C:/G9/profiles/berlin' }] };
+    case 'engines.versions': return { running: [], browsers: [{ kind: 'edge', path: 'C:/Edge/msedge.exe', version: '153.0.3405.12' }, { kind: 'chrome', path: 'C:/Chrome/chrome.exe', version: '153.0.7000.4' }], cft: { pinned: { version: '153.0.7000.1', platform: 'win64' }, installed: [] }, log: 'C:/G9BrowserAgent/engine-versions.log' };
+    case 'engines.installCft': return { cft: { downloaded: { version: '153.0.7000.1', path: 'C:/G9BrowserAgent/engines/cft/chrome.exe' } } };
+    case 'profiles.list': return { profiles: [{ name: 'automation', dir: 'C:/G9BrowserAgent/profiles/automation' }, { name: 'berlin', dir: 'C:/G9BrowserAgent/profiles/berlin' }] };
     case 'profiles.warm': return { profile: a.name, warming: true, pid: 77 };
     case 'runs.list': return { runs: runsList };
     case 'schedule.list': return { entries: scheduleEntries };
     case 'schedule.add': return { id: 'sch_new', ...a.entry };
     case 'schedule.remove': return { removed: a.entryId };
-    case 'schedule.runNow': return { runId: '20260921-235900-schedule-0001', dir: 'C:/G9/runs/z' };
+    case 'schedule.runNow': return { runId: '20260921-235900-schedule-0001', dir: 'C:/G9BrowserAgent/runs/z' };
     case 'watch': return { watching: true, tabId: a.tabId, runId: '20260921-235959-watch-0002' };
     case 'unwatch': return { watching: false, tabId: a.tabId };
     case 'halt': return { halted: true };
@@ -300,7 +300,7 @@ t.test('Setup: five steps filled from the wizard; policies ask, then offer the o
   assert.deepEqual(steps.map((li) => li.dataset.step), ['browsers', 'profile', 'policies', 'mcp', 'extension']);
   assert.ok(!$$('#view-setup .step-content').some((b) => /Checking…/.test(b.textContent)), 'every step finished loading');
   assert.match($('[data-step="browsers"]').textContent, /Install Chrome for Testing 153\.0\.7000\.1/);
-  assert.match($('[data-step="extension"]').textContent, /C:\/G9\/extension/);
+  assert.match($('[data-step="extension"]').textContent, /C:\/G9BrowserAgent\/extension/);
   const mark = calls.length;
   button('Apply policies').click();
   await answerModal('Apply');
@@ -363,7 +363,7 @@ t.test('Engines: running engines with contexts, installed browsers + pinned CfT,
   push('state', snapshot());
   await flush();
   assert.match(view.textContent, /153\.0\.7000\.1 \(pinned\)/);
-  assert.match(view.textContent, /C:\/G9\/profiles\/berlin/);
+  assert.match(view.textContent, /C:\/G9BrowserAgent\/profiles\/berlin/);
   const mark = calls.length;
   button('Install 153.0.7000.1', view).click();
   await flush();
@@ -506,8 +506,8 @@ t.test('Runs: list with verdicts, a run with steps/surprises, and a replay playe
 
 t.test('Runs: a replay that passed with warnings shows their text, or says it was not kept', async () => {
   runsList.push(
-    { runId: '20260921-220500-replay-warn', kind: 'replay', label: 'rec_login', startedAt: NOW - 300_000, finishedAt: NOW - 280_000, active: false, ok: true, verdict: 'PASS_WITH_WARNING', exitCode: null, frames: 0, dir: 'C:/G9/runs/w1' },
-    { runId: '20260921-220400-replay-warn-text', kind: 'replay', label: 'rec_login', startedAt: NOW - 400_000, finishedAt: NOW - 380_000, active: false, ok: true, verdict: 'PASS_WITH_WARNING', exitCode: null, frames: 0, dir: 'C:/G9/runs/w2' },
+    { runId: '20260921-220500-replay-warn', kind: 'replay', label: 'rec_login', startedAt: NOW - 300_000, finishedAt: NOW - 280_000, active: false, ok: true, verdict: 'PASS_WITH_WARNING', exitCode: null, frames: 0, dir: 'C:/G9BrowserAgent/runs/w1' },
+    { runId: '20260921-220400-replay-warn-text', kind: 'replay', label: 'rec_login', startedAt: NOW - 400_000, finishedAt: NOW - 380_000, active: false, ok: true, verdict: 'PASS_WITH_WARNING', exitCode: null, frames: 0, dir: 'C:/G9BrowserAgent/runs/w2' },
   );
   try {
     await go('agents');

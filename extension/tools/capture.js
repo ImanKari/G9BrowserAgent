@@ -38,7 +38,7 @@ import { bringIntoView } from './interact.js';
 import { realWindowState } from './tabs.js';
 
 /**
- * Where G9's pointer is on this tab, for the result. The cursor is never drawn
+ * Where G9BrowserAgent's pointer is on this tab, for the result. The cursor is never drawn
  * in the page (decision D9), so a viewer that wants to show it draws it from
  * this. Null when nothing has moved the pointer on this tab yet.
  */
@@ -289,7 +289,7 @@ export async function screenshot(tabId, opts = {}) {
         `A full-page capture of this page (${Math.round(content.width)}×${Math.round(content.height)}, larger than the ` +
           `${Math.round(Number(view.clientWidth) || 0)}×${Math.round(Number(view.clientHeight) || 0)} viewport) makes the browser ` +
           'resize the page\'s viewport for the capture — the page sees resize events, once as small as 1×1 — and at the ' +
-          'stealth level G9 does nothing a page could see that a person would not. Nothing was captured. Take area:"viewport" ' +
+          'stealth level G9BrowserAgent does nothing a page could see that a person would not. Nothing was captured. Take area:"viewport" ' +
           'shots, scrolling between them (browser_interact action:"scroll"), or capture an element (area:"element").',
       );
     }

@@ -38,7 +38,7 @@
 
 import { send } from '../lib/cdp.js';
 // Every page read and every piece of bookkeeping replay leaves in the page
-// (the resolved target, the settle box, the event proofs) lives in G9's
+// (the resolved target, the settle box, the event proofs) lives in G9BrowserAgent's
 // isolated world: the page never sees __g9target or __g9ReplayProof.
 import { inWorld, callInWorld } from '../lib/world.js';
 import { levelFor, nextSeed } from '../lib/humanize.js';
@@ -1080,7 +1080,7 @@ async function withRefsBypass(tabId, refs, run) {
 }
 
 async function armEventProof(tabId, backendNodeId, eventName) {
-  // The proof is an expando on the node's wrapper IN G9'S WORLD and a
+  // The proof is an expando on the node's wrapper IN G9BrowserAgent'S WORLD and a
   // listener on the node's own window there: the page sees neither, and both
   // still observe the page's real events.
   await callInWorld(
@@ -1163,7 +1163,7 @@ async function verifyEventProof(tabId, backendNodeId, eventName) {
   throw new Error(`The ${eventName} command was issued, but the recorded target did not observe the expected trusted event.`);
 }
 
-/** backendNodeId of whatever `locate` stored in window.__g9target (G9's world). */
+/** backendNodeId of whatever `locate` stored in window.__g9target (G9BrowserAgent's world). */
 async function resolvedNodeId(tabId) {
   const result = await inWorld(tabId, 'window.__g9target', { returnByValue: false }).catch(() => null);
   if (!result?.objectId) throw new Error('Lost the resolved element before acting on it — the page changed mid-step.');

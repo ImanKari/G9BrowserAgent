@@ -346,7 +346,7 @@ await test('tabs.create/update/remove, onUpdated from Target events, onRemoved o
   assert.equal(focused.id, tabB.id, 'the newest tab is the focused one');
   // `active` is "in front of its REAL window" (P8 matrix, round 3): tabB has a window of its own,
   // so tabA is still the one in front of ITS window.
-  assert.equal((await platform.tabs.get(tabA.id)).active, true, 'each page G9 opens is in front of its own window');
+  assert.equal((await platform.tabs.get(tabA.id)).active, true, 'each page G9BrowserAgent opens is in front of its own window');
   assert.equal((await platform.tabs.get(tabB.id)).active, true);
 
   updated.length = 0;
@@ -515,7 +515,7 @@ let ctx;
 let tabC;
 await test('contexts: registered context is passed explicitly; settings come from it', async () => {
   ({ browserContextId: ctx } = await b1.send('Target.createBrowserContext', {}));
-  cdp.registerContext('e1', ctx, { humanize: 'stealth', stealth: 'stealth', downloadPath: 'C:\\G9\\downloads\\c1' });
+  cdp.registerContext('e1', ctx, { humanize: 'stealth', stealth: 'stealth', downloadPath: 'C:\\G9BrowserAgent\\downloads\\c1' });
   tabC = await cdp.createTab('e1', ctx, 'https://shop.example.net/');
   const createCall = b1.sent.filter((s) => s.method === 'Target.createTarget').at(-1);
   assert.equal(createCall.params.browserContextId, ctx);
@@ -538,7 +538,7 @@ await test('contexts: registered context is passed explicitly; settings come fro
   cdp.setDefaultContext('e1', null);
 });
 
-await test('F1 + P8: every page G9 opens gets a real window of its own — the first of a fresh context and every later one', async () => {
+await test('F1 + P8: every page G9BrowserAgent opens gets a real window of its own — the first of a fresh context and every later one', async () => {
   // F1: Chrome/Edge refuse newWindow:false for the first page of a fresh context ("no browser is
   // open"). P8 matrix, round 2: a later page that JOINED the first one's window left the first one
   // behind it, throttled to ~1 frame per 1.5 s. So no page ever joins another's window.
@@ -609,10 +609,10 @@ await test('windows are synthetic: one per context, focused, create refuses clea
 
 await test('downloads: begin on the BROWSER session; frameId == page target → exact; path = folder/guid', async () => {
   const began = await platform.downloads.begin(tabC.id);
-  assert.deepEqual(began, { mode: 'cdp', downloadPath: 'C:\\G9\\downloads\\c1' });
+  assert.deepEqual(began, { mode: 'cdp', downloadPath: 'C:\\G9BrowserAgent\\downloads\\c1' });
   const call = b1.downloadBehavior.at(-1);
   assert.equal(call.sessionId, null, 'Browser domain is only reachable on the browser session');
-  assert.deepEqual(call.params, { behavior: 'allowAndName', downloadPath: 'C:\\G9\\downloads\\c1', eventsEnabled: true, browserContextId: ctx });
+  assert.deepEqual(call.params, { behavior: 'allowAndName', downloadPath: 'C:\\G9BrowserAgent\\downloads\\c1', eventsEnabled: true, browserContextId: ctx });
 
   downloads.length = 0;
   const frameId = cdp.tabInfo(tabC.id).targetId;
@@ -620,7 +620,7 @@ await test('downloads: begin on the BROWSER session; frameId == page target → 
   assert.equal(downloads.length, 1);
   assert.equal(downloads[0].tabId, tabC.id);
   assert.equal(downloads[0].attribution, 'exact');
-  assert.equal(downloads[0].path, 'C:\\G9\\downloads\\c1\\g-1');
+  assert.equal(downloads[0].path, 'C:\\G9BrowserAgent\\downloads\\c1\\g-1');
   assert.equal(downloads[0].state, 'in_progress');
   assert.equal(downloads[0].filename, 'report.xlsx');
 
@@ -675,7 +675,7 @@ await test('downloads: a popup opened by the watched tab downloads → the opene
   assert.equal(downloads[0].tabId, tabC.id, 'attributed to the watched opener');
   assert.equal(downloads[0].attribution, 'exact', 'the opener link is the browser\'s own fact');
   assert.equal(downloads[0].viaTabId, popupTab.id, 'and it says which tab it came from');
-  assert.equal(downloads[0].path, 'C:\\G9\\downloads\\c1\\g-5', 'saved in the popup\'s context folder');
+  assert.equal(downloads[0].path, 'C:\\G9BrowserAgent\\downloads\\c1\\g-5', 'saved in the popup\'s context folder');
   await b1.send('Target.closeTarget', { targetId: popup.targetId });
 
   // A tab nobody watches whose opener is not watched either keeps its own exact id.
@@ -688,9 +688,9 @@ await test('downloads: a popup opened by the watched tab downloads → the opene
 
 await test('downloads.inspect: a failing file check rejects instead of passing for "no way to check"', async () => {
   cdp.configure({ fileInfo: async () => { throw new Error('EBUSY: resource busy'); } });
-  await assert.rejects(platform.downloads.inspect({ path: 'C:\\G9\\downloads\\c1\\g-1' }), /EBUSY/);
+  await assert.rejects(platform.downloads.inspect({ path: 'C:\\G9BrowserAgent\\downloads\\c1\\g-1' }), /EBUSY/);
   cdp.configure({ fileInfo: async (path) => ({ exists: true, size: 42, sha256: 'ab'.repeat(32), magicHex: '504b0304', mime: 'application/zip', path }) });
-  assert.equal((await platform.downloads.inspect({ path: 'C:\\G9\\downloads\\c1\\g-1' })).source, 'disk');
+  assert.equal((await platform.downloads.inspect({ path: 'C:\\G9BrowserAgent\\downloads\\c1\\g-1' })).source, 'disk');
 });
 
 let b2;
@@ -896,7 +896,7 @@ await test('held targets: createTab returns only once the new page was prepared 
 
 await test('a tab behind a page-opened tab is reported behind; ensureFront brings it forward on a HEADLESS engine only', async () => {
   // P8 matrix, round 3 (4/4): the opener behind a target=_blank tab took 20.9 s per humanized click
-  // and 24–46 s per screenshot; browser_status said nothing and every G9-opened tab listed active:false.
+  // and 24–46 s per screenshot; browser_status said nothing and every G9BrowserAgent-opened tab listed active:false.
   const b4 = new FakeBrowser('b4', { pages: [{ url: 'https://app.example.org/' }] });
   await cdp.registerEngine('e4', b4, { headless: true });
   try {

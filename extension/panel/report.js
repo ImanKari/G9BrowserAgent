@@ -122,7 +122,7 @@ const STYLE = [
  * The report as one HTML document string. Needs a DOM (the panel); `summary` is summarizeHistory's.
  * @param {{ scope: string, at?: number, product?: string, version?: string }} o
  */
-export function buildHistoryReport(summary, { scope = 'all flows', at = Date.now(), product = 'G9 Browser Agent', version = '' } = {}) {
+export function buildHistoryReport(summary, { scope = 'all flows', at = Date.now(), product = 'G9BrowserAgent', version = '' } = {}) {
   const doc = document.implementation.createHTMLDocument(`${product} — history — ${scope}`);
   const make = (tag, text, cls) => {
     const n = doc.createElement(tag);

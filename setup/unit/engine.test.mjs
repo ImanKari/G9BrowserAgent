@@ -578,6 +578,7 @@ test('launch: the sandbox stays on unless G9_BROWSER_NO_SANDBOX=1 on Linux; a sa
   assert.match(hint, /sudo chown root:root \/opt\/microsoft\/msedge\/msedge-sandbox && sudo chmod 4755 \/opt\/microsoft\/msedge\/msedge-sandbox/);
   assert.match(hint, /G9_BROWSER_NO_SANDBOX=1/);
   assert.match(launch.sandboxHint('No usable sandbox! Update your kernel'), /user namespaces/);
+  assert.match(launch.sandboxHint('[3494:3494:0927/080108.139285:ERROR:content/browser/zygote_host/zygote_host_impl_linux.cc:102] Running as root without --no-sandbox is not supported. See https://crbug.com/638180.'), /as root[\s\S]*G9_BROWSER_NO_SANDBOX=1/);
   assert.equal(launch.sandboxHint('[123:FATAL:gpu] something else'), '');
   assert.equal(launch.sandboxHint(''), '');
 });
@@ -943,7 +944,7 @@ test('firewall: the first CfT launch from a path gives the one-time Firewall war
   assert.equal(first.warning, firewall.firewallWarning(exe));
   assert.ok(first.warning.includes(exe), 'names the chrome.exe it is about');
   assert.match(first.warning, /one-time Windows Defender Firewall prompt/);
-  assert.match(first.warning, /Allow or Cancel does not affect G9/);
+  assert.match(first.warning, /Allow or Cancel does not affect G9BrowserAgent/);
   assert.match(first.warning, /inbound connections only/);
 
   const doc = JSON.parse(await readFile(file, 'utf8'));

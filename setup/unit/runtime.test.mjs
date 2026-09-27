@@ -1,10 +1,10 @@
 /**
- * lib/runtime.mjs — how one G9 process starts another with the same runtime (node, the installed
- * G9 executable, or a Linux AppImage), and what a launched browser must not inherit from it.
+ * lib/runtime.mjs — how one G9BrowserAgent process starts another with the same runtime (node, the installed
+ * G9BrowserAgent executable, or a Linux AppImage), and what a launched browser must not inherit from it.
  *
  * The AppImage case is the one that breaks silently: its files live in a FUSE mount that exists only
  * while the process the AppImage runtime started is alive. A daemon or MCP entry naming a path
- * inside it works until G9 quits, then never again.
+ * inside it works until G9BrowserAgent quits, then never again.
  */
 
 import assert from 'node:assert/strict';
@@ -38,9 +38,9 @@ test('scriptCommand: node in a checkout, the executable as Node when installed, 
   assert.equal(dev.env.ELECTRON_RUN_AS_NODE, undefined, 'a dev shell\'s ELECTRON_RUN_AS_NODE is not passed on');
   assert.equal(dev.env.X, 'y');
 
-  const win = scriptCommand({ script: 'mcp/shim.mjs', root: 'C:\\G9\\resources', execPath: 'C:\\G9\\G9.exe', electron: true, env: {}, platform: 'win32' });
-  assert.equal(win.command, 'C:\\G9\\G9.exe');
-  assert.deepEqual(win.args, [path.join('C:\\G9\\resources', 'mcp', 'shim.mjs')]);
+  const win = scriptCommand({ script: 'mcp/shim.mjs', root: 'C:\\G9BrowserAgent\\resources', execPath: 'C:\\G9BrowserAgent\\G9BrowserAgent.exe', electron: true, env: {}, platform: 'win32' });
+  assert.equal(win.command, 'C:\\G9BrowserAgent\\G9BrowserAgent.exe');
+  assert.deepEqual(win.args, [path.join('C:\\G9BrowserAgent\\resources', 'mcp', 'shim.mjs')]);
   assert.equal(win.env.ELECTRON_RUN_AS_NODE, '1');
 
   const img = scriptCommand({ script: 'daemon/g9d.mjs', root: `${MOUNT}/resources`, execPath: `${MOUNT}/g9`, electron: true, home: '/home/qa/.g9', env: APPIMAGE_ENV, platform: 'linux' });
@@ -48,12 +48,12 @@ test('scriptCommand: node in a checkout, the executable as Node when installed, 
   assert.deepEqual(img.args, [bootstrapPath('/home/qa/.g9'), 'daemon/g9d.mjs', '--no-sandbox'], 'the flag after the script, so AppRun does not add it before');
   assert.ok(!img.args.some((a) => a.includes('.mount_')), 'nothing inside the temporary mount');
   assert.equal(img.env.ELECTRON_RUN_AS_NODE, '1');
-  assert.throws(() => scriptCommand({ script: 'x.mjs', root: '/r', execPath: `${MOUNT}/g9`, electron: true, env: APPIMAGE_ENV, platform: 'linux' }), /G9 home/);
+  assert.throws(() => scriptCommand({ script: 'x.mjs', root: '/r', execPath: `${MOUNT}/g9`, electron: true, env: APPIMAGE_ENV, platform: 'linux' }), /G9BrowserAgent home/);
 });
 
 test('installId: the .AppImage file for an AppImage (its root is a new mount every start), else the resource root', () => {
   assert.equal(installId({ root: `${MOUNT}/resources`, env: APPIMAGE_ENV, execPath: `${MOUNT}/g9`, platform: 'linux' }), '/home/qa/Apps/G9-3.1.0.AppImage');
-  assert.equal(installId({ root: 'C:\\G9\\resources', env: {}, execPath: 'C:\\G9\\G9.exe', platform: 'win32' }), 'C:/G9/resources');
+  assert.equal(installId({ root: 'C:\\G9BrowserAgent\\resources', env: {}, execPath: 'C:\\G9BrowserAgent\\G9BrowserAgent.exe', platform: 'win32' }), 'C:/G9BrowserAgent/resources');
 });
 
 test('cleanChildEnv: a browser never inherits ELECTRON_RUN_AS_NODE or anything that points into the AppImage mount', () => {
@@ -82,7 +82,7 @@ test('ensureBootstrap writes the bootstrap once, rewrites a changed one, and it 
     const appdir = path.join(home, 'mount');
     mkdirSync(path.join(appdir, 'resources', 'demo'), { recursive: true });
     writeFileSync(path.join(appdir, 'resources', 'demo', 'hello.mjs'), 'console.log(JSON.stringify(process.argv.slice(1)));\n', 'utf8');
-    // As AppRun hands it over: '--no-sandbox' after the script (G9 puts it there), dropped by the bootstrap.
+    // As AppRun hands it over: '--no-sandbox' after the script (G9BrowserAgent puts it there), dropped by the bootstrap.
     const r = spawnSync(process.execPath, [file, 'demo/hello.mjs', '--flag', '--no-sandbox'], { env: { ...process.env, APPDIR: appdir }, encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
     const argv = JSON.parse(r.stdout.trim());

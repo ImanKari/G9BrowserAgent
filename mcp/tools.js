@@ -13,7 +13,7 @@
  *
  * v2 changes: `browser_engine` is new (launched browsers); `browser_tabs` gains
  * attach/claim/release/popout/handoff and loses pin/unpin; every tab tool takes
- * `tabId` (a G9 handle, shared by all engines) or `session`; modes and the
+ * `tabId` (a G9BrowserAgent handle, shared by all engines) or `session`; modes and the
  * workspace allowlist are gone; input is humanized and reports delivery.
  */
 
@@ -21,7 +21,7 @@ const str = (description, extra = {}) => ({ type: 'string', description, ...extr
 const num = (description, extra = {}) => ({ type: 'number', description, ...extra });
 const bool = (description, def) => ({ type: 'boolean', description, ...(def !== undefined ? { default: def } : {}) });
 
-const TAB_ID = num('Which tab: a G9 tab handle from browser_tabs action:"list" (shared by every engine). Default: your current tab.');
+const TAB_ID = num('Which tab: a G9BrowserAgent tab handle from browser_tabs action:"list" (shared by every engine). Default: your current tab.');
 const HUMANIZE = str(
   'Input style for this call: "off" (direct, instant events — v1 behaviour), "human" (curved pointer paths, ' +
     'human timing, wheel notches, per-key rhythm), "stealth" (human, plus nothing that needs the page\'s JS runtime), ' +
@@ -39,18 +39,18 @@ const SEED = {
   anyOf: [{ type: 'number' }, { type: 'string' }],
 };
 
-export const INSTRUCTIONS = `You are connected to G9: real browsers you can drive, through a local daemon.
+export const INSTRUCTIONS = `You are connected to G9BrowserAgent: real browsers you can drive, through a local daemon.
 
 ## Two engines, one set of tools
 - **Engine 1 — the extension** runs inside the user's OWN browser (their real
   cookies, sessions and logins). Use it to explore, author and debug with them.
-- **Engine 2 — launched browsers** are real Chrome/Edge processes G9 starts
+- **Engine 2 — launched browsers** are real Chrome/Edge processes G9BrowserAgent starts
   itself, headless by default, with their own profiles. Use them for long or
   unattended runs, parallel work, and work that must keep going while the user
   minimises or covers their windows — a HEADLESS one has no window of its own
   (a locked screen has not been measured). \`browser_engine\` manages them.
 
-Every tool works the same on both. Tabs are addressed by a **G9 tab handle**
+Every tool works the same on both. Tabs are addressed by a **G9BrowserAgent tab handle**
 (\`tabId\` from \`browser_tabs action:"list"\`), shared by all engines, or by a
 **session** name. Without either, a call acts on YOUR current tab.
 
@@ -146,7 +146,7 @@ input: \`humanize\` can make a call stricter, never looser — on a stealth tab
 every action uses stealth input, and the result's \`humanize.raisedFrom\` says
 when it was raised. In the user's own browser the side panel's Input setting
 is the default level; only its Stealth setting is also a floor, so with the
-panel at Human \`humanize:"off"\` still gives direct input. G9 never overrides the
+panel at Human \`humanize:"off"\` still gives direct input. G9BrowserAgent never overrides the
 user agent on its own — \`browser_emulate\` device presets do, and at stealth they
 are refused. Pass a \`seed\` to reproduce a run's motion from the same pointer
 position (a replay homes the pointer and reports \`pointerStart\`).
@@ -201,7 +201,7 @@ export const TOOLS = [
   {
     name: 'browser_engine',
     description:
-      'Launched browsers (Engine 2): real Chrome, Edge or Chrome for Testing started and driven by G9, headless by default — a headless one is unaffected by the user minimising or covering their windows (a locked screen has not been measured); a headed one must never be minimised. "launch" starts one with a named profile; "list" shows every engine; "stop" closes a launched one (refused while another agent owns a tab in it, or holds it with "acquire", unless force:true); "context" creates an isolated context (own cookies, optional proxy/locale/timezone/stealth — note that navigator.webdriver follows the ENGINE\'s launch level, not the context\'s); "acquire"/"release" hold an engine across your tabs so a long run is not stopped by another agent finishing first (the daemon stops an engine launched with lease+stopWhenReleased once the last holder releases it); "versions" lists installed browsers and the pinned Chrome for Testing (download:true fetches it); "warm" opens a profile HEADED so the user can sign in once. You rarely need launch: browser_tabs action:"open" launches the default engine on demand.',
+      'Launched browsers (Engine 2): real Chrome, Edge or Chrome for Testing started and driven by G9BrowserAgent, headless by default — a headless one is unaffected by the user minimising or covering their windows (a locked screen has not been measured); a headed one must never be minimised. "launch" starts one with a named profile; "list" shows every engine; "stop" closes a launched one (refused while another agent owns a tab in it, or holds it with "acquire", unless force:true); "context" creates an isolated context (own cookies, optional proxy/locale/timezone/stealth — note that navigator.webdriver follows the ENGINE\'s launch level, not the context\'s); "acquire"/"release" hold an engine across your tabs so a long run is not stopped by another agent finishing first (the daemon stops an engine launched with lease+stopWhenReleased once the last holder releases it); "versions" lists installed browsers and the pinned Chrome for Testing (download:true fetches it); "warm" opens a profile HEADED so the user can sign in once. You rarely need launch: browser_tabs action:"open" launches the default engine on demand.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -210,7 +210,7 @@ export const TOOLS = [
         stopWhenReleased: bool('For launch with lease:true: the daemon stops this engine once every holder has released it and no agent owns a tab in it.', false),
         browser: str('For launch/warm: which browser. "auto" = pinned Chrome for Testing if installed, else Edge, else Chrome.', { enum: ['auto', 'edge', 'chrome', 'cft'] }),
         headless: bool('For launch: run with no window (default from settings, normally true). Headed needs a desktop that nobody minimises.'),
-        profile: str('For launch/warm: profile name under the G9 data folder (default "automation"). A profile holds cookies and history between runs; one browser at a time per profile.'),
+        profile: str('For launch/warm: profile name under the G9BrowserAgent data folder (default "automation"). A profile holds cookies and history between runs; one browser at a time per profile.'),
         stealth: str('For launch/context: "off", "human" or "stealth". Stealth never enables the page JS runtime domain (no page console capture) and adds no automation switches.', { enum: ['off', 'human', 'stealth'] }),
         humanize: HUMANIZE,
         proxy: str('For launch/context: proxy server, e.g. "http://proxy:8080".'),
@@ -224,7 +224,7 @@ export const TOOLS = [
         },
         name: str('For launch: a label shown in lists.'),
         engineId: str('For stop/context/acquire/release: which launched engine (from action:"list"). context defaults to the first running one, launching the default engine if none runs.'),
-        downloadPath: str('For context: folder downloads land in (default: the G9 data folder).'),
+        downloadPath: str('For context: folder downloads land in (default: the G9BrowserAgent data folder).'),
         download: bool('For versions: download and verify the pinned Chrome for Testing if it is not installed.', false),
         version: str('For versions with download:true: a specific Chrome for Testing version instead of the pinned one.'),
         url: str('For warm: the page to open for the one-time sign-in.'),
@@ -246,7 +246,7 @@ export const TOOLS = [
         }),
         on: bool('For watch: false closes the live view again.', true),
         url: str('For open/session: the URL. For wait: a URL substring.'),
-        tabId: num('For close/focus/attach/claim/release/popout/handoff/watch, or session (name a tab already open). A G9 handle. watch without one: your current tab.'),
+        tabId: num('For close/focus/attach/claim/release/popout/handoff/watch, or session (name a tab already open). A G9BrowserAgent handle. watch without one: your current tab.'),
         session: str('Instead of tabId: a session name.'),
         name: str('For session/end_session: the session name, e.g. "buyer". For open: also name the new tab.'),
         engine: str('For open/session/attach: "extension", "launched", or an engineId from browser_engine. For handoff: the launched engine to receive the tab. Default for open: the extension if connected, else a launched browser (launched on demand).'),
@@ -261,7 +261,7 @@ export const TOOLS = [
         left: num('For popout: window left position.'),
         top: num('For popout: window top position.'),
         title: str('For wait: title substring of the popup/new tab.'),
-        openerTabId: num('For wait: require this opener tab (a G9 handle).'),
+        openerTabId: num('For wait: require this opener tab (a G9BrowserAgent handle).'),
         timeoutMs: num('For wait: deadline.', { default: 15000 }),
       },
     },
@@ -533,7 +533,7 @@ export const TOOLS = [
         by: str('For approve — who approved it.'),
         note: str('For approve — why.'),
         expectLastRunAt: num('For approve — the `lastRun.at` of the run that was reviewed. The approval is refused when a newer run arrived since, instead of folding that run\'s surprises into the known world unseen.'),
-        spec: { type: 'object', description: 'For import_spec — a G9 FlowSpec document.' },
+        spec: { type: 'object', description: 'For import_spec — a G9BrowserAgent FlowSpec document.' },
         approved: { type: 'object', description: 'For import_spec — the flow\'s approval sidecar (format "g9-approved": the approved known world and the screenshot/aria baselines), as export_spec returns it or <name>.approved.json holds it. The later human approval wins; without it the store keeps the baselines it has.' },
         images: { type: 'object', description: 'For import_spec — baseline screenshots named in approved, { "<step>.png": base64 }.' },
         includeImages: bool('For export_spec — also return the baseline screenshots as base64 (they can be large).', false),

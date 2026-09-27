@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "G9 Browser Agent",
-  "version": "3.2.0",
-  "description": "G9 v2 Engine 1: lets your AI agents drive the tabs of this browser through the local G9 daemon, with human-like input.",
+  "name": "G9BrowserAgent",
+  "version": "3.2.1",
+  "description": "G9BrowserAgent v3: lets your AI agents drive the tabs of this browser through the local G9BrowserAgent daemon.",
   "minimum_chrome_version": "125",
   "permissions": [
     "debugger",
@@ -23,7 +23,7 @@
     "type": "module"
   },
   "action": {
-    "default_title": "G9 Browser Agent v3"
+    "default_title": "G9BrowserAgent v3"
   },
   "side_panel": {
     "default_path": "panel/panel.html"

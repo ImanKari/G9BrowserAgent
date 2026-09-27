@@ -368,7 +368,7 @@ export async function perform(tabId, plan, { sessionId = null, signal: explicitS
     if (!force && now - lastHaltCheck < HALT_CHECK_MS) return;
     lastHaltCheck = now;
     if (await isHalted()) {
-      throw new HaltedError(stopMessage('Stopped: the user pressed Stop in the G9 panel while this action was running.'));
+      throw new HaltedError(stopMessage('Stopped: the user pressed Stop in the G9BrowserAgent panel while this action was running.'));
     }
   };
 
@@ -450,7 +450,7 @@ export async function perform(tabId, plan, { sessionId = null, signal: explicitS
     if (err instanceof HaltedError) throw err;
     const msg = String(err?.message ?? err);
     if (/halted by the user|Stop was pressed/i.test(msg)) {
-      throw new HaltedError(stopMessage('Stopped: the user pressed Stop in the G9 panel while this action was running.'));
+      throw new HaltedError(stopMessage('Stopped: the user pressed Stop in the G9BrowserAgent panel while this action was running.'));
     }
     if (err?.hidden) throw hiddenPartway(err, {
       sent: dispatched,
@@ -498,8 +498,8 @@ export const HIDDEN_REMEDY =
  * The physics, as measured (P8 matrix, round 3, Edge and Chrome 153, 10/10 hidden pages): pointer
  * and wheel events do not reach a page that is not visible — mouseMoved was never even answered —
  * but KEY events do (a bare keyDown landed in the focused field every time). So the refusal of
- * typing and keys is G9's policy, not the browser's: a person cannot type into a tab they cannot
- * see, and every G9 input action that needs a pointer (the focus click of a type) would be lost.
+ * typing and keys is G9BrowserAgent's policy, not the browser's: a person cannot type into a tab they cannot
+ * see, and every G9BrowserAgent input action that needs a pointer (the focus click of a type) would be lost.
  */
 export function hiddenInputMessage(action, state = 'hidden', { dispatched = true } = {}) {
   return (
@@ -507,7 +507,7 @@ export function hiddenInputMessage(action, state = 'hidden', { dispatched = true
       ? `The ${action} was dispatched but the page never received it: the attached tab is HIDDEN `
       : `The ${action} was not sent: the attached tab is HIDDEN `) +
     `(document.visibilityState="${state}") — a background tab, or a minimized or covered window. The browser ` +
-    `does not deliver pointer or wheel input to a page that is not visible, and G9 does not type into one either ` +
+    `does not deliver pointer or wheel input to a page that is not visible, and G9BrowserAgent does not type into one either ` +
     `(key events would reach it, but nobody can see what they do). ${HIDDEN_REMEDY}`
   );
 }
@@ -550,7 +550,7 @@ export function hiddenInputError(action, state = 'hidden', opts = {}) {
 }
 
 /**
- * The page's document.visibilityState, read in G9's world ('visible' |
+ * The page's document.visibilityState, read in G9BrowserAgent's world ('visible' |
  * 'hidden' | …), or null when it cannot be read. One round trip.
  */
 export async function visibilityOf(tabId, sessionId = null) {

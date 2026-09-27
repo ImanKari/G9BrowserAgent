@@ -12,10 +12,10 @@ const t = suite('desktop: paths, settings, logs');
 const dir = tmpDir();
 t.cleanup(() => rmrf(dir));
 
-t.test('G9_HOME: env override, else %LOCALAPPDATA%\\G9 on Windows, else ~/.g9', () => {
+t.test('G9_HOME: env override, else %LOCALAPPDATA%\\G9BrowserAgent on Windows, else ~/.g9browseragent', () => {
   assert.equal(g9Home({ env: { G9_HOME: dir }, platform: 'win32' }), path.resolve(dir));
-  assert.equal(g9Home({ env: { LOCALAPPDATA: 'C:\\Users\\qa\\AppData\\Local' }, platform: 'win32' }), path.join('C:\\Users\\qa\\AppData\\Local', 'G9'));
-  assert.equal(g9Home({ env: {}, platform: 'linux', homedir: '/home/qa' }), path.join('/home/qa', '.g9'));
+  assert.equal(g9Home({ env: { LOCALAPPDATA: 'C:\\Users\\qa\\AppData\\Local' }, platform: 'win32' }), path.join('C:\\Users\\qa\\AppData\\Local', 'G9BrowserAgent'));
+  assert.equal(g9Home({ env: {}, platform: 'linux', homedir: '/home/qa' }), path.join('/home/qa', '.g9browseragent'));
 });
 
 t.test('port: G9_PORT when valid, else 8765', () => {

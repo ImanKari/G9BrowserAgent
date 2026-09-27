@@ -11,7 +11,7 @@
  * Options: --browser auto|edge|chrome|cft   --headed   --stealth stealth|human|off (not stealth = a
  * control that MUST be detected)   --locale de-DE --timezone Europe/Berlin   --matrix [--configs a,b]
  * --local-only | --public-only   --repeat N (local page N times per configuration, to measure flake
- * rates)   --no-warm   --profile NAME   --home DIR (use an existing G9 home and its profile as-is)
+ * rates)   --no-warm   --profile NAME   --home DIR (use an existing G9BrowserAgent home and its profile as-is)
  * --out DIR   --seed S   --extra-arg <switch> (repeatable, for controlled experiments)   --verbose
  * --keep-home   --on-screen (headed without parking the window off-screen: never on a desk in use)
  * --no-control (skip the settled-scroll control actions)   --allow-sync (do not add --disable-sync
@@ -60,10 +60,10 @@
  *
  * Two kinds of detector:
  * 1. The LOCAL page, setup/fixtures/stealth-local.html, served by setup/serve.mjs. It was written
- *    against G9 itself: main-world globals and DOM calls G9 might leave, the Runtime-domain console
+ *    against G9BrowserAgent itself: main-world globals and DOM calls G9BrowserAgent might leave, the Runtime-domain console
  *    side channel, trusted/ordered/curved input, locale/timezone/Accept-Language agreement, screen
  *    vs window, WebGL, permissions. Each of its checks names who could fix a failure (cls):
- *    g9 = a G9 leak or broken promise; headless/cdp/browser = inherent to headless Chromium, CDP
+ *    g9 = a G9BrowserAgent leak or broken promise; headless/cdp/browser = inherent to headless Chromium, CDP
  *    input or the binary; host/harness = this machine, or how this test launched the browser.
  * 2. PUBLIC pages, listed in setup/stealth-pages.json (they drift: a broken extractor is a WARN,
  *    a detected verdict is a FAIL naming the page and field).
@@ -295,7 +295,7 @@ async function startDaemon(home, port) {
 
 // ------------------------------------------------------------------ MCP
 
-class G9 {
+class G9BrowserAgent {
   constructor(port, home) {
     this.client = new McpClient({ env: { G9_PORT: String(port), G9_HOME: home, ELECTRON_RUN_AS_NODE: '' }, name: 'g9-stealthtest' });
     track(this.client.child);
@@ -437,7 +437,7 @@ function actionFacts(r) {
 
 /**
  * The local page's URL. Children (unless --no-children): `xframe` embeds the same page from
- * `localhost` — another SITE than 127.0.0.1, so Chromium puts it in its own process and G9 meets it
+ * `localhost` — another SITE than 127.0.0.1, so Chromium puts it in its own process and G9BrowserAgent meets it
  * as a child session of the tab — and `popup` is what the page's "Open popup" button opens.
  */
 function localUrl(cfg, ctx, extra = {}, { host = '127.0.0.1', frame = !ARGS['no-children'], popup = false } = {}) {
@@ -517,7 +517,7 @@ async function runLocal(g9, cfg, engineId, ctx, runDir, iteration) {
     out.afterHover = seen ? { endTarget: lastMove?.id ?? null, endAt: lastMove ? [lastMove.cx, lastMove.cy] : null, hoverTarget: (seen.checks ?? []).find((c) => c.id === 'hover-target')?.value ?? null, tail: (seen.tail ?? []).slice(-25) } : null;
   }
   if (ref.btn) await act('click', { action: 'click', ref: ref.btn });
-  if (ref.text) await act('type', { action: 'type', ref: ref.text, text: 'Hello World from G9' });
+  if (ref.text) await act('type', { action: 'type', ref: ref.text, text: 'Hello World from G9BrowserAgent' });
   if (ref.sel) await act('select', { action: 'select', ref: ref.sel, values: 'Two' });
   if (ref.pd) {
     const before = await readLocalResult(g9, tabId, 0);
@@ -545,7 +545,7 @@ async function runLocal(g9, cfg, engineId, ctx, runDir, iteration) {
     const lm = [...(seen2?.tail ?? [])].reverse().find((e) => e.ty === 'mousemove');
     out.afterHoverControl = { endTarget: lm?.id ?? null, endAt: lm ? [lm.cx, lm.cy] : null };
   }
-  // G9's read tools, used the way an agent uses them, one at a time, while the page watches for side
+  // G9BrowserAgent's read tools, used the way an agent uses them, one at a time, while the page watches for side
   // effects (resize, visibility, blur, programmatic scroll): which tool caused what is the difference
   // between two reads.
   // pageshow is the page's own load, not a side effect (the page's check leaves it out too).
@@ -581,7 +581,7 @@ async function runLocal(g9, cfg, engineId, ctx, runDir, iteration) {
   out.digest = digest ? { seq: digest.seq, timeOrigin: digest.timeOrigin, count: digest.events.length, events: digest.events.map(({ ty, at, hAt, id, cx, cy, scy, k }) => ({ ty, at: Math.round(at), q: hAt != null ? Math.round(hAt - at) : null, id, cx, cy, scy, k })) } : null;
   out.scrollSettle = scrollSettleFacts(out.actions, digest);
   if (result?.checks) {
-    // Checks only the harness can make: it knows what it asked for and what G9 answered.
+    // Checks only the harness can make: it knows what it asked for and what G9BrowserAgent answered.
     const b = result.behaviour ?? {};
     if (out.afterHover) {
       const ok = out.afterHover.endTarget === 'sl-hover';
@@ -742,11 +742,11 @@ async function runSweep(g9, cfg, ctx, tabId) {
 /**
  * A page that opens a window of its own (OAuth, payment, "share" popups): the local page's "Open
  * popup" button calls window.open() on a trusted click, and the popup — the same page from
- * `localhost`, role=popup — runs the same probes and posts them to its opener. G9 did not open
- * that tab; it must still get the stealth treatment, and the page must not be hurt by G9 being
+ * `localhost`, role=popup — runs the same probes and posts them to its opener. G9BrowserAgent did not open
+ * that tab; it must still get the stealth treatment, and the page must not be hurt by G9BrowserAgent being
  * attached.
  *
- * Measured 2026-09-22 (Edge 153 and Chrome 153, headless, raw CDP without G9's tool layer): with
+ * Measured 2026-09-22 (Edge 153 and Chrome 153, headless, raw CDP without G9BrowserAgent's tool layer): with
  * a browser-level Target.setAutoAttach({waitForDebuggerOnStart:false, flatten:true}), window.open()
  * never returns — the popup target stays at url "" and the opener's renderer stops (its timers,
  * its input acks: the click's mouseReleased "did not return after 20s", and a later goto of the
@@ -799,7 +799,7 @@ async function runPopupTest(g9, cfg, ctx, engineId) {
     for (const c of seen?.checks ?? []) if (/^popup-(runtime-probe|main-world|webdriver|vs-top)$/.test(c.id)) out.checks.push(c);
     const leftOver = (Array.isArray(out.tabsAfter) ? out.tabsAfter : []).filter((t) => t.tabId !== tabId && !(Array.isArray(tabsBefore) && tabsBefore.some((b) => b.tabId === t.tabId)));
     out.checks.push({ id: 'popup-tab-closed', status: leftOver.length ? (loaded ? 'fail' : 'info') : 'pass', cls: 'g9', value: leftOver.map((t) => `${t.tabId} "${t.url.slice(0, 60)}"`),
-      detail: leftOver.length ? (loaded ? 'the popup closed itself (window.close) but G9 still lists its tab' : 'the popup never loaded, so it could not close itself') : '' });
+      detail: leftOver.length ? (loaded ? 'the popup closed itself (window.close) but G9BrowserAgent still lists its tab' : 'the popup never loaded, so it could not close itself') : '' });
   } finally {
     // Close the opener and whatever it opened, so neither outlives the test in this engine.
     const now = await engineTabs(g9, engineId);
@@ -974,7 +974,7 @@ async function runPublic(g9, cfg, page, tabId, runDir, viewport) {
   let nav = await g9.tool('browser_navigate', { action: 'goto', url: page.url, timeoutMs: 45_000, tabId }, 90_000);
   out.actions.goto = actionFacts(nav);
   if (!nav.ok && /did not return after/.test(String(nav.error))) {
-    // Measured (round 3): Page.navigate answers only when the server's response arrives, and G9
+    // Measured (round 3): Page.navigate answers only when the server's response arrives, and G9BrowserAgent
     // gives it a fixed 20 s whatever timeoutMs says, so on a slow network a navigation that is
     // merely slow is reported "stuck" while it carries on in the browser. Give it the rest of the
     // 45 s and see where the tab really is; the tool's error stays in the report as a problem.
@@ -1034,7 +1034,7 @@ async function runPublic(g9, cfg, page, tabId, runDir, viewport) {
 /** Screenshot, page text and verdict of a public page (after its interaction, if any). */
 async function finishPublic(g9, cfg, page, tabId, runDir, out) {
   let shot = await saveScreenshot(g9, tabId, path.join(runDir, `${cfg.name}-${page.name}.jpg`), page.screenshot === 'fullpage' ? 'fullpage' : 'viewport');
-  // At stealth G9 refuses a full-page capture of a page taller than the viewport (the browser would
+  // At stealth G9BrowserAgent refuses a full-page capture of a page taller than the viewport (the browser would
   // resize the viewport — the page sees it). The evidence is then the viewport, and the report says so.
   let shotNote = '';
   if (!shot.ok && page.screenshot === 'fullpage' && /resize the page's viewport/.test(String(shot.error))) {
@@ -1074,8 +1074,8 @@ async function finishPublic(g9, cfg, page, tabId, runDir, out) {
 
 /**
  * What the persona profile holds once the browser has closed: every extension that is not part of
- * the browser itself, and whether the profile is signed in or syncing. A G9 profile is created
- * empty; anything else in it was put there by the browser behind G9's back (sync, import, an
+ * the browser itself, and whether the profile is signed in or syncing. A G9BrowserAgent profile is created
+ * empty; anything else in it was put there by the browser behind G9BrowserAgent's back (sync, import, an
  * external-extension registration on this machine) and runs content scripts in every page a
  * stealth run opens. Account facts are reported as counts and flags only — never an identity.
  */
@@ -1193,7 +1193,7 @@ async function warmProfile(g9, cfg, profile) {
  * Switches for this configuration's launch: the off-screen position for headed runs, plus any
  * `--extra-arg <switch>` given on the command line (repeatable; for controlled experiments such as
  * "does pixelscan still flag this with a different user agent" — launch.js refuses the switches
- * that would turn a run into something G9 never does).
+ * that would turn a run into something G9BrowserAgent never does).
  */
 function extraArgsFor(cfg) {
   const out = [];
@@ -1203,9 +1203,9 @@ function extraArgsFor(cfg) {
 }
 
 /**
- * What the engine was launched with, against what G9 promises (engine/launch.js): the switch
- * list is the part of the environment G9 alone decides, so it is judged here, from the argv the
- * launch result reports. cls g9: every item is G9's choice.
+ * What the engine was launched with, against what G9BrowserAgent promises (engine/launch.js): the switch
+ * list is the part of the environment G9BrowserAgent alone decides, so it is judged here, from the argv the
+ * launch result reports. cls g9: every item is G9BrowserAgent's choice.
  */
 function launchArgvCheck(cfg, engine) {
   const argv = (engine.argv ?? []).map(String);
@@ -1407,7 +1407,7 @@ function reportLocal(cfg, local) {
   }
   if (local.toolEffects) say(`  ${tag.INFO} local#${local.iteration} what each read tool made the page see: ${JSON.stringify(local.toolEffects)}`);
   const passed = v.checks.filter((c) => c.status === 'pass').length;
-  say(`  ${color(90, `local#${local.iteration}: ${passed} pass, ${v.failed.length} fail (${v.g9Fails.length} G9), ${v.warns.length} warn`)}`);
+  say(`  ${color(90, `local#${local.iteration}: ${passed} pass, ${v.failed.length} fail (${v.g9Fails.length} G9BrowserAgent), ${v.warns.length} warn`)}`);
 }
 
 function reportPublic(cfg, r) {
@@ -1455,7 +1455,7 @@ function writeReport(runDir, payload) {
   fs.writeFileSync(path.join(runDir, 'results.json'), `${JSON.stringify(payload, null, 2)}\n`);
   const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const parts = [];
-  parts.push(`<!doctype html><meta charset="utf-8"><title>G9 stealth self-test</title><style>
+  parts.push(`<!doctype html><meta charset="utf-8"><title>G9BrowserAgent stealth self-test</title><style>
     :root { color-scheme: light dark; --bg:#fff; --fg:#1d1d1f; --mut:#6e6e73; --line:#d2d2d7; --ok:#1a7f37; --bad:#c62828; --warn:#9a6700; }
     @media (prefers-color-scheme: dark) { :root { --bg:#161618; --fg:#f2f2f3; --mut:#a1a1a6; --line:#3a3a3c; --ok:#4ac26b; --bad:#ff6b6b; --warn:#e3b341; } }
     body { font: 14px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--fg); margin: 24px; }
@@ -1463,8 +1463,8 @@ function writeReport(runDir, payload) {
     .pass { color: var(--ok); } .fail { color: var(--bad); } .warn { color: var(--warn); } .mut { color: var(--mut); }
     img { max-width: 420px; border: 1px solid var(--line); } code { font-size: 12px; }
   </style>`);
-  parts.push(`<h1>G9 stealth self-test</h1><p class="mut">G9 ${esc(payload.version)} · ${esc(payload.startedAt)} · ${esc(payload.host)}</p>`);
-  parts.push('<h2>Summary</h2><table><tr><th>configuration</th><th>verdict</th><th>G9 leaks</th><th>other signals</th><th>public detectors</th></tr>');
+  parts.push(`<h1>G9BrowserAgent stealth self-test</h1><p class="mut">G9BrowserAgent ${esc(payload.version)} · ${esc(payload.startedAt)} · ${esc(payload.host)}</p>`);
+  parts.push('<h2>Summary</h2><table><tr><th>configuration</th><th>verdict</th><th>G9BrowserAgent leaks</th><th>other signals</th><th>public detectors</th></tr>');
   for (const r of payload.summary.rows) {
     const cls = /UNDETECTED|CONTROL-DETECTED/.test(r.verdict) ? 'pass' : 'fail';
     parts.push(`<tr><td>${esc(r.name)}</td><td class="${cls}">${esc(r.verdict)}</td><td>${esc(r.g9Leaks.join(', ') || '—')}</td><td>${esc(r.otherSignals.join(', ') || '—')}</td><td>${esc([...r.publicDetected, ...r.publicWarnings].join(' · ') || '—')}</td></tr>`);
@@ -1524,7 +1524,7 @@ async function main() {
   const port = ARGS.port ? Number(ARGS.port) : await freePort();
   if (port === 8765 || !(port >= 1024 && port < 65536)) throw new Error(`refusing port ${port}`);
 
-  say(color(1, `G9 stealth self-test — v${VERSION}`));
+  say(color(1, `G9BrowserAgent stealth self-test — v${VERSION}`));
   say(color(90, `run dir: ${runDir}\nhome:    ${home}\nport:    ${port} (never 8765)`));
 
   const payload = { version: VERSION, startedAt: new Date().toISOString(), host: `${os.hostname()} ${os.platform()} ${os.release()}`, argv: process.argv.slice(2), runDir, results: [], warm: {}, calls: null };
@@ -1547,7 +1547,7 @@ async function main() {
   const page = await startPageServer();
   const echo = await startEchoServer();
   await startDaemon(home, port);
-  const g9 = new G9(port, home);
+  const g9 = new G9BrowserAgent(port, home);
   await g9.init();
   const ctx = { pagePort: page.port, echoPort: echo.port, home };
 
@@ -1586,7 +1586,7 @@ async function main() {
   say(`\n${color(1, 'Summary')}`);
   for (const r of payload.summary.rows) {
     const t = /UNDETECTED|CONTROL-DETECTED/.test(r.verdict) ? tag.PASS : tag.FAIL;
-    say(`  ${t} ${r.name}: ${r.verdict}${r.g9Leaks.length ? ` — G9 leaks: ${r.g9Leaks.join(', ')}` : ''}${r.otherSignals.length ? ` — other signals: ${r.otherSignals.join(', ')}` : ''}${r.publicDetected.length ? ` — public: ${r.publicDetected.join(' · ')}` : ''}`);
+    say(`  ${t} ${r.name}: ${r.verdict}${r.g9Leaks.length ? ` — G9BrowserAgent leaks: ${r.g9Leaks.join(', ')}` : ''}${r.otherSignals.length ? ` — other signals: ${r.otherSignals.join(', ')}` : ''}${r.publicDetected.length ? ` — public: ${r.publicDetected.join(' · ')}` : ''}`);
     for (const w of r.publicWarnings) say(`  ${tag.WARN} ${r.name}: ${w}`);
   }
   say(color(90, `\ncleanup: swept ${clean.swept?.length ?? 0} process(es), ${clean.leftovers.length} left; temp dirs removed ${clean.removed?.length ?? 0}, not removed ${clean.notRemoved?.length ?? 0}`));

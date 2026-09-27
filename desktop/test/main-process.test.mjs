@@ -197,14 +197,14 @@ const trayItem = (label) => rec.trays[0]?.menu?.find((i) => i.label === label);
 
 t.test('startApp runs to the end: privileged scheme, one window on g9app://, a tray, connected as ui', async () => {
   await until(() => rec.ipc && rec.protocol && rec.windows.length === 1 && rec.trays.length === 1, { what: 'startup' });
-  assert.deepEqual(rec.errors, [], 'no "G9 could not start" dialog');
+  assert.deepEqual(rec.errors, [], 'no "G9BrowserAgent could not start" dialog');
   assert.equal(rec.schemes[0].scheme, 'g9app');
   assert.equal(win().url, 'g9app://app/index.html');
   const o = win().opts;
   assert.equal(o.webPreferences.contextIsolation, true);
   assert.equal(o.webPreferences.sandbox, true);
   assert.equal(o.webPreferences.nodeIntegration, false);
-  assert.equal(o.title, `G9 ${fakeElectron.app.getVersion()}`);
+  assert.equal(o.title, `G9BrowserAgent ${fakeElectron.app.getVersion()}`);
   assert.ok(o.width <= 1366 && o.height <= 728, 'fits the work area');
   assert.equal(o.width, 1100);
   assert.equal(o.height, 720);
@@ -216,7 +216,7 @@ t.test('startApp runs to the end: privileged scheme, one window on g9app://, a t
   assert.equal(s.app.port, port);
   await until(async () => (await ipc('state')).result.agents.length === 1, { what: 'seeded state' });
   assert.equal((await ipc('state')).result.tabs[0].tabId, 3);
-  assert.match(rec.trays[0].tooltip, /^G9 \d+\.\d+\.\d+/);
+  assert.match(rec.trays[0].tooltip, /^G9BrowserAgent \d+\.\d+\.\d+/);
 });
 
 t.test('a small screen: the window opens inside the work area instead of off it', async () => {
@@ -232,7 +232,7 @@ t.test('a small screen: the window opens inside the work area instead of off it'
   fakeElectron.screen.getPrimaryDisplay = () => ({ workAreaSize: { width: 1366, height: 728 } });
 });
 
-t.test('IPC: only the G9 page may call; unknown ops, admin ops and tool actions outside the allowlist are refused', async () => {
+t.test('IPC: only the G9BrowserAgent page may call; unknown ops, admin ops and tool actions outside the allowlist are refused', async () => {
   assert.equal((await ipc('state', {}, 'https://evil.example/')).ok, false);
   assert.match((await ipc('nope')).error, /Unknown operation/);
   assert.match((await ipc('admin', { op: 'rm -rf' })).error, /Not an admin operation/);
@@ -287,7 +287,7 @@ t.test('desktop.patch keeps only what the shell owns', async () => {
   assert.equal(r.result.update.url, '', 'the page cannot redirect the updater through desktop.json');
 });
 
-t.test('closing the window hides it (G9 stays in the tray); Windows sign-out lets it close', () => {
+t.test('closing the window hides it (G9BrowserAgent stays in the tray); Windows sign-out lets it close', () => {
   const w = win();
   w.show();
   assert.equal(w.tryClose(), false, 'close is turned into hide');
@@ -344,7 +344,7 @@ t.test('a daemon RESTART drops the watches: tab handles belong to one daemon ins
 
 t.test('Quit from the tray: the app quits, the daemon keeps serving (no shutdown sent)', async () => {
   const shutdownsBefore = daemon.received.filter((m) => m.op === 'shutdown').length;
-  trayItem('Quit G9').click();
+  trayItem('Quit G9BrowserAgent').click();
   await until(() => rec.quit === 1, { what: 'app.quit' });
   assert.equal(daemon.received.filter((m) => m.op === 'shutdown').length, shutdownsBefore);
   assert.deepEqual(rec.errors, []);

@@ -46,7 +46,7 @@ export const DEFAULTS = Object.freeze({
   idleExitMinutes: 60,
   /**
    * Where the desktop app updates from (desktop/lib/updater.mjs): 'official' (the default) is the
-   * published G9 releases on GitHub and needs nothing configured; 'custom' uses `updateUrl`;
+   * published G9BrowserAgent releases on GitHub and needs nothing configured; 'custom' uses `updateUrl`;
    * 'off' never checks.
    */
   updateMode: 'official',
@@ -125,7 +125,7 @@ export function validateSettings(s) {
     problems.push('updateUrl must be an https:// URL, or empty.');
   } else if (s.updateUrl && /^http:/i.test(s.updateUrl.trim()) && !/^http:\/\/(localhost|127\.0\.0\.1|\[?::1\]?)([:/]|$)/i.test(s.updateUrl.trim())) {
     problems.push(
-      'updateUrl must be https:// (or http:// on localhost, for a test feed): the installer G9 downloads is authenticated ' +
+      'updateUrl must be https:// (or http:// on localhost, for a test feed): the installer G9BrowserAgent downloads is authenticated ' +
         'by TLS to that host alone, so a plain-http feed would let anyone on the network path hand the app an installer.',
     );
   }

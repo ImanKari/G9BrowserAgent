@@ -314,7 +314,7 @@ export class Daemon {
     if (role === 'ui' && originKind !== 'native') {
       conn.send({
         type: 'welcome', version: VERSION, daemonPid: process.pid, id: null,
-        problem: 'The "ui" role (admin operations) is only for native clients — the G9 desktop app — which send no Origin header. Connect as "engine" or "agent".',
+        problem: 'The "ui" role (admin operations) is only for native clients — the G9BrowserAgent desktop app — which send no Origin header. Connect as "engine" or "agent".',
       });
       setTimeout(() => conn.close(4003, 'ui role needs a native client'), 50).unref?.();
       this.log(`[g9d] refused a "ui" hello from origin ${meta.origin ?? '-'}: admin is for native clients only`);
@@ -323,12 +323,12 @@ export class Daemon {
 
     if (role === 'engine' && !(majorOf(msg.version) >= 2)) {
       const problem =
-        `This is the G9 extension v${msg.version ?? '?'}, but port ${this.port} now runs the G9 v2 daemon (g9d v${VERSION}). ` +
+        `This is the G9BrowserAgent extension v${msg.version ?? '?'}, but port ${this.port} now runs the G9BrowserAgent v2 daemon (g9d v${VERSION}). ` +
         'A v1 extension cannot work with it. Reload the extension from the v2 folder: open edge://extensions or ' +
-        'chrome://extensions, find G9 Browser Agent and press Reload (or Load unpacked the "extension" folder of the ' +
+        'chrome://extensions, find G9BrowserAgent and press Reload (or Load unpacked the "extension" folder of the ' +
         'v2 install).';
       conn.send({ type: 'welcome', version: VERSION, daemonPid: process.pid, id: null, repoRoot: REPO_ROOT.replace(/\\/g, '/'), problem });
-      setTimeout(() => conn.close(4001, 'G9 v1 extension: reload the v2 extension (g9d v2 runs here)'), 50).unref?.();
+      setTimeout(() => conn.close(4001, 'G9BrowserAgent v1 extension: reload the v2 extension (g9d v2 runs here)'), 50).unref?.();
       const key = meta.origin ?? 'none';
       const last = this.v1Refusals.get(key) ?? 0;
       if (Date.now() - last > 60_000) {
@@ -644,7 +644,7 @@ export class Daemon {
 
   async #admin(client, msg) {
     const reply = (ok, payload) => client.send({ type: 'result', id: msg.id, ok, ...(ok ? { result: payload } : { error: payload }) });
-    if (client.role !== 'ui') return reply(false, 'Admin operations are for the G9 desktop app (role "ui"). Agents cannot halt, resume or reconfigure the daemon.');
+    if (client.role !== 'ui') return reply(false, 'Admin operations are for the G9BrowserAgent desktop app (role "ui"). Agents cannot halt, resume or reconfigure the daemon.');
     try {
       reply(true, await this.#adminOp(client, msg));
     } catch (err) {
@@ -1009,8 +1009,8 @@ export class Daemon {
       note: shownIn.length
         ? `A live view of tab ${handle} (in ${where}) is open for the person: frames and your cursor as you act, view only. ` +
           'It stays open until they close it or you call action:"watch" with on:false.'
-        : 'Nobody could be shown a live view: no browser with the G9 extension and no G9 desktop app is connected. ' +
-          "Ask the person to open the G9 side panel (Session → Live view) or the desktop app's Watch view.",
+        : 'Nobody could be shown a live view: no browser with the G9BrowserAgent extension and no G9BrowserAgent desktop app is connected. ' +
+          "Ask the person to open the G9BrowserAgent side panel (Session → Live view) or the desktop app's Watch view.",
     };
   }
 

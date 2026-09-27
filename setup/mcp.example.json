@@ -1,9 +1,9 @@
 {
   "mcpServers": {
-    "g9-browser": {
+    "g9browseragent": {
       "command": "node",
       "args": [
-        "REPLACE_WITH_ABSOLUTE_PATH/g9-browser-agent/mcp/shim.mjs"
+        "REPLACE_WITH_ABSOLUTE_PATH/G9BrowserAgent/mcp/shim.mjs"
       ],
       "env": {
         "G9_HOST": "127.0.0.1",

@@ -218,7 +218,7 @@ test('registry: global halt blocks everyone, an agent halt only that agent', () 
   assert.equal(reg.haltError(a.id), null);
   assert.equal(reg.setGlobalHalt(true, { by: 'panel' }), true);
   assert.equal(reg.setGlobalHalt(true, { by: 'panel' }), false, 'idempotent');
-  assert.match(reg.haltError(a.id), /pressed Stop in the G9 side panel/);
+  assert.match(reg.haltError(a.id), /pressed Stop in the G9BrowserAgent side panel/);
   assert.match(reg.haltError(b.id), /cannot lift this yourself/);
   reg.setGlobalHalt(false, { by: 'desktop' });
   assert.equal(reg.haltError(a.id), null);
@@ -1184,9 +1184,29 @@ test('ws codec: masked/unmasked round trips, 16/64-bit lengths, oversize refused
   assert.deepEqual(parseCloseBody(closeBody(4001, 'reload the v2 extension')), { code: 4001, reason: 'reload the v2 extension' });
 });
 
-test('paths: G9_HOME resolution, ports, layout', () => {
+// The default home is resolved against a temporary profile folder: resolving the real one would
+// move a developer's pre-3.2.1 data folder to its new name (lib/home.mjs).
+async function withFakeProfile(fn) {
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'g9-profile-'));
+  const saved = { LOCALAPPDATA: process.env.LOCALAPPDATA, HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, G9_HOME: process.env.G9_HOME };
+  process.env.LOCALAPPDATA = path.join(dir, 'AppData', 'Local');
+  process.env.HOME = dir;
+  process.env.USERPROFILE = dir;
+  delete process.env.G9_HOME;
+  try {
+    return await fn(dir);
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    await fs.promises.rm(dir, { recursive: true, force: true });
+  }
+}
+
+test('paths: G9_HOME resolution, ports, layout', async () => {
   assert.equal(resolveHome('C:/x/y'), path.resolve('C:/x/y'));
-  assert.ok(resolveHome('').length > 0);
+  await withFakeProfile(async (dir) => assert.ok(resolveHome('').startsWith(dir)));
   assert.equal(parsePort('8765'), 8765);
   assert.equal(parsePort('0'), null);
   assert.equal(parsePort('70000'), null);
@@ -2230,9 +2250,9 @@ test('review: an engine is not handed out before its setup finished, nor while i
   assert.equal(m.currentTab(), null);
 });
 
-test('review: every context sends its downloads to G9\'s own folder, from the moment it exists', async () => {
+test('review: every context sends its downloads to G9BrowserAgent\'s own folder, from the moment it exists', async () => {
   // Without watch_downloads the browser used the PROFILE's default directory — the owner's own
-  // Downloads — and G9 had no record of the file (engine review, 2026-09-22).
+  // Downloads — and G9BrowserAgent had no record of the file (engine review, 2026-09-22).
   const reg = new Registry();
   const home = fs.mkdtempSync(path.join(TMP, 'dl-'));
   const m = new EngineManager({ home, registry: reg, settings: { get: () => ({ ...DEFAULTS }) } });
@@ -2459,7 +2479,7 @@ test('review: a call that hits its deadline is CANCELLED, and the tab\'s queue w
     const long = router.call(a, 'browser_interact', { action: 'type', text: 'x', ref: 'long', tabId: 5 });
     await sleep(20);
     const next = router.call(a, 'browser_interact', { action: 'click', ref: 'next', tabId: 5 });
-    await assert.rejects(long, /did not finish within 1s, so G9 stopped it: 3 of 12 input events/);
+    await assert.rejects(long, /did not finish within 1s, so G9BrowserAgent stopped it: 3 of 12 input events/);
     await next;
     assert.deepEqual(started.map((s) => s.ref), ['long', 'next']);
     assert.ok(longStoppedAt > 0 && started[1].at >= longStoppedAt,
@@ -2609,18 +2629,11 @@ test('contract gap: the desktop\'s per-call timeouts never end a call before the
 
 test('contract gap: G9_HOME falls back like engine/find.js g9Home() on Windows without LOCALAPPDATA', async () => {
   const { g9Home } = await import('../../engine/find.js');
-  const saved = { G9_HOME: process.env.G9_HOME, LOCALAPPDATA: process.env.LOCALAPPDATA };
-  try {
-    delete process.env.G9_HOME;
+  await withFakeProfile(async () => {
     assert.equal(resolveHome(undefined), g9Home(process.env));
     delete process.env.LOCALAPPDATA;
     assert.equal(resolveHome(undefined), g9Home(process.env), 'the same folder with LOCALAPPDATA unset');
-  } finally {
-    for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
-  }
+  });
 });
 
 test('contract gap: launch lines in engine-versions.log use cft.js\'s one format', async () => {
@@ -2896,7 +2909,7 @@ test('3.2: a viewer (the watch window) lists and watches tabs and nothing else; 
   await waitUntil(() => d.registry.extensionEngines().length === 0);
   const none = d.requestWatch({ handle: lone, caller: { name: 'claude-code' } });
   assert.equal(none.shown, false);
-  assert.match(none.note, /no browser with the G9 extension and no G9 desktop app is connected/);
+  assert.match(none.note, /no browser with the G9BrowserAgent extension and no G9BrowserAgent desktop app is connected/);
   clearInterval(answer);
   await d.stop('test over').catch(() => {});
 });

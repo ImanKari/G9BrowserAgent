@@ -1,16 +1,16 @@
-# G9 desktop packages (docs/INSTALL.md; ARCHITECTURE_V2 §11).
+# G9BrowserAgent desktop packages (docs/INSTALL.md; ARCHITECTURE_V2 §11).
 # Build with `npm run build:win|build:mac|build:linux` (scripts/build.mjs), which draws the icon,
 # checks the packaged resources and the version, and never publishes: the release pipeline uploads
 # the artifacts to GitHub itself (azure-pipelines.yml).
 #
-#   Windows  G9-Setup-<v>.exe (+ .blockmap)            per-user NSIS, auto-update     latest.yml
-#   macOS    G9-<v>-mac-<arch>.dmg / .zip (x64, arm64) drag to Applications; unsigned  latest-mac.yml
-#   Linux    G9-x86_64.AppImage (no version: see below) auto-update                    latest-linux.yml
-#            G9_<v>_amd64.deb                           system package, updated by hand
+#   Windows  G9BrowserAgent-Setup-<v>.exe (+ .blockmap)            per-user NSIS, auto-update     latest.yml
+#   macOS    G9BrowserAgent-<v>-mac-<arch>.dmg / .zip (x64, arm64) drag to Applications; unsigned  latest-mac.yml
+#   Linux    G9BrowserAgent-x86_64.AppImage (no version: see below) auto-update                    latest-linux.yml
+#            G9BrowserAgent_<v>_amd64.deb                           system package, updated by hand
 
 appId: com.g9.browseragent
-productName: G9
-copyright: G9
+productName: G9BrowserAgent
+copyright: G9BrowserAgent
 
 directories:
   output: dist
@@ -29,7 +29,7 @@ files:
   - "!dist/**"
 
 # The product the app carries: the daemon, engines, MCP shim, runner and extension run from
-# resources/ under G9.exe with ELECTRON_RUN_AS_NODE=1, so a QA machine needs no Node.
+# resources/ under G9BrowserAgent.exe with ELECTRON_RUN_AS_NODE=1, so a QA machine needs no Node.
 # Dev-only override files (dev-daemon.json / dev-bridge.json) must never ship.
 extraResources:
   - from: ../extension
@@ -62,7 +62,7 @@ win:
   target:
     - target: nsis
       arch: [x64]
-  executableName: G9
+  executableName: G9BrowserAgent
   icon: build/icon.png
   requestedExecutionLevel: asInvoker
 
@@ -71,10 +71,10 @@ nsis:
   perMachine: false
   allowElevation: false
   allowToChangeInstallationDirectory: false
-  artifactName: G9-Setup-${version}.exe
+  artifactName: G9BrowserAgent-Setup-${version}.exe
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: G9
+  shortcutName: G9BrowserAgent
   runAfterFinish: true
   deleteAppDataOnUninstall: false
   include: build/installer.nsh
@@ -94,13 +94,13 @@ mac:
   identity: '-'
   hardenedRuntime: false
   gatekeeperAssess: false
-  artifactName: G9-${version}-mac-${arch}.${ext}
+  artifactName: G9BrowserAgent-${version}-mac-${arch}.${ext}
 dmg:
-  title: G9 ${version}
-  artifactName: G9-${version}-mac-${arch}.${ext}
+  title: G9BrowserAgent ${version}
+  artifactName: G9BrowserAgent-${version}-mac-${arch}.${ext}
 
 # Linux. The AppImage updates itself (electron-updater replaces the file at $APPIMAGE); the .deb
-# installs to /opt/G9 and is updated with the package manager. An AppImage runs from a temporary
+# installs to /opt/G9BrowserAgent and is updated with the package manager. An AppImage runs from a temporary
 # mount, so the daemon and MCP entries go through the .AppImage file (lib/runtime.mjs).
 linux:
   target:
@@ -108,24 +108,28 @@ linux:
       arch: [x64]
     - target: deb
       arch: [x64]
-  executableName: g9
-  # The .desktop entry is g9.desktop (package.json desktopName), and Electron's app_id / WM_CLASS
-  # follows it, so the desktop links G9's windows to its launcher and dock icon.
+  executableName: g9browseragent
+  # The .desktop entry is g9browseragent.desktop (package.json desktopName), and Electron's app_id / WM_CLASS
+  # follows it, so the desktop links G9BrowserAgent's windows to its launcher and dock icon.
   syncDesktopName: true
   category: Development
   icon: build/icon.png
   synopsis: AI agents drive real Chrome and Edge through MCP, with human-like input
-  description: G9 lets AI agents drive real Chromium browsers at DevTools depth through MCP, with human-like input and reviewable evidence.
+  description: G9BrowserAgent lets AI agents drive real Chromium browsers at DevTools depth through MCP, with human-like input and reviewable evidence.
   maintainer: Iman Kari <iman.kari@live.com>
 # No version in the AppImage's name, on purpose: electron-updater replaces the file IN PLACE only
 # when its name has no version; otherwise it moves the update to the new version's name and deletes
 # the old file, and every MCP entry and autostart entry naming that file breaks after an update.
 appImage:
-  artifactName: G9-x86_64.${ext}
+  artifactName: G9BrowserAgent-x86_64.${ext}
 deb:
   # electron-builder's default dependency list (Electron's own needs). Not overridden: a hard
   # libasound2 would make the package uninstallable on Ubuntu 24.04 (libasound2t64).
-  artifactName: G9_${version}_amd64.${ext}
+  artifactName: G9BrowserAgent_${version}_amd64.${ext}
+  # Until 3.2.0 the package was "g9-desktop" (installed as /opt/G9, command g9). This one replaces
+  # it, so `apt install` of the new file upgrades an old install instead of putting a second next to it.
+  packageName: g9browseragent
+  fpm: ['--replaces', 'g9-desktop', '--conflicts', 'g9-desktop', '--provides', 'g9-desktop']
 
 # The official update feed: the GitHub releases of the official repository. The app sets its feed
 # at runtime (Settings: official / custom / off); this block is what makes every build write

@@ -51,7 +51,7 @@ function downloadBytes(name) {
   if (/empty/i.test(name)) return Buffer.alloc(0);
   if (/\.pdf$/i.test(name)) {
     const lines = ['%PDF-1.4', '%âãÏÓ'];
-    for (let i = 0; i < 600; i++) lines.push(`% G9 engine2 fixture ${name} line ${i}`);
+    for (let i = 0; i < 600; i++) lines.push(`% G9BrowserAgent engine2 fixture ${name} line ${i}`);
     lines.push('%%EOF', '');
     return Buffer.from(lines.join('\n'), 'latin1');
   }
@@ -230,6 +230,6 @@ const server = http.createServer(async (req, res) => {
 // iframe without a second server or a real external site.
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`\nTest page:  http://127.0.0.1:${PORT}/`);
-  console.log('Open it in Chrome or Edge, then attach it from the G9 side panel.');
+  console.log('Open it in Chrome or Edge, then attach it from the G9BrowserAgent side panel.');
   console.log('Ctrl+C to stop.\n');
 });

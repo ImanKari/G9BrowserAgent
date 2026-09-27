@@ -304,7 +304,7 @@ async function uiClient(port) {
 
 // ------------------------------------------------------------------ the run
 
-console.log(`\n${color(1, 'G9 v2 — self-test')} ${color(90, `(v${VERSION})`)}`);
+console.log(`\n${color(1, 'G9BrowserAgent v2 — self-test')} ${color(90, `(v${VERSION})`)}`);
 
 const PORT = await freePort();
 const HOME = tempHome('main');
@@ -393,7 +393,7 @@ try {
   shimA = new Mcp(SHIM, shimEnv, 'agent-alpha');
   shimB = new Mcp(SHIM, shimEnv, 'agent-beta');
   const [initA, initB] = await Promise.all([shimA.init(), shimB.init()]);
-  check(initA.result?.serverInfo?.name === 'g9-browser-agent' && initA.result.serverInfo.version === VERSION, 'initialize', initA.result?.protocolVersion);
+  check(initA.result?.serverInfo?.name === 'G9BrowserAgent' && initA.result.serverInfo.version === VERSION, 'initialize', initA.result?.protocolVersion);
   check(initB.result?.instructions?.includes('Two engines, one set of tools'), 'v2 instructions delivered', `${initB.result?.instructions?.length} chars`);
   const list = await shimA.request('tools/list');
   const tools = list.result?.tools ?? [];
@@ -423,7 +423,7 @@ try {
   check(names.includes('agent-alpha') && names.includes('agent-beta'), 'agents list both shims by their MCP client names', names.join(', '));
   check(s.halted?.global === false && s.halted?.mine === false, 'halted { global, mine }');
   check(s.health?.consoleErrors === 1, 'engine-local status carried (health)');
-  check(Number.isInteger(s.current?.tabId) && s.current.tabId !== 101, 'engine tab ids come back as G9 handles', `101 → ${s.current?.tabId}`);
+  check(Number.isInteger(s.current?.tabId) && s.current.tabId !== 101, 'engine tab ids come back as G9BrowserAgent handles', `101 → ${s.current?.tabId}`);
   check(s.you?.current === s.current?.tabId, 'the engine\'s target became the agent\'s current tab');
   check(s.capabilities?.extension === true && s.capabilities?.popout === true, 'capabilities block');
   check(s.shim?.version === VERSION, 'shim version reported');
@@ -490,7 +490,7 @@ try {
   await waitFor(async () => (await shimA.call('browser_status')).data?.halted?.global === true, 3_000);
   const haltedA = await shimA.call('browser_snapshot', { tabId: h101 });
   const haltedB = await shimB.call('browser_tabs', { action: 'list' });
-  check(!haltedA.ok && /pressed Stop in the G9 side panel/.test(haltedA.text), 'agent A blocked by the panel\'s Stop', haltedA.text.slice(0, 80));
+  check(!haltedA.ok && /pressed Stop in the G9BrowserAgent side panel/.test(haltedA.text), 'agent A blocked by the panel\'s Stop', haltedA.text.slice(0, 80));
   check(!haltedB.ok && /pressed Stop/.test(haltedB.text), 'agent B blocked too (even browser_tabs list)');
   const haltStatus = await shimB.call('browser_status');
   check(haltStatus.ok && haltStatus.data?.halted?.global === true && haltStatus.data?.halted?.by === 'panel', 'browser_status still answers, and says why');
@@ -506,7 +506,7 @@ try {
   await waitFor(() => ext.messages.filter((m) => m.type === 'halt').length > extHaltBefore, 2_000);
   check(ext.messages.filter((m) => m.type === 'halt').at(-1)?.halted === true, 'the extension is told {type:"halt", halted:true}');
   const desktopHalted = await shimA.call('browser_snapshot', { tabId: h101 });
-  check(!desktopHalted.ok && /G9 desktop app/.test(desktopHalted.text), 'agents blocked by the desktop Stop');
+  check(!desktopHalted.ok && /G9BrowserAgent desktop app/.test(desktopHalted.text), 'agents blocked by the desktop Stop');
   check(ui.events.some((e) => e.topic === 'halt'), 'the UI receives the halt event');
   await ui.admin('resume');
   await waitFor(() => ext.messages.filter((m) => m.type === 'halt').at(-1)?.halted === false, 2_000);

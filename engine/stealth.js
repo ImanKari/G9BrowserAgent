@@ -71,7 +71,7 @@ export const WEBDRIVER_SWITCH = '--disable-blink-features=AutomationControlled';
  *
  * Why stealth still adds nothing else:
  * * `--enable-automation` shows the "controlled by automated test software" bar and sets
- *   navigator.webdriver. G9 never passes it, at any level; launch.js refuses it always.
+ *   navigator.webdriver. G9BrowserAgent never passes it, at any level; launch.js refuses it always.
  * * `--disable-features=AutomationControlled`: there is no such Chromium *feature*; the flag is
  *   folklore (AutomationControlled is a Blink runtime feature, see above). Useless.
  * * UA / Client Hints / platform / WebGL / languages overrides by switch: each one creates a
@@ -118,7 +118,7 @@ export function launchWarnings({ level = 'off', headless = true, kind = null } =
     out.push(
       'stealth with headless=true: headless leaves signals no level can remove — the user agent and ' +
       'userAgentData say HeadlessChrome, and the window\'s outer size can read 0×0 at the load event. ' +
-      'Public detectors flagged every headless stealth run in G9\'s own test (docs/STEALTH.md). On a ' +
+      'Public detectors flagged every headless stealth run in G9BrowserAgent\'s own test (docs/STEALTH.md). On a ' +
       'machine without a GPU, a software GL renderer string is a further tell. Run stealth-critical ' +
       'suites headed on a dedicated desktop (docs/STEALTH.md).',
     );
@@ -127,9 +127,9 @@ export function launchWarnings({ level = 'off', headless = true, kind = null } =
     out.push(
       'stealth on Chrome for Testing: detectors read its brand ("Google Chrome for Testing" is a red flag ' +
       'on rebrowser\'s bot detector, headed runs included) and the Chromium build ships no Widevine key ' +
-      'system, which detectors also read. Its renderer also ran at 10 Hz on the machine G9 was measured ' +
+      'system, which detectors also read. Its renderer also ran at 10 Hz on the machine G9BrowserAgent was measured ' +
       'on (100 ms between frames and between the page\'s mousemove events, re-confirmed 2026-09-23 in an ' +
-      'interleaved A/B against Edge); G9 passes --disable-frame-rate-limit to CfT for that (measured ' +
+      'interleaved A/B against Edge); G9BrowserAgent passes --disable-frame-rate-limit to CfT for that (measured ' +
       '~57 Hz with it — engine/launch.js KIND_SWITCHES), which Edge and Chrome do not need. Prefer Edge ' +
       'or Chrome for stealth (docs/STEALTH.md).',
     );

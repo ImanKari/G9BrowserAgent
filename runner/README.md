@@ -16,12 +16,12 @@ node runner/g9.mjs help
 ```
 
 On a machine with only the desktop app installed there is no `node`. Run the same file with the
-app itself: `G9.exe` with `ELECTRON_RUN_AS_NODE=1` and `resources\runner\g9.mjs` (see
+app itself: `G9BrowserAgent.exe` with `ELECTRON_RUN_AS_NODE=1` and `resources\runner\g9.mjs` (see
 [Scheduling](#scheduling)).
 
 ## Where it runs: a launched browser, by default
 
-`--engine launched` (the default) runs every flow in a browser that the G9 daemon **launches**: real
+`--engine launched` (the default) runs every flow in a browser that the G9BrowserAgent daemon **launches**: real
 Edge, Chrome or Chrome for Testing, headless by default (the daemon setting `headless`) or headed
 with `--headed`, with its own profile under
 `G9_HOME\profiles`. It never touches the person's own browser. A headless launched browser has no
@@ -29,7 +29,7 @@ window, so a minimised or covered window, or someone working in their own browse
 it. That is the reason Engine 2 exists (AIGuide §2.8.1, D3). By the same design a locked session
 should not affect it either — and disconnecting RDP puts the session in exactly that state (see
 docs/INSTALL.md, "Unattended machines"). **That was not measured.** A logged-off user runs nothing,
-because every G9 process lives in the user's session.
+because every G9BrowserAgent process lives in the user's session.
 
 The engine is **held** for the run (`browser_engine action:"acquire"`, or `lease:true` on the launch)
 and released at the end; the daemon stops an engine that was launched for a run once the last run
@@ -46,7 +46,7 @@ therefore share one browser safely: neither stops it under the other.
 | `--humanize-seed <n>` | reproduce a run's exact pointer and keyboard motion |
 | `--stealth off\|human\|stealth` | stealth level of an engine this run launches (default: the daemon setting, `off`) |
 | `--keep-engine` | leave an engine this run launched running afterwards |
-| `--port <n>` | the G9 daemon's port. It is passed to the shim as `G9_PORT`; without it the shim uses `G9_PORT` from the environment, else 8765. |
+| `--port <n>` | the G9BrowserAgent daemon's port. It is passed to the shim as `G9_PORT`; without it the shim uses `G9_PORT` from the environment, else 8765. |
 
 **Engine reuse.** An engine already running on the same `--profile` is reused, because a profile can
 be open in only one browser at a time. If it does not match the run's `--headed`/`--headless` or
@@ -119,7 +119,7 @@ that lists the known flows, never an empty PASS.
 ## It speaks MCP, on purpose
 
 The runner spawns `mcp/shim.mjs`, the same shim an AI agent's client launches. The shim talks to
-the one G9 daemon on this machine and starts it if needed. So the runner can do nothing an agent
+the one G9BrowserAgent daemon on this machine and starts it if needed. So the runner can do nothing an agent
 could not do: ownership, the Stop button (side panel or desktop app) and every refusal apply to a
 scheduled run exactly as they do to an agent. If Stop is engaged when the run starts, it exits 4 with
 "Stop is engaged". There is no private back door, and there should never be one. (`--platform
@@ -133,9 +133,9 @@ daemon listens.
 
 ## Scheduling
 
-**G9's scheduler.** The desktop app's **Schedule** view (or the daemon's `schedule.*` admin ops) runs
+**G9BrowserAgent's scheduler.** The desktop app's **Schedule** view (or the daemon's `schedule.*` admin ops) runs
 `runner/g9.mjs run <target> …` as a child process, daily at a local time or every N minutes:
-- The child is started with the daemon's own executable, so on an installed machine it is `G9.exe`,
+- The child is started with the daemon's own executable, so on an installed machine it is `G9BrowserAgent.exe`,
   with no Node needed.
 - Every engine option in the form becomes an explicit flag, except a browser left at "auto": no
   `--browser` is passed, so that entry follows the daemon's `defaultBrowser` setting.
@@ -143,10 +143,10 @@ daemon listens.
 - An entry may name its project (`project`: the path of a `g9.project.json`). Otherwise the daemon's
   default project is passed as `--project`, and the run starts in that project's folder.
 - A run missed while the daemon was down runs once when it comes back.
-- It only fires while the daemon runs, so turn on "Start G9 when I sign in" (`docs/INSTALL.md`,
+- It only fires while the daemon runs, so turn on "Start G9BrowserAgent when I sign in" (`docs/INSTALL.md`,
   "Unattended machines").
 
-The desktop suite ran a desktop-shaped schedule entry through the packaged `G9.exe`, with no Node on
+The desktop suite ran a desktop-shaped schedule entry through the packaged `G9BrowserAgent.exe`, with no Node on
 the PATH: 3 of 3 runs passed (2026-09-22).
 
 **Windows Task Scheduler** works as well. Set the task's "Start in" folder to the folder that holds
@@ -154,14 +154,14 @@ the PATH: 3 of 3 runs passed (2026-09-22).
 working directory, and a task starts in `System32` by default. From a repository checkout:
 
 ```powershell
-node G:\path\to\g9-browser-agent\runner\g9.mjs run suite:nightly --report D:\qa\nightly --quiet
+node G:\path\to\G9BrowserAgent\runner\g9.mjs run suite:nightly --report D:\qa\nightly --quiet
 ```
 
 On an installed machine, wrap the command in `cmd` so the environment variable is set (there is no
 space before `&&`):
 
 ```
-cmd.exe /d /c "set ELECTRON_RUN_AS_NODE=1&& "%LOCALAPPDATA%\Programs\G9\G9.exe" "%LOCALAPPDATA%\Programs\G9\resources\runner\g9.mjs" run suite:nightly --report D:\qa\nightly --quiet"
+cmd.exe /d /c "set ELECTRON_RUN_AS_NODE=1&& "%LOCALAPPDATA%\Programs\G9BrowserAgent\G9BrowserAgent.exe" "%LOCALAPPDATA%\Programs\G9BrowserAgent\resources\runner\g9.mjs" run suite:nightly --report D:\qa\nightly --quiet"
 ```
 
 That form was run against the built `win-unpacked` copy with `help`, and it exited 0. Task Scheduler

@@ -1,7 +1,7 @@
 /**
  * Starting g9d when nothing listens, and restarting it only when that cannot hurt a run.
  *
- * Packaged: `G9.exe` itself runs the daemon script with ELECTRON_RUN_AS_NODE=1 — the machine needs
+ * Packaged: `G9BrowserAgent.exe` itself runs the daemon script with ELECTRON_RUN_AS_NODE=1 — the machine needs
  * no Node (ARCHITECTURE_V2 §11). Dev: `node <repo>/daemon/g9d.mjs`.
  *
  * The daemon is spawned DETACHED: it serves every agent on the machine, not just this window, and
@@ -80,14 +80,14 @@ export function describeForeign(health, port) {
   const pid = b?.pid ?? b?.bridgePid ?? null;
   const isV1 = !!b && (b.extensionConnected !== undefined || /^1\./.test(version ?? '') || b.name === 'g9-bridge');
   const who = isV1
-    ? `a v1 G9 bridge${version ? ` (version ${version}` : ''}${pid ? `${version ? ', ' : ' ('}pid ${pid}` : ''}${version || pid ? ')' : ''}`
+    ? `a v1 G9BrowserAgent bridge${version ? ` (version ${version}` : ''}${pid ? `${version ? ', ' : ' ('}pid ${pid}` : ''}${version || pid ? ')' : ''}`
     : `another program${health?.httpStatus ? ` (HTTP ${health.httpStatus} on /health)` : ''}`;
   return {
     kind: isV1 ? 'v1-bridge' : 'unknown',
     pid,
     version,
     message:
-      `Port ${port} is held by ${who}, not the G9 v2 daemon. G9 will not stop it. ` +
+      `Port ${port} is held by ${who}, not the G9BrowserAgent v2 daemon. G9BrowserAgent will not stop it. ` +
       (isV1
         ? 'Close the AI client that started the v1 bridge (or end that node process yourself), then press Reconnect. '
         : 'Stop that program, then press Reconnect. ') +

@@ -1,6 +1,6 @@
 /**
  * The app and tray icons, drawn in code: a rounded square with the cursor arrow — the one thing
- * G9 draws that the page never sees (D9). No binary assets in the repo; the installer icon is
+ * G9BrowserAgent draws that the page never sees (D9). No binary assets in the repo; the installer icon is
  * written by scripts/make-icons.mjs from the same function, and the tray recolours it by state.
  *
  * A tiny PNG encoder (zlib is in Node) with 4×4 supersampling for anti-aliased edges.

@@ -4,9 +4,9 @@
  *   node scripts/build.mjs [--win | --mac | --linux] [--allow-missing]
  *   (no platform flag: the machine's own)
  *
- *   Windows  G9-Setup-<v>.exe (+ .blockmap), latest.yml                 build on Windows
- *   macOS    G9-<v>-mac-{x64,arm64}.{dmg,zip} (+ .blockmap), latest-mac.yml   build on macOS
- *   Linux    G9-x86_64.AppImage, G9_<v>_amd64.deb, latest-linux.yml        build on Linux
+ *   Windows  G9BrowserAgent-Setup-<v>.exe (+ .blockmap), latest.yml                 build on Windows
+ *   macOS    G9BrowserAgent-<v>-mac-{x64,arm64}.{dmg,zip} (+ .blockmap), latest-mac.yml   build on macOS
+ *   Linux    G9BrowserAgent-x86_64.AppImage, G9BrowserAgent_<v>_amd64.deb, latest-linux.yml        build on Linux
  *
  * 1. Draw build/icon.png (scripts/make-icons.mjs).
  * 2. Check that every packaged resource exists — an app that cannot start its daemon is worse than
@@ -138,10 +138,10 @@ try {
 }
 
 const problems = verifyArtifacts(dist, { version, expect: [target] });
-// Every packed app (win-unpacked, linux-unpacked, mac/G9.app, mac-arm64/G9.app) carries every
+// Every packed app (win-unpacked, linux-unpacked, mac/G9BrowserAgent.app, mac-arm64/G9BrowserAgent.app) carries every
 // production dependency — electron-updater once shipped without its own (verify-artifacts.mjs).
 const asars = fs.readdirSync(dist, { withFileTypes: true }).filter((d) => d.isDirectory())
-  .flatMap((d) => [path.join(dist, d.name, 'resources', 'app.asar'), path.join(dist, d.name, 'G9.app', 'Contents', 'Resources', 'app.asar')])
+  .flatMap((d) => [path.join(dist, d.name, 'resources', 'app.asar'), path.join(dist, d.name, 'G9BrowserAgent.app', 'Contents', 'Resources', 'app.asar')])
   .filter((f) => fs.existsSync(f));
 if (!asars.length) problems.push('no packed app.asar found in the output');
 for (const asar of asars) problems.push(...verifyPackedDependencies(asar, path.join(appDir, 'package-lock.json')).map((p) => `${path.relative(dist, asar)}: ${p}`));

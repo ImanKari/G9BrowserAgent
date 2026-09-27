@@ -1,5 +1,5 @@
 /**
- * A minimal MCP stdio client, for driving G9 with no agent present.
+ * A minimal MCP stdio client, for driving G9BrowserAgent with no agent present.
  *
  * The runner is just another MCP client: it spawns `mcp/shim.mjs` — the same
  * shim an AI agent's client launches — and the shim connects to the one daemon
@@ -54,7 +54,7 @@ export class McpClient {
       this.closed = true;
       for (const [, entry] of this.pending) {
         clearTimeout(entry.timer);
-        entry.reject(new Error(`The G9 MCP shim exited. stderr:\n${this.stderr.join('').slice(-1200)}`));
+        entry.reject(new Error(`The G9BrowserAgent MCP shim exited. stderr:\n${this.stderr.join('').slice(-1200)}`));
       }
       this.pending.clear();
     });
@@ -83,7 +83,7 @@ export class McpClient {
   }
 
   request(method, params = {}, timeoutMs = 180_000) {
-    if (this.closed) return Promise.reject(new Error('The G9 MCP shim is no longer running.'));
+    if (this.closed) return Promise.reject(new Error('The G9BrowserAgent MCP shim is no longer running.'));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {

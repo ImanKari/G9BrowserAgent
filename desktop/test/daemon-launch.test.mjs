@@ -15,9 +15,9 @@ t.cleanup(() => rmrf(root));
 fs.mkdirSync(path.join(root, 'daemon'), { recursive: true });
 fs.writeFileSync(path.join(root, 'daemon', 'g9d.mjs'), '// fake\n');
 
-t.test('packaged: G9.exe runs the daemon script with ELECTRON_RUN_AS_NODE=1', () => {
-  const cmd = daemonCommand({ isPackaged: true, execPath: 'C:\\Users\\qa\\AppData\\Local\\Programs\\G9\\G9.exe', resourceRoot: root, env: { PATH: 'x' }, port: 18123, home: 'D:\\g9home' });
-  assert.equal(cmd.command, 'C:\\Users\\qa\\AppData\\Local\\Programs\\G9\\G9.exe');
+t.test('packaged: G9BrowserAgent.exe runs the daemon script with ELECTRON_RUN_AS_NODE=1', () => {
+  const cmd = daemonCommand({ isPackaged: true, execPath: 'C:\\Users\\qa\\AppData\\Local\\Programs\\G9BrowserAgent\\G9BrowserAgent.exe', resourceRoot: root, env: { PATH: 'x' }, port: 18123, home: 'D:\\g9home' });
+  assert.equal(cmd.command, 'C:\\Users\\qa\\AppData\\Local\\Programs\\G9BrowserAgent\\G9BrowserAgent.exe');
   assert.deepEqual(cmd.args, [path.join(root, 'daemon', 'g9d.mjs')]);
   assert.equal(cmd.env.ELECTRON_RUN_AS_NODE, '1');
   assert.equal(cmd.env.G9_PORT, '18123');
@@ -52,8 +52,8 @@ t.test('probeHealth: none / g9d / foreign (a v1 bridge answers /health without n
   assert.equal(h2.status, 'foreign');
   const f = describeForeign(h2, p2);
   assert.equal(f.kind, 'v1-bridge');
-  assert.match(f.message, /v1 G9 bridge \(version 1\.7\.21, pid 4321\)/);
-  assert.match(f.message, /G9 will not stop it/);
+  assert.match(f.message, /v1 G9BrowserAgent bridge \(version 1\.7\.21, pid 4321\)/);
+  assert.match(f.message, /G9BrowserAgent will not stop it/);
   await new Promise((r) => v1.close(r));
 });
 
@@ -65,7 +65,7 @@ t.test('DaemonLauncher: spawns once when nothing listens, then respects the cool
   };
   let now = 1000;
   const l = new DaemonLauncher({
-    commandOptions: { isPackaged: true, execPath: 'G9.exe', resourceRoot: root },
+    commandOptions: { isPackaged: true, execPath: 'G9BrowserAgent.exe', resourceRoot: root },
     port: 18555,
     spawn: fakeSpawn,
     probe: async () => ({ status: 'none' }),
@@ -163,13 +163,13 @@ t.test('a version mismatch: only an OLDER daemon of this install is restarted', 
   // It used to restart on any difference: a 2.0.1 daemon from a repository checkout (started by its
   // own shim) was shut down and replaced by this app's older one — and with "Start the daemon" off
   // it was shut down and nothing started (desktop review, 2026-09-22).
-  const app = { appVersion: '2.0.0', appRoot: 'C:/Program Files/G9/resources', platform: 'win32' };
+  const app = { appVersion: '2.0.0', appRoot: 'C:/Program Files/G9BrowserAgent/resources', platform: 'win32' };
   assert.equal(mismatchAction({ daemonVersion: '2.0.0', ...app }), 'none');
   assert.equal(mismatchAction({ daemonVersion: null, ...app }), 'none');
-  assert.equal(mismatchAction({ daemonVersion: '1.9.9', daemonRoot: 'C:/Program Files/G9/resources', ...app }), 'restart');
-  assert.equal(mismatchAction({ daemonVersion: '1.9.9', daemonRoot: 'c:\\Program Files\\G9\\resources\\', ...app }), 'restart', 'the same root, spelled another way');
+  assert.equal(mismatchAction({ daemonVersion: '1.9.9', daemonRoot: 'C:/Program Files/G9BrowserAgent/resources', ...app }), 'restart');
+  assert.equal(mismatchAction({ daemonVersion: '1.9.9', daemonRoot: 'c:\\Program Files\\G9BrowserAgent\\resources\\', ...app }), 'restart', 'the same root, spelled another way');
   assert.equal(mismatchAction({ daemonVersion: '1.9.9', ...app }), 'restart', 'a daemon that does not say where it lives is ours');
-  assert.equal(mismatchAction({ daemonVersion: '2.0.1', daemonRoot: 'C:/Program Files/G9/resources', ...app }), 'notice-newer');
+  assert.equal(mismatchAction({ daemonVersion: '2.0.1', daemonRoot: 'C:/Program Files/G9BrowserAgent/resources', ...app }), 'notice-newer');
   assert.equal(mismatchAction({ daemonVersion: '1.9.9', daemonRoot: 'G:/Projects/g9-browser-agent', ...app }), 'notice-other-install');
   assert.equal(mismatchAction({ daemonVersion: '1.9.9', daemonRoot: app.appRoot, startDaemon: false, ...app }), 'notice-no-autostart');
   assert.equal(compareVersions('2.0.1', '2.0.0'), 1);
@@ -274,9 +274,9 @@ t.test('Linux AppImage: the daemon is started from the .AppImage file and the st
   const mount = '/tmp/.mount_G9x1y2';
   const cmd = daemonCommand({
     isPackaged: true, execPath: `${mount}/g9`, resourceRoot: `${mount}/resources`, env: { PATH: '/usr/bin' }, port: 18123, home: '/home/qa/.g9',
-    appImage: { file: '/home/qa/Apps/G9.AppImage', bootstrap: '/home/qa/.g9/bin/g9-run.mjs' },
+    appImage: { file: '/home/qa/Apps/G9BrowserAgent.AppImage', bootstrap: '/home/qa/.g9/bin/g9-run.mjs' },
   });
-  assert.equal(cmd.command, '/home/qa/Apps/G9.AppImage');
+  assert.equal(cmd.command, '/home/qa/Apps/G9BrowserAgent.AppImage');
   assert.deepEqual(cmd.args, ['/home/qa/.g9/bin/g9-run.mjs', 'daemon/g9d.mjs', '--no-sandbox'], 'the flag AFTER the script: AppRun would put it before, where Node rejects it');
   assert.equal(cmd.env.ELECTRON_RUN_AS_NODE, '1');
   assert.equal(cmd.env.G9_PORT, '18123');
@@ -286,11 +286,11 @@ t.test('Linux AppImage: the daemon is started from the .AppImage file and the st
 t.test('mismatch: a stable install id beats the resource root (an AppImage mounts somewhere new on every start)', () => {
   const base = { daemonVersion: '3.0.9', appVersion: '3.1.0', startDaemon: true, platform: 'linux' };
   // Same .AppImage, two different mounts: this install's old daemon → restart it.
-  assert.equal(mismatchAction({ ...base, daemonRoot: '/tmp/.mount_G9aaaa/resources', appRoot: '/tmp/.mount_G9bbbb/resources', daemonInstall: '/home/qa/G9.AppImage', appInstall: '/home/qa/G9.AppImage' }), 'restart');
+  assert.equal(mismatchAction({ ...base, daemonRoot: '/tmp/.mount_G9aaaa/resources', appRoot: '/tmp/.mount_G9bbbb/resources', daemonInstall: '/home/qa/G9BrowserAgent.AppImage', appInstall: '/home/qa/G9BrowserAgent.AppImage' }), 'restart');
   // Without the ids, the two mounts look like two installs.
   assert.equal(mismatchAction({ ...base, daemonRoot: '/tmp/.mount_G9aaaa/resources', appRoot: '/tmp/.mount_G9bbbb/resources' }), 'notice-other-install');
   // Another install really is another install.
-  assert.equal(mismatchAction({ ...base, daemonInstall: '/opt/G9/resources', appInstall: '/home/qa/G9.AppImage' }), 'notice-other-install');
+  assert.equal(mismatchAction({ ...base, daemonInstall: '/opt/G9BrowserAgent/resources', appInstall: '/home/qa/G9BrowserAgent.AppImage' }), 'notice-other-install');
 });
 
 t.run();

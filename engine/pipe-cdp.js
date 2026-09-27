@@ -251,7 +251,7 @@ export class PipeCdp extends EventEmitter {
    * quit — launch.js close() does that with Browser.close first. (Closing our write end is still a
    * signal the browser sees; see engine/README.md for what a browser does when its pipe closes.)
    */
-  close(reason = `${this.name}: connection closed by G9`) {
+  close(reason = `${this.name}: connection closed by G9BrowserAgent`) {
     this._shutdown(reason, { destroy: true });
     // The connection may already have closed from the browser's side (pipe end, process exit),
     // which does not destroy our streams. Release them now either way: the fd-3 socket is a

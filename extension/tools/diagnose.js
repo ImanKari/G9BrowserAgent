@@ -12,9 +12,9 @@ import { send } from '../lib/cdp.js';
 import { inWorld } from '../lib/world.js';
 import { consoleLog, network } from './observe.js';
 
-// The in-page audit and the vitals observers run in G9's isolated world: they
+// The in-page audit and the vitals observers run in G9BrowserAgent's isolated world: they
 // see the same DOM and the same performance timeline, and they leave nothing on
-// the page's own window — so the page is measured without G9 inside it.
+// the page's own window — so the page is measured without G9BrowserAgent inside it.
 
 export async function health(tabId) {
   const [logs, net, page] = await Promise.all([

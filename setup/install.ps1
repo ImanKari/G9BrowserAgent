@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Sets up G9 v2 on this machine from a clone of the repository (the Node path).
+  Sets up G9BrowserAgent v2 on this machine from a clone of the repository (the Node path).
 
 .DESCRIPTION
   Verifies Node 22+, runs the unit tests, the daemon/MCP self-test and the
@@ -9,7 +9,7 @@
   and prints the one step that cannot be automated: loading the unpacked
   extension in Chrome/Edge.
 
-  No Node on the machine? Use the desktop installer (G9-Setup.exe) instead: it
+  No Node on the machine? Use the desktop installer (G9BrowserAgent-Setup.exe) instead: it
   carries its own runtime, registers the MCP shim for the AI clients it finds,
   and manages the extension folder and updates.
 
@@ -56,14 +56,14 @@ Write-Step 1 "Checking Node.js"
 $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) {
   Write-Host "    Node.js is not on PATH. Install Node 22 or newer (https://nodejs.org)," -ForegroundColor Red
-  Write-Host "    or use the desktop installer (G9-Setup.exe), which needs no Node." -ForegroundColor Red
+  Write-Host "    or use the desktop installer (G9BrowserAgent-Setup.exe), which needs no Node." -ForegroundColor Red
   exit 1
 }
 $nodeVersion = (node --version).TrimStart('v')
 $major = [int]($nodeVersion.Split('.')[0])
 if ($major -lt 22) {
-  Write-Host "    Node $nodeVersion is too old. G9 v2 needs Node 22 or newer," -ForegroundColor Red
-  Write-Host "    or use the desktop installer (G9-Setup.exe), which needs no Node." -ForegroundColor Red
+  Write-Host "    Node $nodeVersion is too old. G9BrowserAgent v2 needs Node 22 or newer," -ForegroundColor Red
+  Write-Host "    or use the desktop installer (G9BrowserAgent-Setup.exe), which needs no Node." -ForegroundColor Red
   exit 1
 }
 Write-Ok "Node $nodeVersion"
@@ -94,7 +94,7 @@ Write-Step 3 "Writing MCP client config"
 $shimPath = (Join-Path $repo 'mcp\shim.mjs') -replace '\\', '/'
 $config = [ordered]@{
   mcpServers = [ordered]@{
-    'g9-browser' = [ordered]@{
+    'g9browseragent' = [ordered]@{
       command = 'node'
       args    = @($shimPath)
       env     = [ordered]@{ G9_HOST = '127.0.0.1'; G9_PORT = "$Port" }
@@ -113,7 +113,7 @@ if ($WriteProjectConfig) {
     try { $existing = Get-Content $projectConfig -Raw | ConvertFrom-Json } catch { $existing = $null }
   }
   $existingArgs = @()
-  if ($existing -and $existing.mcpServers -and $existing.mcpServers.'g9-browser') { $existingArgs = @($existing.mcpServers.'g9-browser'.args) }
+  if ($existing -and $existing.mcpServers -and $existing.mcpServers.'g9browseragent') { $existingArgs = @($existing.mcpServers.'g9browseragent'.args) }
   $isOldBridge = $existingArgs | Where-Object { $_ -match 'bridge[\\/]+src[\\/]+server\.js' }
   if ((Test-Path $projectConfig) -and -not $isOldBridge) {
     Write-Warn2 "$projectConfig already exists - leaving it alone. Merge setup\mcp.json by hand if needed."
@@ -135,7 +135,7 @@ Write-Ok "Configs that still point at bridge/src/server.js keep working: it now 
 $extensionSteps = @"
        Chrome:  chrome://extensions      Edge:  edge://extensions
        - Turn on "Developer mode"
-       - Click "Load unpacked"  (or "Reload" if an older G9 extension is already loaded)
+       - Click "Load unpacked"  (or "Reload" if an older G9BrowserAgent extension is already loaded)
        - Select:  $repo\extension
 "@
 
@@ -166,13 +166,13 @@ if ($WriteProjectConfig) {
 
 Write-Host @"
 
-    How it runs: the first agent that calls a G9 tool starts the daemon (g9d) on
+    How it runs: the first agent that calls a G9BrowserAgent tool starts the daemon (g9d) on
     127.0.0.1:$Port by itself; it stops on its own after an hour with nobody
     connected. Launched browsers (Engine 2) need no extension at all - an agent
-    can call browser_tabs action:"open" and G9 starts a headless Edge/Chrome.
+    can call browser_tabs action:"open" and G9BrowserAgent starts a headless Edge/Chrome.
     To watch the daemon:  node daemon/g9d.mjs --foreground
 
-    No Node on a QA machine? Use the desktop installer (G9-Setup.exe) - it bundles
+    No Node on a QA machine? Use the desktop installer (G9BrowserAgent-Setup.exe) - it bundles
     the runtime, registers the shim with the AI clients it finds, and keeps the
     extension folder up to date.
 "@ -ForegroundColor DarkGray

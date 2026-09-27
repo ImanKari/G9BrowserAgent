@@ -95,7 +95,7 @@ export function validateApproved(doc, flowId = null) {
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return ['not an object'];
   if (doc.format !== APPROVED_FORMAT) problems.push(`format must be "${APPROVED_FORMAT}"`);
   if (!Number.isInteger(doc.schemaVersion)) problems.push('schemaVersion must be an integer');
-  else if (doc.schemaVersion > APPROVED_VERSION) problems.push(`schemaVersion ${doc.schemaVersion} is newer than this build (${APPROVED_VERSION}); update G9`);
+  else if (doc.schemaVersion > APPROVED_VERSION) problems.push(`schemaVersion ${doc.schemaVersion} is newer than this build (${APPROVED_VERSION}); update G9BrowserAgent`);
   if (flowId != null && doc.flowId !== flowId) problems.push(`it belongs to flow "${doc.flowId}", not "${flowId}"`);
   if (doc.knownWorld != null && (typeof doc.knownWorld !== 'object' || !Number.isFinite(doc.knownWorld.approvedAt))) {
     problems.push('knownWorld must be an approved known world (with approvedAt)');

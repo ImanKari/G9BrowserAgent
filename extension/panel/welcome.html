@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <!-- welcome.js sets the full title with the version from the manifest. -->
-  <title>G9 Browser Agent</title>
+  <title>G9BrowserAgent</title>
   <!-- Self-contained on purpose: no fonts, scripts or images from anywhere but
        this extension. It is the first page a new install shows, often on a
        machine whose proxy has not been sorted out yet. -->
@@ -112,7 +112,7 @@
     <div class="hero">
       <img src="icon128.png" alt="" width="64" height="64" />
       <div>
-        <h1>G9 Browser Agent</h1>
+        <h1>G9BrowserAgent</h1>
         <div class="bigver" id="ver" aria-label="Version">v2</div>
         <p class="status" id="status">is installed in this browser.</p>
       </div>
@@ -125,8 +125,8 @@
     </div>
 
     <p class="lede">
-      This extension is <b>Engine 1</b> of G9: your AI agents drive the tabs of this
-      browser — your sign-ins, your pages — through the local G9 daemon. For runs that
+      This extension is <b>Engine 1</b> of G9BrowserAgent: your AI agents drive the tabs of this
+      browser — your sign-ins, your pages — through the local G9BrowserAgent daemon. For runs that
       should not tie up your screen, the daemon launches its own browser in the
       background (<b>Engine 2</b>). Both run the same tools.
     </p>
@@ -134,18 +134,18 @@
     <h2>Set up — three steps</h2>
     <ol>
       <li>
-        <strong>Install G9 Desktop</strong>
-        <p>Run <code>G9-Setup.exe</code> once — per user, no admin rights. Its wizard picks
+        <strong>Install G9BrowserAgent Desktop</strong>
+        <p>Run <code>G9BrowserAgent-Setup.exe</code> once — per user, no admin rights. Its wizard picks
         the browser for background runs (your Edge or Chrome, or it downloads Chrome for
         Testing), opens the automation profile once so you can sign in, applies the
-        recommended browser policies (listed, with an undo), and registers G9 with the AI
+        recommended browser policies (listed, with an undo), and registers G9BrowserAgent with the AI
         clients it finds.</p>
       </li>
       <li class="done">
         <strong>Add this extension — done</strong>
         <p>You are reading this, so it is loaded. For the record: <em>Developer mode</em> →
         <em>Load unpacked</em> → paste the folder path the wizard copied to your clipboard.
-        Leave that folder where it is: the extension's id comes from its path, and G9
+        Leave that folder where it is: the extension's id comes from its path, and G9BrowserAgent
         Desktop updates it in place. On managed machines a policy installs it instead.</p>
       </li>
       <li>
@@ -156,8 +156,8 @@
     </ol>
 
     <div class="actions">
-      <button id="openPanel" type="button">Open the G9 panel</button>
-      <span class="hint">or click the G9 icon in the toolbar at any time.</span>
+      <button id="openPanel" type="button">Open the G9BrowserAgent panel</button>
+      <span class="hint">or click the G9BrowserAgent icon in the toolbar at any time.</span>
     </div>
 
     <h2>What changed in v2</h2>
@@ -185,7 +185,7 @@
       </div>
       <div class="card">
         <strong>Send to background</strong>
-        <p>Continues a tab in a browser G9 launches. The page reloads there with its
+        <p>Continues a tab in a browser G9BrowserAgent launches. The page reloads there with its
         cookies and storage; unsaved in-page state stays behind.</p>
       </div>
       <div class="card">
@@ -201,12 +201,12 @@
       </div>
     </div>
 
-    <h2>Without G9 Desktop (developer setup)</h2>
+    <h2>Without G9BrowserAgent Desktop (developer setup)</h2>
     <p class="status">Point your MCP client at the shim in a clone of the repository. It
     starts the daemon on <code>127.0.0.1:8765</code> when it needs it.</p>
     <pre>{
   "mcpServers": {
-    "g9-browser": {
+    "g9browseragent": {
       "command": "node",
       "args": ["&lt;path to the repo&gt;/mcp/shim.mjs"]
     }
@@ -223,7 +223,7 @@
       this browser and in the background.</p>
     </div>
 
-    <footer id="footer">G9 Browser Agent</footer>
+    <footer id="footer">G9BrowserAgent</footer>
   </main>
   <script src="welcome.js" type="module"></script>
 </body>

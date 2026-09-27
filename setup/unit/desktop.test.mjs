@@ -10,12 +10,12 @@
  * Two environment rules:
  *
  * - ELECTRON_RUN_AS_NODE is removed from the child's environment. Some hosts
- *   (an AI agent's shell, the packaged G9.exe running a Node script) export it,
+ *   (an AI agent's shell, the packaged G9BrowserAgent.exe running a Node script) export it,
  *   and with it set `electron` and the Electron-backed parts of the tests run as
  *   plain Node of another version — measured: `npx electron --version` printed
  *   v24.21.0 (the host's Node) instead of Electron 44.
  * - No desktop/node_modules (nobody ran `npm install` in desktop/): the suite is
- *   SKIPPED with a line saying so and exits 0. The rest of G9 has zero npm
+ *   SKIPPED with a line saying so and exits 0. The rest of G9BrowserAgent has zero npm
  *   dependencies and must stay testable without them; a skip is reported as a
  *   skip, never as a pass.
  *

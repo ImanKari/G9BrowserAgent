@@ -1,5 +1,5 @@
 /**
- * The G9 desktop window: the shell (navigation, connection bar, Stop control, notices) and the
+ * The G9BrowserAgent desktop window: the shell (navigation, connection bar, Stop control, notices) and the
  * router. Each view lives in views/<name>.js and exports { mount(el), unmount?(), update?(state) }.
  *
  * Everything the page knows arrives from main as a 'state' snapshot or an 'event'; everything it
@@ -37,7 +37,7 @@ function navigate(name, opts = {}) {
     if (b.dataset.view === name) b.setAttribute('aria-current', 'page');
     else b.removeAttribute('aria-current');
   }
-  document.title = `G9 — ${el.dataset.title}`;
+  document.title = `G9BrowserAgent — ${el.dataset.title}`;
   VIEWS[name].mount(el, opts);
   mounted.add(name);
   if (store.state) VIEWS[name].update?.(store.state);
@@ -143,7 +143,7 @@ function renderNotices(s) {
     items.push({
       tone: 'warn',
       text: m.kind && m.kind !== 'restart'
-        ? why || `The daemon is version ${m.daemonVersion}; this app is ${m.appVersion}. G9 leaves it running.`
+        ? why || `The daemon is version ${m.daemonVersion}; this app is ${m.appVersion}. G9BrowserAgent leaves it running.`
         : `The daemon is version ${m.daemonVersion}; this app is ${m.appVersion}. It restarts with the new version once it is idle (${why}).`,
     });
   }

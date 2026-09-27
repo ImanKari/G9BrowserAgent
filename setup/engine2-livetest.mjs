@@ -619,7 +619,7 @@ async function sectionLaunch() {
   await must(A, 'browser_navigate', { action: 'wait', selector: '#e2lab', tabId: S.tabMain, timeoutMs: 20_000 }, 'wait for the lab');
   await sleep(900); // the page throws its deliberate ReferenceError 300 ms after load
   const seen = await pageEval(A, S.tabMain, '({ title: document.title, href: location.href, lab: !!document.getElementById("e2lab") })');
-  check(seen.title === 'G9 Agent Test Page' && seen.href === S.testUrl && seen.lab, 'the page itself reports the test page loaded', short(seen));
+  check(seen.title === 'G9BrowserAgent Test Page' && seen.href === S.testUrl && seen.lab, 'the page itself reports the test page loaded', short(seen));
   // Round 3: headless got --screen-info with a taskbar work area and a window that fills it.
   const geo = await pageEval(A, S.tabMain, '({ sw: screen.width, sh: screen.height, aw: screen.availWidth, ah: screen.availHeight, ow: outerWidth, oh: outerHeight, iw: innerWidth, ih: innerHeight, dpr: devicePixelRatio, vis: document.visibilityState, headlessUA: /HeadlessChrome/.test(navigator.userAgent) })');
   check(geo.sw === 1920 && geo.sh === 1080 && geo.ah < geo.sh && geo.ow > 0 && geo.oh > 0 && geo.oh <= geo.ah && geo.ow <= geo.aw,
@@ -629,7 +629,7 @@ async function sectionLaunch() {
   const hits = await (await fetch(`${S.web}/e2/stats`)).json();
   check((hits.hits['/testpage.html'] ?? 0) >= 1 && (hits.hits['/crossframe.html'] ?? 0) >= 1 && (hits.hits['/api/missing'] ?? 0) >= 1,
     'the server saw the page, its cross-origin frame and /api/missing requested', short({ page: hits.hits['/testpage.html'], frame: hits.hits['/crossframe.html'], missing: hits.hits['/api/missing'] }));
-  // The first load of a tab G9 opened itself: Engine 2 tabs are attached from
+  // The first load of a tab G9BrowserAgent opened itself: Engine 2 tabs are attached from
   // birth, so nothing of that load may be missing from capture.
   const firstLoad = await must(A, 'browser_network', { tabId: S.tabMain, limit: 100 });
   const urls = (firstLoad.requests ?? []).map((q) => q.url);
@@ -650,7 +650,7 @@ async function sectionStatus() {
   check(/^agent-\d+$/.test(s.you?.agentId ?? '') && s.you?.current === S.tabMain, 'status.you: my agent id and my current tab', short(s.you));
   check(s.you?.name === 'e2-agent-A', 'status.you.name is the MCP clientInfo name', s.you?.name);
   check(s.engine?.engineId === S.engineId && s.engine?.kind === 'launched', 'status.engine is the engine of my current tab', short(s.engine));
-  check(s.current?.tabId === S.tabMain && s.current?.url === S.testUrl && s.current?.title === 'G9 Agent Test Page', 'status.current describes my tab (url, title)', short(s.current));
+  check(s.current?.tabId === S.tabMain && s.current?.url === S.testUrl && s.current?.title === 'G9BrowserAgent Test Page', 'status.current describes my tab (url, title)', short(s.current));
   const row = s.engines?.find((x) => x.engineId === S.engineId);
   check(row?.kind === 'launched' && row?.browser === 'edge' && row?.headless === true && row?.pid === S.enginePid, 'status.engines lists the launched engine (browser, headless, pid)', short(row && { kind: row.kind, browser: row.browser, headless: row.headless, pid: row.pid }));
   check(s.halted?.global === false && s.halted?.mine === false, 'status.halted: not halted');
@@ -677,7 +677,7 @@ async function sectionTabs() {
   const { A } = S;
   const list = await must(A, 'browser_tabs', { action: 'list' });
   const row = list.tabs?.find((t) => t.tabId === S.tabMain);
-  check(row && row.url === S.testUrl && row.title === 'G9 Agent Test Page' && row.engineKind === 'launched' && row.engine === S.engineId,
+  check(row && row.url === S.testUrl && row.title === 'G9BrowserAgent Test Page' && row.engineKind === 'launched' && row.engine === S.engineId,
     'list: my tab with full url/title, engine, engineKind', short(row));
   check(row?.owner === S.agentA && row?.current === true, 'list: owner is me, current:true', short({ owner: row?.owner, current: row?.current }));
 
@@ -717,7 +717,7 @@ async function sectionTabs() {
 async function sectionSnapshot() {
   const { A } = S;
   const s1 = await snap(A, S.tabMain);
-  check(s1.title === 'G9 Agent Test Page' && s1.url === S.testUrl, 'snapshot: title and url', short({ title: s1.title, url: s1.url }));
+  check(s1.title === 'G9BrowserAgent Test Page' && s1.url === S.testUrl, 'snapshot: title and url', short({ title: s1.title, url: s1.url }));
   const want = [['button', 'Sign in'], ['textbox', 'Username'], ['button', 'Lab button'], ['textbox', 'Lab text'], ['link', 'Download data file']];
   const missing = want.filter(([role, name]) => !s1.refs.some((r) => r.role === role && r.name === name && !r.inFrame));
   check(!missing.length, 'snapshot: refs for the controls a person would use', missing.length ? `missing ${short(missing)}` : `${s1.interactiveCount} interactive`);
@@ -872,7 +872,7 @@ async function interactAt(level) {
     // At off the move and the press are back to back, and where the press
     // lands is Chromium's race (measured, runs of this suite: on the moved
     // button — pointerdown and click on it — or on the track). A button that
-    // left before G9 aimed is refused at its centre, with nothing pressed.
+    // left before G9BrowserAgent aimed is refused at its centre, with nothing pressed.
     // Whatever the page saw, the tool must say the same.
     const refusedFirst = !r.ok && runDowns.length === 0 && run?.clicks === 0 && /not clickable/.test(r.text);
     check((onButton && r.ok && r.data?.delivery === 'delivered') || (onTrack && saysMissed) || refusedFirst,
@@ -1080,7 +1080,7 @@ async function sectionConsoleNetwork() {
   if (doc?.requestId) {
     const detail = await must(A, 'browser_network', { tabId: S.tabMain, requestId: doc.requestId });
     const body = typeof detail.body === 'string' ? detail.body : typeof detail.responseBody === 'string' ? detail.responseBody : JSON.stringify(detail);
-    check(/G9 Agent Test Page/.test(body), 'network requestId: the document\'s response body', `${body.length} chars`);
+    check(/G9BrowserAgent Test Page/.test(body), 'network requestId: the document\'s response body', `${body.length} chars`);
   } else {
     bad('network list has the document request', short(netw.requests?.slice(0, 3)));
   }
@@ -1499,7 +1499,7 @@ async function sectionRecording() {
     await must(A, 'browser_interact', { action: 'click', ref: s.ref('button', 'Sign in'), tabId: tab });
     // While the recorder is armed: nothing of it in the page's main world.
     S.midRecordingNames = await mainWorldLeaks(tab);
-    check(S.midRecordingNames.length === 0, 'while recording: no G9 name in the page\'s main world', short(S.midRecordingNames));
+    check(S.midRecordingNames.length === 0, 'while recording: no G9BrowserAgent name in the page\'s main world', short(S.midRecordingNames));
     const stop = await A.call('browser_recording', { action: 'stop', tabId: tab });
     check(stop.ok && stop.data?.steps >= 3, 'recording stop: steps captured', stop.ok ? short(stop.data?.outline) : stop.text);
     if (stop.ok) {
@@ -1544,7 +1544,7 @@ async function sectionRecording() {
   check(kw.ok && kw.data?.runs >= 1, 'seedKnownWorld created a known world', short(kw.data ?? kw.text));
 }
 
-/** Names in the page's MAIN world that G9 put there (page-owned __g9 names excluded). */
+/** Names in the page's MAIN world that G9BrowserAgent put there (page-owned __g9 names excluded). */
 async function mainWorldLeaks(tab) {
   const pageOwn = [...new Set([...fs.readFileSync(path.join(HERE, 'testpage.html'), 'utf8').matchAll(/window\.(__g9\w+)/g)].map((m) => m[1]))];
   return pageEval(S.A, tab, `Object.getOwnPropertyNames(window).filter((n) => /^__g9|g9emit/i.test(n) && !${JSON.stringify(pageOwn)}.includes(n))`);
@@ -1620,7 +1620,7 @@ async function sectionTwoAgents() {
   const tabC = openedC.tabId;
   await must(C, 'browser_navigate', { action: 'wait', selector: '#e2lab', tabId: tabC, timeoutMs: 20_000 });
   // Round 2 (bench B4): a second Engine 2 tab put the first one behind it,
-  // and input to the hidden one was lost. Every page G9 opens has its own
+  // and input to the hidden one was lost. Every page G9BrowserAgent opens has its own
   // window now, so both must be visible, and the first still takes input.
   const visMain = await pageEval(A, S.tabMain, 'document.visibilityState');
   const visC = await pageEval(C, tabC, 'document.visibilityState');
@@ -1822,7 +1822,7 @@ async function sectionParallel() {
 /**
  * Windows the PAGE opens. They join the opener's browser window as tabs, in
  * front of the opener (platform-cdp createTabIn gives a window of its own only
- * to pages G9 opens). Three ways a page does it:
+ * to pages G9BrowserAgent opens). Three ways a page does it:
  *  - window.open() from a click (OAuth/SSO, payment, "open in new window");
  *  - a target=_blank link;
  *  - a target=_blank link to a download.
@@ -2116,7 +2116,7 @@ async function sectionHandoff() {
   const url = `${S.testUrl}?handoff=1`;
   const payload = {
     url,
-    title: 'G9 Agent Test Page (handoff)',
+    title: 'G9BrowserAgent Test Page (handoff)',
     origin: S.web,
     cookies: [
       { name: 'e2hand', value: 'from-ext', domain: '127.0.0.1', hostOnly: true, path: '/', secure: false, httpOnly: false, session: true, sameSite: 'lax' },
@@ -2166,7 +2166,7 @@ async function sectionHandoff() {
  * window (a same-origin about:blank iframe created now) nor the test page's
  * own script explains. Frame indices ("0", "1") are not names anyone added.
  * Also: every name, in the page or the pristine window, that looks like an
- * automation artefact (a G9 helper, a CDP binding, a driver marker).
+ * automation artefact (a G9BrowserAgent helper, a CDP binding, a driver marker).
  */
 async function mainWorldExtras(tab) {
   const html = fs.readFileSync(path.join(HERE, 'testpage.html'), 'utf8');
@@ -2199,7 +2199,7 @@ async function sectionCleanliness() {
       const x = await mainWorldExtras(tab);
       const dom = await pageEval(S.A, tab, 'document.querySelectorAll("[id^=__g9], [class*=__g9], [id*=g9-], g9-cursor").length');
       check(leaks.length === 0 && x.extras.length === 0 && x.suspicious.length === 0 && x.suspiciousInPristine.length === 0 && dom === 0,
-        `tab ${tab}: the page's main world has no name G9 added (vs a pristine window) and no G9 element, after all tools`,
+        `tab ${tab}: the page's main world has no name G9BrowserAgent added (vs a pristine window) and no G9BrowserAgent element, after all tools`,
         short({ leaks, extras: x.extras, suspicious: x.suspicious, inPristine: x.suspiciousInPristine, names: `${x.total} vs pristine ${x.pristine}` }));
     } catch (err) {
       bad(`tab ${tab}: cleanliness check`, err.message);
@@ -2320,7 +2320,7 @@ async function sectionLocale() {
   const p1 = await personaProbe(o1.tabId);
   check(good(p1), 'de-DE persona: navigator.languages, Intl, timezone, Accept-Language and a dedicated worker all agree', short(p1, 500));
   const boot1 = await pageEval(A, o1.tabId, 'window.e2boot');
-  check(boot1?.tz === 'Europe/Berlin' && boot1?.locale === 'de-DE' && boot1?.language === 'de-DE', 'de-DE persona, a tab G9 opened: the document already saw it while loading', short(boot1));
+  check(boot1?.tz === 'Europe/Berlin' && boot1?.locale === 'de-DE' && boot1?.language === 'de-DE', 'de-DE persona, a tab G9BrowserAgent opened: the document already saw it while loading', short(boot1));
   // A tab the PAGE opens (target=_blank) in that persona: same persona from its first script?
   try {
     const s1 = await snap(A, o1.tabId);
@@ -2439,7 +2439,7 @@ async function cleanup() {
   }
 }
 
-console.log(`\n${color(1, 'G9 v2 — Engine 2 live test (product path)')} ${color(90, `(v${VERSION}, node ${process.version})`)}`);
+console.log(`\n${color(1, 'G9BrowserAgent v2 — Engine 2 live test (product path)')} ${color(90, `(v${VERSION}, node ${process.version})`)}`);
 const startedAt = Date.now();
 try {
   await run('setup', 'serve.mjs, daemon, shim', setup, { core: true });

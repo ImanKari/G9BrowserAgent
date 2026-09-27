@@ -70,7 +70,7 @@ export async function watch(tabId, { downloadPath } = {}) {
   if (!platform.downloads.available) {
     throw new Error(
       'Download tracking is not available in this engine: the extension build lacks the "downloads" ' +
-        'permission. Reload the G9 v2 extension, or run the flow on a launched engine.',
+        'permission. Reload the G9BrowserAgent v2 extension, or run the flow on a launched engine.',
     );
   }
   const began = await platform.downloads.begin(tabId, { downloadPath });

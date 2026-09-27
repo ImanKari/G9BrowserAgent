@@ -1,5 +1,5 @@
 /**
- * G9 FlowSpec — the portable, versioned form of a recorded flow.
+ * G9BrowserAgent FlowSpec — the portable, versioned form of a recorded flow.
  *
  * ## Why a second representation exists
  *
