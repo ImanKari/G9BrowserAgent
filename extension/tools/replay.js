@@ -55,6 +55,7 @@ import * as observe from './observe.js';
 import {
   buildSignature, detectSurprises, classifySurprises, mergeKnownWorld,
   calibrateVolatile, emptyKnownWorld, describeSurprise,
+  envKeyOf, knownWorldFor, withKnownWorld, renormalizeKnownWorld,
 } from '../lib/signature.js';
 import { DEFAULT_SENSITIVITY } from '../lib/flowspec.js';
 
@@ -104,10 +105,16 @@ const SIGNATURE_MODES = {
 export async function replay(tabId, {
   id, timing = 'recorded', stopOnFailure = true, dryRun = false, variables = {},
   signature: signatureMode = 'lite', compare = true, seedKnownWorld = false,
-  includeSignature = false, humanize, seed,
+  includeSignature = false, humanize, seed, environment, urlNormalizers,
 } = {}) {
   const recording = await getRecording(id);
   if (!recording) throw new Error(`No recording with id "${id}". Call browser_recording action:"list" to see them.`);
+
+  // Which environment's known world this run belongs to (the runner's --env,
+  // else the flow's own environment, else the default), and the project's url
+  // rules — both arrive as arguments because this module knows no project.
+  const envName = envKeyOf(environment ?? recording.environment?.name ?? recording.environment);
+  const normalizers = urlNormalizers ?? recording.urlNormalizers ?? [];
 
   // Resolved once, up front: an unknown profile name fails before step 1, not
   // halfway through a flow.
@@ -289,15 +296,18 @@ export async function replay(tabId, {
   if (signatureMode !== 'off') {
     runSignature = buildSignature({
       flowId: recording.flowId ?? recording.id,
-      environment: recording.environment?.name ?? recording.environment ?? null,
+      environment: envName,
       platform: 'web',
       build: recording.build ?? null,
-      normalizers: recording.urlNormalizers ?? [],
+      normalizers,
       steps: results,
     });
 
     if (compare) {
-      const detection = detectSurprises(recording.knownWorld, runSignature, { sensitivity });
+      // The stored world's keys are re-normalised with today's url rules, so a
+      // rule added after the approval collapses BOTH sides the same way.
+      const world = renormalizeKnownWorld(knownWorldFor(recording, envName), normalizers);
+      const detection = detectSurprises(world, runSignature, { sensitivity });
       classified = classifySurprises(detection.surprises, recording.surpriseHistory ?? []);
 
       // ⚠️ BOUNDED. The first live run against a real data-heavy page produced
@@ -336,7 +346,8 @@ export async function replay(tabId, {
       };
       summary.knownWorld = detection.seeded
         ? { seeded: false, runs: 0, note: detection.note }
-        : { runs: detection.knownWorldRuns, volatileKeys: (recording.knownWorld?.volatile ?? []).length };
+        : { runs: detection.knownWorldRuns, volatileKeys: (world?.volatile ?? []).length };
+      summary.environment = envName;
     }
     // Never sent to an agent: a full signature is kilobytes of normalised
     // evidence. Internal callers (calibration, A/B) ask for it by name.
@@ -361,23 +372,21 @@ export async function replay(tabId, {
     const passRuns = recent.filter((item) => item.failed === 0).length;
     const failRuns = recent.length - passRuns;
 
-    // The known world is only ever grown by a human approving a run, EXCEPT for
-    // the very first one: a flow with no known world can never produce a useful
-    // comparison, and asking somebody to approve an empty baseline they have
-    // not seen is theatre. `seedKnownWorld` makes that first merge explicit.
-    const shouldSeed = seedKnownWorld && runSignature && !(recording.knownWorld?.runs);
     // Read again before writing: an approval made WHILE this run was going would otherwise be
     // undone by the copy read at the start (the flow would still be reported as approved).
     const current = (await getRecording(id)) ?? recording;
+    // The known world is only ever grown by a human approving a run, EXCEPT for
+    // the very first one: a flow with no known world can never produce a useful
+    // comparison, and asking somebody to approve an empty baseline they have
+    // not seen is theatre. `seedKnownWorld` makes that first merge explicit —
+    // per environment: seeding test2's first world never touches test1's.
+    const shouldSeed = seedKnownWorld && runSignature && !(knownWorldFor(current, envName)?.runs);
 
-    await saveRecording({
+    let next = {
       ...current,
       lastRun: run,
       runHistory,
       lastSignature: runSignature ?? current.lastSignature ?? null,
-      knownWorld: shouldSeed
-        ? { ...mergeKnownWorld(emptyKnownWorld(runSignature), runSignature), approvedAt: Date.now(), approvedBy: 'seed' }
-        : current.knownWorld ?? null,
       surpriseHistory: [...(current.surpriseHistory ?? []), classified.map((s) => ({ key: s.key, kind: s.kind }))].slice(-5),
       flaky: {
         detected: passRuns > 0 && failRuns > 0,
@@ -385,7 +394,13 @@ export async function replay(tabId, {
         passRuns,
         failRuns,
       },
-    });
+    };
+    if (shouldSeed) {
+      next = withKnownWorld(next, envName, {
+        ...mergeKnownWorld(emptyKnownWorld(runSignature), runSignature), approvedAt: Date.now(), approvedBy: 'seed',
+      });
+    }
+    await saveRecording(next);
     summary.flaky = passRuns > 0 && failRuns > 0;
     if (shouldSeed) summary.knownWorld = { runs: 1, seeded: true, note: 'Known world seeded from this run.' };
   }
@@ -401,8 +416,11 @@ export async function replay(tabId, {
  * not slowly blind the suite, because it only ever excludes things that were
  * proven unstable rather than things somebody found annoying.
  */
-export async function calibrate(tabId, { id, timing = 'recorded', variables = {}, humanize } = {}) {
-  const options = { id, timing, variables, signature: 'full', compare: false, stopOnFailure: true, includeSignature: true, humanize };
+export async function calibrate(tabId, { id, timing = 'recorded', variables = {}, humanize, environment, urlNormalizers } = {}) {
+  const options = {
+    id, timing, variables, signature: 'full', compare: false, stopOnFailure: true, includeSignature: true, humanize,
+    ...(environment !== undefined ? { environment } : {}), ...(urlNormalizers !== undefined ? { urlNormalizers } : {}),
+  };
 
   const first = await replay(tabId, options);
   if (first.failed) {
@@ -418,11 +436,15 @@ export async function calibrate(tabId, { id, timing = 'recorded', variables = {}
 
   const volatile = calibrateVolatile(first.signature, second.signature);
   const recording = await getRecording(id);
-  const knownWorld = { ...(recording.knownWorld ?? emptyKnownWorld(second.signature)), volatile };
-  await saveRecording({ ...recording, knownWorld });
+  // The noise mask belongs to the environment it was measured on: the run's
+  // signature already carries the resolved environment key.
+  const envName = envKeyOf(second.signature?.environment ?? environment ?? recording.environment?.name ?? recording.environment);
+  const knownWorld = { ...(knownWorldFor(recording, envName) ?? emptyKnownWorld(second.signature)), volatile };
+  await saveRecording(withKnownWorld(recording, envName, knownWorld));
 
   return {
     id,
+    environment: envName,
     runs: 2,
     volatileKeys: volatile.length,
     volatile: volatile.slice(0, 60),
@@ -438,11 +460,21 @@ export async function calibrate(tabId, { id, timing = 'recorded', variables = {}
  * Deliberately a separate, explicit action. Everything else in this file is
  * allowed to observe; only a person is allowed to say "that is normal now".
  */
-export async function approveKnownWorld(id, { by = 'operator', note = null, expectLastRunAt = null } = {}) {
+export async function approveKnownWorld(id, { by = 'operator', note = null, expectLastRunAt = null, environment } = {}) {
   const recording = await getRecording(id);
   if (!recording) throw new Error(`No recording with id "${id}".`);
   if (!recording.lastSignature) {
     throw new Error('There is no recorded signature to approve. Replay the flow once, then approve that run.');
+  }
+  // The approval lands in the environment the REVIEWED run ran on — its
+  // signature says which. An explicit environment that disagrees is refused:
+  // folding a test1 run into test2's known world would poison both worlds.
+  const runEnv = envKeyOf(recording.lastSignature.environment ?? recording.environment?.name ?? recording.environment);
+  if (environment != null && envKeyOf(environment) !== runEnv) {
+    throw new Error(
+      `The last run of "${recording.name ?? id}" was on environment "${runEnv}", not "${envKeyOf(environment)}", so nothing was approved. ` +
+        'Replay the flow on that environment first, then approve that run.',
+    );
   }
   // What is approved is the run the person REVIEWED. A replay that finished between the review and
   // the press replaced lastSignature, and its surprises — a real regression among them — went into
@@ -455,13 +487,14 @@ export async function approveKnownWorld(id, { by = 'operator', note = null, expe
         'Review that run and approve it instead.',
     );
   }
-  const merged = mergeKnownWorld(recording.knownWorld, recording.lastSignature);
+  const merged = mergeKnownWorld(knownWorldFor(recording, runEnv), recording.lastSignature);
   // A person's name, never the word a first run uses for itself (lib/approved.js isApproved).
   const approver = by === 'seed' ? 'operator' : by;
   const knownWorld = { ...merged, approvedAt: Date.now(), approvedBy: approver, approvalNote: note };
-  await saveRecording({ ...recording, knownWorld, surpriseHistory: [] });
+  await saveRecording(withKnownWorld({ ...recording, surpriseHistory: [] }, runEnv, knownWorld));
   const result = {
     id,
+    environment: runEnv,
     runs: knownWorld.runs,
     networkOperations: Object.keys(knownWorld.network).length,
     consoleSignatures: Object.keys(knownWorld.console).length,
@@ -1185,8 +1218,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function parameterDefaults(parameters) {
   if (!parameters || typeof parameters !== 'object') return {};
-  return Object.fromEntries(Object.entries(parameters).map(([key, value]) => [
-    key,
-    value && typeof value === 'object' && 'default' in value ? value.default : value,
-  ]));
+  const out = {};
+  for (const [key, value] of Object.entries(parameters)) {
+    if (value && typeof value === 'object') {
+      // A secretRef NAMES a secret; it never has a value here. Leaving it out
+      // makes an unresolved secret fail loudly at substitution ("Missing data
+      // parameter") — the old code handed the declaration object itself over,
+      // and the flow typed "[object Object]" into the password field.
+      if (value.type === 'secretRef') continue;
+      if ('default' in value) out[key] = value.default;
+      continue;
+    }
+    out[key] = value;
+  }
+  return out;
 }

@@ -292,7 +292,85 @@ export function buildSignature({
   };
 }
 
+/**
+ * Re-apply the project's url rules to keys that were STORED before the rules
+ * existed (or changed).
+ *
+ * `buildSignature` normalises the current run with whatever `urlNormalizers`
+ * the project declares today; a known world merged last month holds keys built
+ * with last month's rules. Comparing the two raw would report `/api/orders/<id>`
+ * as new AND missing on every run — so the stored side is re-normalised at
+ * comparison time, and both sides collapse to the same operation.
+ *
+ * Two stored keys that collapse into one keep the LARGER count: the operation
+ * was seen on at least that many runs, and overstating it (summing) could claim
+ * more runs than the world has, which breaks the "universal" rule for the
+ * missing direction.
+ */
+export function normalizeOperationKey(key, normalizers = []) {
+  const parts = /^([A-Z]+) (.*) (\S+)$/.exec(String(key ?? ''));
+  if (!parts) return key;
+  let operation = parts[2];
+  for (const rule of normalizers) {
+    try {
+      const re = new RegExp(rule.match);
+      if (re.test(operation)) operation = operation.replace(re, rule.as ?? '{id}');
+    } catch {
+      /* a bad rule in project config must not break a run */
+    }
+  }
+  return `${parts[1]} ${operation} ${parts[3]}`;
+}
+
+export function renormalizeKnownWorld(knownWorld, normalizers = []) {
+  if (!knownWorld || !normalizers?.length) return knownWorld;
+  const network = {};
+  for (const [key, count] of Object.entries(knownWorld.network ?? {})) {
+    const next = normalizeOperationKey(key, normalizers);
+    network[next] = Math.max(network[next] ?? 0, count);
+  }
+  const volatile = [...new Set((knownWorld.volatile ?? []).map((key) => normalizeOperationKey(key, normalizers)))];
+  return { ...knownWorld, network, volatile };
+}
+
 // ---------------------------------------------------------------- known world
+
+/**
+ * Known worlds are kept PER ENVIRONMENT: what "normal" looks like on test1 is
+ * not what it looks like on test2 — the hosts differ, the data differs, and a
+ * world merged across them calls every run half-surprising.
+ *
+ * The shape is compatible by construction: `recording.knownWorld` (and the
+ * sidecar's flat `knownWorld`) IS the default environment's world — every
+ * store, panel and sidecar written before this keeps meaning what it meant.
+ * Named environments live under `recording.knownWorlds[envName]`. A run whose
+ * environment is unset (no `--env`, no flow environment) uses the default key.
+ */
+export const KNOWN_WORLD_DEFAULT_ENV = 'default';
+
+/** The environment key a run or approval files under: a trimmed name, else the default. */
+export function envKeyOf(environment) {
+  const name = environment && typeof environment === 'object' ? environment.name : environment;
+  const text = String(name ?? '').trim();
+  return text || KNOWN_WORLD_DEFAULT_ENV;
+}
+
+/** The known world a run on `environment` compares against; null when there is none yet. */
+export function knownWorldFor(recording, environment) {
+  const key = envKeyOf(environment);
+  if (key === KNOWN_WORLD_DEFAULT_ENV) return recording?.knownWorld ?? null;
+  return recording?.knownWorlds?.[key] ?? null;
+}
+
+/** The recording with `environment`'s known world replaced (null removes it). */
+export function withKnownWorld(recording, environment, knownWorld) {
+  const key = envKeyOf(environment);
+  if (key === KNOWN_WORLD_DEFAULT_ENV) return { ...recording, knownWorld: knownWorld ?? null };
+  const knownWorlds = { ...(recording?.knownWorlds ?? {}) };
+  if (knownWorld == null) delete knownWorlds[key];
+  else knownWorlds[key] = knownWorld;
+  return { ...recording, knownWorlds };
+}
 
 export function emptyKnownWorld({ flowId, environment = null, platform = 'web' } = {}) {
   return {

@@ -151,6 +151,12 @@ const RECORDER_SOURCE = `
     return out;
   };
 
+  // A password field's value never leaves the page — not even into the raw
+  // event buffer. The step is emitted with an empty value and a marker; the
+  // extension's normalize() turns it into a {{secret:…}} placeholder and a
+  // declared secretRef parameter. Detection matches the sampler's rule below.
+  const secret = (el) => !!el && (el.type === 'password' || /(current|new)-password/.test(String((el.getAttribute && el.getAttribute('autocomplete')) || '')));
+
   on('click', (e) => {
     if (!e.isTrusted) return;
     send('click', e.composedPath ? e.composedPath()[0] : e.target, { button: 'left', detail: e.detail, modifiers: mods(e) });
@@ -172,6 +178,10 @@ const RECORDER_SOURCE = `
     const el = e.target;
     if (!el || !('value' in el)) return;
     if (el.tagName === 'SELECT' || el.type === 'checkbox' || el.type === 'radio' || el.type === 'file') return;
+    if (secret(el)) {
+      send('change', el, { value: '', secret: true, inputType: e.inputType || null, live: true });
+      return;
+    }
     send('change', el, { value: String(el.value), inputType: e.inputType || null, live: true });
   }, true);
 
@@ -196,7 +206,11 @@ const RECORDER_SOURCE = `
       });
       return;
     }
-    if ('value' in el) send('change', el, { value: String(el.value), committed: true });
+    if ('value' in el) {
+      send('change', el, secret(el)
+        ? { value: '', secret: true, committed: true }
+        : { value: String(el.value), committed: true });
+    }
   }, true);
 
   // Only keys that carry meaning on their own. Ordinary characters arrive as
@@ -308,7 +322,7 @@ const RECORDER_SOURCE = `
     if (/^[\\p{P}\\p{S}]$/u.test(k)) return '.';
     return 'a';
   };
-  const secret = (el) => !!el && (el.type === 'password' || /(current|new)-password/.test(String((el.getAttribute && el.getAttribute('autocomplete')) || '')));
+  // (secret() is declared above, next to mods(): the step events use it too.)
   const pairing = new Map();
   let pairs = 0;
   on('keydown', (e) => {
@@ -596,12 +610,17 @@ export async function stopRecording(tabId) {
   const allRaw = [...raw, ...tail.events.filter((e) => e.type !== 'samples')]
     .sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
   const steps = normalize(allRaw);
+  // A masked password field became a {{secret:…}} step in normalize(); the
+  // matching secretRef parameter is declared here, so the flow says what it
+  // needs and a spec export refuses to ever carry the value.
+  const secretParameters = secretParametersOf(steps);
   const recording = await saveRecording({
     name: current.name,
     startUrl: current.startUrl,
     createdAt: current.startedAt,
     durationMs: Date.now() - current.startedAt,
     steps,
+    ...(Object.keys(secretParameters).length ? { parameters: secretParameters } : {}),
     recorderWarnings: dropped
       ? [`${dropped} oldest raw events were discarded after the ${MAX_RAW_EVENTS}-event safety cap.`]
       : [],
@@ -806,6 +825,25 @@ export function normalize(raw) {
     steps.push({ ...e });
   }
 
+  // A password field's typed value was never emitted (the in-page recorder
+  // masks it at the source). What remains is the marker; it becomes a
+  // {{secret:…}} placeholder here, one name per distinct field — password,
+  // password2, … — so replay resolves it from the run's secrets and the stored
+  // flow never carries the credential.
+  const secretNames = new Map();
+  let secretCount = 0;
+  for (const step of steps) {
+    if (step.type !== 'type' || !step.secret) continue;
+    const key = strongestLocatorKey(step.target);
+    let name = key != null ? secretNames.get(key) : null;
+    if (!name) {
+      secretCount += 1;
+      name = secretCount === 1 ? 'password' : `password${secretCount}`;
+      if (key != null) secretNames.set(key, name);
+    }
+    step.value = `{{secret:${name}}}`;
+  }
+
   // Wall-clock gaps, capped: a QA who answered the phone mid-session should not
   // bake a four-minute pause into the test.
   let previous = null;
@@ -814,9 +852,27 @@ export function normalize(raw) {
     previous = step.at;
     delete step.live;
     delete step.committed;
+    delete step.secret;
   }
 
   return steps;
+}
+
+/**
+ * The secretRef parameters a recording's steps declare: every distinct
+ * `{{secret:<name>}}` a type step carries, as `{ name: { type: 'secretRef',
+ * required: true } }`. This is what makes a masked password field visible in
+ * the FlowSpec: the runner sees the parameter and resolves (or refuses) it
+ * BEFORE the flow runs.
+ */
+export function secretParametersOf(steps) {
+  const parameters = {};
+  for (const step of steps ?? []) {
+    if (step?.type !== 'type' || typeof step.value !== 'string') continue;
+    const match = /^\{\{secret:([A-Za-z_][A-Za-z0-9_.-]*)\}\}$/.exec(step.value);
+    if (match) parameters[match[1]] = { type: 'secretRef', required: true };
+  }
+  return parameters;
 }
 
 function pushOrReplaceValue(steps, e) {
@@ -826,10 +882,12 @@ function pushOrReplaceValue(steps, e) {
     target: e.target,
     value: e.value,
     at: e.at,
+    ...(e.secret ? { secret: true } : {}),
   };
   if (last && last.type === step.type && sameTarget(last.target, e.target)) {
     last.value = e.value;
     last.at = e.at;
+    if (e.secret) last.secret = true;
     return;
   }
   steps.push(step);
@@ -842,16 +900,19 @@ function pushOrReplaceValue(steps, e) {
  */
 export function sameTarget(a, b) {
   if (!a || !b) return false;
-  const key = (t) => {
-    const byKind = {};
-    for (const loc of t.locators || []) byKind[loc.kind] = loc;
-    for (const kind of ['testid', 'role', 'label', 'css', 'xpath']) {
-      if (byKind[kind]) return kind + ':' + JSON.stringify(byKind[kind]);
-    }
-    return null;
-  };
-  const ka = key(a);
-  return ka !== null && ka === key(b);
+  const ka = strongestLocatorKey(a);
+  return ka !== null && ka === strongestLocatorKey(b);
+}
+
+/** The strongest locator a descriptor carries, as a comparable string; null when it has none. */
+function strongestLocatorKey(target) {
+  if (!target) return null;
+  const byKind = {};
+  for (const loc of target.locators || []) byKind[loc.kind] = loc;
+  for (const kind of ['testid', 'role', 'label', 'css', 'xpath']) {
+    if (byKind[kind]) return kind + ':' + JSON.stringify(byKind[kind]);
+  }
+  return null;
 }
 
 /** One human line per step, for the panel and for the agent. */

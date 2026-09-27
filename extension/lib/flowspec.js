@@ -80,7 +80,8 @@ export function toFlowSpec(recording, { platform = 'web', adapter = 'chromium-cd
   for (const [name, raw] of Object.entries(recording.parameters ?? {})) {
     const value = raw && typeof raw === 'object' ? raw : { default: raw };
     if (value.type === 'secretRef') {
-      if ('default' in value && value.default != null && value.default !== '') {
+      if (('default' in value && value.default != null && value.default !== '')
+        || ('value' in value && value.value != null && value.value !== '')) {
         throw new Error(
           `Parameter "${name}" is declared secretRef but carries a literal default. ` +
             `A FlowSpec must never contain a secret value — store the name only.`,
@@ -148,6 +149,9 @@ export function toFlowSpec(recording, { platform = 'web', adapter = 'chromium-cd
     risk: recording.risk ?? undefined,
     startUrl: recording.startUrl ?? undefined,
     environment: recording.environment?.name ?? recording.environment ?? undefined,
+    // What this flow needs before it may run (the runner's preflight): carried
+    // whole, so a Pull → Push round trip cannot silently drop it.
+    requires: recording.requires ?? undefined,
     parameters: Object.keys(parameters).length ? parameters : undefined,
     sensitivity: { ...DEFAULT_SENSITIVITY, ...(recording.sensitivity ?? {}) },
     knownWorldRef: recording.knownWorldRef ?? undefined,
@@ -215,6 +219,7 @@ export function fromFlowSpec(spec) {
     risk: spec.risk ?? null,
     startUrl: spec.startUrl ?? null,
     environment: spec.environment ? { name: spec.environment } : null,
+    requires: spec.requires ?? null,
     parameters: spec.parameters ?? {},
     sensitivity: { ...DEFAULT_SENSITIVITY, ...(spec.sensitivity ?? {}) },
     knownWorldRef: spec.knownWorldRef ?? null,
@@ -223,8 +228,14 @@ export function fromFlowSpec(spec) {
   };
 }
 
-/** Every problem at once, so a fix is one edit rather than a game of whack-a-mole. */
-export function validateFlowSpec(spec) {
+/**
+ * Every problem at once, so a fix is one edit rather than a game of whack-a-mole.
+ *
+ * `actions` widens the accepted step actions for a platform whose driver
+ * understands more than the web replayer does (the AgriPad driver's `dismiss`).
+ * It only ever ADDS: an action outside the set is still refused, never skipped.
+ */
+export function validateFlowSpec(spec, { actions = KNOWN_ACTIONS } = {}) {
   const problems = [];
   if (!spec || typeof spec !== 'object') return ['Not an object.'];
   if (spec.format !== FLOWSPEC_FORMAT) problems.push(`format must be "${FLOWSPEC_FORMAT}".`);
@@ -245,7 +256,7 @@ export function validateFlowSpec(spec) {
     if (!step.id) problems.push(`${where} has no id; ids are what keep a fingerprint stable across edits.`);
     else if (ids.has(step.id)) problems.push(`${where} repeats id "${step.id}".`);
     else ids.add(step.id);
-    if (!KNOWN_ACTIONS.has(step.action)) {
+    if (!actions.has(step.action)) {
       problems.push(`${where} has unknown action "${step.action}". A runner must refuse, not skip.`);
     }
     if (step.action === 'assert' && !step.oracle?.kind) {
@@ -254,8 +265,33 @@ export function validateFlowSpec(spec) {
   });
 
   for (const [name, param] of Object.entries(spec.parameters ?? {})) {
-    if (param?.type === 'secretRef' && 'default' in param) {
+    if (param?.type === 'secretRef' && ('default' in param || 'value' in param)) {
       problems.push(`Parameter "${name}" is a secretRef and must not carry a default value.`);
+    }
+  }
+
+  // The runner's preflight contract (`requires`). Unknown keys are refused, not
+  // ignored: a misspelt requirement that is silently dropped is a flow that runs
+  // where it must not, and nobody finds out until the environment does.
+  if (spec.requires != null) {
+    if (typeof spec.requires !== 'object' || Array.isArray(spec.requires)) {
+      problems.push('requires must be an object: { "minBuild": string?, "features": string[]?, "environments": string[]? }.');
+    } else {
+      for (const key of Object.keys(spec.requires)) {
+        if (!['minBuild', 'features', 'environments'].includes(key)) {
+          problems.push(`requires.${key} is not a known requirement (known: minBuild, features, environments). A runner must refuse, not skip.`);
+        }
+      }
+      if ('minBuild' in spec.requires && (typeof spec.requires.minBuild !== 'string' || !spec.requires.minBuild.trim())) {
+        problems.push('requires.minBuild must be a non-empty string like "5.9.2".');
+      }
+      for (const key of ['features', 'environments']) {
+        if (!(key in spec.requires)) continue;
+        const list = spec.requires[key];
+        if (!Array.isArray(list) || !list.length || list.some((item) => typeof item !== 'string' || !item.trim())) {
+          problems.push(`requires.${key} must be a non-empty array of strings.`);
+        }
+      }
     }
   }
 

@@ -20,6 +20,8 @@ const LABEL = {
   SURPRISE: 'Surprise',
   FAIL_PRODUCT: 'Product fail',
   FAIL_AUTOMATION: 'Test fail',
+  SKIPPED: 'Skipped',
+  NOT_RUN: 'Not run',
   none: 'Never run',
 };
 const COLOR = {
@@ -28,6 +30,8 @@ const COLOR = {
   SURPRISE: '#5b50d6',
   FAIL_PRODUCT: '#c62828',
   FAIL_AUTOMATION: '#d4560b',
+  SKIPPED: '#0e7490',
+  NOT_RUN: '#64748b',
   none: '#8a8f98',
 };
 

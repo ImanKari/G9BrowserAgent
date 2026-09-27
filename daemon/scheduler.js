@@ -93,10 +93,12 @@ export function validateEntry(entry) {
 
 /** The worst verdict of a runner report, or one inferred from its exit code. */
 export function overallVerdict(report, exitCode) {
-  const order = ['ERROR', 'FAIL_PRODUCT', 'FAIL_AUTOMATION', 'SURPRISE', 'PASS_WITH_WARNING', 'PASS'];
+  // SKIPPED/NOT_RUN sit below PASS: a run whose every flow was skipped says
+  // SKIPPED, while one green flow among skips still reads PASS (exit 0 agrees).
+  const order = ['ERROR', 'FAIL_PRODUCT', 'FAIL_AUTOMATION', 'SURPRISE', 'PASS_WITH_WARNING', 'PASS', 'SKIPPED', 'NOT_RUN'];
   const seen = new Set((report?.flows ?? []).map((f) => f.verdict));
   for (const verdict of order) if (seen.has(verdict)) return verdict;
-  return { 0: 'PASS', 1: 'FAIL_PRODUCT', 2: 'FAIL_AUTOMATION', 3: 'SURPRISE' }[exitCode] ?? 'ERROR';
+  return { 0: 'PASS', 1: 'FAIL_PRODUCT', 2: 'FAIL_AUTOMATION', 3: 'SURPRISE', 5: 'ERROR' }[exitCode] ?? 'ERROR';
 }
 
 /**

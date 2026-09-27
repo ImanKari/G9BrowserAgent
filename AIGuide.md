@@ -1026,15 +1026,24 @@ into view first"). Model limits are in §8.
 
 ### 6.8 `runner/`
 
-`g9.mjs`: `list`, `run <flowId|suite:<name>|tag:<name>|all>`, `calibrate`, `approve`, `spec`, `ab`.
+`g9.mjs`: `list`, `run <flowId|suite:<name>|tag:<name>|all>`, `calibrate`, `approve`, `spec`, `ab`,
+`harvest` (AgriPad: drains the device's passive flow recorder into
+`<flowsDir>/agripad/candidates/*.candidate.json` — raw material, never loaded as flows).
 Default `--engine launched` (headless, own profile, flows imported from the repository's FlowSpec
 library into the launched store); `--engine extension` runs on the person's browser's current tab.
 `--browser`, `--headed/--headless`, `--profile`, `--humanize`, `--humanize-seed`, `--stealth`,
 `--keep-engine`, `--port`, plus v1's run options (`--env`, `--data`, `--report`, `--timing`,
 `--signature`, `--pin`, `--strict-pin`, `--seed`, `--no-compare`, `--project`, `--platform agripad`,
-`--fail-on`). Exit codes: 0 pass (warnings allowed), 1 product failure, 2 automation failure, 3
-confirmed surprise, 4 could not run. `report.mjs` writes `run.json`, `junit.xml`, `report.html`,
-`qa-automation-status.json`; the report records every humanize seed. `mcp-client.mjs` spawns the shim.
+`--fail-on`). `--env` is real (3.3.0): it re-points flow URLs at the chosen environment's
+baseUrl, resolves `{{baseUrl}}`, and selects that environment's known world; `--data` (then
+`G9_SECRET_<NAME>`) resolves `{{secret:…}}` parameters, and a flow whose required secret or
+`requires` preflight is unmet is SKIPPED, aged in `<reportDir>/skips.json`, and warned about after
+14 days. Suites honour `order: "risk-desc"` and `stopOn: "failure"` (the rest become NOT_RUN).
+Exit codes: 0 pass (warnings allowed; skips never redden), 1 product failure, 2 automation failure,
+3 confirmed surprise, 4 could not run, 5 a runner-internal ERROR — precedence 1 > 2 > 5 > 3 > 0.
+`report.mjs` writes `run.json`, `junit.xml`, `report.html`, `qa-automation-status.json` (plus
+`skips.json`); the report records every humanize seed and the run's provenance (git commit/branch
+of the project repo, the app build). `mcp-client.mjs` spawns the shim.
 
 ### 6.9 `desktop/` — the Electron shell
 
@@ -1804,6 +1813,114 @@ after every step of a forty-step flow doubles the run for evidence nobody reads.
 Entries below describe what was believed or tested at the time. Current capability claims and
 unresolved findings are in §§4, 7 and 8, which supersede historical assertions. Entries dated before
 2026-09-21 describe v1 (the bridge, the four control modes, the workspace allowlist).
+
+### 2026-09-27 — v3.3.0: secrets, environments, requires, and an honest SKIPPED
+
+**Why.** Ten approved runner/flow features in one batch: flows carrying credentials could not be
+recorded safely, `--env` was only a label, the known world confused environments, a flow that could
+not run either failed or silently "passed", and the device recorder's passive capture had no consumer.
+
+**Password masking at record time** (`extension/tools/record.js`). The in-page recorder never emits
+a password field's value (input type=password, or autocomplete current-/new-password — the same rule
+the input sampler always used): the change event carries `value: '', secret: true`, so the
+credential is not even in the raw session buffer. `normalize()` turns the marker into
+`{{secret:password}}` (`password2`, … per distinct field, keyed by the strongest locator), and
+`stopRecording` declares the matching `parameters: { password: { type: "secretRef", required: true } }`
+(`secretParametersOf`). `validateFlowSpec` also refuses a secretRef carrying a literal under `value`,
+next to the existing `default` rule; `qa.substitute` resolves `{{secret:NAME}}` exactly like
+`{{NAME}}`.
+
+**Secrets at run time** (`runner/g9.mjs`). `resolveSecrets`: the `--data` file first, then
+`G9_SECRET_<NAME>` (uppercased, non-alphanumerics → `_`). A flow whose required secret has neither
+is **SKIPPED**, the reason naming both ways to provide it. Secret VALUES are masked back to their
+placeholder everywhere a result echoes them (`maskSecretsDeep` over the whole flow result — step
+echoes, failure messages quoting field contents). Found and fixed on the way: `parameterDefaults`
+(replay.js) handed the secretRef *declaration object* over as a value, so `{{password}}` typed
+"[object Object]" into the field — a secretRef now contributes no default, and an unresolved one
+fails substitution loudly.
+
+**Real `--env`** (`runner/g9.mjs`, `daemon/project.js`). `environments` accepts the object form
+`{ "baseUrl", "features", "build" }` beside the string form (a malformed entry is reported in
+`problems` and kept out). With `--env <name>` (refused when it names no declared environment) every
+flow URL — startUrl, navigate steps, url oracles — whose origin is ANY declared environment's origin
+is re-pointed at the chosen one before import (`rewriteFlowUrls`); `{{baseUrl}}` resolves in URLs
+and as a variable. Fixed on the way: the start URL was never substituted at all — `{{placeholders}}`
+in it reached the browser literally (`resolveUrlPlaceholders` now runs before the goto).
+
+**Known worlds per environment** (`extension/lib/signature.js`, `approved.js`, replay/flowsync/
+router/flows). What "normal" looks like on test1 is not test2. `knownWorldFor`/`withKnownWorld`:
+the flat `recording.knownWorld` IS the `default` environment's world (full compatibility — every
+existing store, sidecar and panel keeps meaning what it meant), named environments live under
+`knownWorlds[env]`. Replay compares, seeds and saves under the run's environment (the new
+`environment` replay/calibrate argument; the runner passes `--env` through); `approve` folds the
+reviewed run into the environment its signature names and refuses a contradicting `--env`. The
+sidecar carries `knownWorlds` beside the flat `knownWorld` (validateApproved knows the shape;
+`applyApproved` takes the later human approval PER ENVIRONMENT, so a repo approval on test2 never
+overwrites a newer local one on test1); `knownWorlds` joined every local-truth list
+(daemon/flows.js LOCAL_ONLY, daemon/router.js LOCAL_TRUTH, the import skip set). The desktop's
+Approvals view still shows the default environment's approval only.
+
+**urlNormalizers are consumed** (`extension/lib/signature.js`). The project's `[{match, as}]` rules
+now reach the signature twice: `buildSignature` gets them from the new replay argument (the runner
+reads g9.project.json), and `renormalizeKnownWorld` re-applies them to the STORED world's network
+keys (and volatile masks) at comparison — so `/api/orders/<guid>` collapses to `/api/orders/{id}` on
+both sides even for a world approved before the rule existed. Colliding keys keep the larger count,
+never a sum past `runs`.
+
+**`requires` preflight and SKIPPED** (`extension/lib/flowspec.js`, `runner/g9.mjs`,
+`runner/report.mjs`). A flow may declare `requires: { minBuild?, features?, environments? }`
+(validated; unknown keys refused; carried through toFlowSpec/fromFlowSpec — they used to drop
+everything they did not know, so a Pull → Push would have silently erased it). Before a tab opens or
+a device is driven: environments against `--env`; on maui, `qa.ping`/`qa.capabilities` once per
+device per run (lenient numeric-dotted `minBuild` compare); on web, the environment object form —
+data it does not declare is a SKIP saying "cannot evaluate requires.X … declare it in
+g9.project.json", never a silent pass. SKIPPED is first-class: `skipReason` in run.json,
+`<skipped message>` in junit.xml (with a testsuite `skipped` count), a distinct section in
+report.html, `"SKIPPED"` in qa-automation-status.json. `<reportDir>/skips.json` maps
+(flowId + environment) → { firstSkippedAt, lastReason }; an executed flow drops out, an entry
+14+ days old warns loudly in the summary and the report («این فلو ۱۴+ روز است اجرا نشده — پوشش در
+حال آب رفتن است»). Skips never make a run red.
+
+**Suite `order` and `stopOn`** (`runner/g9.mjs`). `order: "risk-desc"` (critical > high > medium >
+low; missing = medium, "normal" accepted; stable) and `stopOn: "failure"` — the suite stops after
+FAIL_PRODUCT / FAIL_AUTOMATION / ERROR (not SURPRISE, not SKIPPED), and the rest are reported
+NOT_RUN, naming the stopping flow. Any other `stopOn` value is refused by name.
+
+**Exit code 5** (`runner/g9.mjs`, scheduler, desktop, README). A runner-internal ERROR exits 5,
+distinct from product 1; precedence 1 > 2 > 5 > 3 > 0. The scheduler's exit-code fallback and the
+desktop's verdict maps learned SKIPPED/NOT_RUN and 5.
+
+**Provenance** (`runner/g9.mjs`, `report.mjs`). run.json/report.html/junit properties carry
+`provenance: { gitCommit, gitBranch, appBuild }` — git asked in the directory holding
+g9.project.json (nulls without git), appBuild from the device's qa.ping or the web environment's
+declared `build`.
+
+**`g9 harvest --platform agripad`** (`runner/g9.mjs`). Reaches the device exactly like
+`run --platform agripad` (adb forward, port 8799, lease), calls `flow.record.harvest` (drains the
+app's passive ring buffer) and writes each candidate to
+`<flowsDir>/agripad/candidates/<yyyyMMdd-HHmm>-<n>.candidate.json` (`format: "g9/flow-candidate"`,
+schemaVersion 1, tags `["@candidate"]`, capture time, device, provenance, the device's steps passed
+through untouched). An app build without the command gets a friendly message naming its build.
+Candidates are NOT flows: the runner's loaders read only `*.flow.json`, and the daemon's library
+walk now skips `*.candidate.json` by name (it used to list any `.json` as a flow).
+
+**Also found and fixed on the way.**
+- Device `type` steps typed NOTHING: the driver sent `text`, the bridge reads `args.value` — every
+  type step "passed" while the field stayed empty (`runner/drivers/agripad.mjs`).
+- The device's consent refusal ("Live access has not been granted") was classified FAIL_PRODUCT:
+  the runner's pattern said "has not granted live access". Both wordings classify as
+  FAIL_AUTOMATION now.
+- Device flows were never validated: `loadDeviceFlows` now runs `validateFlowSpec` with the action
+  set widened by the driver's own `dismiss` (the validator takes `{ actions }`), so a malformed
+  file stops the run with its name instead of failing step-by-step on the device.
+- Device steps never saw `--data` variables at all; they are substituted now (including
+  `{{secret:…}}`), and step outcomes are masked like the web path's.
+
+**Docs/tests.** g9.project.example.json shows the environment object form and marks
+`operationAliases`/`reportSink`/`volatile` RESERVED — not implemented; runner/README.md covers all
+of the above; the extension suite grew from 88 to 100 tests (masking, secrets, requires, --env
+rewriting, urlNormalizers both sides, per-env worlds and sidecars, junit `<skipped>`, exit
+precedence, the skip ledger, candidate exclusion); the version stays 3.2.1 until this ships.
 
 ### 2026-09-27 — v3.2.1: G9 is G9BrowserAgent
 
@@ -3204,10 +3321,10 @@ bytes*. The bridge hashes what it wrote to disk; the extension hashes `canonical
 are the same string by construction — and had they drifted, every flow would have reported as
 "differs" forever, which is an indicator people stop reading.
 
-The consumer-facing QA documentation moved with this work: it is now `QA/` at the root of the
-AgriPad repo (guides, the flow library, an experience log, and a tool-gap ledger), not
-`Agriculture.AgriPad.App/AiGuides/`. It is written against the behaviour recorded here, so a change
-to this tool still needs an edit there.
+The consumer-facing QA documentation moved with this work: it now lives in a `QA/` folder at the
+root of the consuming app's repository (guides, the flow library, an experience log, and a
+tool-gap ledger), not inside the app project. It is written against the behaviour recorded here, so
+a change to this tool still needs an edit there.
 
 ### 2026-09-12 (latest) — v1.7.21: three things that were wrong in ways tests could not see
 
@@ -3863,9 +3980,9 @@ Worth stating because it is the failure mode this file exists to prevent: a coun
 claim, and a claim that nobody re-checks quietly becomes wrong. When a suite grows, the number in
 the README is part of the change.
 
-A consumer-facing QA manual now also documents this tool end to end for non-engineers —
-`Agriculture.AgriPad.App/AiGuides/QAAutomationGuide.html` in the AgriPad repo. It is written against
-the behaviour recorded here, so a change to the tool's behaviour needs an edit there too.
+A consumer-facing QA manual now also documents this tool end to end for non-engineers — a
+`QAAutomationGuide.html` kept in the consuming app's repository. It is written against the
+behaviour recorded here, so a change to the tool's behaviour needs an edit there too.
 
 ### 2026-09-04 — v1.6.0 completion: the wizard, A/B, and two normalisation bugs
 

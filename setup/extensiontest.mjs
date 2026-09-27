@@ -408,8 +408,8 @@ await test('with nothing current, an unattachable active page is refused, never 
 });
 
 await test('data substitution and Playwright select export preserve test intent', async () => {
-  assert.deepEqual(qa.substitute({ url: '/{{tenant}}', values: ['{{user}}'] }, { tenant: 'qa', user: 'iman' }), {
-    url: '/qa', values: ['iman'],
+  assert.deepEqual(qa.substitute({ url: '/{{tenant}}', values: ['{{user}}'] }, { tenant: 'qa', user: 'alice' }), {
+    url: '/qa', values: ['alice'],
   });
   assert.equal(qa.substitute('{{enabled}}', { enabled: false }), false);
   assert.throws(() => qa.substitute('{{missing}}', {}), /Missing data parameter/);
@@ -1482,10 +1482,11 @@ await test('the flow library refuses to write local-only run history to the repo
 
   // Committing run history means every replay dirties the working tree, which
   // trains people to `git checkout .` — and eventually to discard a real edit.
-  assert.match(flows, /LOCAL_ONLY = \['runHistory', 'lastRun', 'flaky', 'knownWorld', 'surpriseHistory'\]/);
+  // (knownWorlds joined the list with the per-environment known worlds.)
+  assert.match(flows, /LOCAL_ONLY = \['runHistory', 'lastRun', 'flaky', 'knownWorld', 'knownWorlds', 'surpriseHistory'\]/);
   assert.match(flows, /for \(const field of LOCAL_ONLY\) delete clean\[field\]/);
 
-  // As behaviour, on a real folder: a flow that arrives carrying all five.
+  // As behaviour, on a real folder: a flow that arrives carrying all six.
   await withFlowLibrary(async (library, root, path) => {
     const spec = flowspec.toFlowSpec({
       id: 'rec_hist', name: 'Login', folder: 'auth',
@@ -1493,7 +1494,7 @@ await test('the flow library refuses to write local-only run history to the repo
     });
     const history = {
       runHistory: [{ at: 1, verdict: 'PASS' }], lastRun: { at: 1 }, flaky: { rate: 0.1 },
-      knownWorld: { runs: 3 }, surpriseHistory: [[]],
+      knownWorld: { runs: 3 }, knownWorlds: { test2: { runs: 1 } }, surpriseHistory: [[]],
     };
     const written = await library.write({ ...spec, ...history });
     assert.equal(written.file, 'web/auth/login.flow.json');
@@ -1837,7 +1838,9 @@ async function runnerSelection() {
   const lifted = liftFunctions(
     runner,
     ['selectFlows', 'loadDeviceFlows', 'requireSelection', 'applySelect', 'readSuite', 'flowsRoot', 'collectJson'],
-    { readFile, path },
+    // validateFlowSpec/KNOWN_ACTIONS: loadDeviceFlows validates device flows
+    // with the shared validator (widened by the driver's own `dismiss`).
+    { readFile, path, validateFlowSpec: flowspec.validateFlowSpec, KNOWN_ACTIONS: flowspec.KNOWN_ACTIONS },
   );
   return { runner, path, ...lifted };
 }
@@ -1900,7 +1903,12 @@ await test('a suite means the same thing on both platforms', async () => {
       { id: 'w4', name: 'Web four', tags: [], suite: 'legacy' },
     ];
     for (const [id, extra] of [['d1', { tags: ['smoke'] }], ['d2', { tags: ['smoke', 'wip'] }], ['d3', { tags: [], suite: 'smoke' }]]) {
-      await writeFile(path.join(lib, 'agripad', 'map', `${id}.flow.json`), JSON.stringify({ id, name: id, ...extra }));
+      // Valid FlowSpecs: device flows are validated on load now, so a fixture
+      // that is only `{ id, name }` would fail the run before selection.
+      await writeFile(path.join(lib, 'agripad', 'map', `${id}.flow.json`), JSON.stringify({
+        format: 'g9/flowspec', schemaVersion: 1, id, name: id, target: { kind: 'maui' },
+        steps: [{ id: 's1', action: 'navigate', target: { automationId: 'Page.Home' } }], ...extra,
+      }));
     }
     assert.deepEqual((await selectFlows(web, 'suite:smoke', project, 'web')).map((f) => f.id), ['w1'],
       'the browser path must read the suite file and apply its query');
@@ -2068,7 +2076,7 @@ await test('an interception rule must say what it does, and say it validly', asy
   assert.throws(() => normaliseRules([{ match: '/api', abort: 'Banana' }]), /not a network error/);
   assert.throws(() => normaliseRules([{ match: '/api', status: 500, abort: true }]), /one outcome/);
 
-  const [rule] = normaliseRules([{ match: '/api/farm', method: 'post', status: 500, times: 1, label: 'x' }]);
+  const [rule] = normaliseRules([{ match: '/api/orders', method: 'post', status: 500, times: 1, label: 'x' }]);
   assert.equal(rule.method, 'POST', 'the verb is compared upper-case, so it must be stored that way');
   assert.equal(rule.status, 500);
   assert.equal(rule.times, 1);
@@ -2922,6 +2930,397 @@ await test('3.2: the flow library narrows to one site, and "none" means flows wi
     const st = await library.status([], { site: 'https://admin.example.test' });
     assert.deepEqual(st.onlyInRepo.map((f) => f.id), ['f2']);
     assert.equal(st.total, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3.3.0: password masking, secrets, requires, --env, urlNormalizers,
+// SKIPPED/NOT_RUN, exit-code precedence, per-environment known worlds.
+
+await test('a password typed while recording never reaches the stored flow', async () => {
+  const recordSource = await readFile(new URL('../extension/tools/record.js', import.meta.url), 'utf8');
+  // The in-page half masks at the SOURCE: a secret field's change events carry
+  // an empty value and a marker, so the credential is not even in the raw
+  // session buffer. Assert the branch exists in the injected source.
+  assert.match(recordSource, /secret\(el\)/);
+  assert.match(recordSource, /value: '', secret: true/);
+
+  // normalize() turns the marker into a placeholder — one name per field.
+  const password = { locators: [{ kind: 'testid', value: 'password' }] };
+  const confirm = { locators: [{ kind: 'testid', value: 'confirm' }] };
+  const user = { locators: [{ kind: 'testid', value: 'user' }] };
+  const steps = record.normalize([
+    { type: 'change', at: 1, target: user, value: 'alice', live: true },
+    { type: 'change', at: 2, target: password, value: '', secret: true, live: true },
+    { type: 'change', at: 3, target: password, value: '', secret: true, live: true },
+    { type: 'change', at: 4, target: confirm, value: '', secret: true, live: true },
+  ]);
+  assert.equal(steps.length, 3);
+  assert.equal(steps[0].value, 'alice', 'an ordinary field keeps its value');
+  assert.equal(steps[1].value, '{{secret:password}}');
+  assert.equal(steps[2].value, '{{secret:password2}}', 'a second distinct password field gets its own name');
+  assert.ok(steps.every((s) => !('secret' in s)), 'the marker never reaches the stored steps');
+
+  // The matching parameters, declared so the runner (and toFlowSpec) see them.
+  assert.deepEqual(record.secretParametersOf(steps), {
+    password: { type: 'secretRef', required: true },
+    password2: { type: 'secretRef', required: true },
+  });
+
+  // Retyping into the SAME field keeps one name; the spec round trip carries it.
+  const again = record.normalize([
+    { type: 'change', at: 1, target: password, value: '', secret: true, live: true },
+    { type: 'click', at: 2, target: user },
+    { type: 'change', at: 3, target: password, value: '', secret: true, live: true },
+  ]);
+  assert.deepEqual(again.filter((s) => s.type === 'type').map((s) => s.value),
+    ['{{secret:password}}', '{{secret:password}}']);
+  const spec = flowspec.toFlowSpec({ id: 'rec_pw', name: 'Login', steps, parameters: record.secretParametersOf(steps) });
+  assert.equal(spec.parameters.password.type, 'secretRef');
+  assert.doesNotMatch(JSON.stringify(spec), /hunter2/, 'no literal value anywhere');
+});
+
+await test('{{secret:name}} resolves like {{name}}, and an unresolved secretRef fails loudly', async () => {
+  assert.equal(qa.substitute('{{secret:password}}', { password: 'hunter2' }), 'hunter2');
+  assert.equal(qa.substitute('user={{user}}&pw={{secret:password}}', { user: 'a', password: 'b' }), 'user=a&pw=b');
+  assert.throws(() => qa.substitute('{{secret:password}}', {}), /Missing data parameter "password"/);
+
+  // The defect this closes: parameterDefaults handed the secretRef DECLARATION
+  // over as a value, and the flow typed "[object Object]" into the field.
+  const replaySource = await readFile(new URL('../extension/tools/replay.js', import.meta.url), 'utf8');
+  const { parameterDefaults } = liftFunctions(replaySource, ['parameterDefaults'], {});
+  assert.deepEqual(
+    parameterDefaults({ password: { type: 'secretRef', required: true }, title: { type: 'string', default: 'x' }, plain: 'y' }),
+    { title: 'x', plain: 'y' },
+    'a secretRef never contributes a value; substitution then refuses instead of typing [object Object]',
+  );
+});
+
+await test('FlowSpec validates and round-trips `requires`; unknown requirement keys are refused', () => {
+  const base = {
+    format: 'g9/flowspec', schemaVersion: 1, id: 'f1', name: 'F',
+    steps: [{ id: 's1', action: 'navigate', url: 'https://a.test/' }],
+  };
+  assert.deepEqual(flowspec.validateFlowSpec({
+    ...base, requires: { minBuild: '2.9.2', features: ['map'], environments: ['test1'] },
+  }), []);
+  for (const [requires, why] of [
+    [{ minbuild: '1' }, /requires\.minbuild is not a known requirement/],
+    [{ minBuild: 5 }, /requires\.minBuild must be a non-empty string/],
+    [{ features: [] }, /requires\.features must be a non-empty array of strings/],
+    [{ environments: ['a', 3] }, /requires\.environments must be a non-empty array of strings/],
+    [['test1'], /requires must be an object/],
+  ]) {
+    const problems = flowspec.validateFlowSpec({ ...base, requires });
+    assert.ok(problems.some((p) => why.test(p)), `expected ${why} in: ${problems.join(' | ')}`);
+  }
+
+  // Round trip: a Pull → Push must not silently drop the contract.
+  const spec = flowspec.toFlowSpec({
+    id: 'rec_r', name: 'Gated', requires: { minBuild: '2.9.2', features: ['reports-v2'] },
+    steps: [{ id: 's1', type: 'navigate', url: 'https://a.test/' }],
+  });
+  assert.deepEqual(spec.requires, { features: ['reports-v2'], minBuild: '2.9.2' });
+  assert.deepEqual(flowspec.fromFlowSpec(spec).requires, { features: ['reports-v2'], minBuild: '2.9.2' });
+
+  // A secretRef smuggling a literal under `value` is as refused as `default`.
+  const problems = flowspec.validateFlowSpec({ ...base, parameters: { pw: { type: 'secretRef', value: 'hunter2' } } });
+  assert.ok(problems.some((p) => /secretRef and must not carry a default value/.test(p)));
+});
+
+await test('the runner resolves secrets from --data first, then G9_SECRET_*, and skips loudly without either', async () => {
+  const runner = await readFile(new URL('../runner/g9.mjs', import.meta.url), 'utf8');
+  const { resolveSecrets, secretEnvVarName, maskSecretsDeep } = liftFunctions(
+    runner, ['resolveSecrets', 'secretEnvVarName', 'maskSecretsDeep'], {},
+  );
+  assert.equal(secretEnvVarName('db.password'), 'G9_SECRET_DB_PASSWORD');
+
+  const parameters = { password: { type: 'secretRef', required: true }, title: { type: 'string', default: 'x' } };
+  assert.deepEqual(resolveSecrets(parameters, { password: 'from-data' }, { G9_SECRET_PASSWORD: 'from-env' }),
+    { values: { password: 'from-data' }, missing: [] }, 'the --data file wins');
+  assert.deepEqual(resolveSecrets(parameters, {}, { G9_SECRET_PASSWORD: 'from-env' }),
+    { values: { password: 'from-env' }, missing: [] });
+  const missing = resolveSecrets(parameters, {}, {});
+  assert.equal(missing.missing.length, 1);
+  assert.match(missing.missing[0], /--data file as "password"/, 'the reason names the first way to provide it');
+  assert.match(missing.missing[0], /G9_SECRET_PASSWORD/, 'and the second');
+  assert.deepEqual(resolveSecrets({ pw: { type: 'secretRef', required: false } }, {}, {}), { values: {}, missing: [] },
+    'an optional secret without a value is not a skip');
+
+  // And the value never reaches an artefact: every echo is masked back to the placeholder.
+  const masked = maskSecretsDeep(
+    { steps: [{ error: 'the field contains "hunter2" instead of ""', value: 'hunter2' }], name: 'Login' },
+    { password: 'hunter2' },
+  );
+  assert.equal(JSON.stringify(masked).includes('hunter2'), false);
+  assert.match(masked.steps[0].error, /\{\{secret:password\}\}/);
+});
+
+await test('requires preflight: environments, lenient minBuild, features — and "cannot evaluate" is a skip, not a pass', async () => {
+  const runner = await readFile(new URL('../runner/g9.mjs', import.meta.url), 'utf8');
+  const { evaluateRequires, compareBuilds } = liftFunctions(runner, ['evaluateRequires', 'compareBuilds'], {});
+
+  assert.equal(compareBuilds('2.9.2', '2.10'), -1, 'numeric segments, not string order');
+  assert.equal(compareBuilds('v5.10.0-beta', '5.10'), 0, 'decoration is ignored');
+  assert.equal(compareBuilds('6', '5.99.99'), 1);
+
+  assert.equal(evaluateRequires(null, {}), null);
+  assert.equal(evaluateRequires({ environments: ['test1'] }, { environment: 'test1' }), null);
+  assert.match(evaluateRequires({ environments: ['test1'] }, { environment: 'test2' }), /requires environment "test1"/);
+  assert.match(evaluateRequires({ environments: ['test1'] }, {}), /no named environment/);
+
+  const device = { environment: 'test1', build: '2.9.2', features: ['map', 'sync'], subject: 'device X' };
+  assert.equal(evaluateRequires({ minBuild: '2.9.0', features: ['map'] }, device), null);
+  assert.match(evaluateRequires({ minBuild: '2.10' }, device), /requires build 2\.10 or newer.*2\.9\.2/);
+  assert.match(evaluateRequires({ features: ['map', 'draw'] }, device), /"draw" that device X does not have/);
+
+  // A web environment in the STRING form declares neither build nor features:
+  // a requirement that needs them cannot be evaluated, and that is a SKIP that
+  // says so — loud, never a silent pass.
+  const undeclared = { environment: 'test1', build: null, features: null, subject: 'environment "test1"', hint: 'declare it in g9.project.json' };
+  assert.match(evaluateRequires({ minBuild: '1.0' }, undeclared), /cannot evaluate requires\.minBuild for environment "test1" — declare it in g9\.project\.json/);
+  assert.match(evaluateRequires({ features: ['x'] }, undeclared), /cannot evaluate requires\.features/);
+});
+
+await test('--env re-points flow URLs across declared environments and resolves {{baseUrl}}', async () => {
+  const runner = await readFile(new URL('../runner/g9.mjs', import.meta.url), 'utf8');
+  const { rewriteFlowUrls, environmentBaseUrl, environmentFacts } = liftFunctions(
+    runner, ['rewriteFlowUrls', 'environmentBaseUrl', 'environmentFacts'], {},
+  );
+  const environments = {
+    test1: 'https://test1.example.internal',
+    test2: { baseUrl: 'https://test2.example.internal', features: ['map'], build: '2.9.2' },
+  };
+  assert.equal(environmentBaseUrl(environments.test2), 'https://test2.example.internal', 'both forms are read');
+  assert.deepEqual(environmentFacts(environments.test1), { build: null, features: null }, 'a string form declares nothing');
+
+  const flow = {
+    id: 'f1',
+    startUrl: 'https://test1.example.internal/login',
+    steps: [
+      { id: 's1', action: 'navigate', url: '{{baseUrl}}/map' },
+      { id: 's2', action: 'assert', oracle: { kind: 'url', expected: 'https://test1.example.internal/map' } },
+      { id: 's3', action: 'assert', oracle: { kind: 'text', contains: 'https://test1.example.internal is fine' } },
+      { id: 's4', action: 'navigate', url: 'https://cdn.other.test/asset' },
+    ],
+  };
+  const moved = rewriteFlowUrls(flow, environments, 'test2', true);
+  assert.equal(moved.startUrl, 'https://test2.example.internal/login', 'a recorded origin follows the chosen environment');
+  assert.equal(moved.steps[0].url, 'https://test2.example.internal/map', '{{baseUrl}} resolves to the chosen baseUrl');
+  assert.equal(moved.steps[1].oracle.expected, 'https://test2.example.internal/map', 'url oracles move too');
+  assert.equal(moved.steps[2].oracle.contains, 'https://test1.example.internal is fine', 'a text oracle is content, not addressing');
+  assert.equal(moved.steps[3].url, 'https://cdn.other.test/asset', 'an origin no environment owns is left alone');
+  assert.equal(flow.startUrl, 'https://test1.example.internal/login', 'the input flow is not mutated');
+
+  // Without an explicit --env, {{baseUrl}} still resolves but origins stay.
+  const labelled = rewriteFlowUrls(flow, environments, 'test2', false);
+  assert.equal(labelled.startUrl, 'https://test1.example.internal/login');
+  assert.equal(labelled.steps[0].url, 'https://test2.example.internal/map');
+});
+
+await test('urlNormalizers collapse operations on BOTH sides: the run signature and the stored known world', async () => {
+  const normalizers = [{ match: '/api/orders/[0-9a-f-]{36}', as: '/api/orders/{id}' }];
+  const guid = '3f2a1b4c-0000-4111-8222-333344445555';
+
+  // Building: the current run's keys are normalised as they are made.
+  const built = signature.buildSignature({
+    flowId: 'f1',
+    normalizers,
+    steps: [{ id: 's1', ms: 5, network: [{ requestId: 'r1', method: 'GET', url: `https://api.test/api/orders/${guid}`, status: 200 }] }],
+  });
+  assert.deepEqual(Object.keys(built.network), ['GET api.test/api/orders/{id} 2xx']);
+
+  // Comparison: a known world stored BEFORE the rule existed is re-normalised,
+  // so the same operation stops being "new" and "missing" at once.
+  const otherGuid = '99999999-1111-4111-8222-333344445555';
+  const oldWorld = {
+    runs: 3,
+    network: { [`GET api.test/api/orders/${guid} 2xx`]: 3, [`GET api.test/api/orders/${otherGuid} 2xx`]: 1 },
+    console: {}, dialogs: {}, steps: {}, volatile: [`GET api.test/api/orders/${guid} 5xx`],
+  };
+  const renormalized = signature.renormalizeKnownWorld(oldWorld, normalizers);
+  assert.deepEqual(Object.keys(renormalized.network).sort(), ['GET api.test/api/orders/{id} 2xx']);
+  assert.equal(renormalized.network['GET api.test/api/orders/{id} 2xx'], 3, 'colliding keys keep the larger count, never a sum past runs');
+  assert.deepEqual(renormalized.volatile, ['GET api.test/api/orders/{id} 5xx'], 'volatile masks follow the same rules');
+
+  const { surprises } = signature.detectSurprises(renormalized, built, {});
+  assert.deepEqual(surprises.filter((s) => s.layer === 'network'), [], 'no false new/missing pair');
+});
+
+await test('known worlds are kept per environment, and the sidecar carries every approved one', async () => {
+  const approved = await import('../extension/lib/approved.js');
+
+  // The compatibility story in one line: the flat knownWorld IS "default".
+  const world = (env, at) => ({ runs: 2, approvedAt: at, approvedBy: 'alice', environment: env, network: {}, console: {}, dialogs: {}, steps: {}, volatile: [] });
+  const rec = { id: 'r1', flowId: 'f1', steps: [], knownWorld: world('default', 1000), knownWorlds: { test2: world('test2', 2000) } };
+  assert.equal(signature.knownWorldFor(rec, null).approvedAt, 1000);
+  assert.equal(signature.knownWorldFor(rec, 'test2').approvedAt, 2000);
+  assert.equal(signature.knownWorldFor(rec, 'test3'), null, 'a third environment starts with no world, not test1\'s');
+  const withT3 = signature.withKnownWorld(rec, 'test3', world('test3', 3000));
+  assert.equal(withT3.knownWorlds.test3.approvedAt, 3000);
+  assert.equal(withT3.knownWorld.approvedAt, 1000, 'writing one environment never touches another');
+
+  // The sidecar: default stays flat (an older reader keeps working), named
+  // environments travel under knownWorlds — and validation knows the shape.
+  const { doc } = approved.approvedDocFor(rec);
+  assert.equal(doc.knownWorld.approvedAt, 1000);
+  assert.equal(doc.knownWorlds.test2.approvedAt, 2000);
+  assert.deepEqual(approved.validateApproved(doc, 'f1'), []);
+  assert.ok(approved.validateApproved({ ...doc, knownWorlds: { default: world('default', 1) } }, 'f1')
+    .some((p) => /must not carry the "default" environment/.test(p)));
+
+  // Pull: each environment's LATER human approval wins independently.
+  const localNewerT2 = { ...rec, knownWorlds: { test2: world('test2', 9000) } };
+  const applied = approved.applyApproved({ id: 'r1', flowId: 'f1', steps: [] }, doc, localNewerT2);
+  assert.equal(applied.recording.knownWorld.approvedAt, 1000, 'default came from the repo');
+  assert.equal(applied.recording.knownWorlds.test2.approvedAt, 9000, 'test2 kept the newer local approval');
+  assert.equal(applied.localNewer, true, 'and the answer says this machine holds something worth pushing');
+  assert.equal(approved.approvedAtFor(localNewerT2), 9000, 'status lines compare the latest approval across environments');
+});
+
+await test('SKIPPED and NOT_RUN are first-class in every report format', async () => {
+  const { writeReports } = await import('../runner/report.mjs');
+  const { mkdtemp, rm, readFile: read } = await import('node:fs/promises');
+  const os = await import('node:os');
+  const path = (await import('node:path')).default;
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'g9-report-'));
+  try {
+    await writeReports(dir, {
+      format: 'g9/run', version: 1, startedAt: Date.now(), durationMs: 1234, environment: 'test1', suite: 'smoke',
+      provenance: { gitCommit: 'abc123def456', gitBranch: 'feature-x', appBuild: '2.9.2' },
+      staleSkips: [{ flowId: 'f2', environment: 'test1', firstSkippedAt: Date.now() - 15 * 864e5, lastReason: 'missing secret "password"' }],
+      flows: [
+        { id: 'f1', name: 'Login', verdict: 'PASS', total: 3, passed: 3, failed: 0, durationMs: 100, steps: [], qaTestCaseIds: ['TC-01'] },
+        { id: 'f2', name: 'Gated', verdict: 'SKIPPED', skipReason: 'missing secret "password" (put it in the --data file…)', total: 2, passed: 0, failed: 0, durationMs: 0, steps: [], qaTestCaseIds: ['TC-02'] },
+        { id: 'f3', name: 'Late', verdict: 'NOT_RUN', skipReason: 'not run — the suite stopped after "Login"', total: 2, passed: 0, failed: 0, durationMs: 0, steps: [], qaTestCaseIds: ['TC-01'] },
+      ],
+    });
+    const junit = await read(path.join(dir, 'junit.xml'), 'utf8');
+    assert.match(junit, /<skipped message="missing secret &quot;password&quot;/, 'a skip is JUnit\'s own <skipped>, message included');
+    assert.match(junit, /<skipped message="not run — the suite stopped after/, 'NOT_RUN too, with the culprit named');
+    assert.match(junit, /skipped="2"/, 'the suite counts them');
+    assert.doesNotMatch(junit, /<failure[^>]*SKIPPED/, 'a skip is never a failure');
+    assert.match(junit, /g9\.git\.commit" value="abc123def456"/, 'provenance rides the properties');
+
+    const html = await read(path.join(dir, 'report.html'), 'utf8');
+    assert.match(html, /رد شده‌ها/, 'skips get their own visible section');
+    assert.match(html, /این فلو ۱۴\+ روز است اجرا نشده — پوشش در حال آب رفتن است/, 'a 14-day skip warns loudly');
+    assert.match(html, /abc123def456/, 'provenance is shown');
+
+    const status = JSON.parse(await read(path.join(dir, 'qa-automation-status.json'), 'utf8'));
+    assert.equal(status.cases['TC-02'].status, 'SKIPPED');
+    assert.equal(status.cases['TC-01'].status, 'NOT_RUN', 'worst verdict wins: a case whose other coverage did not run is not green');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+await test('suite order runs by risk, stopOn stops on failures only, and exit codes keep 1 > 2 > 5 > 3 > 0', async () => {
+  const runner = await readFile(new URL('../runner/g9.mjs', import.meta.url), 'utf8');
+  assert.match(runner, /const EXIT = \{ OK: 0, PRODUCT: 1, AUTOMATION: 2, SURPRISE: 3, RUNNER: 4, ERROR: 5 \};/);
+  const { orderFlows, stopsSuite, exitCodeFor } = liftFunctions(
+    runner, ['orderFlows', 'stopsSuite', 'exitCodeFor'],
+    { EXIT: { OK: 0, PRODUCT: 1, AUTOMATION: 2, SURPRISE: 3, RUNNER: 4, ERROR: 5 } },
+  );
+
+  // risk-desc: critical > high > medium (the default for a missing risk) > low, stable within a rank.
+  const flows = [
+    { id: 'a', risk: 'low' }, { id: 'b' }, { id: 'c', risk: 'critical' },
+    { id: 'd', risk: 'high' }, { id: 'e', risk: 'medium' }, { id: 'f', risk: 'critical' },
+  ];
+  assert.deepEqual(orderFlows(flows, 'risk-desc').map((f) => f.id), ['c', 'f', 'd', 'b', 'e', 'a']);
+  assert.deepEqual(orderFlows(flows, null).map((f) => f.id), ['a', 'b', 'c', 'd', 'e', 'f'], 'no order asked, none applied');
+  assert.deepEqual(orderFlows([{ name: 'b' }, { name: 'a' }], 'name').map((f) => f.name), ['a', 'b'], 'the daemon\'s other order works here too');
+  // An order the runner does not implement is refused by suiteRules, never ignored.
+  assert.match(runner, /order "\$\{suite\.order\}", which this runner does not implement/);
+
+  // stopOn: failure stops on the three broken verdicts, never on a surprise or a skip.
+  for (const [verdict, stops] of [
+    ['FAIL_PRODUCT', true], ['FAIL_AUTOMATION', true], ['ERROR', true],
+    ['SURPRISE', false], ['SKIPPED', false], ['PASS', false], ['NOT_RUN', false],
+  ]) {
+    assert.equal(stopsSuite({ stopOn: 'failure' }, verdict), stops, verdict);
+    assert.equal(stopsSuite({}, verdict), false, `${verdict} without stopOn`);
+  }
+
+  // Exit precedence: 1 > 2 > 5 > 3 > 0; skips and not-runs never redden a run.
+  const runWith = (...verdicts) => ({ flows: verdicts.map((verdict) => ({ verdict })) });
+  assert.equal(exitCodeFor(runWith('PASS', 'SKIPPED', 'NOT_RUN'), 'surprise'), 0);
+  assert.equal(exitCodeFor(runWith('ERROR', 'SURPRISE'), 'surprise'), 5, 'a runner error is 5, not a product 1');
+  assert.equal(exitCodeFor(runWith('FAIL_AUTOMATION', 'ERROR'), 'surprise'), 2, 'a broken test outranks a broken runner');
+  assert.equal(exitCodeFor(runWith('FAIL_PRODUCT', 'FAIL_AUTOMATION', 'ERROR', 'SURPRISE'), 'surprise'), 1, 'the product failure dominates');
+  assert.equal(exitCodeFor(runWith('SURPRISE'), 'surprise'), 3);
+  assert.equal(exitCodeFor(runWith('SURPRISE'), 'failure'), 0, '--fail-on failure keeps the old gate');
+  assert.equal(exitCodeFor(runWith('SKIPPED'), 'warning'), 0, 'an all-skipped run is not red — it is a warning in the summary');
+});
+
+await test('the skip ledger ages a skip, clears it on a real run, and warns after 14 days', async () => {
+  const runner = await readFile(new URL('../runner/g9.mjs', import.meta.url), 'utf8');
+  const { mkdtemp, rm, mkdir, writeFile, readFile: read } = await import('node:fs/promises');
+  const os = await import('node:os');
+  const path = (await import('node:path')).default;
+  const { updateSkipLedger } = liftFunctions(runner, ['updateSkipLedger'], { readFile: read, writeFile, mkdir, path });
+
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'g9-skips-'));
+  try {
+    // First run: two skips are filed, nothing is stale yet.
+    let stale = await updateSkipLedger(dir, {
+      environment: 'test1',
+      flows: [
+        { id: 'f1', verdict: 'SKIPPED', skipReason: 'missing secret "password"' },
+        { id: 'f2', verdict: 'SKIPPED', skipReason: 'requires feature "map"' },
+        { id: 'f3', verdict: 'PASS' },
+      ],
+    });
+    assert.deepEqual(stale, []);
+    let ledger = JSON.parse(await read(path.join(dir, 'skips.json'), 'utf8'));
+    assert.deepEqual(Object.keys(ledger.entries).sort(), ['f1::test1', 'f2::test1']);
+
+    // Age one entry past 14 days by hand, then run again: f1 executes (any
+    // verdict, even a failure, is an execution) and drops out; f2 is still
+    // skipped, KEEPS its first date, and is now stale — the warning names it.
+    ledger.entries['f2::test1'].firstSkippedAt = Date.now() - 15 * 24 * 60 * 60 * 1000;
+    await writeFile(path.join(dir, 'skips.json'), JSON.stringify(ledger));
+    stale = await updateSkipLedger(dir, {
+      environment: 'test1',
+      flows: [
+        { id: 'f1', verdict: 'FAIL_PRODUCT' },
+        { id: 'f2', verdict: 'SKIPPED', skipReason: 'requires feature "map"' },
+        { id: 'f4', verdict: 'NOT_RUN', skipReason: 'not run — stopped' },
+      ],
+    });
+    assert.equal(stale.length, 1);
+    assert.equal(stale[0].flowId, 'f2');
+    assert.equal(stale[0].environment, 'test1');
+    ledger = JSON.parse(await read(path.join(dir, 'skips.json'), 'utf8'));
+    assert.equal('f1::test1' in ledger.entries, false, 'an executed flow leaves the ledger');
+    assert.equal('f4::test1' in ledger.entries, false, 'NOT_RUN neither files nor clears — it was not this flow\'s decision');
+    assert.ok(ledger.entries['f2::test1'].firstSkippedAt < Date.now() - 14 * 24 * 60 * 60 * 1000, 'the first skip date is kept');
+
+    // Two environments are two entries: skipping on test2 says nothing about test1.
+    await updateSkipLedger(dir, { environment: 'test2', flows: [{ id: 'f2', verdict: 'PASS' }] });
+    ledger = JSON.parse(await read(path.join(dir, 'skips.json'), 'utf8'));
+    assert.equal('f2::test1' in ledger.entries, true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+await test('a harvested candidate is never mistaken for a flow', async () => {
+  // The runner's loaders read only *.flow.json (collectJson), and the daemon's
+  // library must skip *.candidate.json by name — a candidate has no FlowSpec
+  // shape, and listing it would offer a "flow" that can neither run nor sync.
+  const { collectJson } = await runnerSelection();
+  await withFlowLibrary(async (library, root, path) => {
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    await mkdir(path.join(root, 'agripad', 'candidates'), { recursive: true });
+    await writeFile(path.join(root, 'agripad', 'candidates', '20260927-1200-1.candidate.json'), JSON.stringify({
+      format: 'g9/flow-candidate', schemaVersion: 1, tags: ['@candidate'], device: 'X', steps: [{ kind: 'cmd', source: 'Map', key: 'tap' }],
+    }));
+    await library.write(flowspec.toFlowSpec({ id: 'real', name: 'Real', steps: [{ id: 's1', type: 'navigate', url: 'https://a.test/' }] }));
+    const { flows } = await library.list();
+    assert.deepEqual(flows.map((f) => f.id), ['real'], 'the candidate is not listed as a flow');
+    assert.deepEqual((await collectJson(path.join(root, 'agripad'))).length, 0, 'and the runner\'s loader never even reads it');
   });
 });
 

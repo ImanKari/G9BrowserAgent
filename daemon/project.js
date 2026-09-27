@@ -116,8 +116,28 @@ export function loadProject(startDir = process.cwd(), options = {}) {
 
   project.found = true;
   project.defaultEnvironment = str(raw.defaultEnvironment);
-  project.environments = obj(raw.environments);
-  project.urlNormalizers = arr(raw.urlNormalizers);
+  // An environment is a base-URL string, or an object form
+  // `{ "baseUrl": "https://…", "features": [...], "build": "1.2.3" }` — the
+  // runner's --env rewriting and `requires` preflight read the object form.
+  // A malformed entry is reported and kept out, so a typo in one environment
+  // does not take the others (or the daemon) with it.
+  project.environments = {};
+  for (const [name, value] of Object.entries(obj(raw.environments))) {
+    if (typeof value === 'string' && value.trim()) {
+      project.environments[name] = value.trim();
+    } else if (value && typeof value === 'object' && !Array.isArray(value) && typeof value.baseUrl === 'string' && value.baseUrl.trim()) {
+      project.environments[name] = value;
+    } else {
+      project.problems.push(
+        `environments.${name} must be a base-URL string or { "baseUrl": "https://…", "features"?: [...], "build"?: "…" }; it was ignored.`,
+      );
+    }
+  }
+  project.urlNormalizers = arr(raw.urlNormalizers).filter((rule, index) => {
+    if (rule && typeof rule === 'object' && typeof rule.match === 'string' && rule.match) return true;
+    project.problems.push(`urlNormalizers[${index}] needs a "match" regex string (and usually an "as" replacement); it was ignored.`);
+    return false;
+  });
   project.secretRefs = arr(raw.secretRefs).filter((s) => typeof s === 'string');
   project.volatile = arr(raw.volatile).filter((s) => typeof s === 'string');
   project.operationAliases = obj(raw.operationAliases);

@@ -30,14 +30,17 @@
  *
  * ## Exit codes
  *
- *   0  everything passed (warnings allowed)
+ *   0  everything passed (warnings allowed; skipped flows never redden a run)
  *   1  a product failure — an assertion or an oracle failed
  *   2  an automation failure — the test broke, not the product
  *   3  a confirmed surprise — the flow did something it has never done
  *   4  the runner could not run at all (no engine, no flows, bad arguments)
+ *   5  a runner-internal error — a driver exception or engine failure mid-run
  *
- * Separating 1 from 2 is the point of the whole classification: a pipeline that
- * treats a rotted locator as a product regression trains people to ignore it.
+ * Precedence when results are mixed: 1 > 2 > 5 > 3 > 0. Separating 1 from 2 is
+ * the point of the whole classification: a pipeline that treats a rotted
+ * locator as a product regression trains people to ignore it — and 5 is split
+ * from 1 for the same reason: a crash of THIS tool is not a product regression.
  */
 
 import path from 'node:path';
@@ -49,9 +52,9 @@ import { writeReports } from './report.mjs';
 // plain ES modules with no browser APIs, so the runner reuses them rather than
 // growing a second implementation that drifts.
 import { calibrateVolatile } from '../extension/lib/signature.js';
-import { validateFlowSpec } from '../extension/lib/flowspec.js';
+import { validateFlowSpec, KNOWN_ACTIONS } from '../extension/lib/flowspec.js';
 
-const EXIT = { OK: 0, PRODUCT: 1, AUTOMATION: 2, SURPRISE: 3, RUNNER: 4 };
+const EXIT = { OK: 0, PRODUCT: 1, AUTOMATION: 2, SURPRISE: 3, RUNNER: 4, ERROR: 5 };
 
 // ------------------------------------------------------------------- CLI
 
@@ -84,6 +87,8 @@ g9 — run recorded G9BrowserAgent flows without an agent
   g9 approve <flowId>                  fold the last run into the approved known world
   g9 spec <flowId> [--out file.json]   export a canonical, Git-diffable FlowSpec
   g9 ab <flowId> --a <url> --b <url>   run the same flow against two builds and diff them
+  g9 harvest --platform agripad        pull recorded flow candidates off a device
+                                       [--device <serial>] [--out <dir>]
 
 Targets for "run":
   <flowId>            one flow, by id (or name); a bare suite name also works
@@ -106,8 +111,11 @@ Engine:
   --port <n>            the G9BrowserAgent daemon's port (default: G9_PORT, else 8765)
 
 Run options:
-  --env <name>          environment label recorded in the report
-  --data <file.json>    variables substituted into {{placeholders}}
+  --env <name>          the environment to run against (g9.project.json "environments"):
+                        rewrites the flows' URLs onto its baseUrl, selects its known
+                        world, and is recorded in the report. Without it: a label only.
+  --data <file.json>    variables substituted into {{placeholders}}; also the first
+                        source for {{secret:NAME}} values (then G9_SECRET_<NAME> env vars)
   --report <dir>        where to write run.json / junit.xml / report.html
   --timing <mode>       recorded (default) | adaptive | fast
   --signature <mode>    lite (default) | full | off
@@ -177,6 +185,268 @@ async function loadProject(file) {
 function flowsRoot(project) {
   const configured = project?.flowsDir ?? 'QA/Flows';
   return path.resolve(project?.dir ?? process.cwd(), configured);
+}
+
+// ------------------------------------ environments, secrets, requires (preflight)
+
+/**
+ * An environment's base URL. `g9.project.json` accepts two forms:
+ * `"test1": "https://test1.example"` and
+ * `"test1": { "baseUrl": "https://test1.example", "features": [...], "build": "1.2.3" }`.
+ */
+function environmentBaseUrl(definition) {
+  if (typeof definition === 'string') return definition.trim() || null;
+  if (definition && typeof definition === 'object' && !Array.isArray(definition)) {
+    return typeof definition.baseUrl === 'string' && definition.baseUrl.trim() ? definition.baseUrl.trim() : null;
+  }
+  return null;
+}
+
+/**
+ * What a web environment DECLARES about itself, for `requires`: build and
+ * features exist only in the object form — the string form declares neither,
+ * and "not declared" must stay distinguishable from "declared empty".
+ */
+function environmentFacts(definition) {
+  if (definition && typeof definition === 'object' && !Array.isArray(definition)) {
+    return {
+      build: typeof definition.build === 'string' ? definition.build : null,
+      features: Array.isArray(definition.features) ? definition.features.filter((f) => typeof f === 'string') : null,
+    };
+  }
+  return { build: null, features: null };
+}
+
+/**
+ * Point a flow's URLs at the chosen environment.
+ *
+ * Two independent rewrites, because they answer two different recordings:
+ * - `{{baseUrl}}` in a URL is resolved to the environment's base URL whenever
+ *   one is known (a flow written portable on purpose);
+ * - with `rewriteOrigins` (an explicit --env), every ABSOLUTE URL whose origin
+ *   is ANY known environment's origin is moved to the chosen environment's
+ *   origin — so a flow recorded on test1 runs against test2 without an edit,
+ *   while a URL pointing somewhere none of the environments own is left alone
+ *   (rewriting a third-party URL would test a page nobody named).
+ *
+ * Touches only where URLs live in a FlowSpec: startUrl, navigate steps, and
+ * url oracles. Everything else — text assertions that happen to contain a URL,
+ * data values — is content, not addressing, and stays byte-identical.
+ */
+function rewriteFlowUrls(flow, environments, envName, rewriteOrigins) {
+  const base = environmentBaseUrl(environments?.[envName]);
+  if (!base) return flow;
+  let targetOrigin = null;
+  try {
+    targetOrigin = new URL(base).origin;
+  } catch {
+    throw new Error(`environment "${envName}" has a baseUrl that is not a URL: ${base}. Fix it in g9.project.json.`);
+  }
+  const origins = new Set();
+  if (rewriteOrigins) {
+    for (const definition of Object.values(environments ?? {})) {
+      const sibling = environmentBaseUrl(definition);
+      try {
+        if (sibling) origins.add(new URL(sibling).origin);
+      } catch {
+        /* a broken sibling environment must not stop this run; loadProject reports it */
+      }
+    }
+  }
+  const rewrite = (value) => {
+    if (typeof value !== 'string' || !value) return value;
+    let text = value.split('{{baseUrl}}').join(base.replace(/\/+$/, ''));
+    if (rewriteOrigins) {
+      try {
+        const url = new URL(text);
+        if (origins.has(url.origin) && url.origin !== targetOrigin) text = targetOrigin + text.slice(url.origin.length);
+      } catch {
+        /* not an absolute URL: nothing to re-point */
+      }
+    }
+    return text;
+  };
+  return {
+    ...flow,
+    ...(flow.startUrl != null ? { startUrl: rewrite(flow.startUrl) } : {}),
+    steps: (flow.steps ?? []).map((step) => {
+      let next = step;
+      if (step?.url != null) next = { ...next, url: rewrite(step.url) };
+      if (step?.oracle?.kind === 'url') {
+        next = {
+          ...next,
+          oracle: {
+            ...step.oracle,
+            ...(step.oracle.expected != null ? { expected: rewrite(step.oracle.expected) } : {}),
+            ...(step.oracle.contains != null ? { contains: rewrite(step.oracle.contains) } : {}),
+          },
+        };
+      }
+      return next;
+    }),
+  };
+}
+
+/** `db.password` → `G9_SECRET_DB_PASSWORD`: uppercased, every non-alphanumeric run one underscore. */
+function secretEnvVarName(name) {
+  return `G9_SECRET_${String(name).toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`;
+}
+
+/**
+ * Resolve a flow's secretRef parameters: the --data file first (a value someone
+ * deliberately provided for this run), then `G9_SECRET_<NAME>` from the
+ * environment. Values are returned apart from ordinary variables so the caller
+ * can mask them wherever they might be echoed; `missing` lists what a required
+ * secret still lacks, with both ways to provide it — that list is a SKIP
+ * reason, never a silent pass with an empty password.
+ */
+function resolveSecrets(parameters, data = {}, env = {}) {
+  const values = {};
+  const missing = [];
+  for (const [name, param] of Object.entries(parameters ?? {})) {
+    if (param?.type !== 'secretRef') continue;
+    const envVar = secretEnvVarName(name);
+    const value = data[name] ?? env[envVar];
+    if (value != null && value !== '') {
+      values[name] = String(value);
+    } else if (param.required !== false) {
+      missing.push(`secret "${name}" (put it in the --data file as "${name}", or set the environment variable ${envVar})`);
+    }
+  }
+  return { values, missing };
+}
+
+/**
+ * Lenient numeric-dotted build compare: "2.9.2" vs "2.10" by numeric segments,
+ * missing segments are 0, non-numeric decoration ("v", "-beta") is ignored.
+ * → -1 | 0 | 1.
+ */
+function compareBuilds(a, b) {
+  const parse = (value) => String(value ?? '').split(/[^0-9]+/).filter(Boolean).map(Number);
+  const left = parse(a);
+  const right = parse(b);
+  for (let i = 0; i < Math.max(left.length, right.length); i++) {
+    const x = left[i] ?? 0;
+    const y = right[i] ?? 0;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Evaluate a flow's `requires` against what is known about the target.
+ *
+ * `facts`: { environment, build, features, subject, hint } — `build`/`features`
+ * null means UNKNOWN (as opposed to a declared empty list), and a requirement
+ * that cannot be evaluated is a skip that says so, never a silent pass: a gate
+ * that waves through what it could not check is not a gate.
+ *
+ * → null when the flow may run, else the skip reason.
+ */
+function evaluateRequires(requires, facts = {}) {
+  if (!requires || typeof requires !== 'object') return null;
+  if (Array.isArray(requires.environments) && requires.environments.length) {
+    const env = facts.environment ?? null;
+    if (!env || !requires.environments.includes(env)) {
+      return `the flow requires environment ${requires.environments.map((e) => `"${e}"`).join(' or ')}, and this run is on ${env ? `"${env}"` : 'no named environment (pass --env)'}`;
+    }
+  }
+  if (requires.minBuild != null) {
+    if (facts.build == null) return `cannot evaluate requires.minBuild for ${facts.subject ?? 'this target'} — ${facts.hint ?? 'it declares no build'}`;
+    if (compareBuilds(facts.build, requires.minBuild) < 0) {
+      return `the flow requires build ${requires.minBuild} or newer, and ${facts.subject ?? 'this target'} is on ${facts.build}`;
+    }
+  }
+  if (Array.isArray(requires.features) && requires.features.length) {
+    if (!Array.isArray(facts.features)) return `cannot evaluate requires.features for ${facts.subject ?? 'this target'} — ${facts.hint ?? 'it declares no features'}`;
+    const missing = requires.features.filter((feature) => !facts.features.includes(feature));
+    if (missing.length) {
+      return `the flow requires feature(s) ${missing.map((f) => `"${f}"`).join(', ')} that ${facts.subject ?? 'this target'} does not have`;
+    }
+  }
+  return null;
+}
+
+/**
+ * "risk-desc": most dangerous first — critical > high > medium > low, a flow
+ * with no risk counts as medium ("normal" is accepted as its older spelling).
+ * The sort is stable, so flows of one rank keep their selection order.
+ * "name" (the other order daemon/flows.js resolveSuite knows) sorts by name.
+ */
+function orderFlows(flows, order) {
+  if (order === 'risk-desc') {
+    const rank = { critical: 0, high: 1, medium: 2, normal: 2, low: 3 };
+    return [...flows].sort((a, b) => (rank[a.risk] ?? 2) - (rank[b.risk] ?? 2));
+  }
+  if (order === 'name') return [...flows].sort((a, b) => String(a.name ?? '').localeCompare(String(b.name ?? '')));
+  return flows;
+}
+
+/**
+ * A suite file's run rules — `order` and `stopOn` — for a target that names a
+ * suite (`suite:<name>` or a bare suite name). `{}` for everything else: a tag
+ * or an id has no file to carry rules.
+ */
+async function suiteRules(project, target) {
+  if (!project || !target) return {};
+  const name = target.startsWith('suite:') ? target.slice(6) : (target.startsWith('tag:') ? null : target);
+  if (!name) return {};
+  const suite = await readSuite(flowsRoot(project), name);
+  if (!suite) return {};
+  if (suite.stopOn != null && suite.stopOn !== 'failure') {
+    throw new Error(`Suite "${name}" has stopOn "${suite.stopOn}", which this runner does not implement. Supported: "failure". Refusing rather than guessing.`);
+  }
+  if (suite.order != null && !['risk-desc', 'name'].includes(suite.order)) {
+    throw new Error(`Suite "${name}" has order "${suite.order}", which this runner does not implement. Supported: "risk-desc", "name". Refusing rather than guessing.`);
+  }
+  return { order: suite.order ?? null, stopOn: suite.stopOn ?? null };
+}
+
+/** Does this verdict stop a `stopOn: "failure"` suite? SURPRISE and SKIPPED do not. */
+function stopsSuite(rules, verdict) {
+  return rules?.stopOn === 'failure' && ['FAIL_PRODUCT', 'FAIL_AUTOMATION', 'ERROR'].includes(verdict);
+}
+
+/**
+ * Resolve {{placeholders}} (and {{secret:…}}) in a URL before navigating to it.
+ * The replay engine substitutes step values, but the START URL is the runner's
+ * own navigation — unsubstituted, it used to be sent to the browser literally.
+ */
+function resolveUrlPlaceholders(value, variables = {}) {
+  return String(value).replace(/\{\{(secret:)?([A-Za-z_][A-Za-z0-9_.-]*)\}\}/g, (whole, secretPrefix, key) => {
+    if (!(key in variables)) {
+      throw new Error(
+        `The start URL needs ${secretPrefix ? 'the secret' : 'the data parameter'} "${key}" (${whole}). ` +
+          `Provide it with --data${secretPrefix ? `, or set ${secretEnvVarName(key)}` : ''}.`,
+      );
+    }
+    return String(variables[key]);
+  });
+}
+
+/**
+ * Replace every occurrence of a secret's VALUE in a result with its
+ * placeholder, recursively. Step echoes ("the field contains …"), failure
+ * messages and evidence all flow into run.json and the reports; a report that
+ * prints the password is a credential leak with a distribution list.
+ */
+function maskSecretsDeep(value, secrets = {}) {
+  const entries = Object.entries(secrets).filter(([, secret]) => typeof secret === 'string' && secret.length);
+  if (!entries.length) return value;
+  const maskText = (text) => {
+    let out = String(text);
+    for (const [name, secret] of entries) out = out.split(secret).join(`{{secret:${name}}}`);
+    return out;
+  };
+  const walk = (node) => {
+    if (typeof node === 'string') return maskText(node);
+    if (Array.isArray(node)) return node.map(walk);
+    if (node && typeof node === 'object') {
+      return Object.fromEntries(Object.entries(node).map(([key, item]) => [key, walk(item)]));
+    }
+    return node;
+  };
+  return walk(value);
 }
 
 // ------------------------------------------------------------- connecting
@@ -404,8 +674,25 @@ async function commandRun({ options }) {
   // touches a browser at all. They share the flow format, the verdicts and the
   // artefacts — which is why FlowSpec carries `target.kind`.
   if ((options.platform ?? 'web') === 'agripad') {
-    return commandRunAgriPad({ options, project, reportDir, target });
+    return commandRunAgriPad({ options, project, reportDir, target, variables });
   }
+
+  // An explicit --env must name a declared environment: a typo that silently
+  // became "just a label" would run every flow against the WRONG environment
+  // while every report proudly carries the right name.
+  const explicitEnv = !!(options.env && options.env !== true);
+  const knownEnvs = Object.keys(project?.environments ?? {});
+  if (explicitEnv && knownEnvs.length && !knownEnvs.includes(options.env)) {
+    throw new Error(
+      `--env "${options.env}" is not declared in g9.project.json (environments: ${knownEnvs.join(', ')}). ` +
+        'Add it there, or pick one of those.',
+    );
+  }
+  const envName = explicitEnv ? options.env : (project?.defaultEnvironment ?? null);
+  // {{baseUrl}} in step values resolves like any other variable; the URL fields
+  // themselves are rewritten by rewriteFlowUrls before import.
+  const envBase = envName ? environmentBaseUrl(project?.environments?.[envName]) : null;
+  if (envBase && !('baseUrl' in variables)) variables.baseUrl = envBase.replace(/\/+$/, '');
 
   const engine = engineChoice(options);
   const humanize = humanizeFor(options);
@@ -414,13 +701,14 @@ async function commandRun({ options }) {
     format: 'g9/run',
     version: 1,
     startedAt: Date.now(),
-    environment: options.env ?? project?.defaultEnvironment ?? null,
+    environment: envName,
     suite: target,
     pinned: false,
     daemon: { version: status.daemon?.version ?? null, port: status.daemon?.port ?? null },
     humanize,
     engine: null,
     flows: [],
+    provenance: await collectProvenance(project?.dir ?? process.cwd(), environmentFacts(project?.environments?.[envName]).build),
   };
 
   let launched = null;
@@ -462,6 +750,10 @@ async function commandRun({ options }) {
   }
 
   run.durationMs = Date.now() - run.startedAt;
+  // The skip ledger: which flows keep being skipped, since when. A flow that
+  // actually ran drops out; one skipped for 14+ days becomes a loud warning —
+  // coverage that quietly evaporates is the failure mode `requires` invites.
+  run.staleSkips = await updateSkipLedger(reportDir, run);
   await writeReports(reportDir, run);
 
   const code = exitCodeFor(run, options['fail-on'] ?? 'surprise');
@@ -489,11 +781,46 @@ async function runLaunched({ client, options, project, target, variables, har, r
     const unique = [...new Map(recordings.map((r) => [r.id, r])).values()];
     flows = await selectFlows(unique, target, project, 'in the browser stores (no flow library found)');
   }
+
+  const rules = await suiteRules(project, target);
+  flows = orderFlows(flows, rules.order);
+  const envName = run.environment;
+  const explicitEnv = !!(options.env && options.env !== true);
+  if (fromDisk && envName && project?.environments) {
+    // Repository flows are re-pointed at the chosen environment BEFORE import,
+    // so the imported copy, the replay and the comparison all see one truth.
+    flows = flows.map((flow) => rewriteFlowUrls(flow, project.environments, envName, explicitEnv));
+  }
   log(options, `${flows.length} flow(s) to run${fromDisk ? ' from the repository' : ' from the browser stores'}\n`);
 
-  for (const flow of flows) {
+  for (const [flowIndex, flow] of flows.entries()) {
     const started = Date.now();
     log(options, `▶ ${flow.name} (${flow.id})`);
+
+    // Preflight, BEFORE a tab is opened: requires, then secrets. A skipped flow
+    // costs nothing and reddens nothing — but it is recorded, aged, and shown.
+    let full = flow;
+    if (!fromDisk && (flow.requires === undefined || flow.parameters === undefined)) {
+      // A store list row is a summary; requires/parameters live on the recording.
+      full = await client.call('browser_recording', { action: 'get', id: flow.id }).catch(() => flow);
+    }
+    const skip = evaluateRequires(full.requires, {
+      environment: envName,
+      ...environmentFacts(project?.environments?.[envName]),
+      subject: envName ? `environment "${envName}"` : 'this run',
+      hint: 'declare it in g9.project.json (the environment object form: { "baseUrl", "features", "build" })',
+    });
+    if (skip) {
+      pushSkipped(run, flow, skip, options);
+      continue;
+    }
+    const secrets = resolveSecrets(full.parameters, variables, process.env);
+    if (secrets.missing.length) {
+      pushSkipped(run, flow, `missing ${secrets.missing.join('; ')}`, options);
+      continue;
+    }
+    const flowVariables = { ...variables, ...secrets.values };
+
     let result;
     let tabId = null;
     try {
@@ -518,7 +845,7 @@ async function runLaunched({ client, options, project, target, variables, har, r
         run.pinned = true;
         run.pinDetail ??= pinned;
       }
-      const startUrl = flow.startUrl ?? null;
+      const startUrl = flow.startUrl ? resolveUrlPlaceholders(flow.startUrl, flowVariables) : null;
       // timeoutMs is the whole goto's deadline (the server's first byte included — a cold staging server
       // can take longer than the 30 s default); the call budget stays above it.
       if (startUrl) await client.call('browser_navigate', { action: 'goto', url: startUrl, tabId, waitUntil: 'load', timeoutMs: 110_000 }, 140_000);
@@ -531,7 +858,9 @@ async function runLaunched({ client, options, project, target, variables, har, r
         compare: options['no-compare'] !== true,
         seedKnownWorld: options.seed === true,
         stopOnFailure: true,
-        variables,
+        variables: flowVariables,
+        ...(envName ? { environment: envName } : {}),
+        ...(project?.urlNormalizers?.length ? { urlNormalizers: project.urlNormalizers } : {}),
         ...(humanize.level ? { humanize: humanize.level } : {}),
         seed: humanize.seed,
       }, 1_900_000);
@@ -540,7 +869,13 @@ async function runLaunched({ client, options, project, target, variables, har, r
     } finally {
       if (tabId != null) await client.call('browser_tabs', { action: 'close', tabId }).catch(() => {});
     }
-    pushFlow(run, flow, result, options);
+    // A secret's value must never reach run.json or a report — not in a step
+    // echo, not in a failure message quoting the field's content.
+    pushFlow(run, flow, maskSecretsDeep(result, secrets.values), options);
+    if (stopsSuite(rules, run.flows.at(-1).verdict)) {
+      pushNotRun(run, flows.slice(flowIndex + 1), flow, options);
+      break;
+    }
   }
 }
 
@@ -553,12 +888,35 @@ async function runExtension({ client, options, project, target, variables, har, 
     log(options, `network pinned: ${pinned.operations} operations, ${pinned.responses} recorded responses`);
   }
   const { recordings = [] } = await client.call('browser_recording', { action: 'list', engine: 'extension' });
-  const flows = await selectFlows(recordings, target, project, 'in this browser profile');
+  let flows = await selectFlows(recordings, target, project, 'in this browser profile');
+  const rules = await suiteRules(project, target);
+  flows = orderFlows(flows, rules.order);
+  const envName = run.environment;
   log(options, `${flows.length} flow(s) to run\n`);
 
-  for (const entry of flows) {
+  for (const [flowIndex, entry] of flows.entries()) {
     const started = Date.now();
     log(options, `▶ ${entry.name} (${entry.id})`);
+
+    // The store's list rows are summaries: requires and parameters live on the
+    // recording itself, and the preflight needs both before anything replays.
+    const full = await client.call('browser_recording', { action: 'get', id: entry.id, engine: 'extension' }).catch(() => entry);
+    const skip = evaluateRequires(full.requires, {
+      environment: envName,
+      ...environmentFacts(project?.environments?.[envName]),
+      subject: envName ? `environment "${envName}"` : 'this run',
+      hint: 'declare it in g9.project.json (the environment object form: { "baseUrl", "features", "build" })',
+    });
+    if (skip) {
+      pushSkipped(run, entry, skip, options);
+      continue;
+    }
+    const secrets = resolveSecrets(full.parameters, variables, process.env);
+    if (secrets.missing.length) {
+      pushSkipped(run, entry, `missing ${secrets.missing.join('; ')}`, options);
+      continue;
+    }
+
     let result;
     try {
       result = await client.call('browser_recording', {
@@ -570,14 +928,20 @@ async function runExtension({ client, options, project, target, variables, har, 
         compare: options['no-compare'] !== true,
         seedKnownWorld: options.seed === true,
         stopOnFailure: true,
-        variables,
+        variables: { ...variables, ...secrets.values },
+        ...(envName ? { environment: envName } : {}),
+        ...(project?.urlNormalizers?.length ? { urlNormalizers: project.urlNormalizers } : {}),
         ...(humanize.level ? { humanize: humanize.level } : {}),
         seed: humanize.seed,
       }, 1_900_000);
     } catch (err) {
       result = errorResult(entry, started, err);
     }
-    pushFlow(run, entry, result, options);
+    pushFlow(run, entry, maskSecretsDeep(result, secrets.values), options);
+    if (stopsSuite(rules, run.flows.at(-1).verdict)) {
+      pushNotRun(run, flows.slice(flowIndex + 1), entry, options);
+      break;
+    }
   }
   if (run.pinned) await client.call('browser_network', { action: 'unpin' }).catch(() => {});
 }
@@ -604,6 +968,57 @@ function pushFlow(run, entry, result, options) {
   log(options, `  ${verdictLine(result)}\n`);
 }
 
+/**
+ * A flow the preflight kept from running. SKIPPED is a first-class verdict —
+ * it appears in run.json, junit.xml (<skipped>), report.html and the QA status
+ * file — because a skip that is invisible is coverage silently lost, which is
+ * the exact failure `requires` would otherwise introduce.
+ */
+function pushSkipped(run, flow, reason, options) {
+  run.flows.push({
+    id: flow.id,
+    name: flow.name,
+    verdict: 'SKIPPED',
+    skipReason: reason,
+    total: (flow.steps ?? []).length || (flow.stepCount ?? 0),
+    passed: 0,
+    failed: 0,
+    durationMs: 0,
+    steps: [],
+    qaTestCaseIds: flow.qaTestCaseIds ?? [],
+    tags: flow.tags ?? [],
+    suite: flow.suite ?? null,
+  });
+  log(options, `  SKIPPED · ${reason}\n`);
+}
+
+/**
+ * The flows a `stopOn: "failure"` suite never reached. NOT_RUN, deliberately
+ * distinct from SKIPPED: a skip is a decision about THIS flow, not-run is
+ * collateral of another flow's failure — and the entry names the culprit.
+ */
+function pushNotRun(run, remaining, stopper, options) {
+  if (!remaining.length) return;
+  const reason = `not run — the suite stopped after "${stopper.name}" (${run.flows.at(-1)?.verdict ?? 'failure'})`;
+  for (const flow of remaining) {
+    run.flows.push({
+      id: flow.id,
+      name: flow.name,
+      verdict: 'NOT_RUN',
+      skipReason: reason,
+      total: (flow.steps ?? []).length || (flow.stepCount ?? 0),
+      passed: 0,
+      failed: 0,
+      durationMs: 0,
+      steps: [],
+      qaTestCaseIds: flow.qaTestCaseIds ?? [],
+      tags: flow.tags ?? [],
+      suite: flow.suite ?? null,
+    });
+  }
+  log(options, `  stopOn: failure — ${remaining.length} flow(s) not run (stopped after "${stopper.name}")\n`);
+}
+
 // -------------------------------------------------------------- AgriPad
 
 /**
@@ -621,7 +1036,7 @@ function pushFlow(run, entry, result, options) {
  *
  * A device flow has no browser to live in, so `QA/Flows/agripad/**` IS the library.
  */
-async function commandRunAgriPad({ options, project, reportDir, target }) {
+async function commandRunAgriPad({ options, project, reportDir, target, variables = {} }) {
   const { AgriPadDriver, listDevices } = await import('./drivers/agripad.mjs');
 
   const devices = await listDevices();
@@ -653,9 +1068,12 @@ async function commandRunAgriPad({ options, project, reportDir, target }) {
     log: (message) => log(options, `  ${message}`),
   });
 
-  const flows = await loadDeviceFlows(project, target);
+  let flows = await loadDeviceFlows(project, target);
+  const rules = await suiteRules(project, target);
+  flows = orderFlows(flows, rules.order);
   log(options, `${flows.length} flow(s) to run on ${serial}\n`);
 
+  const envName = options.env && options.env !== true ? options.env : (project?.defaultEnvironment ?? null);
   const run = {
     format: 'g9/run',
     version: 1,
@@ -666,7 +1084,7 @@ async function commandRunAgriPad({ options, project, reportDir, target }) {
     fidelity: 'gray-box',
     device: serial,
     startedAt: Date.now(),
-    environment: options.env ?? project?.defaultEnvironment ?? null,
+    environment: envName,
     suite: target,
     pinned: false,
     flows: [],
@@ -676,20 +1094,57 @@ async function commandRunAgriPad({ options, project, reportDir, target }) {
   run.deviceInfo = ready.hello;
   await driver.acquire();
 
+  // What this DEVICE declares, asked once per run and cached: qa.ping for the
+  // build (also the report's provenance), qa.capabilities for the feature set.
+  // An older app that does not answer them is an honest "unknown" — a flow
+  // whose `requires` needs the answer is then SKIPPED with that reason, loudly.
+  let deviceFactsCache = null;
+  const deviceFacts = async () => {
+    if (deviceFactsCache) return deviceFactsCache;
+    const ping = await driver.command('qa.ping', {}).catch(() => null);
+    const capabilities = await driver.command('qa.capabilities', {}).catch(() => null);
+    const features = capabilities?.ok
+      ? [...(capabilities.result?.features ?? []), ...(capabilities.result?.commands ?? [])].filter((f) => typeof f === 'string')
+      : null;
+    deviceFactsCache = {
+      build: ping?.ok ? (ping.result?.build ?? null) : null,
+      features,
+      subject: `device ${serial}`,
+      hint: 'the app build does not answer qa.ping/qa.capabilities — update the app on the device',
+    };
+    return deviceFactsCache;
+  };
+  run.provenance = await collectProvenance(project?.dir ?? process.cwd(), (await deviceFacts()).build);
+
   try {
-    for (const flow of flows) {
+    for (const [flowIndex, flow] of flows.entries()) {
       const started = Date.now();
       log(options, `▶ ${flow.name} (${flow.id})`);
+
+      // Preflight, BEFORE any command reaches the device.
+      const skip = evaluateRequires(flow.requires, { environment: envName, ...(flow.requires ? await deviceFacts() : {}) });
+      if (skip) {
+        pushSkipped(run, flow, skip, options);
+        continue;
+      }
+      const secrets = resolveSecrets(flow.parameters, variables, process.env);
+      if (secrets.missing.length) {
+        pushSkipped(run, flow, `missing ${secrets.missing.join('; ')}`, options);
+        continue;
+      }
+      const flowVariables = { ...variables, ...secrets.values };
+
       const steps = [];
       let failed = 0;
 
       for (const [index, step] of (flow.steps ?? []).entries()) {
         let outcome;
         try {
-          outcome = await driver.step(step);
+          outcome = await driver.step(substituteDeviceStep(step, flowVariables));
         } catch (err) {
           outcome = { ok: false, error: String(err.message ?? err) };
         }
+        outcome = maskSecretsDeep(outcome, secrets.values);
         steps.push({ step: index + 1, id: step.id, action: step.action, ...outcome });
         if (!outcome.ok) {
           failed += 1;
@@ -709,8 +1164,14 @@ async function commandRunAgriPad({ options, project, reportDir, target }) {
         durationMs: Date.now() - started,
         steps,
         qaTestCaseIds: flow.qaTestCaseIds ?? [],
+        tags: flow.tags ?? [],
+        suite: flow.suite ?? null,
       });
       log(options, `  ${failed ? '✗' : '✓'} ${passed}/${flow.steps?.length ?? 0}\n`);
+      if (stopsSuite(rules, run.flows.at(-1).verdict)) {
+        pushNotRun(run, flows.slice(flowIndex + 1), flow, options);
+        break;
+      }
     }
   } finally {
     // Always release. A crashed runner that keeps a lease locks the device until the TTL expires,
@@ -723,10 +1184,39 @@ async function commandRunAgriPad({ options, project, reportDir, target }) {
   // path printed "NaNs". A summary that prints NaN is a summary people stop
   // reading, and it was one assignment away from being right.
   run.durationMs = run.finishedAt - run.startedAt;
+  run.staleSkips = await updateSkipLedger(reportDir, run);
   const code = exitCodeFor(run, options['fail-on'] ?? 'surprise');
   await writeReports(reportDir, run);
   summarize(run, reportDir, code);
   return code;
+}
+
+/**
+ * Substitute {{placeholders}} (and {{secret:…}}) into a device step's values.
+ * The web replay engine substitutes inside the browser; the device path drives
+ * steps itself, so it owes them the same resolution — a step is otherwise typed
+ * into the app literally, braces and all.
+ */
+function substituteDeviceStep(step, variables = {}) {
+  const resolve = (value) => {
+    if (typeof value === 'string') {
+      const exact = /^\{\{(?:secret:)?([A-Za-z_][A-Za-z0-9_.-]*)\}\}$/.exec(value);
+      if (exact) {
+        if (!(exact[1] in variables)) throw new Error(`Missing data parameter "${exact[1]}" required by ${JSON.stringify(value)}.`);
+        return variables[exact[1]];
+      }
+      return value.replace(/\{\{(?:secret:)?([A-Za-z_][A-Za-z0-9_.-]*)\}\}/g, (whole, key) => {
+        if (!(key in variables)) throw new Error(`Missing data parameter "${key}" required by ${JSON.stringify(value)}.`);
+        return String(variables[key]);
+      });
+    }
+    if (Array.isArray(value)) return value.map(resolve);
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, resolve(item)]));
+    }
+    return value;
+  };
+  return resolve(step);
 }
 
 /**
@@ -762,8 +1252,11 @@ const DEVICE_AUTOMATION_FAILURES = [
   /not supported/i,
   /unknown command/i,
 
-  // The device was never reachable. Environment, never product.
+  // The device was never reachable, or a person has not consented yet. Environment, never product.
+  // (The bridge's own wording is "Live access has not been granted"; the older
+  // paraphrase stays so a report written by an old build still classifies.)
   /did not answer/i,
+  /live access has not been granted/i,
   /has not granted live access/i,
   /is offline/i,
 
@@ -788,12 +1281,20 @@ async function loadDeviceFlows(project, target) {
   const files = await collectJson(path.join(root, 'agripad'));
   const flows = [];
 
+  // The same validator the web path runs, widened by the one action only the
+  // device driver implements. An invalid file used to reach the device and fail
+  // there, step by step, with the file never named.
+  const deviceActions = new Set([...KNOWN_ACTIONS, 'dismiss']);
   for (const file of files) {
+    let spec;
     try {
-      flows.push(JSON.parse(await readFile(file, 'utf8')));
+      spec = JSON.parse(await readFile(file, 'utf8'));
     } catch (err) {
       throw new Error(`${file} is not valid JSON: ${err.message}`);
     }
+    const problems = validateFlowSpec(spec, { actions: deviceActions });
+    if (problems.length) throw new Error(`${file} is not a valid FlowSpec:\n- ${problems.join('\n- ')}`);
+    flows.push(spec);
   }
 
   if (!flows.length) {
@@ -927,6 +1428,9 @@ async function collectJson(dir, out = []) {
 // ------------------------------------------------------------ verdicts, summary
 
 function verdictLine(result) {
+  if (result.verdict === 'SKIPPED' || result.verdict === 'NOT_RUN') {
+    return `${result.verdict} · ${result.skipReason ?? ''}`;
+  }
   const bits = [`${result.verdict ?? 'ERROR'}`, `${result.passed ?? 0}/${result.total ?? 0} steps`];
   if (result.surprises?.length) {
     const fails = result.surprises.filter((s) => s.effectiveSeverity === 'fail').length;
@@ -949,8 +1453,14 @@ function verdictLine(result) {
  */
 function exitCodeFor(run, failOn) {
   const has = (verdict) => run.flows.some((flow) => flow.verdict === verdict);
-  if (has('FAIL_PRODUCT') || has('ERROR')) return EXIT.PRODUCT;
+  // Precedence when results are mixed: 1 > 2 > 5 > 3 > 0. A product failure
+  // dominates everything; a broken test beats a broken runner (both need a
+  // person, but different people); ERROR (5) is the runner's own fault and
+  // must never masquerade as a product regression. SKIPPED and NOT_RUN never
+  // redden a run by themselves — they are reported, aged and warned about.
+  if (has('FAIL_PRODUCT')) return EXIT.PRODUCT;
   if (has('FAIL_AUTOMATION')) return EXIT.AUTOMATION;
+  if (has('ERROR')) return EXIT.ERROR;
   if (failOn !== 'failure' && has('SURPRISE')) return EXIT.SURPRISE;
   if (failOn === 'warning' && has('PASS_WITH_WARNING')) return EXIT.SURPRISE;
   return EXIT.OK;
@@ -960,8 +1470,98 @@ function summarize(run, reportDir, code) {
   const counts = run.flows.reduce((acc, f) => { acc[f.verdict] = (acc[f.verdict] ?? 0) + 1; return acc; }, {});
   const parts = Object.entries(counts).map(([verdict, n]) => `${verdict}=${n}`).join(' ');
   console.log(`\n${parts || 'nothing ran'}  ·  ${Math.round(run.durationMs / 100) / 10}s  ·  exit ${code}`);
+  // A skip nobody re-visits is coverage silently rotting. 14 days is long
+  // enough for "waiting on the next build" and far too long for "forgotten".
+  for (const stale of run.staleSkips ?? []) {
+    console.log(
+      `⚠ ${stale.flowId} (${stale.environment}): این فلو ۱۴+ روز است اجرا نشده — پوشش در حال آب رفتن است ` +
+        `(skipped since ${new Date(stale.firstSkippedAt).toISOString().slice(0, 10)}: ${stale.lastReason})`,
+    );
+  }
   if (run.humanize?.seed != null) console.log(`humanize seed: ${run.humanize.seed} (pass --humanize-seed ${run.humanize.seed} to reproduce the motion)`);
   console.log(`reports: ${reportDir}`);
+}
+
+/**
+ * The skip ledger: `<reportDir>/skips.json`, `(flowId + environment)` →
+ * `{ firstSkippedAt, lastReason }`.
+ *
+ * A run that SKIPS a flow files it (keeping the first date); a run that
+ * actually executes the flow — any verdict, even a failure — removes it. A
+ * NOT_RUN flow touches nothing: it was neither skipped on its own account nor
+ * executed. Entries older than 14 days come back as `staleSkips`, which the
+ * summary and report.html turn into a loud warning.
+ *
+ * → the stale entries. A ledger that cannot be read is reported and replaced,
+ * never silently trusted or silently discarded.
+ */
+async function updateSkipLedger(reportDir, run) {
+  const file = path.join(reportDir, 'skips.json');
+  let ledger = { format: 'g9/skips', version: 1, entries: {} };
+  try {
+    const parsed = JSON.parse(await readFile(file, 'utf8'));
+    if (parsed && typeof parsed === 'object' && parsed.entries && typeof parsed.entries === 'object') {
+      ledger.entries = { ...parsed.entries };
+    } else {
+      console.error(`g9: ${file} does not look like a skip ledger; starting a fresh one.`);
+    }
+  } catch (err) {
+    if (err?.code !== 'ENOENT') console.error(`g9: ${file} could not be read (${err.message}); starting a fresh skip ledger.`);
+  }
+
+  const environment = run.environment ?? 'default';
+  const now = Date.now();
+  for (const flow of run.flows ?? []) {
+    const key = `${flow.id}::${environment}`;
+    if (flow.verdict === 'SKIPPED') {
+      const existing = ledger.entries[key];
+      ledger.entries[key] = {
+        firstSkippedAt: Number(existing?.firstSkippedAt) || now,
+        lastReason: flow.skipReason ?? '(no reason recorded)',
+      };
+    } else if (flow.verdict !== 'NOT_RUN') {
+      delete ledger.entries[key];
+    }
+  }
+
+  const cutoff = now - 14 * 24 * 60 * 60 * 1000;
+  const stale = [];
+  for (const [key, entry] of Object.entries(ledger.entries)) {
+    const at = Number(entry?.firstSkippedAt) || now;
+    if (at > cutoff) continue;
+    const split = key.lastIndexOf('::');
+    stale.push({
+      flowId: split > -1 ? key.slice(0, split) : key,
+      environment: split > -1 ? key.slice(split + 2) : environment,
+      firstSkippedAt: at,
+      lastReason: entry?.lastReason ?? null,
+    });
+  }
+
+  await mkdir(reportDir, { recursive: true });
+  await writeFile(file, `${JSON.stringify(ledger, null, 2)}\n`, 'utf8');
+  return stale;
+}
+
+/**
+ * Where this run's flows came from and what they ran against:
+ * `{ gitCommit, gitBranch, appBuild }`. git is asked in the directory holding
+ * g9.project.json (the flows' repository, not the runner's); a machine without
+ * git, or a directory outside any repository, yields nulls rather than a
+ * failed run — provenance is context, never a gate.
+ */
+async function collectProvenance(dir, appBuild = null) {
+  const { execFile } = await import('node:child_process');
+  const git = (args) => new Promise((resolve) => {
+    execFile('git', args, { cwd: dir ?? process.cwd(), windowsHide: true }, (err, stdout) => {
+      resolve(err ? null : (String(stdout).trim() || null));
+    });
+  });
+  const [gitCommit, gitBranch] = await Promise.all([
+    git(['rev-parse', 'HEAD']),
+    git(['rev-parse', '--abbrev-ref', 'HEAD']),
+  ]);
+  return { gitCommit, gitBranch, appBuild: appBuild ?? null };
 }
 
 // ------------------------------------------------------------ other commands
@@ -1029,9 +1629,13 @@ async function commandCalibrate({ options }) {
   let tab = null;
   try {
     tab = await flowTab(client, options, id);
+    const project = await loadProject(options.project === true ? undefined : options.project).catch(() => null);
     const result = await client.call('browser_recording', {
       action: 'calibrate', id, timing: options.timing ?? 'recorded',
       ...(tab.tabId != null ? { tabId: tab.tabId } : {}),
+      // The noise mask belongs to the environment it was measured on.
+      ...(options.env && options.env !== true ? { environment: options.env } : {}),
+      ...(project?.urlNormalizers?.length ? { urlNormalizers: project.urlNormalizers } : {}),
     }, 1_900_000);
     console.log(`${result.volatileKeys} volatile item(s) recorded.`);
     console.log(result.note);
@@ -1049,6 +1653,9 @@ async function commandApprove({ options }) {
   try {
     const result = await client.call('browser_recording', {
       action: 'approve', id, engine: engineChoice(options), by: options.by ?? 'runner', note: options.note === true ? null : options.note,
+      // Approvals land in the environment the reviewed run ran on; naming one
+      // that disagrees is refused by the engine (extension/tools/replay.js).
+      ...(options.env && options.env !== true ? { environment: options.env } : {}),
     });
     console.log(
       `Known world for ${id} (${result.engine ?? engineChoice(options)} store): ${result.runs} approved run(s), ` +
@@ -1180,6 +1787,113 @@ async function commandSpec({ options }) {
   } finally { client.close(); }
 }
 
+// ----------------------------------------------------------------- harvest
+
+/**
+ * `g9 harvest --platform agripad [--device <serial>] [--out <dir>]`
+ *
+ * Pull recorded flow CANDIDATES off a device: the app's passive recorder keeps
+ * what a person did (command/activity steps with timing) in a ring buffer, and
+ * `flow.record.harvest` returns and drains it. Each candidate lands as
+ * `<flowsDir>/agripad/candidates/<yyyyMMdd-HHmm>-<n>.candidate.json` — raw
+ * material for a human to turn INTO a flow, deliberately NOT a FlowSpec: the
+ * flow loaders only read `*.flow.json`, and the daemon's library skips
+ * `*.candidate.json` by name, so a candidate can never run by accident.
+ *
+ * The device's steps are passed through OPAQUELY: whatever shape the app's
+ * recorder emits is what the file holds. This side only wraps them in an
+ * envelope (format, capture time, device, provenance) — interpreting them here
+ * would weld the runner to a recorder that is still growing.
+ */
+async function commandHarvest({ options }) {
+  if ((options.platform ?? null) !== 'agripad') {
+    throw new Error('g9 harvest works on a device: pass --platform agripad (web flows are recorded in the browser, side panel → Record).');
+  }
+  const { AgriPadDriver, listDevices } = await import('./drivers/agripad.mjs');
+
+  const devices = await listDevices();
+  const usable = devices.filter((d) => d.state === 'device');
+  if (!usable.length) {
+    throw new Error(devices.length
+      ? `adb sees ${devices.length} device(s) but none is ready: ${devices.map((d) => `${d.serial} (${d.state})`).join(', ')}. ` +
+        '"unauthorized" means the tablet is showing a permission dialog — accept it.'
+      : 'adb sees no devices. Check the cable and that USB debugging is on.');
+  }
+  const serial = options.device === true ? null : (options.device ?? (usable.length === 1 ? usable[0].serial : null));
+  if (!serial) {
+    throw new Error(
+      `${usable.length} devices are connected, so there is no unambiguous target: ` +
+        usable.map((d) => `${d.serial}${d.model ? ` (${d.model})` : ''}`).join(', ') +
+        '. Name one with --device <serial>.',
+    );
+  }
+
+  const driver = new AgriPadDriver({
+    serial,
+    port: Number(options['device-port'] ?? options.port) || 8799,
+    token: options.token === true ? '' : (options.token ?? ''),
+    log: (message) => log(options, `  ${message}`),
+  });
+
+  const project = await loadProject(options.project === true ? undefined : options.project);
+  const outDir = options.out && options.out !== true
+    ? path.resolve(options.out)
+    : path.join(flowsRoot(project), 'agripad', 'candidates');
+
+  await driver.connect();
+  await driver.acquire('g9-harvest');
+  try {
+    const ping = await driver.command('qa.ping', {}).catch(() => null);
+    const build = ping?.ok ? (ping.result?.build ?? null) : null;
+
+    const res = await driver.command('flow.record.harvest', {});
+    if (!res.ok) {
+      if (/unknown command|not supported/i.test(String(res.error ?? ''))) {
+        console.log(
+          `This device's app build (${build ?? 'unknown — it does not answer qa.ping either'}) does not know ` +
+            '"flow.record.harvest" yet. Harvesting needs a harvest-capable app build: update the app ' +
+            'on the device, use it for a while, then run this again.',
+        );
+        return EXIT.RUNNER;
+      }
+      throw new Error(`flow.record.harvest failed on ${serial}: ${res.error}`);
+    }
+
+    const candidates = Array.isArray(res.result?.candidates) ? res.result.candidates : [];
+    if (!candidates.length) {
+      console.log(`No candidates on ${serial} — the recorder's buffer is empty. Use the app, then harvest again.`);
+      return EXIT.OK;
+    }
+
+    const provenance = await collectProvenance(project?.dir ?? process.cwd(), build);
+    const stamp = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const prefix = `${stamp.getFullYear()}${pad(stamp.getMonth() + 1)}${pad(stamp.getDate())}-${pad(stamp.getHours())}${pad(stamp.getMinutes())}`;
+    await mkdir(outDir, { recursive: true });
+    const files = [];
+    for (const [index, candidate] of candidates.entries()) {
+      const body = {
+        ...candidate,
+        format: 'g9/flow-candidate',
+        schemaVersion: 1,
+        tags: ['@candidate'],
+        capturedAt: candidate?.startedAt ?? Date.now(),
+        device: serial,
+        provenance,
+        steps: candidate?.steps ?? [],
+      };
+      const file = path.join(outDir, `${prefix}-${index + 1}.candidate.json`);
+      await writeFile(file, `${JSON.stringify(body, null, 2)}\n`, 'utf8');
+      files.push(file);
+      console.log(`wrote ${file} (${body.steps.length} step(s))`);
+    }
+    console.log(`\n${files.length} candidate(s) from ${serial}. They are raw material, not flows: review one, turn it into a *.flow.json, and delete the candidate.`);
+    return EXIT.OK;
+  } finally {
+    await driver.release();
+  }
+}
+
 function requireTarget(options, command) {
   const id = options._[0];
   if (!id) throw new Error(`g9 ${command} needs a flow id. Run "g9 list" to see them.`);
@@ -1199,6 +1913,7 @@ const COMMANDS = {
   approve: commandApprove,
   spec: commandSpec,
   ab: commandAb,
+  harvest: commandHarvest,
 };
 
 async function main() {

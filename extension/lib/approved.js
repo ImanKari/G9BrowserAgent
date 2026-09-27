@@ -45,6 +45,32 @@ export function isApproved(knownWorld) {
 const approvedAtOf = (knownWorld) => (isApproved(knownWorld) ? knownWorld.approvedAt : 0);
 
 /**
+ * Every approved known world of a recording or a sidecar document, keyed by
+ * environment (lib/signature.js): the flat `knownWorld` IS the default
+ * environment's world — that is the whole compatibility story, because every
+ * store and sidecar written before environments existed keeps meaning exactly
+ * what it meant — and named environments live under `knownWorlds`.
+ */
+export function approvedWorldsOf(holder) {
+  const worlds = {};
+  if (isApproved(holder?.knownWorld)) worlds.default = holder.knownWorld;
+  for (const [env, kw] of Object.entries(holder?.knownWorlds ?? {})) {
+    if (env !== 'default' && isApproved(kw)) worlds[env] = kw;
+  }
+  return worlds;
+}
+
+/** The latest human approval across every environment: `{ approvedAt, approvedBy }`, or nulls. */
+export function latestApprovalOf(holder) {
+  let approvedAt = 0;
+  let approvedBy = null;
+  for (const kw of Object.values(approvedWorldsOf(holder))) {
+    if (kw.approvedAt > approvedAt) { approvedAt = kw.approvedAt; approvedBy = kw.approvedBy ?? null; }
+  }
+  return approvedAt ? { approvedAt, approvedBy } : { approvedAt: null, approvedBy: null };
+}
+
+/**
  * The sidecar for a recording, or null when there is nothing to carry (no approval, no baseline).
  * `images` lists the baseline screenshots to copy: `{ name, stepId, attachmentId }`.
  */
@@ -72,13 +98,18 @@ export function approvedDocFor(recording) {
       baselines[id] = { kind: 'aria', lines: step.ariaBaseline, maxNodes: step.maxNodes ?? undefined };
     }
   });
-  const knownWorld = isApproved(recording.knownWorld) ? recording.knownWorld : null;
-  if (!knownWorld && !Object.keys(baselines).length) return null;
+  // Per environment: the default environment's world stays under the flat key
+  // (so an older G9BrowserAgent reading this sidecar still applies it), named
+  // environments' worlds travel under `knownWorlds`.
+  const worlds = approvedWorldsOf(recording);
+  const { default: defaultWorld, ...namedWorlds } = worlds;
+  if (!Object.keys(worlds).length && !Object.keys(baselines).length) return null;
   const doc = canonicalize({
     format: APPROVED_FORMAT,
     schemaVersion: APPROVED_VERSION,
     flowId: recording.flowId ?? recording.id,
-    knownWorld: knownWorld ?? undefined,
+    knownWorld: defaultWorld ?? undefined,
+    knownWorlds: Object.keys(namedWorlds).length ? namedWorlds : undefined,
     baselines: Object.keys(baselines).length ? baselines : undefined,
   });
   return { doc, images };
@@ -99,6 +130,18 @@ export function validateApproved(doc, flowId = null) {
   if (flowId != null && doc.flowId !== flowId) problems.push(`it belongs to flow "${doc.flowId}", not "${flowId}"`);
   if (doc.knownWorld != null && (typeof doc.knownWorld !== 'object' || !Number.isFinite(doc.knownWorld.approvedAt))) {
     problems.push('knownWorld must be an approved known world (with approvedAt)');
+  }
+  if (doc.knownWorlds != null) {
+    if (typeof doc.knownWorlds !== 'object' || Array.isArray(doc.knownWorlds)) {
+      problems.push('knownWorlds must be an object keyed by environment name');
+    } else {
+      for (const [env, kw] of Object.entries(doc.knownWorlds)) {
+        if (env === 'default') problems.push('knownWorlds must not carry the "default" environment; that world lives under knownWorld');
+        else if (!kw || typeof kw !== 'object' || !Number.isFinite(kw.approvedAt)) {
+          problems.push(`knownWorlds.${env} must be an approved known world (with approvedAt)`);
+        }
+      }
+    }
   }
   for (const [id, b] of Object.entries(doc.baselines ?? {})) {
     if (b?.kind === 'screenshot') {
@@ -167,20 +210,34 @@ export function applyApproved(recording, doc, local = null) {
     return step;
   });
 
-  const repoAt = approvedAtOf(doc?.knownWorld);
-  const localAt = approvedAtOf(local?.knownWorld);
-  let knownWorld = null;
+  // Known worlds, per environment: for each environment either side knows, the
+  // LATER human approval wins — independently, so a fresh approval on test2 in
+  // the repo never overwrites this machine's newer approval on test1. A world
+  // this machine merely SEEDED loses to any human approval and never travels.
+  const repoWorlds = { default: doc?.knownWorld, ...(doc?.knownWorlds ?? {}) };
+  const localWorlds = { default: local?.knownWorld, ...(local?.knownWorlds ?? {}) };
+  let tookRepo = false;
+  let keptLocal = false;
   let localNewer = false;
-  if (repoAt && repoAt > localAt) {
-    out.knownWorld = doc.knownWorld;
-    out.surpriseHistory = [];
-    knownWorld = 'repo';
-  } else if (local?.knownWorld) {
-    out.knownWorld = local.knownWorld;
-    knownWorld = 'local';
+  for (const env of new Set([...Object.keys(repoWorlds), ...Object.keys(localWorlds)])) {
+    const repoAt = approvedAtOf(repoWorlds[env]);
+    const localAt = approvedAtOf(localWorlds[env]);
+    let world = null;
+    if (repoAt && repoAt > localAt) {
+      world = repoWorlds[env];
+      tookRepo = true;
+    } else if (localWorlds[env]) {
+      world = localWorlds[env];
+      keptLocal = true;
+    }
+    // This machine holds an approval the repository does not have yet: push to share it.
+    if (localAt > 0 && localAt > repoAt) localNewer = true;
+    if (env === 'default') out.knownWorld = world ?? undefined;
+    else if (world) out.knownWorlds = { ...(out.knownWorlds ?? {}), [env]: world };
   }
-  // This machine holds an approval the repository does not have yet: push to share it.
-  localNewer = localAt > 0 && localAt > repoAt;
+  if (out.knownWorld === undefined) delete out.knownWorld;
+  if (tookRepo) out.surpriseHistory = [];
+  const knownWorld = tookRepo ? 'repo' : (keptLocal ? 'local' : null);
   return { recording: out, knownWorld, localNewer, baselines: { fromRepo, kept }, images };
 }
 
@@ -192,9 +249,9 @@ export function setBaselineImage(recording, stepId, attachmentId) {
   };
 }
 
-/** When the flow's approval was made, for status lines: ms epoch, or null. */
+/** When the flow's LATEST approval was made, across environments, for status lines: ms epoch, or null. */
 export function approvedAtFor(recording) {
-  return approvedAtOf(recording?.knownWorld) || null;
+  return latestApprovalOf(recording).approvedAt;
 }
 
 function compact(o) {

@@ -22,6 +22,7 @@ import { evaluate, send as cdpSend, attachedTabIds } from '../lib/cdp.js';
 import { bindCallSignal } from '../lib/humanize.js';
 import * as store from '../lib/store.js';
 import { toFlowSpec, canonicalJson } from '../lib/flowspec.js';
+import { envKeyOf, knownWorldFor } from '../lib/signature.js';
 import { importFlow, approvedBundle } from '../lib/flowsync.js';
 
 import * as tabsTool from './tabs.js';
@@ -339,11 +340,18 @@ export const TOOLS = {
           seedKnownWorld: args.seedKnownWorld === true,
           ...(args.humanize !== undefined ? { humanize: args.humanize } : {}),
           ...(args.seed !== undefined ? { seed: args.seed } : {}),
+          ...(args.environment !== undefined ? { environment: args.environment } : {}),
+          ...(args.urlNormalizers !== undefined ? { urlNormalizers: args.urlNormalizers } : {}),
         });
         case 'calibrate': return replay.calibrate(tab.id, {
           id: requireId(args), timing: args.timing, variables: args.variables,
+          ...(args.environment !== undefined ? { environment: args.environment } : {}),
+          ...(args.urlNormalizers !== undefined ? { urlNormalizers: args.urlNormalizers } : {}),
         });
-        case 'approve': return replay.approveKnownWorld(requireId(args), { by: args.by, note: args.note, expectLastRunAt: args.expectLastRunAt ?? null });
+        case 'approve': return replay.approveKnownWorld(requireId(args), {
+          by: args.by, note: args.note, expectLastRunAt: args.expectLastRunAt ?? null,
+          ...(args.environment !== undefined ? { environment: args.environment } : {}),
+        });
         case 'signature': {
           // The full signature of the LAST run. Not returned by replay itself — it is kilobytes of
           // normalised evidence and would flood an agent's context — but a runner doing an A/B
@@ -356,10 +364,22 @@ export const TOOLS = {
         case 'known_world': {
           const rec = await store.getRecording(requireId(args));
           if (!rec) throw new Error(`No recording with id "${args.id}".`);
-          const kw = rec.knownWorld;
-          if (!kw?.runs) return { runs: 0, note: 'No approved known world yet. Replay once, then action:"approve".' };
+          // Per environment (lib/signature.js): the default world without an
+          // environment argument, so every existing caller keeps its answer.
+          const kw = knownWorldFor(rec, args.environment ?? rec.environment);
+          if (!kw?.runs) {
+            return {
+              runs: 0,
+              environment: envKeyOf(args.environment ?? rec.environment),
+              note: 'No approved known world yet for this environment. Replay once, then action:"approve".',
+              ...(Object.keys(rec.knownWorlds ?? {}).length || rec.knownWorld?.runs
+                ? { environmentsWithWorlds: [...(rec.knownWorld?.runs ? ['default'] : []), ...Object.keys(rec.knownWorlds ?? {})] }
+                : {}),
+            };
+          }
           return {
             runs: kw.runs, approvedAt: kw.approvedAt, approvedBy: kw.approvedBy,
+            environment: envKeyOf(args.environment ?? rec.environment),
             networkOperations: Object.keys(kw.network), consoleSignatures: Object.keys(kw.console),
             dialogs: Object.keys(kw.dialogs), steps: Object.keys(kw.steps).length,
             volatile: kw.volatile,

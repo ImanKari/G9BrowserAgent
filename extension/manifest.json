@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "G9BrowserAgent",
-  "version": "3.2.1",
+  "version": "3.3.0",
   "description": "G9BrowserAgent v3: lets your AI agents drive the tabs of this browser through the local G9BrowserAgent daemon.",
   "minimum_chrome_version": "125",
   "permissions": [

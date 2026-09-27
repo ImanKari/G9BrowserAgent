@@ -137,6 +137,11 @@ const VERDICT = {
   SURPRISE: { icon: '🔎', cls: 'warn', text: 'Surprise — it did something new' },
   FAIL_PRODUCT: { icon: '❌', cls: 'bad', text: 'Product failure' },
   FAIL_AUTOMATION: { icon: '🔧', cls: 'bad', text: 'Test failure (not the product)' },
+  // Runner-only verdicts (a preflight skip, a stopOn:"failure" cut-off). A
+  // replay in this panel never produces them, but a run.json written by the
+  // runner can carry them into views that share these maps.
+  SKIPPED: { icon: '⏭️', cls: 'warn', text: 'Skipped — a requirement was not met' },
+  NOT_RUN: { icon: '⏹️', cls: 'warn', text: 'Not run — the suite stopped earlier' },
 };
 
 /**
@@ -163,6 +168,8 @@ const VERDICT_LABEL = {
   SURPRISE: 'Surprise',
   FAIL_PRODUCT: 'Product fail',
   FAIL_AUTOMATION: 'Test fail',
+  SKIPPED: 'Skipped',
+  NOT_RUN: 'Not run',
   none: 'Never run',
 };
 

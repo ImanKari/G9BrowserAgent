@@ -575,14 +575,17 @@ function assertCount(label, count, min, max) {
 
 export function substitute(value, variables) {
   if (typeof value === 'string') {
-    const exact = value.match(/^\{\{([A-Za-z_][A-Za-z0-9_.-]*)\}\}$/);
+    // `{{secret:name}}` resolves exactly like `{{name}}`: the prefix marks the
+    // value as a secret in the STORED flow (so it is never recorded), not a
+    // second namespace at run time — the runner resolves both into `variables`.
+    const exact = value.match(/^\{\{(?:secret:)?([A-Za-z_][A-Za-z0-9_.-]*)\}\}$/);
     if (exact) {
       if (!(exact[1] in variables)) {
         throw new Error('Missing data parameter "' + exact[1] + '" required by ' + JSON.stringify(value) + '.');
       }
       return variables[exact[1]];
     }
-    return value.replace(/\{\{([A-Za-z_][A-Za-z0-9_.-]*)\}\}/g, (whole, key) => {
+    return value.replace(/\{\{(?:secret:)?([A-Za-z_][A-Za-z0-9_.-]*)\}\}/g, (whole, key) => {
       if (!(key in variables)) throw new Error('Missing data parameter "' + key + '" required by ' + JSON.stringify(value) + '.');
       return String(variables[key]);
     });

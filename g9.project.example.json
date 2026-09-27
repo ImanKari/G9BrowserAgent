@@ -8,24 +8,35 @@
 
   "defaultEnvironment": "test1",
 
+  "//environments": [
+    "A base-URL string, or the object form. The runner's --env <name> rewrites every flow URL",
+    "whose origin is ANY environment's origin onto the chosen environment's origin, resolves a",
+    "literal {{baseUrl}} in URLs, and keys the flow's known world by the environment name.",
+    "`features` and `build` are what `requires` preflight checks against for web flows",
+    "(a flow whose requires needs them on a string-form environment is SKIPPED, loudly)."
+  ],
   "environments": {
     "test1": "https://test1.example.internal",
-    "test2": "https://test2.example.internal"
+    "test2": {
+      "baseUrl": "https://test2.example.internal",
+      "features": ["reports-v2", "new-auth"],
+      "build": "2.4.0"
+    }
   },
 
-  "//urlNormalizers": "Collapse routes only your app knows are the same operation. Applied to the path before comparison, so /tasks/<guid> and /tasks/<other-guid> stop looking like two different requests.",
+  "//urlNormalizers": "CONSUMED by the runner and replay since 3.3.0: collapse routes only your app knows are the same operation. Applied when the network signature is built AND to the stored known world at comparison, so /tasks/<guid> and /tasks/<other-guid> stop looking like two different requests.",
   "urlNormalizers": [
     { "match": "/tasks/[0-9a-f-]{36}", "as": "/tasks/{id}" },
-    { "match": "/sites/\\d+/pots", "as": "/sites/{id}/pots" }
+    { "match": "/sites/\\d+/items", "as": "/sites/{id}/items" }
   ],
 
-  "//secretRefs": "NAMES only. A value here would be a credential in a file that gets committed.",
+  "//secretRefs": "NAMES only — a value here would be a credential in a file that gets committed. CONSUMED: a recording's password fields become {{secret:<name>}} steps with a secretRef parameter; the runner resolves each from the --data file, then from G9_SECRET_<NAME> environment variables, and SKIPS a flow whose required secret has neither.",
   "secretRefs": ["qa.username", "qa.password"],
 
-  "//volatile": "A last-resort manual mask. Prefer `g9 calibrate`, which finds these by running the flow twice and needs nobody to guess.",
+  "//volatile": "RESERVED — not implemented: nothing reads this key yet. Use `g9 calibrate`, which finds volatile noise by running the flow twice and needs nobody to guess.",
   "volatile": ["#server-clock", "[data-testid=last-sync]"],
 
-  "//operationAliases": "Friendlier names in reports and Jira summaries.",
+  "//operationAliases": "RESERVED — not implemented: nothing reads this key yet. Intended for friendlier names in reports and Jira summaries.",
   "operationAliases": {
     "POST /api/task 2xx": "task.create",
     "GET /api/task/{uuid} 2xx": "task.read"
@@ -34,6 +45,6 @@
   "//destructiveActions": "Accessible names an exploratory run must never click. Advisory today; the state-graph explorer will enforce it.",
   "destructiveActions": ["حذف", "Delete", "Remove", "Sign out"],
 
-  "//reportSink": "Where a scheduled run posts its artefacts. The runner writes files regardless.",
+  "//reportSink": "RESERVED — not implemented: nothing reads this key yet. The runner writes its report files to --report (default ./g9-artifacts) regardless.",
   "reportSink": { "kind": "file", "path": "./g9-artifacts" }
 }

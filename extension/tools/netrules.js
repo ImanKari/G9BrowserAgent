@@ -97,7 +97,7 @@ export function normaliseRules(rules) {
     if (!rule || typeof rule !== 'object') throw new Error(`${where} is not an object.`);
 
     const match = typeof rule.match === 'string' ? rule.match.trim() : '';
-    if (!match) throw new Error(`${where} needs "match" — a substring of the URL, e.g. "/api/farm".`);
+    if (!match) throw new Error(`${where} needs "match" — a substring of the URL, e.g. "/api/orders".`);
 
     const method = rule.method ? String(rule.method).toUpperCase() : null;
 

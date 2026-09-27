@@ -71,6 +71,18 @@ const VERDICT_STYLE = {
     fa: 'خطا',
     advice: 'تست نیمه‌کاره ماند. متن خطا را برای برنامه‌نویس بفرست.',
   },
+  SKIPPED: {
+    colour: '#0e7490',
+    label: 'SKIPPED',
+    fa: 'رد شد',
+    advice: 'این تست اجرا نشد چون پیش‌نیازش فراهم نبود — دلیلش پایین نوشته شده. باگ نیست، ولی پوشش هم نیست.',
+  },
+  NOT_RUN: {
+    colour: '#64748b',
+    label: 'NOT RUN',
+    fa: 'اجرا نشد',
+    advice: 'مجموعه بعد از یک خطا متوقف شد و نوبت به این تست نرسید. بعد از رفع خطا دوباره اجرا کن.',
+  },
 };
 
 export async function writeReports(dir, run) {
@@ -94,6 +106,14 @@ function junit(run) {
 
     if (flow.verdict === 'PASS' || flow.verdict === 'PASS_WITH_WARNING') {
       cases.push(`    <testcase classname="g9.flow" name="${name}" time="${time}"/>`);
+    } else if (flow.verdict === 'SKIPPED' || flow.verdict === 'NOT_RUN') {
+      // JUnit's own vocabulary for "did not run": every CI shows it apart from
+      // pass and fail, which is exactly the reading a skip deserves.
+      cases.push(
+        `    <testcase classname="g9.flow" name="${name}" time="${time}">\n` +
+        `      <skipped message="${esc(flow.skipReason ?? flow.verdict)}"/>\n` +
+        `    </testcase>`,
+      );
     } else {
       const kind = flow.verdict === 'FAIL_AUTOMATION' ? 'error' : 'failure';
       const message = esc(flow.failureMessage ?? flow.verdict);
@@ -127,10 +147,11 @@ function junit(run) {
 
   const failures = run.flows.filter((f) => f.verdict === 'FAIL_PRODUCT' || f.verdict === 'SURPRISE').length;
   const errors = run.flows.filter((f) => f.verdict === 'FAIL_AUTOMATION' || f.verdict === 'ERROR').length;
+  const skipped = run.flows.filter((f) => f.verdict === 'SKIPPED' || f.verdict === 'NOT_RUN').length;
 
   return `<?xml version="1.0" encoding="UTF-8"?>
-<testsuites name="G9BrowserAgent" tests="${cases.length}" failures="${failures}" errors="${errors}" time="${((run.durationMs ?? 0) / 1000).toFixed(3)}">
-  <testsuite name="${esc(run.suite ?? 'g9')}" tests="${cases.length}" failures="${failures}" errors="${errors}" timestamp="${new Date(run.startedAt).toISOString()}">
+<testsuites name="G9BrowserAgent" tests="${cases.length}" failures="${failures}" errors="${errors}" skipped="${skipped}" time="${((run.durationMs ?? 0) / 1000).toFixed(3)}">
+  <testsuite name="${esc(run.suite ?? 'g9')}" tests="${cases.length}" failures="${failures}" errors="${errors}" skipped="${skipped}" timestamp="${new Date(run.startedAt).toISOString()}">
 ${properties(run)}${cases.join('\n')}
   </testsuite>
 </testsuites>
@@ -140,7 +161,12 @@ ${properties(run)}${cases.join('\n')}
 // -------------------------------------------------------------------- HTML
 
 function html(run) {
-  const rows = run.flows.map((flow) => {
+  // Skips get a section of their own instead of hiding among the results: a
+  // flow that did not run is a different KIND of fact from a flow that passed,
+  // and burying it in the list is how coverage rots invisibly.
+  const executed = run.flows.filter((f) => f.verdict !== 'SKIPPED' && f.verdict !== 'NOT_RUN');
+  const skippedFlows = run.flows.filter((f) => f.verdict === 'SKIPPED' || f.verdict === 'NOT_RUN');
+  const rows = executed.map((flow) => {
     const style = VERDICT_STYLE[flow.verdict] ?? VERDICT_STYLE.ERROR;
     const surprises = (flow.surprises ?? []).map((s) => `
         <li class="s-${s.effectiveSeverity ?? s.severity}">
@@ -167,6 +193,22 @@ function html(run) {
 
   const counts = run.flows.reduce((acc, f) => { acc[f.verdict] = (acc[f.verdict] ?? 0) + 1; return acc; }, {});
 
+  const skippedSection = skippedFlows.length ? `
+    <section class="skips">
+      <h2><span class="badge" style="background:${VERDICT_STYLE.SKIPPED.colour}">رد شده‌ها</span> تست‌هایی که اجرا نشدند (${skippedFlows.length})</h2>
+      <p class="advice">${VERDICT_STYLE.SKIPPED.advice}</p>
+      <ul>
+        ${skippedFlows.map((flow) => `<li><b>${escHtml(flow.name ?? flow.id)}</b> — <span dir="ltr">${escHtml(flow.verdict)}</span><span>${escHtml(flow.skipReason ?? '')}</span></li>`).join('\n        ')}
+      </ul>
+    </section>` : '';
+
+  const staleSection = (run.staleSkips ?? []).length ? `
+    <section class="stale">
+      <h2>⚠ پوشش در حال آب رفتن است</h2>
+      ${run.staleSkips.map((s) => `<p><b dir="ltr">${escHtml(s.flowId)}</b> (${escHtml(s.environment)}): این فلو ۱۴+ روز است اجرا نشده — پوشش در حال آب رفتن است.
+        <span dir="ltr">${escHtml(new Date(s.firstSkippedAt).toISOString().slice(0, 10))}</span> · ${escHtml(s.lastReason ?? '')}</p>`).join('\n      ')}
+    </section>` : '';
+
   return `<!doctype html>
 <html lang="fa" dir="rtl"><head><meta charset="utf-8"><title>گزارش تست — ${escHtml(run.suite ?? 'all')}</title>
 <style>
@@ -188,13 +230,18 @@ function html(run) {
   .bad { color:#b91c1c; } .warn { color:#a16207; }
   code { background:rgba(127,127,127,.15); padding:0 4px; border-radius:3px; }
   footer { color:var(--muted); font-size:12px; margin-top:24px; }
+  section.stale { border-color:#b45309; }
+  section.stale h2 { color:#b45309; }
+  section.skips li span { display:block; color:var(--muted); font-size:12px; }
 </style></head><body>
 <h1>گزارش تست — ${escHtml(run.suite ?? 'همهٔ سناریوها')}</h1>
 <p class="meta">${new Date(run.startedAt).toLocaleString('fa-IR')} · محیط <b>${escHtml(run.environment ?? 'default')}</b> · ${Math.round((run.durationMs ?? 0) / 100) / 10} ثانیه${run.pinned ? ' · <b>شبکه ثابت‌شده</b>' : ''}</p>
 ${runFacts(run)}
 <div class="summary">${Object.entries(counts).map(([verdict, n]) =>
   `<span class="pill" style="border-color:${(VERDICT_STYLE[verdict] ?? VERDICT_STYLE.ERROR).colour}">${(VERDICT_STYLE[verdict] ?? VERDICT_STYLE.ERROR).fa}: <b>${n}</b></span>`).join('')}</div>
+${staleSection}
 ${rows}
+${skippedSection}
 <footer>ساختهٔ runner خودکار. «تغییر غیرمنتظره» یعنی صفحه کاری کرد که تا امروز نکرده بود —
 الزاماً باگ نیست، ولی هیچ‌وقت هم هیچ نیست.</footer>
 </body></html>
@@ -228,6 +275,9 @@ function properties(run) {
   add('g9.humanize.level', run.humanize ? (run.humanize.level ?? 'default') : null);
   add('g9.humanize.seed', run.humanize?.seed);
   add('g9.environment', run.environment);
+  add('g9.git.commit', run.provenance?.gitCommit);
+  add('g9.git.branch', run.provenance?.gitBranch);
+  add('g9.app.build', run.provenance?.appBuild);
   return props.length ? `    <properties>\n${props.join('\n')}\n    </properties>\n` : '';
 }
 
@@ -239,6 +289,11 @@ function runFacts(run) {
     bits.push(`seed حرکت <code dir="ltr">${escHtml(run.humanize.seed)}</code>${run.humanize.level ? ` (${escHtml(run.humanize.level)})` : ''}`);
   }
   if (run.daemon?.version) bits.push(`G9BrowserAgent <span dir="ltr">v${escHtml(run.daemon.version)}</span>`);
+  // Which code produced this run: without it two reports cannot be compared.
+  if (run.provenance?.gitCommit) {
+    bits.push(`commit <code dir="ltr">${escHtml(run.provenance.gitCommit.slice(0, 12))}</code>${run.provenance.gitBranch ? ` (<span dir="ltr">${escHtml(run.provenance.gitBranch)}</span>)` : ''}`);
+  }
+  if (run.provenance?.appBuild) bits.push(`بیلد برنامه <span dir="ltr">${escHtml(run.provenance.appBuild)}</span>`);
   return bits.length ? `<p class="meta">${bits.join(' · ')}</p>` : '';
 }
 
@@ -266,8 +321,10 @@ function qaStatus(run) {
   return out;
 }
 
-const RANK = { PASS: 0, PASS_WITH_WARNING: 1, SURPRISE: 2, FAIL_AUTOMATION: 3, FAIL_PRODUCT: 4, ERROR: 5 };
-const rank = (verdict) => RANK[verdict] ?? 5;
+// Worst wins. A skip outranks a pass (a case whose only OTHER coverage was
+// skipped is not fully green) and every failure outranks a skip.
+const RANK = { PASS: 0, PASS_WITH_WARNING: 1, SKIPPED: 2, NOT_RUN: 3, SURPRISE: 4, FAIL_AUTOMATION: 5, FAIL_PRODUCT: 6, ERROR: 7 };
+const rank = (verdict) => RANK[verdict] ?? 7;
 
 const esc = (value) => String(value ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')

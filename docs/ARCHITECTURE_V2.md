@@ -62,7 +62,7 @@ extension/sw.js (Engine 1) ───────────WS /g9────�
 
 ## 2. Root package and version
 
-* `package.json` at the repo root: `{ "name": "g9browseragent", "version": "3.2.1", "private": true,
+* `package.json` at the repo root: `{ "name": "g9browseragent", "version": "3.3.0", "private": true,
   "type": "module", "engines": { "node": ">=22" }, "scripts": { … } }`. No dependencies.
 * `extension/manifest.json.version` **must equal** it; `desktop/package.json.version` **must equal** it.
   `setup/unit/version.test.mjs` enforces both ***(as built)*** and also compares the version in

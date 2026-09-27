@@ -8,10 +8,11 @@ every night".
 node runner/g9.mjs list
 node runner/g9.mjs run suite:smoke --env test1 --report ./g9-artifacts
 node runner/g9.mjs run tag:checkout --headed --browser edge --profile qa-checkout
-node runner/g9.mjs calibrate flow_login          # once per flow
+node runner/g9.mjs calibrate flow_login          # once per flow (per environment)
 node runner/g9.mjs approve  flow_login --by alice --note "new banner is expected"
 node runner/g9.mjs spec     flow_login --out QA/Flows/web/auth/login.flow.json
 node runner/g9.mjs ab       flow_login --a https://released.example --b https://candidate.example
+node runner/g9.mjs harvest  --platform agripad --device R52T80XXXX
 node runner/g9.mjs help
 ```
 
@@ -101,8 +102,8 @@ that lists the known flows, never an empty PASS.
 
 | Option | Meaning |
 |---|---|
-| `--env <name>` | environment label recorded in the report (default: the project's `defaultEnvironment`) |
-| `--data <file.json>` | variables substituted into `{{placeholders}}` |
+| `--env <name>` | run against this `g9.project.json` environment (must be declared there when any are): flow URLs whose origin is any known environment's origin are rewritten onto its `baseUrl`, `{{baseUrl}}` resolves to it, the flow's **known world is keyed by the environment**, and the name appears in every report. Without `--env`, the project's `defaultEnvironment` is used as the label (and for `{{baseUrl}}`), but URLs are **not** re-pointed. |
+| `--data <file.json>` | variables substituted into `{{placeholders}}`; also the first source for `{{secret:NAME}}` values — then `G9_SECRET_<NAME>` environment variables (NAME uppercased, non-alphanumerics → `_`). A flow whose required secret has neither is **SKIPPED**, and secret values are masked in run.json and every report. |
 | `--report <dir>` | where the reports go (default `./g9-artifacts`) |
 | `--timing recorded\|adaptive\|fast` | replay pacing (default `recorded`) |
 | `--signature lite\|full\|off` | how much of the page's behaviour is fingerprinted for the known world (default `lite`) |
@@ -168,22 +169,58 @@ That form was run against the built `win-unpacked` copy with `help`, and it exit
 itself was not exercised. For stealth-critical suites, run headed Edge on a dedicated desktop that
 nobody minimises (`docs/STEALTH.md`).
 
+## Preflight: `requires`, secrets, and SKIPPED
+
+A flow may declare, at its top level:
+
+```json
+"requires": { "minBuild": "5.9.2", "features": ["map-drawings"], "environments": ["test1", "test2"] }
+```
+
+Before a tab is opened (or a device command sent), the runner checks it:
+- `environments`: the current `--env` must be one of them;
+- on `--platform agripad`: `qa.ping` (build) and `qa.capabilities` (features/commands) are asked
+  once per device per run; `minBuild` uses a lenient numeric-dotted compare, and every entry of
+  `features` must be present;
+- on web: build/features come from the environment's **object form** in `g9.project.json`
+  (`{ "baseUrl", "features", "build" }`). A requirement the environment does not declare is a
+  SKIP that says "cannot evaluate … — declare it in g9.project.json", never a silent pass.
+
+A flow that fails preflight — or whose required `{{secret:NAME}}` has no value (see `--data`) —
+gets the verdict **SKIPPED** with the reason. Skips never make a run red; they appear in run.json
+(`skipReason`), as `<skipped>` in junit.xml, in a distinct section of report.html, and as
+`"SKIPPED"` in qa-automation-status.json. `<reportDir>/skips.json` tracks how long each
+(flow + environment) has been skipped; an entry older than **14 days** produces a loud warning in
+the summary and the report — coverage that quietly evaporates is the failure `requires` invites.
+
+## Suites: `order` and `stopOn`
+
+A suite file may add, next to `select`:
+- `"order": "risk-desc"` — run critical > high > medium > low (missing risk = medium; stable
+  within a rank);
+- `"stopOn": "failure"` — stop the suite after a flow whose verdict is `FAIL_PRODUCT`,
+  `FAIL_AUTOMATION` or `ERROR` (not `SURPRISE`, not `SKIPPED`). The remaining flows are reported
+  as **NOT_RUN**, naming the flow that stopped the suite — distinct from SKIPPED on purpose.
+
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
-| 0 | everything passed (warnings allowed, unless `--fail-on warning`) |
-| 1 | **product** failure: an assertion or oracle failed (`FAIL_PRODUCT`), or a flow could not complete (`ERROR`) |
+| 0 | everything passed (warnings allowed, unless `--fail-on warning`; SKIPPED/NOT_RUN alone never redden a run) |
+| 1 | **product** failure: an assertion or oracle failed (`FAIL_PRODUCT`) |
 | 2 | **automation** failure: the test broke, not the product (`FAIL_AUTOMATION`) |
 | 3 | a confirmed **surprise**: the flow did something it has never done. With `--fail-on warning`, `PASS_WITH_WARNING` also gives 3. |
 | 4 | the runner could not run at all (no daemon, no engine, no flows, bad arguments, Stop engaged) |
+| 5 | a **runner-internal error** (`ERROR`): a driver exception or engine failure mid-run — the tool's fault, not the product's |
 
-The worst verdict wins, in that order: 1 before 2 before 3. `--fail-on failure` ignores surprises,
-which keeps the gate where a normal suite would put it while you learn to trust the surprise
-detector. `--fail-on surprise` (the default) treats an unexplained change as a reason to look.
+When results are mixed, precedence is **1 > 2 > 5 > 3 > 0**. `--fail-on failure` ignores
+surprises, which keeps the gate where a normal suite would put it while you learn to trust the
+surprise detector. `--fail-on surprise` (the default) treats an unexplained change as a reason to
+look.
 
 Separating 1 from 2 is the whole point of the classification. A pipeline that reports a rotted
-locator as a product regression teaches people to ignore it.
+locator as a product regression teaches people to ignore it — and 5 is split from 1 for the same
+reason: a crash of this tool is not a product regression.
 
 ## Reports
 
@@ -191,10 +228,11 @@ Four files, because four audiences read them:
 
 | File | For |
 |---|---|
-| `run.json` | machines: the complete record, including every surprise, the daemon version, the engine (id, browser, version, headless, profile, stealth, humanize, and whether this run launched it) and the humanize seed |
-| `junit.xml` | CI: surprises appear as their own test cases; engine, daemon version and seed as `<properties>` |
-| `report.html` | a QA, by double-clicking. It is self-contained, with no CDN, and shows the engine and the seed. |
-| `qa-automation-status.json` | the manual QA suite: `{ "format": "g9/qa-automation-status", "version": 1, "at", "environment", "cases": { "TC-06-01": { "status": "PASS", "flowId", "flowName", "at", "durationMs" } } }` — the worst verdict wins when two flows cover one case |
+| `run.json` | machines: the complete record, including every surprise, the daemon version, the engine (id, browser, version, headless, profile, stealth, humanize, and whether this run launched it), the humanize seed, `provenance` (`gitCommit`/`gitBranch` from the repo holding g9.project.json, `appBuild` from the device's qa.ping or the web environment's declared `build`), each skipped flow's `skipReason`, and `staleSkips` (14+ days) |
+| `junit.xml` | CI: surprises appear as their own test cases; SKIPPED/NOT_RUN flows as `<skipped message="…"/>`; engine, daemon version, seed and provenance as `<properties>` |
+| `report.html` | a QA, by double-clicking. It is self-contained, with no CDN, and shows the engine, the seed, the provenance, a distinct section for skipped flows with their reasons, and a loud warning for skips older than 14 days. |
+| `qa-automation-status.json` | the manual QA suite: `{ "format": "g9/qa-automation-status", "version": 1, "at", "environment", "cases": { "TC-06-01": { "status": "PASS", "flowId", "flowName", "at", "durationMs" } } }` — the worst verdict wins when two flows cover one case; a skipped flow records `"SKIPPED"` |
+| `skips.json` | the runner itself: `(flowId + environment) → { firstSkippedAt, lastReason }`, updated every run — an executed flow drops out, a 14-day-old entry becomes the warning above |
 
 Each launched-engine replay also leaves an evidence run under `G9_HOME\runs\<runId>\` (screencast
 frames, the pointer track, `engine.json`, and `result.json` with the verdict, steps and warnings).
@@ -208,8 +246,9 @@ the same pointer paths and typing rhythm.
 | Command | What it does |
 |---|---|
 | `list` | the flows in the repository library and in each browser store |
-| `calibrate <flowId>` | replays the flow twice on one build and marks what differs as volatile noise, so it never counts as a surprise. Run it once per flow. |
-| `approve <flowId> [--by <name>] [--note <text>]` | folds the last run into the flow's approved known world (default `--by runner`). The desktop's Approvals view does the same with your Windows user name. (3.2) When the flow is in a project repository, the approval is written beside it (`<name>.approved.json`), ready to commit. |
+| `calibrate <flowId>` | replays the flow twice on one build and marks what differs as volatile noise, so it never counts as a surprise. Run it once per flow — per environment: with `--env`, the mask lands in that environment's known world. |
+| `approve <flowId> [--by <name>] [--note <text>] [--env <name>]` | folds the last run into the flow's approved known world — the one belonging to the environment the reviewed run ran on (an `--env` that disagrees is refused). The desktop's Approvals view does the same with your Windows user name. (3.2) When the flow is in a project repository, the approval is written beside it (`<name>.approved.json`; per-environment worlds under its `knownWorlds`), ready to commit. |
+| `harvest --platform agripad [--device <serial>] [--out <dir>]` | drains the device's passive flow recorder (`flow.record.harvest`) and writes each candidate to `<flowsDir>/agripad/candidates/<yyyyMMdd-HHmm>-<n>.candidate.json` (`format: "g9/flow-candidate"`, tagged `@candidate`, device steps passed through untouched, plus capture time, device serial and provenance). Candidates are raw material, **not** flows: no loader ever runs one. An app build without the command gets a friendly message naming the build. |
 | `spec <flowId> [--out <file>]` | exports a canonical, Git-diffable FlowSpec (to stdout without `--out`). (3.2) With `--out x.flow.json` it also writes what was approved beside it: `x.approved.json` and `x.baselines/*.png`. |
 | `ab <flowId> --a <url> --b <url> [--timing <mode>] [--report <dir>]` | runs the flow against two builds and diffs their full signatures. It reports differences, not verdicts: a shipped feature and a regression look the same. It exits 0 unless a side failed to run (2), and writes `ab.json` with `--report`. |
 
@@ -232,6 +271,9 @@ Use the comparison to narrow a diagnosis; it does not prove a fully frozen backe
 ## AgriPad devices
 
 `--platform agripad` drives a real device over adb through `drivers/agripad.mjs` instead of a
-browser. Flows come from `QA/Flows/agripad/**`; choose the device with `--device <serial>` and its
-port with `--device-port <n>` (default 8799). It shares the flow format, the verdicts and the
-reports, and its results are labelled `gray-box`.
+browser. Flows come from `QA/Flows/agripad/**` and are validated like web flows (the device also
+accepts the `dismiss` action; an invalid file stops the run and is named); `candidates/` files
+(`*.candidate.json`, from `g9 harvest`) are never loaded as flows. Choose the device with
+`--device <serial>` and its port with `--device-port <n>` (default 8799). `--data` variables and
+`{{secret:…}}` values are substituted into device steps too. It shares the flow format, the
+verdicts and the reports, and its results are labelled `gray-box`.

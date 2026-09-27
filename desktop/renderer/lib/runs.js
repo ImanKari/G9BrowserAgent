@@ -18,7 +18,9 @@
  */
 
 export const VERDICTS = ['PASS', 'PASS_WITH_WARNING', 'SURPRISE', 'FAIL_PRODUCT', 'FAIL_AUTOMATION'];
-const RANK = { PASS: 0, PASS_WITH_WARNING: 1, SURPRISE: 2, FAIL_PRODUCT: 3, FAIL_AUTOMATION: 4, ERROR: 5 };
+// SKIPPED/NOT_RUN (the runner's preflight and stopOn verdicts) rank between a
+// warning and a surprise: not green, not a failure.
+const RANK = { PASS: 0, PASS_WITH_WARNING: 1, SKIPPED: 2, NOT_RUN: 3, SURPRISE: 4, FAIL_PRODUCT: 5, FAIL_AUTOMATION: 6, ERROR: 7 };
 
 export function verdictTone(verdict) {
   switch (String(verdict ?? '').toUpperCase()) {
@@ -31,6 +33,8 @@ export function verdictTone(verdict) {
     case 'ERROR':
     case 'FAILED': return 'fail';
     case 'RUNNING': return 'live';
+    case 'SKIPPED':
+    case 'NOT_RUN': return 'neutral';
     default: return 'neutral';
   }
 }
@@ -47,6 +51,8 @@ export function verdictLabel(verdict) {
     case 'FINISHED': return 'Finished';
     case 'RUNNING': return 'Running';
     case 'WATCH': return 'Watch session';
+    case 'SKIPPED': return 'Skipped';
+    case 'NOT_RUN': return 'Not run';
     default: return verdict ? String(verdict) : 'No verdict';
   }
 }
@@ -61,7 +67,7 @@ export function worstVerdict(hist) {
   let worst = null;
   for (const [v, n] of Object.entries(hist)) {
     if (!n) continue;
-    if (worst === null || (RANK[v] ?? 5) > (RANK[worst] ?? 5)) worst = v;
+    if (worst === null || (RANK[v] ?? 7) > (RANK[worst] ?? 7)) worst = v;
   }
   return worst;
 }

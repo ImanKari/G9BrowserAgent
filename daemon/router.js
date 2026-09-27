@@ -170,7 +170,7 @@ const CREATE_ACTIONS = new Set(['import', 'import_spec', 'create']);
 const NOT_FOUND = /\bNo (recording|issue|attachment|flow)\b|not found in this browser|has not been replayed yet/i;
 
 /** What a store learns about a flow by running it; never part of a FlowSpec (daemon/flows.js LOCAL_ONLY). */
-const LOCAL_TRUTH = ['runHistory', 'lastRun', 'flaky', 'knownWorld', 'surpriseHistory', 'lastSignature'];
+const LOCAL_TRUTH = ['runHistory', 'lastRun', 'flaky', 'knownWorld', 'knownWorlds', 'surpriseHistory', 'lastSignature'];
 
 const TABS_ACTIONS = ['list', 'open', 'close', 'focus', 'attach', 'claim', 'release', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch'];
 
@@ -910,7 +910,7 @@ export class Router {
       let kept = [];
       // (3.2) import_spec keeps local truth itself (lib/flowsync.js importFlow) and may have taken a
       // LATER approval from the repository's sidecar: then the old known world must not come back.
-      const skip = result?.knownWorld === 'repo' ? ['knownWorld', 'surpriseHistory'] : [];
+      const skip = result?.knownWorld === 'repo' ? ['knownWorld', 'knownWorlds', 'surpriseHistory'] : [];
       if (previous && result?.id) kept = await this.#restoreLocalTruth(result.id, previous, skip);
       if (!result || typeof result !== 'object' || Array.isArray(result)) return result;
       return { ...result, engine: store.kind, ...(kept.length ? { keptLocal: kept } : {}) };

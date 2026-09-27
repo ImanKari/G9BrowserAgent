@@ -40,7 +40,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { approvedJson, validateApproved, isApproved } from '../extension/lib/approved.js';
+import { approvedJson, validateApproved, latestApprovalOf } from '../extension/lib/approved.js';
 
 const FLOW_SUFFIX = '.flow.json';
 const SUITE_DIR = 'suites';
@@ -52,7 +52,7 @@ const IMAGE_NAME = /^[\w.-]{1,80}\.png$/;
 const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
 
 /** Fields that are local-only truth and must never be written to disk. */
-const LOCAL_ONLY = ['runHistory', 'lastRun', 'flaky', 'knownWorld', 'surpriseHistory'];
+const LOCAL_ONLY = ['runHistory', 'lastRun', 'flaky', 'knownWorld', 'knownWorlds', 'surpriseHistory'];
 
 export class FlowLibrary {
   constructor(rootDir) {
@@ -264,7 +264,8 @@ export class FlowLibrary {
       changed: changed || imagesChanged > 0 || removedImages > 0,
       images: named.size - missing.length,
       ...(missing.length ? { missingImages: missing } : {}),
-      approvedAt: isApproved(doc.knownWorld) ? doc.knownWorld.approvedAt : null,
+      // The latest approval across environments (a sidecar may carry one world per environment).
+      approvedAt: latestApprovalOf(doc).approvedAt,
     };
   }
 
@@ -475,9 +476,11 @@ function sidecarOf(flowFile) {
 async function sidecarSummary(flowFile) {
   try {
     const doc = JSON.parse(await fs.readFile(sidecarOf(flowFile).approved, 'utf8'));
+    // The latest approval across environments: what the status line compares.
+    const { approvedAt, approvedBy } = latestApprovalOf(doc);
     return {
-      approvedAt: isApproved(doc?.knownWorld) ? doc.knownWorld.approvedAt : null,
-      approvedBy: isApproved(doc?.knownWorld) ? (doc.knownWorld.approvedBy ?? null) : null,
+      approvedAt,
+      approvedBy,
       baselines: Object.keys(doc?.baselines ?? {}).length,
     };
   } catch {
@@ -501,6 +504,11 @@ async function walk(dir, out = []) {
       await walk(full, out);
     } else if (entry.name.endsWith(APPROVED_SUFFIX)) {
       // A sidecar is not a flow: it belongs to the flow file beside it (3.2).
+      continue;
+    } else if (entry.name.endsWith('.candidate.json')) {
+      // A harvested candidate (`g9 harvest`) is raw device material for a human
+      // to turn INTO a flow — it is not a FlowSpec and must never be listed,
+      // matched by id, or imported as one.
       continue;
     } else if (entry.name.endsWith(FLOW_SUFFIX) || entry.name.endsWith('.json')) {
       out.push(full);

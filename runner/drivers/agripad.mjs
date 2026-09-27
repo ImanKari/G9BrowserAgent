@@ -201,7 +201,9 @@ export class AgriPadDriver {
       case 'click':
         return this.actuate('ui.tap', { automationId: requireId(target, spec) });
       case 'type':
-        return this.actuate('ui.type', { automationId: requireId(target, spec), text: spec.value ?? '' });
+        // The bridge reads args.value (QaBridge): a `text` argument was read by
+        // nothing, so every type step "passed" while typing nothing at all.
+        return this.actuate('ui.type', { automationId: requireId(target, spec), value: spec.value ?? '' });
       case 'dismiss':
         // The device can close any dialog or sheet; the flow format could not say so.
         //

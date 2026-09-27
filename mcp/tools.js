@@ -411,7 +411,7 @@ export const TOOLS = [
             'For action:"intercept". Each rule needs "match" (URL substring) and one outcome: "status" (+ optional "body", "headers"), ' +
             '"abort" ("TimedOut", "ConnectionRefused", "Failed", …) or "delayMs" alone. Optional "method", "times" (fire N times — ' +
             '"the first save fails, the retry succeeds"), "label" (named in a response header so an injected 500 is never mistaken ' +
-            'for a real one). Example: [{ "match": "/api/farm", "method": "POST", "status": 500, "times": 1, "label": "first save fails" }]',
+            'for a real one). Example: [{ "match": "/api/orders", "method": "POST", "status": 500, "times": 1, "label": "first save fails" }]',
           items: { type: 'object' },
         },
         contains: str('For action:"wait_download" — a download whose filename or URL contains this. Omit for any.'),
@@ -530,6 +530,8 @@ export const TOOLS = [
         signature: str('For replay — evidence for the surprise detector: "lite" (default), "full" (UI shape every step; used by calibration), "off".', { enum: ['off', 'lite', 'full'], default: 'lite' }),
         compare: bool('For replay — compare against the approved known world. Off only for a deliberate reference run.', true),
         seedKnownWorld: bool('For replay — if the flow has no known world yet, create one from this run. Never overwrites an approved one.', false),
+        environment: str('For replay/calibrate/known_world — which environment\'s known world this run compares against and files under (known worlds are kept per environment; default: the flow\'s own environment, else the default world). For approve — must name the environment the reviewed run ran on, or the approval is refused.'),
+        urlNormalizers: { type: 'array', items: { type: 'object' }, description: 'For replay/calibrate — the project\'s url rules ([{match, as}] regex → replacement), applied when the network signature is built AND to the stored known world at comparison, so /api/orders/<id> collapses to /api/orders/{id} on both sides. The runner passes g9.project.json\'s.' },
         by: str('For approve — who approved it.'),
         note: str('For approve — why.'),
         expectLastRunAt: num('For approve — the `lastRun.at` of the run that was reviewed. The approval is refused when a newer run arrived since, instead of folding that run\'s surprises into the known world unseen.'),
