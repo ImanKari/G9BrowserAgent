@@ -21,7 +21,19 @@ import { sessionForNode } from './refs.js';
  * it is never enabled there. The cost is page console capture, and
  * browser_console says so rather than returning an empty log.
  */
-const AUTO_ENABLE = ['Page', 'Runtime', 'Log', 'Network', 'DOM', 'CSS'];
+const AUTO_ENABLE = ['Page', 'Runtime', 'Log', 'Network', 'DOM'];
+
+/**
+ * (3.4) Every step of an attach is bounded. A field incident on a browser node: an evaluate on a
+ * background tab Engine 1 had just opened hung for 120 s, and afterwards even `browser_tabs close`
+ * timed out until the container was restarted. Nothing before a command had a deadline — the
+ * debugger attach, the domain enables, Target.setAutoAttach — so one command a throttled or frozen
+ * page never answered held the attach, and every later call on that tab waited behind it.
+ * `CSS` left the attach set at the same time: no capture needs it, and it is the enable most likely
+ * to block on a background page; `inspect styles` enables it when it is used (ensureDomain).
+ */
+export const ATTACH_TIMEOUT_MS = 10_000;
+export const ENABLE_TIMEOUT_MS = 5_000;
 
 function isStealth(tabId) {
   try {
@@ -53,8 +65,34 @@ export class CdpError extends Error {
 
 /** Is the debugger already attached to this tab (by us or anyone)? */
 async function isAttached(tabId) {
-  const targets = await platform.debugger.getTargets();
+  const targets = await bounded(platform.debugger.getTargets(), ENABLE_TIMEOUT_MS, 'debugger.getTargets', tabId);
   return targets.some((t) => t.tabId === tabId && t.attached);
+}
+
+/** `promise`, or a CdpError naming `what` once `ms` have passed (the promise is left to settle alone). */
+function bounded(promise, ms, what, tabId = null) {
+  let timer;
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new CdpError(
+        `"${what}" did not return after ${Math.round(ms / 1000)}s — the browser accepted it and never answered.`,
+        { method: what, tabId },
+      )), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+/** tabId → the attach in progress: two calls on one tab share it instead of attaching twice. */
+const attaching = new Map();
+
+/**
+ * (3.4) Domains whose enable did not answer at the last attach, per tab — they are NOT marked
+ * enabled, so ensureDomain asks again when a tool needs one. Reported by recoverTab and status.
+ */
+const attachIssues = new Map();
+export function attachIssuesOf(tabId) {
+  return attachIssues.get(tabId) ?? null;
 }
 
 /**
@@ -69,7 +107,19 @@ export async function attachedTabIds() {
   return targets.filter((t) => t.attached && t.tabId != null).map((t) => t.tabId);
 }
 
-export async function attach(tabId, { log = true } = {}) {
+export function attach(tabId, opts = {}) {
+  // One attach per tab at a time: a second call while the first is still enabling domains waits for
+  // it instead of starting another debugger attach (each would have its own unbounded wait).
+  const running = attaching.get(tabId);
+  if (running) return running;
+  const run = attachOnce(tabId, opts).finally(() => {
+    if (attaching.get(tabId) === run) attaching.delete(tabId);
+  });
+  attaching.set(tabId, run);
+  return run;
+}
+
+async function attachOnce(tabId, { log = true } = {}) {
   const state = await getState();
   if (state.attachedTabs.includes(tabId) && (await isAttached(tabId))) return;
 
@@ -77,7 +127,7 @@ export async function attach(tabId, { log = true } = {}) {
   // from before a worker restart has been capturing all along and keeps its start time.
   let fresh = true;
   try {
-    await platform.debugger.attach(tabId);
+    await bounded(platform.debugger.attach(tabId, { timeoutMs: ATTACH_TIMEOUT_MS }), ATTACH_TIMEOUT_MS, 'debugger.attach', tabId);
   } catch (err) {
     const msg = String(err?.message ?? err);
     // Another client (a real DevTools window, or a previous session we lost
@@ -91,14 +141,19 @@ export async function attach(tabId, { log = true } = {}) {
     }
   }
 
-  for (const domain of autoEnableFor(tabId)) {
+  // (3.4) Sent together and each bounded: one domain a throttled page does not answer no longer
+  // holds the attach (and every call behind it). A domain that did not answer is not marked
+  // enabled, so ensureDomain asks for it again when a tool needs it.
+  const late = [];
+  await Promise.all(autoEnableFor(tabId).map(async (domain) => {
     try {
-      await rawSend(tabId, `${domain}.enable`);
+      await bounded(rawSend(tabId, `${domain}.enable`, {}, null, ENABLE_TIMEOUT_MS), ENABLE_TIMEOUT_MS, `${domain}.enable`, tabId);
       enabled.add(`${tabId}:${domain}`);
-    } catch {
+    } catch (err) {
       /* some domains are unavailable on some target types; not fatal */
+      if (/did not return/.test(String(err?.message))) late.push(domain);
     }
-  }
+  }));
 
   // Attach to cross-origin children as they appear.
   //
@@ -108,23 +163,31 @@ export async function attach(tabId, { log = true } = {}) {
   // is non-fatal — on a browser without flat-session support (before Chrome
   // 125) this simply does nothing and same-origin work is unaffected.
   try {
-    await rawSend(tabId, 'Target.setAutoAttach', {
+    await bounded(rawSend(tabId, 'Target.setAutoAttach', {
       autoAttach: true,
       waitForDebuggerOnStart: false,
       flatten: true,
-    });
-  } catch {
+    }, null, ENABLE_TIMEOUT_MS), ENABLE_TIMEOUT_MS, 'Target.setAutoAttach', tabId);
+  } catch (err) {
     /* older Chrome, or a target type that has no children */
+    if (/did not return/.test(String(err?.message))) late.push('Target.setAutoAttach');
   }
+  if (late.length) attachIssues.set(tabId, { at: Date.now(), unanswered: late });
+  else attachIssues.delete(tabId);
+  // A tab kept awake (browser_tabs open keepAwake:true) loses its emulation with its debugger
+  // session; a re-attach (the watchdog's, a worker restart's) puts it back.
+  if (await isKeptAwake(tabId)) await wakeCommands(tabId, true).catch(() => {});
 
   // One step of the state chain, read and write together: two attaches finishing at the same moment
   // (auto-attach on several loading tabs, two agents on two tabs) each read [] and wrote [itself],
   // and one tab was lost from attachedTabs — Detach then left it debugged while reporting a clean
   // release, and Stealth never reached it (extension review, 2026-09-22: 20/20 stub runs).
-  await updateState((s) => noteAttached(s, tabId, fresh));
+  // (3.4) Bounded: a stalled state write must not hold the call that needed the attach.
+  await bounded(updateState((s) => noteAttached(s, tabId, fresh)), ENABLE_TIMEOUT_MS, 'state write (attach)', tabId).catch(() => {});
   // `log: false` — the caller writes the one activity line itself (the panel's Record from now,
-  // which may reload the page too: one gesture, one line).
-  if (log) await logActivity({ kind: 'attach', tabId, ok: true });
+  // which may reload the page too: one gesture, one line). Not awaited (3.4): the activity log
+  // never holds a call.
+  if (log) logActivity({ kind: 'attach', tabId, ok: true }).catch(() => {});
 }
 
 /**
@@ -145,6 +208,68 @@ export function forgetAttached(s, tabIds) {
   const gone = new Set(tabIds.map(String));
   const since = Object.fromEntries(Object.entries(s.attachedSince ?? {}).filter(([id]) => !gone.has(id)));
   return { attachedTabs: s.attachedTabs.filter((id) => !gone.has(String(id))), attachedSince: since };
+}
+
+// ------------------------------------------------------------------ keep awake (3.4)
+
+const KEEP_AWAKE_KEY = 'g9:keepAwake';
+
+async function keptAwake() {
+  try {
+    const stored = await platform.storage.session.get(KEEP_AWAKE_KEY);
+    return Array.isArray(stored?.[KEEP_AWAKE_KEY]) ? stored[KEEP_AWAKE_KEY] : [];
+  } catch {
+    return [];
+  }
+}
+
+async function isKeptAwake(tabId) {
+  return (await keptAwake()).includes(tabId);
+}
+
+/**
+ * What "keep awake" sends, each bounded: focus emulation (the page believes it has focus, as in a
+ * window in front: document.hasFocus(), focus/blur, :focus-visible), and the page lifecycle set to
+ * active (a frozen background page — Memory Saver, tab freezing — runs its timers and tasks again).
+ * Timer throttling of a hidden page is a browser switch, not a command: launched engines start with
+ * --disable-background-timer-throttling; in the person's own browser the policy
+ * IntensiveWakeUpThrottlingEnabled=0 (the desktop app sets it) keeps a hidden page's timers at least
+ * once a second instead of once a minute. → { focusEmulation, lifecycle }
+ */
+async function wakeCommands(tabId, on) {
+  const out = {};
+  await bounded(rawSend(tabId, 'Emulation.setFocusEmulationEnabled', { enabled: !!on }, null, ENABLE_TIMEOUT_MS), ENABLE_TIMEOUT_MS, 'Emulation.setFocusEmulationEnabled', tabId)
+    .then(() => { out.focusEmulation = !!on; }, (err) => { out.focusEmulation = `failed: ${err.message}`; });
+  if (on) {
+    await bounded(rawSend(tabId, 'Page.setWebLifecycleState', { state: 'active' }, null, ENABLE_TIMEOUT_MS), ENABLE_TIMEOUT_MS, 'Page.setWebLifecycleState', tabId)
+      .then(() => { out.lifecycle = 'active'; }, (err) => { out.lifecycle = `failed: ${err.message}`; });
+  }
+  return out;
+}
+
+/**
+ * Keep a tab working while it is in the background (long in-page work: rendering, uploads). Stored
+ * per tab in storage.session and applied again after every re-attach. → what was applied.
+ */
+export async function keepAwake(tabId, on = true) {
+  await attach(tabId);
+  const applied = await wakeCommands(tabId, on);
+  const list = (await keptAwake()).filter((id) => id !== tabId);
+  if (on) list.push(tabId);
+  await platform.storage.session.set({ [KEEP_AWAKE_KEY]: list }).catch(() => {});
+  return {
+    keepAwake: !!on,
+    ...applied,
+    timerThrottling: platform.name === 'extension'
+      ? "a hidden tab's timers are throttled by the browser; with the IntensiveWakeUpThrottlingEnabled=0 policy (the G9BrowserAgent app sets it) at most once a second"
+      : 'off (launched with --disable-background-timer-throttling)',
+  };
+}
+
+/** Forget a closed tab's keep-awake entry. */
+export async function forgetKeepAwake(tabId) {
+  const list = await keptAwake();
+  if (list.includes(tabId)) await platform.storage.session.set({ [KEEP_AWAKE_KEY]: list.filter((id) => id !== tabId) }).catch(() => {});
 }
 
 /** Tabs whose Runtime domain this extension enabled (the stealth switch must reach every one). */
@@ -207,7 +332,7 @@ export async function detachMany(tabIds) {
   await Promise.all(
     ids.map(async (id) => {
       try {
-        await platform.debugger.detach(id);
+        await bounded(platform.debugger.detach(id), 5_000, 'debugger.detach', id);
       } catch (err) {
         errors.set(id, String(err?.message ?? err));
       }
@@ -327,17 +452,89 @@ export function timeoutMessage(method, timeoutMs) {
     `The command is stuck rather than slow — the browser accepted it and never answered.`;
 }
 
+/**
+ * (3.4) Every command `send()` is waiting for, per tab: what the watchdog (recoverTab) abandons when
+ * a call on that tab ran past its deadline. tabId → Set<{ method, startedAt, reject }>.
+ */
+const inflight = new Map();
+
 function withTimeout(promise, method, tabId, timeoutMs) {
   let timer;
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => {
-      timer = setTimeout(
-        () => reject(new CdpError(timeoutMessage(method, timeoutMs), { method, tabId })),
-        timeoutMs,
-      );
-    }),
-  ]).finally(() => clearTimeout(timer));
+  let entry;
+  const raced = new Promise((resolve, reject) => {
+    entry = { method, startedAt: Date.now(), reject };
+    let set = inflight.get(tabId);
+    if (!set) inflight.set(tabId, (set = new Set()));
+    set.add(entry);
+    timer = setTimeout(
+      () => reject(new CdpError(timeoutMessage(method, timeoutMs), { method, tabId })),
+      timeoutMs,
+    );
+    Promise.resolve(promise).then(resolve, reject);
+  });
+  return raced.finally(() => {
+    clearTimeout(timer);
+    const set = inflight.get(tabId);
+    set?.delete(entry);
+    if (set && !set.size) inflight.delete(tabId);
+  });
+}
+
+/** (3.4) The CDP commands waiting on a tab right now: [{ method, ms }] (oldest first). */
+export function pendingCommands(tabId) {
+  const now = Date.now();
+  return [...(inflight.get(tabId) ?? [])].map((e) => ({ method: e.method, ms: now - e.startedAt }));
+}
+
+/**
+ * (3.4) The watchdog: give a tab whose call ran past its deadline a working debugger session again.
+ *
+ * Every CDP command still waiting on the tab is rejected now (its call fails with the reason, the
+ * tab's queue is free again), what was enabled is forgotten, and — in the person's browser — the
+ * debugger is DETACHED and attached again (chrome.debugger.detach), which ends whatever the old
+ * session was blocked on. A launched engine keeps its page session (there is nothing to detach;
+ * platform-cdp's detach is a no-op): its domains are enabled again. Each step is bounded; the
+ * re-attach happens in the background unless `wait`. Never throws.
+ * → { tabId, recovered:true, abandoned:[method…], detached, reattached, ms, problem? }
+ */
+export async function recoverTab(tabId, { reason = 'a call on it ran past its deadline', wait = false, reattach = true, detach = true } = {}) {
+  const started = Date.now();
+  const pending = [...(inflight.get(tabId) ?? [])];
+  inflight.delete(tabId);
+  const abandoned = pending.map((e) => e.method);
+  for (const e of pending) {
+    // Worded so send() does not take it for a navigation's detach and retry the command.
+    const err = new CdpError(
+      `The CDP command "${e.method}" was abandoned: G9BrowserAgent recovered this tab's debugger session (${reason}).`,
+      { method: e.method, tabId },
+    );
+    err.recovered = true;
+    e.reject(err);
+  }
+  attaching.delete(tabId);
+  forgetTab(tabId);
+  let detached = false;
+  let problem = null;
+  if (platform.name === 'extension' && detach) {
+    try {
+      await bounded(platform.debugger.detach(tabId), 3_000, 'debugger.detach', tabId);
+      detached = true;
+    } catch (err) {
+      problem = String(err?.message ?? err);
+    }
+  }
+  // Both engines: without this the re-attach below finds the tab listed as attached and returns at
+  // once — on a launched engine the domains (and a keep-awake) were then never applied again.
+  await bounded(updateState((s) => forgetAttached(s, [tabId])), 3_000, 'state write (recover)', tabId).catch(() => {});
+  const again = reattach
+    ? attach(tabId, { log: false }).then(() => true, (err) => { problem = problem ?? String(err?.message ?? err); return false; })
+    : Promise.resolve(false);
+  const reattached = wait ? await again : null;
+  logActivity({ kind: 'recover', tabId, ok: true, detail: `recovered tab ${tabId} (${reason}); abandoned ${abandoned.length ? abandoned.join(', ') : 'nothing'}` }).catch(() => {});
+  return {
+    tabId, recovered: true, reason, abandoned, detached, ...(reattached != null ? { reattached } : { reattaching: reattach }),
+    ms: Date.now() - started, ...(problem ? { problem } : {}),
+  };
 }
 
 /**
@@ -397,6 +594,7 @@ export async function send(tabId, method, params = {}, options = {}) {
     const result = await withTimeout(rawSend(tabId, method, params, sessionId, timeoutMs), method, tabId, timeoutMs);
     return result ?? {};
   } catch (err) {
+    if (err?.recovered) throw err;
     const msg = String(err?.message ?? err);
     // A navigation can tear down the session mid-command. One retry after
     // re-attaching resolves the overwhelming majority of these.
@@ -495,18 +693,37 @@ export async function applyStealthLevel(tabId) {
  * page's own JavaScript. G9BrowserAgent's internal page reads use lib/world.js instead, so
  * nothing G9BrowserAgent runs is visible to (or disturbable by) the page's own globals.
  */
-export async function evaluate(tabId, expression, { awaitPromise = true, returnByValue = true } = {}) {
+export async function evaluate(tabId, expression, { awaitPromise = true, returnByValue = true, timeoutMs = null } = {}) {
+  // (3.4) `timeoutMs`: an awaited promise may legitimately take minutes (a render, an upload); the
+  // command budget is the caller's then, not the 20 s meant for a stuck command.
   const res = await send(tabId, 'Runtime.evaluate', {
     expression,
     awaitPromise,
     returnByValue,
     userGesture: true,
-  });
+  }, timeoutMs ? { timeoutMs } : {});
   if (res.exceptionDetails) {
     const d = res.exceptionDetails;
     throw new CdpError(d.exception?.description ?? d.text ?? 'Script threw', { tabId });
   }
   return res.result?.value;
+}
+
+/**
+ * (3.4) The AGENT's or the FLOW's own expression, in the page's MAIN world — the deliberate exception
+ * to "everything G9BrowserAgent evaluates runs in its isolated world" (§4.7), for the same reason as
+ * `browser_console evaluate`: the expression is about the page's own JavaScript. FlowSpec evaluate
+ * steps use it (the interaction suite's source scan keeps every other main-world call out of the
+ * tools). → the raw Runtime.evaluate answer ({ result, exceptionDetails? }), so a caller can read a
+ * value CDP could only name (NaN, Infinity, a bigint: `unserializableValue`).
+ */
+export function evaluateUserExpression(tabId, expression, { awaitPromise = true, timeoutMs = null } = {}) {
+  return send(tabId, 'Runtime.evaluate', {
+    expression,
+    awaitPromise,
+    returnByValue: true,
+    userGesture: true,
+  }, timeoutMs ? { timeoutMs } : {});
 }
 
 /** Call a function with `this` bound to a specific DOM node (main world). */

@@ -27,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 
 import { WsClient } from '../lib/ws-client.mjs';
 import { VERSION } from '../lib/version.mjs';
+import { resultFromContent } from '../mcp/mcp.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -167,8 +168,9 @@ class Mcp {
   async call(name, args = {}, timeoutMs = 15_000) {
     const res = await this.request('tools/call', { name, arguments: args }, timeoutMs);
     const text = (res.result?.content ?? []).filter((c) => c.type === 'text').map((c) => c.text).join('\n');
-    let data = null;
-    try { data = JSON.parse(text); } catch { data = null; }
+    // (3.4) Compact results carry a tree/text in a block of its own (mcp/mcp.js resultFromContent).
+    let data = resultFromContent(res.result?.content ?? []);
+    if (!data || typeof data !== 'object') data = null;
     return { ok: !res.result?.isError && !res.error, data, text, raw: res };
   }
 

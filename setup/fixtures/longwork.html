@@ -1,0 +1,81 @@
+<!doctype html>
+<!--
+  (3.4) The page setup/longwork-livetest.mjs drives: a profile form, a long report (what makes a full
+  snapshot large), a status line, and two pieces of long in-page work — a "render" that becomes
+  ready after a delay (for predicate waits) and a video render that reports progress for minutes
+  (for evaluate jobs). No external resources: the page must load the same in every browser.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Long work</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 1rem; }
+    li { margin: 2px 0; }
+  </style>
+</head>
+<body>
+  <nav aria-label="Main">
+    <a href="#home">Home</a>
+    <a href="#help" id="help">Help</a>
+  </nav>
+  <main>
+    <h1>Profile</h1>
+    <form id="profile" aria-label="Profile" onsubmit="return false">
+      <label>Name <input id="name" name="name" value="Ada"></label>
+      <button type="button" id="save">Save</button>
+      <button type="button" id="cancel">Cancel</button>
+    </form>
+    <p id="status" role="status">idle</p>
+    <section aria-label="Report">
+      <h2>Report</h2>
+      <ul id="rows"></ul>
+    </section>
+  </main>
+  <script>
+    const rows = document.getElementById('rows');
+    for (let i = 1; i <= 120; i++) {
+      const li = document.createElement('li');
+      const a = document.createElement('a');
+      a.href = `#row-${i}`;
+      a.textContent = `Open item ${i}`;
+      li.append(a, document.createTextNode(` — row ${i} of the quarterly report, with enough words to make a full tree long`));
+      rows.append(li);
+    }
+    document.getElementById('save').addEventListener('click', () => {
+      window.__saved = document.getElementById('name').value;
+      document.getElementById('status').textContent = `saved ${window.__saved}`;
+    });
+    /** A "render" that is ready after `ms`: what a predicate wait waits for. */
+    window.startRender = (ms) => {
+      window.__ready = null;
+      setTimeout(() => { window.__ready = { frames: 120, took: ms }; }, ms);
+      return 'started';
+    };
+    /** A long render reporting progress through the job it is given; resolves after `seconds`. */
+    window.renderVideo = (seconds, job) => new Promise((resolve, reject) => {
+      let done = 0;
+      const timer = setInterval(() => {
+        done += 1;
+        if (job) job.progress(done / seconds, `frame batch ${done}/${seconds}`);
+        if (done >= seconds) {
+          clearInterval(timer);
+          resolve({ seconds: done, file: 'render.mp4' });
+        }
+      }, 1000);
+      if (job && job.signal) job.signal.addEventListener('abort', () => { clearInterval(timer); reject(new Error('render cancelled')); });
+    });
+    /** Change the page the way an app does between two snapshots. */
+    window.mutateProfile = () => {
+      document.getElementById('name').value = 'Grace';
+      document.getElementById('help').remove();
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.id = 'delete';
+      del.textContent = 'Delete';
+      document.getElementById('profile').append(del);
+      return 'mutated';
+    };
+  </script>
+</body>
+</html>

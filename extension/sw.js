@@ -677,26 +677,61 @@ async function openWatchWindow({ handle = null, agent = null, person = false, fo
   return { windowId: win.id, reused: false };
 }
 
+/**
+ * (3.4) How long after the daemon's cancel a call may stay unanswered. The watchdog in runTool
+ * recovers the tab at WATCHDOG_GRACE_MS, which ends a call stuck in a CDP command; a call stuck
+ * anywhere else (a storage call that never returns) is answered here anyway, so the daemon's queue
+ * for that tab — and its inFlight count — never wait on it.
+ */
+const CANCEL_ANSWER_MS = 5_000;
+
 async function handleCall(msg) {
   const { id, tool, args = {}, caller = null } = msg;
   inFlight += 1;
   const controller = new AbortController();
   callControllers.set(id, controller);
+  let counted = true;
+  const release = () => {
+    if (!counted) return;
+    counted = false;
+    callControllers.delete(id);
+    inFlight -= 1;
+  };
+  let answered = false;
+  const answer = (message) => {
+    if (answered) return;
+    answered = true;
+    transport.send(message);
+  };
+  let abandonTimer = null;
+  controller.signal.addEventListener('abort', () => {
+    abandonTimer = setTimeout(() => {
+      answer({
+        type: 'result', id, ok: false,
+        error: `[recovered] "${tool}" was cancelled by the G9BrowserAgent daemon and did not stop within ${CANCEL_ANSWER_MS / 1000} s; ` +
+          'the extension gave up on it and its tab was recovered. Take a browser_snapshot before acting on the tab.',
+        recovered: true,
+      });
+      // Abandoned: it no longer counts as running (an update reload must not wait on it forever).
+      release();
+    }, CANCEL_ANSWER_MS);
+  }, { once: true });
   try {
     const result = await runTool(tool, args ?? {}, caller ? { ...caller, signal: controller.signal } : { signal: controller.signal });
-    transport.send({ type: 'result', id, ok: true, result });
+    answer({ type: 'result', id, ok: true, result });
     if (caller?.relayed === true) afterRelayedCall(tool, args, caller, null);
   } catch (err) {
     // The delivery state of an input error travels as fields too (DAEMON_PROTOCOL §4), not only as
     // the [delivery: …] tag runTool put in the message.
-    transport.send({
+    answer({
       type: 'result', id, ok: false, error: String(err?.message ?? err),
       ...(typeof err?.delivery === 'string' ? { delivery: err.delivery, hit: err.hit ?? null, hidden: err.hidden === true } : {}),
+      ...(err?.recovered ? { recovered: err.recovered } : {}),
     });
     if (caller?.relayed === true) afterRelayedCall(tool, args, caller, err);
   } finally {
-    callControllers.delete(id);
-    inFlight -= 1;
+    clearTimeout(abandonTimer);
+    release();
     maybeReload().catch(() => {});
   }
 }

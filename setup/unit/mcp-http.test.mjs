@@ -9,7 +9,7 @@
  */
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { createGateway, tokenMatches, isLoopback, main, MIN_TOKEN_LENGTH } from '../../mcp/http.mjs';
+import { createGateway, tokenMatches, isLoopback, main, MIN_TOKEN_LENGTH, identityFor } from '../../mcp/http.mjs';
 import { TOOLS } from '../../mcp/tools.js';
 
 async function test(name, fn) {
@@ -180,6 +180,33 @@ try {
     gw.sweep();
     assert.equal(gw.sessions.size, 0, 'an hour of nothing closes every session');
     assert.equal(links.find((l) => l.name === 'four').closeReason, 'MCP session idle');
+  });
+
+  await test('(3.4) one identity across sessions: a new session of the same client ends the idle older ones and carries the identity', async () => {
+    assert.equal(identityFor({ header: 'gate-7', clientName: 'n8n' }), 'gate-7', 'the X-G9-Agent header wins');
+    assert.equal(identityFor({ clientName: 'n8n' }), 'n8n');
+    assert.equal(identityFor({ clientName: 'n8n', mode: 'header' }), null);
+    assert.equal(identityFor({ header: 'gate-7', mode: 'off' }), null);
+    const first = await init('panel-gate');
+    const firstId = first.headers.get('mcp-session-id');
+    const firstLink = links.at(-1);
+    assert.equal(firstLink.identity, 'panel-gate');
+    const other = await init('someone-else');
+    const otherId = other.headers.get('mcp-session-id');
+    const second = await init('panel-gate');
+    const secondLink = links.at(-1);
+    assert.equal(secondLink.identity, 'panel-gate', 'the daemon link says who it is (daemon/registry.js adoptIdentity)');
+    assert.equal(firstLink.closed, true, 'the older idle session of the same identity ended');
+    assert.equal(firstLink.closeReason, 'MCP session superseded (same agent)');
+    assert.equal(gw.sessions.has(firstId), false);
+    assert.equal(gw.sessions.has(otherId), true, 'another identity is untouched');
+    const viaHeader = await post({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', clientInfo: { name: 'panel-gate', version: '1' }, capabilities: {} } }, { headers: { 'X-G9-Agent': 'gate-B' } });
+    assert.equal(viaHeader.status, 200);
+    assert.equal(links.at(-1).identity, 'gate-B', 'a header makes two workers of one client two agents');
+    assert.equal(secondLink.closed, false, 'so the panel-gate session stays');
+    for (const id of [otherId, second.headers.get('mcp-session-id'), viaHeader.headers.get('mcp-session-id')]) {
+      await post(undefined, { method: 'DELETE', session: id });
+    }
   });
 
   await test('main refuses to put the daemon on a network without a strong token', async () => {

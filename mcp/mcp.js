@@ -26,11 +26,16 @@ import { EventEmitter } from 'node:events';
 const SUPPORTED_PROTOCOLS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 
 export class McpServer extends EventEmitter {
-  constructor({ name, version, instructions }) {
+  /**
+   * `compact` (3.4, default on; G9_MCP_COMPACT=0 turns it off): tool results as JSON without
+   * indentation, and a result's `tree`/`text` as a plain-text block of its own — see normalizeToolResult.
+   */
+  constructor({ name, version, instructions, compact = process.env.G9_MCP_COMPACT !== '0' }) {
     super();
     this.name = name;
     this.version = version;
     this.instructions = instructions;
+    this.compact = compact !== false;
     this.tools = new Map();
     this.resources = new Map();
     this.initialized = false;
@@ -164,7 +169,7 @@ export class McpServer extends EventEmitter {
           if (!tool) return fail(id, -32602, `Unknown tool: ${params.name}`);
           try {
             const output = await tool.handler(params.arguments ?? {});
-            return reply(id, normalizeToolResult(output));
+            return reply(id, normalizeToolResult(output, { compact: this.compact }));
           } catch (err) {
             // Tool failures are results, not protocol errors — the agent needs
             // to read the message and adapt rather than see a transport fault.
@@ -221,13 +226,39 @@ export function imageMimeOf(output) {
   return null;
 }
 
+/** Top-level string fields that read better as text of their own than escaped inside JSON (3.4). */
+const TEXT_FIELDS = ['tree', 'text'];
+
+/**
+ * Split a result into its JSON part and its long text fields. A snapshot's `tree` inside JSON is one
+ * string full of `\n` and `\"` — longer, and harder to read, than the same lines as plain text.
+ */
+function liftText(output) {
+  if (!output || typeof output !== 'object' || Array.isArray(output)) return { rest: output, texts: [] };
+  const rest = { ...output };
+  const texts = [];
+  for (const key of TEXT_FIELDS) {
+    const value = rest[key];
+    if (typeof value === 'string' && (value.includes('\n') || value.length > 120)) {
+      delete rest[key];
+      texts.push({ key, value });
+    }
+  }
+  return { rest, texts };
+}
+
 /**
  * Accept either a rich content array or a plain object, and always produce a
  * valid MCP tool result. Images become image content blocks so multimodal
  * models actually see them rather than receiving a base64 wall of text.
+ *
+ * (3.4) `compact` (the default): JSON without indentation (a third fewer characters on a typical
+ * result), and long `tree`/`text` fields as plain-text blocks after the JSON, each introduced by its
+ * name (`tree:`). `compact:false` is the pre-3.4 shape: indented JSON with everything inside it.
  */
-export function normalizeToolResult(output) {
+export function normalizeToolResult(output, { compact = true } = {}) {
   if (output && Array.isArray(output.content)) return output;
+  const json = (value) => (compact ? JSON.stringify(value ?? null) : JSON.stringify(value ?? null, null, 2));
 
   if (output && typeof output === 'object' && output.dataBase64) {
     const mimeType = imageMimeOf(output);
@@ -235,18 +266,48 @@ export function normalizeToolResult(output) {
       const { dataBase64, ...rest } = output;
       return {
         content: [
-          { type: 'text', text: JSON.stringify(rest, null, 2) },
+          { type: 'text', text: json(rest) },
           { type: 'image', data: dataBase64, mimeType },
         ],
       };
     }
   }
 
-  const text = typeof output === 'string' ? output : JSON.stringify(output ?? null, null, 2);
-  return { content: [{ type: 'text', text }] };
+  if (typeof output === 'string') return { content: [{ type: 'text', text: output }] };
+  if (!compact) return { content: [{ type: 'text', text: json(output) }] };
+  const { rest, texts } = liftText(output);
+  return {
+    content: [
+      { type: 'text', text: json(rest) },
+      ...texts.map(({ key, value }) => ({ type: 'text', text: `${key}:\n${value}` })),
+    ],
+  };
 }
 
 /** Diagnostics must never touch stdout. */
 export function log(...args) {
   process.stderr.write(`${args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')}\n`);
+}
+
+/**
+ * (3.4) The inverse of a compact normalizeToolResult, for MCP clients of G9BrowserAgent's own (the runner,
+ * the test harnesses): the first text block's JSON with every lifted `tree:`/`text:` block put back
+ * under its name. A first block that is not JSON is returned as the string itself.
+ */
+export function resultFromContent(content = []) {
+  const texts = (content ?? []).filter((c) => c?.type === 'text').map((c) => String(c.text ?? ''));
+  if (!texts.length) return null;
+  let value;
+  try {
+    value = JSON.parse(texts[0]);
+  } catch {
+    return texts.join('\n');
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    for (const block of texts.slice(1)) {
+      const m = /^(tree|text):\n([\s\S]*)$/.exec(block);
+      if (m && !(m[1] in value)) value[m[1]] = m[2];
+    }
+  }
+  return value;
 }

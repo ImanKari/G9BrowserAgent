@@ -28,17 +28,34 @@ const PROTOCOL = '1.3';
 
 // ------------------------------------------------------------------ debugger
 
+/**
+ * (3.4) `promise`, or an Error once `timeoutMs` have passed. chrome.debugger has no deadline of its
+ * own: an attach, a detach or a command a throttled or frozen background page never answers waits
+ * forever (a field incident held a browser node's tab until its container restarted). The browser
+ * call itself is left to settle alone; the caller is free.
+ */
+function withDeadline(promise, timeoutMs, what) {
+  if (!(Number(timeoutMs) > 0)) return promise;
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`The CDP command "${what}" did not return after ${Math.round(timeoutMs / 1000)}s.`)), timeoutMs);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 const debuggerApi = {
   /**
    * Idempotent. Chrome refuses a second attach with "Another debugger is
    * already attached"; when the browser says the tab IS attached, that is us
    * from before a worker restart (or DevTools, which coexists since Chrome 63),
    * so it is not an error. cdp.js keeps its own check as well — the message is
-   * the only signal, and two readings of it cost nothing.
+   * the only signal, and two readings of it cost nothing. (3.4) `{ timeoutMs }` bounds it.
    */
-  async attach(tabId) {
+  async attach(tabId, { timeoutMs = null } = {}) {
     try {
-      await api().debugger.attach({ tabId }, PROTOCOL);
+      await withDeadline(api().debugger.attach({ tabId }, PROTOCOL), timeoutMs, 'debugger.attach');
     } catch (err) {
       const msg = String(err?.message ?? err);
       if (msg.includes('Another debugger') || msg.includes('already attached')) {
@@ -49,20 +66,20 @@ const debuggerApi = {
     }
   },
 
-  async detach(tabId) {
-    await api().debugger.detach({ tabId });
+  async detach(tabId, { timeoutMs = null } = {}) {
+    await withDeadline(api().debugger.detach({ tabId }), timeoutMs, 'debugger.detach');
   },
 
   /**
    * `sessionId` routes the command to a CHILD target (a cross-origin iframe or
    * a worker). Chrome 125 added flat sessions to `chrome.debugger`, which is
    * what makes this a property on the debuggee rather than a second attach per
-   * frame. The fifth argument (`{ timeoutMs }`) is accepted for parity with
-   * platform-cdp and ignored: cdp.js enforces its own timeout.
+   * frame. The fifth argument (`{ timeoutMs }`) bounds the wait (3.4), as platform-cdp does;
+   * cdp.js keeps its own deadline and names the command.
    */
-  sendCommand(tabId, method, params = {}, sessionId = null) {
+  sendCommand(tabId, method, params = {}, sessionId = null, { timeoutMs = null } = {}) {
     const debuggee = sessionId ? { tabId, sessionId } : { tabId };
-    return api().debugger.sendCommand(debuggee, method, params);
+    return withDeadline(api().debugger.sendCommand(debuggee, method, params), timeoutMs, method);
   },
 
   async getTargets() {

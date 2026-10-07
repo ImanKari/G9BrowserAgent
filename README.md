@@ -359,13 +359,13 @@ Agents get **15 tools**. The ones they use most:
 | Tool | What it does |
 |---|---|
 | `browser_status` | Where am I? The current tab and its health, engines, agents, and whether Stop is pressed. Agents call it first. |
-| `browser_tabs` | List, open, close, focus, attach or claim tabs; pop out; hand off to a background browser. |
-| `browser_snapshot` | Read the page as an accessibility tree, with a `ref` for each element to act on. |
+| `browser_tabs` | List, open, close, focus, attach or claim tabs; pop out; hand off to a background browser; keep a background tab awake for long work. |
+| `browser_snapshot` | Read the page as an accessibility tree, with a `ref` for each element to act on — or only part of it (a scope, roles, a name, only controls), or only what changed since last time. |
 | `browser_interact` | Click, double-click, right-click, hover, type, press keys, scroll, drag, select, upload — on a `ref`. |
-| `browser_navigate` | Go to a URL, reload, back, forward, wait for a load state. |
-| `browser_console`, `browser_network` | Read console messages and requests; record HAR; pin or intercept responses. |
-| `browser_screenshot`, `browser_inspect`, `browser_diagnose` | Pictures, DOM / styles / storage / cookies, and health, performance and memory checks. |
-| `browser_recording`, `browser_issue` | Record, replay and approve flows; file issues with evidence. |
+| `browser_navigate` | Go to a URL, reload, back, forward, wait for a load state — or for a condition in the page, for up to two hours. |
+| `browser_console`, `browser_network` | Read console messages and requests; run JavaScript, also as a long background job; record HAR; pin or intercept responses; fetch a file with the browser's cookies and save it. |
+| `browser_screenshot`, `browser_inspect`, `browser_diagnose` | Pictures (also saved to a file), DOM / styles / storage / cookies, finding one control by role and name, and health, performance and memory checks. |
+| `browser_recording`, `browser_issue` | Record, replay and approve flows; run a list of steps in one call; file issues with evidence. |
 | `browser_engine`, `browser_emulate`, `browser_dialog` | Start background browsers; emulate devices, networks and color schemes; answer dialogs. |
 
 The full list, with every argument, is in the [technical reference](docs/REFERENCE.md#the-15-tools).

@@ -334,7 +334,9 @@ test('router: relay rewrites ids both ways and forwards the caller', async () =>
   const snap = await router.call(a, 'browser_snapshot', { tabId: h42 });
   const call = sent.filter((m) => m.type === 'call').at(-1);
   assert.equal(call.args.tabId, 42, 'the extension receives the Chrome id');
-  assert.deepEqual(call.caller, { agentId: a.id, name: 'cursor', relayed: true }, 'relayed calls are tagged (F7)');
+  const { deadlineAt, ...tagged } = call.caller;
+  assert.deepEqual(tagged, { agentId: a.id, name: 'cursor', relayed: true }, 'relayed calls are tagged (F7)');
+  assert.ok(deadlineAt > Date.now() && deadlineAt <= Date.now() + 2_100, '(3.4) and carry the call deadline (EXT-04)');
   assert.equal(snap.echoedTabId, 42);
   assert.equal(snap.tabId, h42, 'results come back as handles');
   assert.deepEqual(snap.tabIds, [h41, h42]);
@@ -1268,7 +1270,7 @@ test('mcp tools: fifteen tools, valid schemas, session on every tab tool, v2 ins
   }
   const tabs = TOOLS.find((t) => t.name === 'browser_tabs');
   assert.deepEqual(tabs.inputSchema.properties.action.enum,
-    ['list', 'open', 'close', 'focus', 'attach', 'claim', 'release', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch']);
+    ['list', 'open', 'close', 'focus', 'attach', 'claim', 'release', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch', 'keep_awake']);
   const engine = TOOLS.find((t) => t.name === 'browser_engine');
   // acquire/release: a run HOLDS a launched engine across its tabs (engine leases, 2026-09-22).
   assert.deepEqual(engine.inputSchema.properties.action.enum, ['launch', 'list', 'stop', 'context', 'versions', 'warm', 'acquire', 'release']);
@@ -2122,6 +2124,9 @@ test('F7: the shared runtime tags the activity record of a relayed call (and onl
   try {
     await runtime.runTool('browser_tabs', { action: 'pin' }, { agentId: 'agent-1', name: 'cursor', relayed: true }).catch(() => {});
     await runtime.runTool('browser_tabs', { action: 'pin' }, null).catch(() => {});
+    // (3.4) The activity line is written after the reply, not before it: wait for both.
+    const until = Date.now() + 3_000;
+    while (events.filter((e) => e.event === 'activity').length < 2 && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
   } finally {
     runtime.setHooks({ emit: null });
   }
@@ -2619,6 +2624,12 @@ test('contract gap: the desktop\'s per-call timeouts never end a call before the
     ['browser_network', { action: 'wait_download' }], ['browser_network', { action: 'wait_download', timeoutMs: 900_000 }],
     ['browser_diagnose', { what: 'performance' }], ['browser_diagnose', { what: 'performance', durationMs: 120_000 }],
     ['browser_engine', { action: 'launch' }], ['browser_engine', { action: 'warm' }], ['browser_engine', { action: 'versions', download: true }],
+    // (3.4) long waits, evaluates, fetches and batches
+    ['browser_navigate', { action: 'wait', predicate: 'x', timeoutMs: 7_200_000 }], ['browser_navigate', { action: 'wait', timeoutMs: 99_000_000 }],
+    ['browser_console', { action: 'evaluate', timeoutMs: 14_400_000 }], ['browser_console', { action: 'evaluate', job: true, timeoutMs: 14_400_000 }],
+    ['browser_network', { action: 'fetch' }], ['browser_network', { action: 'fetch', timeoutMs: 600_000 }],
+    ['browser_console', { action: 'job_status', waitMs: 600_000 }], ['browser_console', { action: 'job_status', waitMs: 9_999_999 }],
+    ['browser_recording', { action: 'batch' }], ['browser_recording', { action: 'batch', timeoutMs: 3_600_000 }],
   ];
   for (const [tool, args] of cases) {
     const daemonMs = timeoutFor(tool, args, F);
@@ -2912,6 +2923,245 @@ test('3.2: a viewer (the watch window) lists and watches tabs and nothing else; 
   assert.match(none.note, /no browser with the G9BrowserAgent extension and no G9BrowserAgent desktop app is connected/);
   clearInterval(answer);
   await d.stop('test over').catch(() => {});
+});
+
+// ------------------------------------------------------------------ 3.4: long, unattended work
+
+test('3.4 identity: a new connection with the same identity takes over the claims and current tab of the connected one', () => {
+  const reg = new Registry();
+  const e = reg.addClient({ role: 'engine' });
+  const h1 = reg.handleForChrome(e.id, 11);
+  const h2 = reg.handleForChrome(e.id, 12);
+  const old = reg.addClient({ role: 'agent', name: 'panel-gate', identity: 'panel-gate', send: () => true });
+  reg.ensureOwnership(h1, old.id);
+  reg.ensureOwnership(h2, old.id);
+  reg.setCurrent(old.id, h2);
+  const other = reg.addClient({ role: 'agent', name: 'someone', identity: 'someone', send: () => true });
+  const fresh = reg.addClient({ role: 'agent', name: 'panel-gate', identity: 'panel-gate', send: () => true });
+  const adopted = reg.adoptIdentity(fresh.id);
+  assert.deepEqual(adopted.tabs, [h1, h2]);
+  assert.deepEqual(adopted.from, [old.id]);
+  assert.equal(reg.ownerOf(h1), fresh.id, 'the claims moved');
+  assert.equal(reg.current(fresh.id), h2, 'and the current tab');
+  assert.deepEqual(reg.ownedBy(old.id), [], 'the older connection owns nothing now');
+  assert.equal(reg.agentRows().find((r) => r.id === old.id).supersededBy, fresh.id);
+  assert.equal(reg.adoptIdentity(other.id), null, 'another identity takes nothing');
+  // An agent without an identity never takes anything (two editors that share a client name).
+  const anon = reg.addClient({ role: 'agent', name: 'panel-gate', send: () => true });
+  assert.equal(reg.adoptIdentity(anon.id), null);
+  assert.equal(reg.ownerOf(h1), fresh.id);
+});
+
+test('3.4 identity: what a departed identity owned is taken back by its next connection, unless someone claimed it meanwhile', () => {
+  const reg = new Registry();
+  const e = reg.addClient({ role: 'engine' });
+  const h1 = reg.handleForChrome(e.id, 21);
+  const h2 = reg.handleForChrome(e.id, 22);
+  const first = reg.addClient({ role: 'agent', name: 'gate', identity: 'gate', send: () => true });
+  reg.ensureOwnership(h1, first.id);
+  reg.ensureOwnership(h2, first.id);
+  reg.setCurrent(first.id, h1);
+  reg.removeClient(first.id);
+  assert.equal(reg.ownerOf(h1), null, 'a departed agent blocks nobody: its claims are released at once');
+  const b = agent(reg, 'b');
+  reg.ensureOwnership(h2, b.id); // somebody else took h2 in the gap
+  const next = reg.addClient({ role: 'agent', name: 'gate', identity: 'gate', send: () => true });
+  const adopted = reg.adoptIdentity(next.id);
+  assert.deepEqual(adopted.tabs, [h1], 'only what is still free comes back');
+  assert.equal(reg.ownerOf(h2), b.id);
+  assert.equal(reg.current(next.id), h1);
+  assert.equal(reg.adoptIdentity(next.id), null, 'remembered once');
+});
+
+test('3.4 sessions: open with session:"n-bs" names the tab, and the name survives the agent that set it', async () => {
+  const reg = new Registry();
+  const router = makeRouter(reg);
+  const a = agent(reg, 'gate');
+  let next = 900;
+  fakeExtension(reg, router, (msg) => {
+    if (msg.tool === 'browser_tabs' && msg.args.action === 'open') return { tabId: ++next, url: msg.args.url };
+    if (msg.tool === 'browser_tabs') return { tabs: [{ tabId: 900 + 1, url: 'https://n.test/' }] };
+    return { tool: msg.tool, tabId: msg.args.tabId };
+  });
+  const opened = await router.call(a, 'browser_tabs', { action: 'open', url: 'https://n.test/', session: 'n-bs' });
+  assert.equal(opened.session, 'n-bs');
+  const viaSession = await router.call(a, 'browser_snapshot', { session: 'n-bs' });
+  assert.equal(viaSession.tabId, opened.tabId, 'the very next call finds the session');
+  reg.removeClient(a.id); // a stateless client's MCP session ended
+  const b = agent(reg, 'gate-2');
+  const again = await router.call(b, 'browser_snapshot', { session: 'n-bs' });
+  assert.equal(again.tabId, opened.tabId, 'a fresh agent finds it too');
+  assert.equal((await router.call(b, 'browser_tabs', { action: 'sessions' })).sessions[0].session, 'n-bs');
+});
+
+test('3.4 close and focus never wait behind a stuck call; close ends the calls on that tab', async () => {
+  const reg = new Registry();
+  const router = makeRouter(reg);
+  const a = agent(reg, 'a');
+  const { sent } = fakeExtension(reg, router, (msg) => {
+    if (msg.tool === 'browser_tabs' && msg.args.action === 'list') return { tabs: [{ tabId: 31 }] };
+    if (msg.tool === 'browser_tabs') return { ok: true, action: msg.args.action };
+    return new Promise(() => {}); // a call the page never answers
+  });
+  const { tabs } = await router.call(a, 'browser_tabs', { action: 'list' });
+  const h = tabs[0].tabId;
+  const stuck = router.call(a, 'browser_console', { action: 'evaluate', expression: 'new Promise(() => {})', tabId: h });
+  const stuckSettled = stuck.then(() => 'resolved', (err) => err.message);
+  await new Promise((r) => setTimeout(r, 30));
+  const t0 = Date.now();
+  const focused = await router.call(a, 'browser_tabs', { action: 'focus', tabId: h });
+  assert.equal(focused.focused, h);
+  const closed = await router.call(a, 'browser_tabs', { action: 'close', tabId: h });
+  assert.ok(Date.now() - t0 < 1_000, `focus and close answered at once (${Date.now() - t0} ms), not after the stuck call`);
+  assert.equal(closed.endedCalls, 1);
+  assert.match(await stuckSettled, /was closed by agent-1 \(a\) while this call was running on it/);
+  assert.ok(sent.some((m) => m.type === 'cancel'), 'the stuck call was cancelled in the extension');
+  assert.equal(reg.hasHandle(h), false);
+});
+
+test('3.4 watchdog: a relayed call past its deadline gets the extension\'s [recovered] answer, and its queue frees', async () => {
+  // The router's timers are unref'd: keep the process alive while they run.
+  const keepAlive = setInterval(() => {}, 1_000);
+  try {
+    const reg = new Registry();
+    const router = makeRouter(reg); // base deadline 2 s
+    const a = agent(reg, 'a');
+    let pendingId = null;
+    const { client: ext } = fakeExtension(reg, router, (msg) => {
+      if (msg.tool === 'browser_tabs') return { tabs: [{ tabId: 41 }] };
+      if (msg.tool === 'browser_snapshot') return { tree: '- button "OK"' };
+      pendingId = msg.id;
+      return new Promise(() => {});
+    });
+    // The extension's watchdog answers the cancel (sw.js handleCall).
+    const send = ext.send;
+    ext.send = (msg) => {
+      if (msg.type === 'cancel' && msg.id === pendingId) {
+        setTimeout(() => router.onRelayResult(ext, { type: 'result', id: msg.id, ok: false, error: '[recovered] The CDP command "Runtime.evaluate" was abandoned', recovered: { tabId: 41, abandoned: ['Runtime.evaluate'], detached: true } }), 50);
+        return true;
+      }
+      return send(msg);
+    };
+    const { tabs } = await router.call(a, 'browser_tabs', { action: 'list' });
+    const h = tabs[0].tabId;
+    const err = await router.call(a, 'browser_console', { action: 'evaluate', expression: 'x', tabId: h }).then(() => null, (e) => e);
+    assert.match(err.message, /did not finish within 2s, so G9BrowserAgent stopped it: \[recovered\]/);
+    assert.equal(err.recovered.detached, true);
+    const next = await router.call(a, 'browser_interact', { action: 'click', ref: 'e1', tabId: h }).catch((e) => e);
+    assert.match(String(next?.message), /\[recovered\]/, 'the next call on that tab ran (its queue was free) and ended the same way');
+    assert.equal(router.inFlight(ext.id), 0, 'nothing is left in flight');
+  } finally {
+    clearInterval(keepAlive);
+  }
+});
+
+test('3.4 files: fetch → sha256 and savePath written on this machine; a bounded body without it; screenshot savePath + thumbnail', async () => {
+  const home = fs.mkdtempSync(path.join(TMP, 'files-'));
+  const reg = new Registry();
+  const router = new Router({
+    registry: reg, engines: stubEngines(), settings: { get: () => ({ ...DEFAULTS }) }, version: '3.4.0',
+    info: () => ({ pid: 1, port: 18001, home, startedAt: Date.now() }), timeoutMs: 2_000,
+  });
+  const a = agent(reg, 'a');
+  const body = Buffer.from('a,b\n1,2\n'.repeat(1000));
+  fakeExtension(reg, router, (msg) => {
+    if (msg.tool === 'browser_tabs') return { tabs: [{ tabId: 51 }] };
+    if (msg.tool === 'browser_network' && msg.args.action === 'fetch') {
+      return { url: 'https://x.test/r.csv', status: 200, ok: true, contentType: 'text/csv', size: body.length, headers: { 'content-type': 'text/csv', 'x-noise': 'n' }, bytesBase64: body.toString('base64'), ...(msg.args.savePath ? { savePath: msg.args.savePath } : {}), maxBytes: msg.args.maxBytes ?? 262144 };
+    }
+    if (msg.tool === 'browser_screenshot') return { format: 'jpeg', area: 'viewport', dataBase64: Buffer.from('JPEGDATA').toString('base64'), thumbnail: { width: 320, height: 180, dataBase64: 'VEhVTUI=' } };
+    if (msg.tool === 'browser_network' && msg.args.action === 'wait_download') {
+      const file = path.join(home, 'dl', 'report.pdf');
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, '%PDF-1.7 test');
+      return { id: 3, filename: file, state: 'complete', attribution: 'exact' };
+    }
+    return {};
+  });
+  const { tabs } = await router.call(a, 'browser_tabs', { action: 'list' });
+  const h = tabs[0].tabId;
+  const sha = crypto.createHash('sha256').update(body).digest('hex');
+  const saved = await router.call(a, 'browser_network', { action: 'fetch', url: 'https://x.test/r.csv', savePath: 'exports/r.csv', tabId: h });
+  assert.equal(saved.path, path.join(home, 'files', 'exports', 'r.csv'), 'a relative savePath lands under <home>/files');
+  assert.equal(saved.sha256, sha);
+  assert.equal(saved.size, body.length);
+  assert.equal(saved.bytesBase64, undefined, 'no bytes in the answer');
+  assert.deepEqual(Object.keys(saved.headers), ['content-type'], 'only the headers worth reading');
+  assert.equal(crypto.createHash('sha256').update(fs.readFileSync(saved.path)).digest('hex'), sha, 'the file on disk is the body');
+  const bounded = await router.call(a, 'browser_network', { action: 'fetch', url: 'https://x.test/r.csv', maxBytes: 16, tabId: h });
+  assert.equal(bounded.text, body.subarray(0, 16).toString('utf8'));
+  assert.equal(bounded.truncated, true);
+  assert.equal(bounded.sha256, sha, 'the hash is of the whole body');
+  const abs = path.join(home, 'shots', 'one');
+  const shot = await router.call(a, 'browser_screenshot', { savePath: abs, thumbnail: true, tabId: h });
+  assert.equal(shot.path, `${abs}.jpg`, 'the format gives a missing extension');
+  assert.equal(fs.readFileSync(shot.path, 'utf8'), 'JPEGDATA');
+  assert.equal(shot.dataBase64, 'VEhVTUI=', 'the thumbnail is what the agent sees');
+  assert.equal(normalizeToolResult(shot).content[1].type, 'image');
+  const dl = await router.call(a, 'browser_network', { action: 'wait_download', tabId: h });
+  assert.equal(dl.path, path.join(home, 'dl', 'report.pdf'), 'Engine 1 downloads report the final path');
+  assert.equal(dl.sha256, crypto.createHash('sha256').update('%PDF-1.7 test').digest('hex'));
+  assert.equal(dl.file.source, 'disk (daemon)');
+});
+
+test('3.4 (EXT-04) a reply that arrives after the grace is ignored; the relay-timeout text no longer blames a dialog', async () => {
+  // The router's timers are unref'd: keep the process alive while they run.
+  const keepAlive = setInterval(() => {}, 1_000);
+  try {
+    const reg = new Registry();
+    const router = new Router({ registry: reg, engines: stubEngines(), settings: { get: () => ({ ...DEFAULTS }) }, version: '3.4.0', info: () => ({}), timeoutMs: 200 });
+    const a = agent(reg, 'a');
+    let lateId = null;
+    const { client: ext } = fakeExtension(reg, router, (msg) => {
+      if (msg.tool === 'browser_tabs') return { tabs: [{ tabId: 61 }] };
+      lateId = msg.id;
+      return new Promise(() => {}); // and the cancel is never answered: an extension that is stuck itself
+    });
+    const { tabs } = await router.call(a, 'browser_tabs', { action: 'list' });
+    const t0 = Date.now();
+    const err = await router.call(a, 'browser_console', { action: 'evaluate', expression: 'x', tabId: tabs[0].tabId }).then(() => null, (e) => e);
+    assert.ok(Date.now() - t0 >= 8_000, 'the daemon waits the relay grace for the extension\'s own recovery');
+    assert.match(err.message, /did not respond within 0s.*the extension has not answered.*This tab's queue is free again/s);
+    assert.doesNotMatch(err.message, /dialog/);
+    assert.equal(router.inFlight(ext.id), 0, 'nothing is left in flight');
+    router.onRelayResult(ext, { type: 'result', id: lateId, ok: true, result: { late: true } }); // the late reply: ignored, no throw
+    assert.equal(router.inFlight(ext.id), 0);
+  } finally {
+    clearInterval(keepAlive);
+  }
+});
+
+test('3.4 deadlines: waits to 2 h, evaluate to 4 h, fetch and batch follow timeoutMs; job:true needs none', () => {
+  assert.equal(timeoutFor('browser_navigate', { action: 'wait', timeoutMs: 7_200_000 }), 7_215_000);
+  assert.equal(timeoutFor('browser_navigate', { action: 'wait', timeoutMs: 99_000_000 }), 7_215_000, 'capped at 2 h');
+  assert.equal(timeoutFor('browser_console', { action: 'evaluate', timeoutMs: 14_400_000 }), 14_415_000);
+  assert.equal(timeoutFor('browser_console', { action: 'evaluate', job: true, timeoutMs: 14_400_000 }), 120_000);
+  assert.equal(timeoutFor('browser_console', { action: 'evaluate' }), 120_000);
+  assert.equal(timeoutFor('browser_network', { action: 'fetch' }), 120_000);
+  assert.equal(timeoutFor('browser_network', { action: 'fetch', timeoutMs: 600_000 }), 615_000);
+  assert.equal(timeoutFor('browser_recording', { action: 'batch' }), 30 * 60_000 + 15_000);
+  assert.equal(timeoutFor('browser_console', { action: 'job_status', waitMs: 600_000 }), 615_000, 'a job_status that waits gets its wait');
+  assert.equal(fallbackIsReadOnly('browser_console', { action: 'job_status' }), true);
+  assert.equal(fallbackIsReadOnly('browser_console', { action: 'job_cancel' }), false);
+  assert.equal(fallbackIsReadOnly('browser_network', { action: 'fetch' }), true);
+  assert.equal(fallbackIsReadOnly('browser_network', { action: 'fetch', method: 'POST' }), false);
+});
+
+test('3.4 compact results: no indentation, a tree as plain text, and resultFromContent puts it back', async () => {
+  const { resultFromContent } = await import('../../mcp/mcp.js');
+  const snap = { url: 'https://x/', generation: 3, tree: '- button "OK" [ref=e1]\n- link "Help" [ref=e2]' };
+  const compact = normalizeToolResult(snap);
+  assert.equal(compact.content.length, 2);
+  assert.equal(compact.content[0].text, '{"url":"https://x/","generation":3}');
+  assert.equal(compact.content[1].text, 'tree:\n- button "OK" [ref=e1]\n- link "Help" [ref=e2]', 'the tree is plain text, not an escaped string');
+  assert.deepEqual(resultFromContent(compact.content), snap);
+  const pretty = normalizeToolResult(snap, { compact: false });
+  assert.equal(pretty.content.length, 1);
+  assert.ok(pretty.content[0].text.includes('\n  "url"'), 'compact:false keeps the indented shape');
+  const saved = JSON.stringify(snap, null, 2).length - compact.content.reduce((n, c) => n + c.text.length, 0);
+  assert.ok(saved > 0, `compact is smaller (${saved} characters saved here)`);
+  assert.equal(normalizeToolResult({ a: 1, text: 'short' }).content.length, 1, 'a short text stays inside the JSON');
+  assert.equal(resultFromContent([{ type: 'text', text: 'plain' }]), 'plain');
 });
 
 // ------------------------------------------------------------------ run

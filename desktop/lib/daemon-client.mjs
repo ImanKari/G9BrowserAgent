@@ -41,12 +41,19 @@ export function callTimeoutMs(tool, args = {}, floor = DEFAULT_CALL_TIMEOUT_MS) 
   const a = args && typeof args === 'object' ? args : {};
   const num = (v, d) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : d);
   let ms = 0;
+  // (3.4) The daemon's caps: a wait 2 h, an evaluate 4 h.
+  const capped = (v, d, cap) => Math.min(cap, num(v, d));
   switch (tool) {
     case 'browser_recording':
       if (a.action === 'replay' || a.action === 'calibrate') ms = 30 * 60_000;
+      else if (a.action === 'batch') ms = capped(a.timeoutMs, 30 * 60_000, 2 * 60 * 60_000) + 15_000;
+      break;
+    case 'browser_console':
+      if (a.action === 'evaluate' && a.job !== true && a.timeoutMs != null) ms = capped(a.timeoutMs, 30_000, 4 * 60 * 60_000) + 15_000;
+      else if (a.action === 'job_status' && num(a.waitMs, 0) > 0) ms = Math.min(10 * 60_000, num(a.waitMs, 0)) + 15_000;
       break;
     case 'browser_navigate':
-      ms = num(a.timeoutMs, a.action === 'wait' ? 15_000 : 30_000) + 15_000;
+      ms = capped(a.timeoutMs, a.action === 'wait' ? 15_000 : 30_000, 2 * 60 * 60_000) + 15_000;
       break;
     case 'browser_tabs':
       if (a.action === 'wait') ms = num(a.timeoutMs, 30_000) + 15_000;
@@ -54,6 +61,7 @@ export function callTimeoutMs(tool, args = {}, floor = DEFAULT_CALL_TIMEOUT_MS) 
       break;
     case 'browser_network':
       if (a.action === 'wait_download') ms = num(a.timeoutMs, 30_000) + 15_000;
+      else if (a.action === 'fetch') ms = capped(a.timeoutMs, 60_000, 2 * 60 * 60_000) + 15_000;
       break;
     case 'browser_diagnose':
       // `what`, as the daemon reads it (daemon/router.js timeoutFor): browser_diagnose has no

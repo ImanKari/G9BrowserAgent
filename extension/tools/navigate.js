@@ -6,12 +6,13 @@
  * and return *why* they finished, so the agent can reason about it.
  */
 
-import { send, COMMAND_TIMEOUT_MS } from '../lib/cdp.js';
-import { clearRefs } from '../lib/refs.js';
-import { inWorld } from '../lib/world.js';
-import { levelFor, perform } from '../lib/humanize.js';
+import { send, COMMAND_TIMEOUT_MS, evaluate as evaluateInPage } from '../lib/cdp.js';
+import { clearRefs, resolveRef } from '../lib/refs.js';
+import { inWorld, callInWorld } from '../lib/world.js';
+import { levelFor, perform, callSignalFor } from '../lib/humanize.js';
 import { createRng, planGap } from '../humanize/index.js';
 import { clearBuffers, network } from './observe.js';
+import { clearDiffBases } from './snapshot.js';
 
 /**
  * Every page read here runs in G9BrowserAgent's isolated world (lib/world.js). The idle
@@ -41,6 +42,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function resetPageState(tabId) {
   await clearRefs(tabId);
   await clearBuffers(tabId);
+  await clearDiffBases(tabId);
 }
 
 /**
@@ -135,23 +137,75 @@ export async function history(tabId, { delta = -1, ...opts } = {}) {
   return { url: await currentUrl(tabId), movedTo: entries[target].url, ...idle };
 }
 
+/** (3.4) The longest one wait may take (a render, a queue position): 2 hours. */
+export const MAX_WAIT_MS = 2 * 60 * 60_000;
+
+/**
+ * (3.4) How often a long wait looks: every 250 ms for the first 10 s, then every second, then (after
+ * 5 minutes) every 2 s — a two-hour wait costs ~3 700 page reads, not 60 000. `pollMs` overrides.
+ */
+export function pollInterval(elapsedMs, pollMs = null) {
+  if (Number(pollMs) > 0) return Math.max(50, Math.min(60_000, Number(pollMs)));
+  if (elapsedMs < 10_000) return 250;
+  if (elapsedMs < 5 * 60_000) return 1_000;
+  return 2_000;
+}
+
+/** A value for a result: JSON-able, at most `max` characters of JSON. */
+export function boundedValue(value, max = 2_000) {
+  if (value === undefined) return '(undefined)';
+  let text;
+  try { text = JSON.stringify(value); } catch { text = String(value); }
+  if (text == null) return String(value);
+  if (text.length <= max) return value;
+  return { truncated: true, length: text.length, preview: text.slice(0, max) };
+}
+
+/** Throws when the call this wait belongs to was cancelled (its deadline, a per-agent Stop). */
+function checkCancelled(tabId) {
+  const signal = callSignalFor(tabId);
+  if (signal?.aborted) {
+    const why = signal.reason instanceof Error ? signal.reason.message : String(signal.reason ?? 'cancelled');
+    throw new Error(`The wait was cancelled: ${why}.`);
+  }
+}
+
+/** The states a ref can be waited for, and what each one checks in the page. */
+const REF_STATES = new Set(['visible', 'hidden', 'enabled', 'disabled', 'gone', 'present', 'checked', 'unchecked']);
+
 /**
  * Wait for a condition. Exactly one of text/selector/ref-gone/idle should be
  * given; `idle` means "no network activity and no DOM mutations for a beat",
  * which is the closest thing to "the page finished doing whatever it was doing".
+ *
+ * (3.4) Two more, for long in-page work, polled HERE (server-side) so the agent makes one call and
+ * reads one answer — the final value and the time it took — however long the wait:
+ * - `predicate`: a JavaScript expression evaluated in the PAGE (its main world, like
+ *   browser_console evaluate; a promise is awaited) until it is truthy.
+ * - `ref` + `state`: an element from a snapshot reaching "visible" | "hidden" | "enabled" |
+ *   "disabled" | "checked" | "unchecked" | "gone" (removed from the page) | "present".
+ * `timeoutMs` up to MAX_WAIT_MS (2 h).
  */
-export async function waitFor(tabId, { text, selector, gone = false, idle = false, timeoutMs = 15_000 } = {}) {
+export async function waitFor(tabId, {
+  text, selector, gone = false, idle = false, predicate = null, ref = null, state = null, pollMs = null, url = null,
+  timeoutMs = 15_000,
+} = {}) {
+  timeoutMs = Math.max(1, Math.min(MAX_WAIT_MS, Number(timeoutMs) || 15_000));
   const deadline = Date.now() + timeoutMs;
 
   if (idle) return waitForIdle(tabId, timeoutMs);
+  if (predicate != null && predicate !== '') return waitForPredicate(tabId, String(predicate), { timeoutMs, pollMs });
+  if (ref) return waitForRefState(tabId, String(ref), { state: state ?? (gone ? 'gone' : 'visible'), timeoutMs, pollMs, url });
 
-  if (!text && !selector) throw new Error('waitFor needs text, selector, or idle:true.');
+  if (!text && !selector) throw new Error('waitFor needs text, selector, predicate, ref (+ state), or idle:true.');
 
   const expr = selector
     ? `!!document.querySelector(${JSON.stringify(selector)})`
     : `document.body && document.body.innerText.includes(${JSON.stringify(text)})`;
 
+  const started = Date.now();
   while (Date.now() < deadline) {
+    checkCancelled(tabId);
     let present = false;
     try {
       present = await evaluate(tabId, `(() => { try { return ${expr}; } catch { return false; } })()`);
@@ -161,12 +215,100 @@ export async function waitFor(tabId, { text, selector, gone = false, idle = fals
     if (present === !gone) {
       return { satisfied: true, waitedMs: timeoutMs - (deadline - Date.now()) };
     }
-    await sleep(120);
+    await sleep(Math.min(timeoutMs > 60_000 ? pollInterval(Date.now() - started, pollMs) : 120, Math.max(1, deadline - Date.now())));
   }
 
   throw new Error(
     `Timed out after ${timeoutMs}ms waiting for ${selector ? `selector ${selector}` : `text "${text}"`} to ` +
       `${gone ? 'disappear' : 'appear'}. Take a browser_snapshot to see the current state.`,
+  );
+}
+
+/**
+ * (3.4) Poll a page expression until it is truthy. Each look is bounded (at most 30 s, never past the
+ * deadline); a look that throws (the page between two documents, the app not booted yet) is retried,
+ * and the last error is reported if the deadline passes. → { satisfied, value, waitedMs, polls }
+ */
+async function waitForPredicate(tabId, expression, { timeoutMs, pollMs }) {
+  const started = Date.now();
+  const deadline = started + timeoutMs;
+  let polls = 0;
+  let lastValue;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    checkCancelled(tabId);
+    polls += 1;
+    try {
+      lastValue = await evaluateInPage(tabId, expression, {
+        timeoutMs: Math.max(1_000, Math.min(30_000, deadline - Date.now())),
+      });
+      lastError = null;
+      if (lastValue) {
+        return { satisfied: true, value: boundedValue(lastValue), waitedMs: Date.now() - started, polls };
+      }
+    } catch (err) {
+      if (/halted by the user/i.test(String(err?.message))) throw err;
+      lastError = String(err?.message ?? err).slice(0, 300);
+    }
+    await sleep(Math.min(pollInterval(Date.now() - started, pollMs), Math.max(1, deadline - Date.now())));
+  }
+  const err = new Error(
+    `Timed out after ${timeoutMs}ms waiting for the predicate to become truthy (${polls} looks). ` +
+      (lastError ? `The last look threw: ${lastError}` : `The last value was ${JSON.stringify(boundedValue(lastValue, 300))}.`) +
+      ' Take a browser_snapshot to see the current state.',
+  );
+  err.waitedMs = Date.now() - started;
+  throw err;
+}
+
+/**
+ * (3.4) Poll an element (a ref) until it reaches `state`. "gone" is satisfied when the element is no
+ * longer in the page (or the page left); every other state needs the element present. The check runs
+ * in G9BrowserAgent's isolated world. → { satisfied, state, waitedMs, polls }
+ */
+async function waitForRefState(tabId, ref, { state, timeoutMs, pollMs, url }) {
+  if (!REF_STATES.has(state)) {
+    throw new Error(`state must be one of ${[...REF_STATES].join(', ')} (got ${JSON.stringify(state)}).`);
+  }
+  const node = await resolveRef(tabId, ref, url);
+  const started = Date.now();
+  const deadline = started + timeoutMs;
+  let polls = 0;
+  let last = null;
+  while (Date.now() < deadline) {
+    checkCancelled(tabId);
+    polls += 1;
+    let facts = null;
+    try {
+      facts = await callInWorld(tabId, node.backendNodeId, `function () {
+          if (!this.isConnected) return { connected: false };
+          const r = this.getBoundingClientRect();
+          const s = getComputedStyle(this);
+          const visible = r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) !== 0;
+          const disabled = !!this.disabled || this.getAttribute('aria-disabled') === 'true' || !!this.closest('fieldset[disabled]');
+          const checked = this.checked === true || this.getAttribute('aria-checked') === 'true';
+          return { connected: true, visible, disabled, checked };
+        }`, [], node.sessionId ?? null);
+    } catch (err) {
+      if (/halted by the user/i.test(String(err?.message))) throw err;
+      facts = { connected: false };
+    }
+    last = facts;
+    const ok = state === 'gone' ? !facts?.connected
+      : state === 'present' ? !!facts?.connected
+        : !!facts?.connected && (
+          state === 'visible' ? facts.visible
+            : state === 'hidden' ? !facts.visible
+              : state === 'enabled' ? !facts.disabled
+                : state === 'disabled' ? facts.disabled
+                  : state === 'checked' ? facts.checked
+                    : !facts.checked);
+    if (ok) return { satisfied: true, ref, state, waitedMs: Date.now() - started, polls };
+    await sleep(Math.min(pollInterval(Date.now() - started, pollMs), Math.max(1, deadline - Date.now())));
+  }
+  throw new Error(
+    `Timed out after ${timeoutMs}ms waiting for ${ref} to be ${state} (${polls} looks; last seen: ${JSON.stringify(last)}). ` +
+      'Take a browser_snapshot to see the current state.',
   );
 }
 

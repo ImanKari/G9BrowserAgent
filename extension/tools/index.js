@@ -18,20 +18,23 @@
 
 import { platform } from '../lib/platform.js';
 import { getState, logActivity } from '../lib/state.js';
-import { evaluate, send as cdpSend, attachedTabIds } from '../lib/cdp.js';
-import { bindCallSignal } from '../lib/humanize.js';
+import { evaluate, send as cdpSend, attachedTabIds, recoverTab, keepAwake, attachIssuesOf, pendingCommands } from '../lib/cdp.js';
+import { bindCallSignal, bindCallDeadline } from '../lib/humanize.js';
 import * as store from '../lib/store.js';
 import { toFlowSpec, canonicalJson } from '../lib/flowspec.js';
 import { envKeyOf, knownWorldFor } from '../lib/signature.js';
 import { importFlow, approvedBundle } from '../lib/flowsync.js';
 
 import * as tabsTool from './tabs.js';
-import { snapshot } from './snapshot.js';
+import { snapshot, find } from './snapshot.js';
+import * as jobs from './jobs.js';
+import { fetchResource } from './fetch.js';
+import { runBatch } from './batch.js';
 import * as interact from './interact.js';
 import * as inspect from './inspect.js';
 import * as observe from './observe.js';
 import * as nav from './navigate.js';
-import { screenshot } from './capture.js';
+import { screenshot, viewportThumbnail } from './capture.js';
 import * as diagnose from './diagnose.js';
 import * as emulate from './emulate.js';
 import * as record from './record.js';
@@ -155,6 +158,9 @@ export const TOOLS = {
           return tabsTool.handoffExport(args.tabId ?? null);
         case 'wait':
           return tabsTool.waitForTab(args);
+        case 'keep_awake':
+          // (3.4) Keep a background tab working: focus emulation + lifecycle active (lib/cdp.js).
+          return { tabId: requireTabId(args), ...(await keepAwake(requireTabId(args), args.on !== false)) };
 
         // --- named sessions ----------------------------------------------
         // Several tabs at once was always possible at the CDP layer; these
@@ -187,7 +193,7 @@ export const TOOLS = {
         default:
           throw new Error(
             `Unknown tabs action "${action}". Known: list, open, close, focus, attach, popout, wait, session, ` +
-              'sessions, end_session (and, through the daemon: claim, release, handoff).',
+              'sessions, end_session, keep_awake (and, through the daemon: claim, release, handoff).',
           );
       }
     },
@@ -196,12 +202,28 @@ export const TOOLS = {
   // --- perception ----------------------------------------------------------
   browser_snapshot: { run: ({ tabId, args, caller }) => snapshot(tabId, args, caller) },
 
-  browser_screenshot: { run: ({ tabId, tab, args }) => screenshot(tabId, { ...args, url: tab.url }) },
+  browser_screenshot: {
+    run: async ({ tabId, tab, args }) => {
+      const shot = await screenshot(tabId, { ...args, url: tab.url });
+      // (3.4) With savePath the daemon writes the image on the browser's machine; thumbnail:true
+      // adds a small viewport JPEG that the agent sees instead of the full image.
+      if (args.savePath && args.thumbnail === true) {
+        try {
+          shot.thumbnail = await viewportThumbnail(tabId, args.thumbnailWidth ?? 320, shot);
+        } catch (err) {
+          shot.thumbnailError = String(err?.message ?? err);
+        }
+      }
+      return shot;
+    },
+  },
 
   browser_inspect: {
-    run: ({ tabId, tab, args }) => {
+    run: ({ tabId, tab, args, caller }) => {
       const withUrl = { ...args, url: tab.url };
       switch (args.what ?? 'dom') {
+        // (3.4) role and/or name regex → only the matching lines, with refs.
+        case 'find': return find(tabId, withUrl, caller);
         case 'dom': return inspect.dom(tabId, withUrl);
         case 'styles': return inspect.styles(tabId, withUrl);
         case 'box': return inspect.box(tabId, withUrl);
@@ -238,13 +260,13 @@ export const TOOLS = {
   },
 
   browser_navigate: {
-    run: ({ tabId, args }) => {
+    run: ({ tabId, tab, args }) => {
       switch (args.action ?? 'goto') {
         case 'goto': return nav.navigate(tabId, args);
         case 'reload': return nav.reload(tabId, args);
         case 'back': return nav.history(tabId, { ...args, delta: -(args.steps ?? 1) });
         case 'forward': return nav.history(tabId, { ...args, delta: args.steps ?? 1 });
-        case 'wait': return nav.waitFor(tabId, args);
+        case 'wait': return nav.waitFor(tabId, { ...args, url: tab?.url ?? null });
         default: throw new Error(`Unknown navigate action "${args.action}".`);
       }
     },
@@ -261,9 +283,16 @@ export const TOOLS = {
         // The MAIN world, deliberately: the agent is asking about the page's own
         // JavaScript, which G9BrowserAgent's isolated world cannot see.
         if (!args.expression) throw new Error('action:"evaluate" needs an expression.');
-        const value = await evaluate(tabId, args.expression);
+        // (3.4) job:true answers at once with a jobId; the work runs on in the page (tools/jobs.js).
+        if (args.job === true) return jobs.startJob(tabId, args.expression, { timeoutMs: args.timeoutMs });
+        // (3.4) timeoutMs: an awaited promise may take minutes, up to 4 h.
+        const timeoutMs = args.timeoutMs != null ? Math.max(1_000, Math.min(jobs.MAX_JOB_MS, Number(args.timeoutMs) || 30_000)) : null;
+        const value = await evaluate(tabId, args.expression, timeoutMs ? { timeoutMs } : {});
         return { value: value === undefined ? '(undefined)' : value };
       }
+      if (args.action === 'job_status') return jobs.jobStatus(tabId, args);
+      if (args.action === 'job_cancel') return jobs.cancelJob(tabId, args);
+      if (args.action === 'jobs') return jobs.listJobs();
       return observe.consoleLog(tabId, args);
     },
   },
@@ -299,6 +328,9 @@ export const TOOLS = {
           return cleared;
         }
 
+        // --- fetch as the page (3.4) ---------------------------------------
+        case 'fetch': return fetchResource(tabId, { ...args, pageUrl: (await platform.tabs.get(tabId).catch(() => null))?.url });
+
         // --- downloads (GAP-0001, EXT-02) ---------------------------------
         case 'watch_downloads': return downloads.watch(tabId, args);
         case 'downloads': return downloads.list(tabId);
@@ -316,9 +348,9 @@ export const TOOLS = {
     // list/get/delete/export/import touch no page, so they must keep working
     // when nothing is attached — that is when someone reviews their library.
     needsTab: false,
-    run: async ({ args }) => {
+    run: async ({ args, caller }) => {
       const action = args.action ?? 'list';
-      const needsPage = ['start', 'stop', 'replay', 'assert', 'suggest', 'calibrate'].includes(action);
+      const needsPage = ['start', 'stop', 'replay', 'assert', 'suggest', 'calibrate', 'batch'].includes(action);
       const tab = needsPage ? await tabsTool.resolveTarget(args.tabId, args.session ?? null) : null;
 
       switch (action) {
@@ -332,6 +364,8 @@ export const TOOLS = {
           (await tabsTool.resolveTarget(args.tabId, args.session ?? null)).id,
         );
         case 'start': return record.startRecording(tab.id, { name: args.name });
+        // (3.4) A list of steps in one call (tools/batch.js).
+        case 'batch': return runBatch(tab.id, args, caller);
         case 'stop': return record.stopRecording(tab.id);
         case 'replay': return replay.replay(tab.id, {
           id: requireId(args), timing: args.timing, dryRun: args.dryRun,
@@ -587,6 +621,7 @@ export async function status(args = {}) {
       : {}),
     ...(targetError ? { targetError } : {}),
     health,
+    ...debuggerHealth(target?.id ?? null),
     tabs: { count: tabs.length, rows: tabs.slice(0, 25) },
     sessions,
     inputMode: state.inputMode,
@@ -607,11 +642,31 @@ export async function status(args = {}) {
   };
 }
 
+/**
+ * (3.4) The tab's debugger session as the watchdog sees it: commands waiting longer than 5 s, and
+ * domains whose enable did not answer at the last attach. Empty when all is well (nothing is added).
+ */
+function debuggerHealth(tabId) {
+  if (tabId == null) return {};
+  const slow = pendingCommands(tabId).filter((c) => c.ms > 5_000);
+  const issues = attachIssuesOf(tabId);
+  if (!slow.length && !issues) return {};
+  return {
+    debugger: {
+      ...(slow.length ? { waitingCommands: slow } : {}),
+      ...(issues ? { unansweredAtAttach: issues.unanswered } : {}),
+      note: 'Commands on this tab are slow to answer (a throttled background page, or a stuck renderer). A call that runs past its deadline is ended and the tab recovered; browser_tabs action:"close" always works.',
+    },
+  };
+}
+
 // ------------------------------------------------------------- read-only
 
 const READ_ONLY_RECORDING = new Set(['list', 'get', 'status', 'signature', 'known_world', 'export_spec', 'export', 'export_test']);
 const READ_ONLY_ISSUE = new Set(['list', 'get', 'attachment']);
 const READ_ONLY_NETWORK_ACTIONS = new Set(['downloads', 'pin_status', 'intercept_status']);
+/** (3.4) Console actions that only read: a job's status and the job list. */
+const READ_ONLY_CONSOLE_ACTIONS = new Set(['read', 'job_status', 'jobs']);
 
 /**
  * Does this call only READ? The daemon lets any agent read any tab, and claims
@@ -637,10 +692,12 @@ export function isReadOnly(tool, args = {}) {
       // is measured, and both areas change the page at every level.
       return (a.area ?? 'viewport') === 'viewport';
     case 'browser_console':
-      return a.action !== 'evaluate' && !a.clear;
+      return READ_ONLY_CONSOLE_ACTIONS.has(a.action ?? 'read') && !a.clear;
     case 'browser_network':
       if (a.clear) return false;
       if (a.action == null || a.action === 'list') return true;
+      // (3.4) A GET/HEAD fetch changes nothing in the page or on the server; anything else may.
+      if (a.action === 'fetch') return ['GET', 'HEAD'].includes(String(a.method ?? 'GET').toUpperCase());
       return READ_ONLY_NETWORK_ACTIONS.has(a.action);
     case 'browser_diagnose':
       // A performance trace with reload:true reloads the page — that is not a read.
@@ -713,10 +770,22 @@ async function dialogBlocks(tool, args, state, tabId) {
  * Run one tool call: halted → target → dialog → run → activity log.
  * Throws an Error on failure; the host turns that into its own reply shape.
  */
+/**
+ * (3.4) How long a call that was cancelled (its deadline passed, a per-agent Stop, a dialog) may
+ * keep running before the watchdog recovers its tab (lib/cdp.js recoverTab): every CDP command still
+ * waiting there is abandoned — so the call ends now, with the reason — and the tab's debugger session
+ * is detached and attached again. Input that honours the cancel stops well inside this
+ * (lib/humanize.js perform checks it between steps); only a call stuck in a command waits it out.
+ */
+export const WATCHDOG_GRACE_MS = 1_500;
+
 export async function runTool(tool, args = {}, caller = null) {
   const started = Date.now();
   const callArgs = args ?? {};
   let tabId = null;
+  let settled = false;
+  let watchdog = null;
+  let recovery = null;
   const by = caller ? (caller.name ?? caller.agentId ?? null) : null;
   // A call the daemon relayed (F7): the daemon reports it to the desktop itself,
   // so the host must not forward this record as a second copy. The panel's own
@@ -743,7 +812,24 @@ export async function runTool(tool, args = {}, caller = null) {
       tab = await tabsTool.resolveTarget(callArgs.tabId, callArgs.session ?? null);
       tabId = tab.id;
     }
-    if (signal) unbindSignal = bindCallSignal(tabId ?? (Number.isInteger(callArgs.tabId) ? callArgs.tabId : null), signal);
+    const unbindDeadline = bindCallDeadline(tabId ?? (Number.isInteger(callArgs.tabId) ? callArgs.tabId : null), caller?.deadlineAt);
+    const priorUnbind = unbindSignal;
+    unbindSignal = () => { priorUnbind(); unbindDeadline(); };
+    if (signal) {
+      const watched = tabId ?? (Number.isInteger(callArgs.tabId) ? callArgs.tabId : null);
+      const unbind = bindCallSignal(watched, signal);
+      const onAbort = () => {
+        if (watched == null || watchdog) return;
+        watchdog = setTimeout(() => {
+          if (settled) return;
+          recovery = recoverTab(watched, { reason: `"${tool}" ran past its deadline and did not stop` });
+        }, WATCHDOG_GRACE_MS);
+        watchdog.unref?.();
+      };
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+      unbindSignal = () => { unbind(); unbindDeadline(); signal.removeEventListener?.('abort', onAbort); };
+    }
 
     if (entry.allowWhenHalted !== true) {
       const dialog = await dialogBlocks(tool, callArgs, state, tabId);
@@ -758,12 +844,23 @@ export async function runTool(tool, args = {}, caller = null) {
 
     const result = await entry.run({ tabId, tab, args: callArgs, caller });
 
-    await log({ kind: 'tool', tool, tabId, ok: true, detail: summarize(tool, callArgs), ms: Date.now() - started, ...tag });
+    // Not awaited (3.4): the activity log is written after the reply, never before it — a stalled
+    // state write must not hold the answer (lib/state.js serialize).
+    void log({ kind: 'tool', tool, tabId, ok: true, detail: summarize(tool, callArgs), ms: Date.now() - started, ...tag });
     return result;
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err?.message ?? err));
     tagDelivery(error);
-    await log({
+    if (recovery || err?.recovered) {
+      // The watchdog ended this call: say so, and what it did (bounded — the detach takes ≤ 3 s).
+      const info = recovery ? await Promise.race([recovery, new Promise((r) => setTimeout(() => r(null), 4_000))]).catch(() => null) : null;
+      error.recovered = info ?? { recovered: true };
+      if (!/^\[recovered\]/.test(error.message)) {
+        error.message = `[recovered] ${error.message} — the tab's debugger session was ${info?.detached ? 'detached and attached again' : 'reset'}` +
+          `${info?.abandoned?.length ? ` (abandoned: ${info.abandoned.join(', ')})` : ''}; the tab is usable again. Take a browser_snapshot before acting on it.`;
+      }
+    }
+    void log({
       kind: 'tool',
       tool,
       tabId,
@@ -774,6 +871,8 @@ export async function runTool(tool, args = {}, caller = null) {
     });
     throw error;
   } finally {
+    settled = true;
+    clearTimeout(watchdog);
     unbindSignal();
   }
 }

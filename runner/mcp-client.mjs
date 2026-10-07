@@ -18,6 +18,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { VERSION } from '../lib/version.mjs';
+import { resultFromContent } from '../mcp/mcp.js';
 
 export const SHIM = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'mcp', 'shim.mjs');
 
@@ -127,11 +128,9 @@ export class McpClient {
       .join('\n');
     if (result.isError) throw new Error(`${name}: ${text || 'tool reported an error with no message'}`);
     if (!text) return {};
-    try {
-      return JSON.parse(text);
-    } catch {
-      return { text };
-    }
+    // (3.4) A compact result puts a snapshot's tree in a text block of its own; put it back.
+    const parsed = resultFromContent(result.content);
+    return parsed && typeof parsed === 'object' ? parsed : { text };
   }
 
   close() {

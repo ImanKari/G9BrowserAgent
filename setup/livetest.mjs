@@ -34,6 +34,7 @@ import { spawn } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resultFromContent } from '../mcp/mcp.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, '..');
@@ -119,12 +120,9 @@ class Mcp {
     const text = content.find((c) => c.type === 'text')?.text ?? '';
     if (res.result?.isError) throw new Error(text);
     const image = content.find((c) => c.type === 'image');
-    let parsed;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      parsed = { text };
-    }
+    // (3.4) Compact results carry a tree/text in a block of its own (mcp/mcp.js resultFromContent).
+    let parsed = resultFromContent(content);
+    if (!parsed || typeof parsed !== 'object') parsed = { text };
     if (parsed && typeof parsed === 'object') {
       // Non-enumerable, so it never shows up when a test prints a result: it
       // is harness metadata, not tool output.

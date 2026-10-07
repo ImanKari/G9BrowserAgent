@@ -633,11 +633,48 @@ export async function exportPlaywright(id) {
       case 'drag': lines.push('  await ' + locator + '.dragTo(' + playwrightLocator(step.to) + ');'); break;
       case 'scroll': lines.push('  await page.evaluate(() => scrollTo(' + (Number(step.x) || 0) + ', ' + (Number(step.y) || 0) + '));'); break;
       case 'assert': lines.push(...playwrightAssertion(step, locator)); break;
+      case 'evaluate': lines.push(...playwrightEvaluate(step)); break;
+      case 'extract': lines.push(...playwrightExtract(step, locator)); break;
       default: lines.push('  // Unsupported G9BrowserAgent step: ' + JSON.stringify(step.type));
     }
   }
   lines.push('});', '');
   return { id, language: 'javascript', framework: '@playwright/test', code: lines.join('\n') };
+}
+
+/**
+ * (3.4) A value step. `page.evaluate` with a STRING evaluates it as an expression in the page and
+ * awaits a promise, like replay does. A saved value becomes a const of the same name (later
+ * `{{name}}` placeholders are exported as written, like every other placeholder); an unsaved one
+ * that is checked gets its own block, so two of them never declare the same const.
+ */
+function playwrightEvaluate(step) {
+  const call = 'await page.evaluate(' + JSON.stringify(String(step.expression ?? '')) + ')';
+  if (step.saveAs) {
+    return ['  const ' + step.saveAs + ' = ' + call + ';',
+      ...(step.expect !== undefined ? ['  expect(' + step.saveAs + ').toEqual(' + JSON.stringify(step.expect) + ');'] : [])];
+  }
+  if (step.expect === undefined) return ['  ' + call + ';'];
+  return ['  {', '    const evaluated = ' + call + ';', '    expect(evaluated).toEqual(' + JSON.stringify(step.expect) + ');', '  }'];
+}
+
+function playwrightExtract(step, locator) {
+  const source = locator ?? (step.selector ? 'page.locator(' + JSON.stringify(step.selector) + ').first()' : null);
+  if (!source) return ['  // Unsupported G9BrowserAgent step: extract with neither target nor selector'];
+  const name = step.saveAs || 'extracted';
+  const indent = step.saveAs ? '  ' : '    ';
+  // innerText is the shown text; for a form field (replay reads its value) use inputValue().
+  const lines = [indent + 'const ' + name + ' = (await ' + source + '.innerText()).trim();'];
+  if (step.expect !== undefined) {
+    const expected = String(step.expect ?? '');
+    const operator = step.operator ?? 'exact';
+    lines.push(indent + (operator === 'contains'
+      ? 'expect(' + name + ').toContain(' + JSON.stringify(expected) + ');'
+      : operator === 'matches'
+        ? 'expect(' + name + ').toMatch(new RegExp(' + JSON.stringify(expected) + '));'
+        : 'expect(' + name + ').toBe(' + JSON.stringify(expected) + ');'));
+  }
+  return step.saveAs ? lines : ['  {', ...lines, '  }'];
 }
 
 function playwrightLocator(target) {

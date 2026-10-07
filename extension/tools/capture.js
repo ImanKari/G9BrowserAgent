@@ -33,7 +33,7 @@ import { resolveRef } from '../lib/refs.js';
 import { callInWorld, inWorld } from '../lib/world.js';
 import { platform } from '../lib/platform.js';
 import { position as pointerPosition } from '../lib/pointer.js';
-import { levelFor } from '../lib/humanize.js';
+import { levelFor, callTimeLeft } from '../lib/humanize.js';
 import { bringIntoView } from './interact.js';
 import { realWindowState } from './tabs.js';
 
@@ -83,22 +83,58 @@ function fit(width, height) {
 /** A capture slower than this gets the same explanation as a stalled one (a 36 s capture had none). */
 const SLOW_CAPTURE_MS = 10_000;
 
+/** (3.4) What a capture attempt leaves for the call to answer with (the answer travels too). */
+const CAPTURE_RESERVE_MS = 3_000;
+/** (3.4) An attempt shorter than this is not worth starting: it would only report a stall. */
+const MIN_ATTEMPT_MS = 2_000;
+
+/**
+ * (3.4, EXT-04) The two attempts are budgeted from the time the CALL has left (`callTimeLeft`, the
+ * daemon's deadline), not a fixed 45 s each: two full attempts (90 s) could outlast a call whose
+ * deadline was nearer, and the answer — the cause of the stall — was then lost to the call's own
+ * timeout. The first attempt gets at most half of what is left, the second the rest less a reserve;
+ * when too little is left for a second one, the stall is reported with its cause instead.
+ */
+export function captureBudgets(left, slowMs = 45_000) {
+  if (left == null) return { first: slowMs, second: slowMs };
+  const usable = Math.max(0, left - CAPTURE_RESERVE_MS);
+  const first = Math.max(MIN_ATTEMPT_MS, Math.min(slowMs, Math.floor(usable / 2)));
+  return { first, second: Math.min(slowMs, usable - first) };
+}
+
 async function captureWithRetry(tabId, params) {
   // A launched HEADLESS engine's tab behind a page-opened tab renders a frame at a time — its
   // screenshots took 24–46 s (P8 matrix, round 3). It is brought to the front first; the extension
   // never rearranges a person's tabs (platform.tabs.ensureFront is a no-op there).
   await platform.tabs.ensureFront?.(tabId)?.catch?.(() => null);
+  const budget = captureBudgets(callTimeLeft(tabId));
   const started = Date.now();
   try {
-    const result = await send(tabId, 'Page.captureScreenshot', params);
+    const result = await send(tabId, 'Page.captureScreenshot', params, { timeoutMs: budget.first });
     const ms = Date.now() - started;
     if (ms < SLOW_CAPTURE_MS) return { ...result, stalled: false };
     return { ...result, stalled: false, slowMs: ms, why: await stallContext(tabId) };
   } catch (err) {
     if (!/did not return after/.test(String(err?.message ?? err))) throw err;
     const why = await stallContext(tabId);
-    const result = await send(tabId, 'Page.captureScreenshot', params);
-    return { ...result, stalled: true, why };
+    const left = callTimeLeft(tabId);
+    const second = left == null ? budget.second : Math.min(budget.second, left - CAPTURE_RESERVE_MS);
+    if (!(second >= MIN_ATTEMPT_MS)) {
+      throw new Error(
+        `The screenshot did not arrive within ${Math.round(budget.first / 1000)} s and too little of this call's time is left ` +
+          `for a second attempt.${why ? ` ${why}` : ''} Nothing was captured.`,
+      );
+    }
+    try {
+      const result = await send(tabId, 'Page.captureScreenshot', params, { timeoutMs: second });
+      return { ...result, stalled: true, why };
+    } catch (again) {
+      if (!/did not return after/.test(String(again?.message ?? again))) throw again;
+      throw new Error(
+        `The screenshot did not arrive in either attempt (${Math.round(budget.first / 1000)} s, then ${Math.round(second / 1000)} s).` +
+          `${why ? ` ${why}` : ' The page renders no frames.'} Nothing was captured.`,
+      );
+    }
   }
 }
 
@@ -305,4 +341,40 @@ export async function screenshot(tabId, opts = {}) {
 
   const capture = await captureWithRetry(tabId, { format, quality });
   return { format, area: 'viewport', ...stallNote(capture), pointer: await pointerFor(tabId), dataBase64: capture.data };
+}
+
+/**
+ * (3.4) A small picture of the capture: what a `savePath` screenshot shows inline instead of the full
+ * image. First choice, a second capture of the viewport as a scaled JPEG (quality 50 — a few KB; a clip
+ * inside the viewport, so nothing is resized and the page sees nothing), budgeted from the call's time
+ * left: a background tab in the person's browser renders slowly and each capture there can take
+ * seconds. When there is no time for it, or it fails, the captured image itself is scaled down
+ * (`platform.image`, a PNG — larger, but no second capture). → { width, height, format, dataBase64, via }
+ */
+export async function viewportThumbnail(tabId, width = 320, captured = null) {
+  const target = Math.max(16, Number(width) || 320);
+  const left = callTimeLeft(tabId);
+  const budget = left == null ? 20_000 : Math.min(20_000, left - CAPTURE_RESERVE_MS - 2_000);
+  if (budget >= MIN_ATTEMPT_MS) {
+    try {
+      const metrics = await send(tabId, 'Page.getLayoutMetrics', {}, { timeoutMs: Math.min(5_000, budget) });
+      const view = metrics.cssVisualViewport ?? metrics.cssLayoutViewport ?? {};
+      const w = Math.max(1, Number(view.clientWidth) || 800);
+      const h = Math.max(1, Number(view.clientHeight) || 600);
+      const scale = Math.min(1, target / w);
+      const shot = await send(tabId, 'Page.captureScreenshot', {
+        format: 'jpeg',
+        quality: 50,
+        clip: { x: Number(view.pageX) || 0, y: Number(view.pageY) || 0, width: w, height: h, scale },
+      }, { timeoutMs: budget });
+      return { width: Math.round(w * scale), height: Math.round(h * scale), format: 'jpeg', dataBase64: shot.data, via: 'capture' };
+    } catch (err) {
+      if (!captured) throw err;
+    }
+  }
+  if (!captured?.dataBase64) throw new Error('no time left for a thumbnail capture');
+  const mime = captured.format === 'png' ? 'image/png' : 'image/jpeg';
+  const small = await platform.image.decode(captured.dataBase64, mime, { fit: Math.min(target, 200) });
+  const png = await platform.image.encodePng(small);
+  return { width: small.width, height: small.height, format: 'png', dataBase64: png, via: 'scaled' };
 }

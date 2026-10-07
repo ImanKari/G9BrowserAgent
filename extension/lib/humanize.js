@@ -266,6 +266,28 @@ export function callSignalFor(tabId) {
   return callSignals.get(tabId) ?? null;
 }
 
+/**
+ * (3.4) When the call running on a tab must have answered (epoch ms; the daemon sends it as
+ * `caller.deadlineAt`). A tool that may retry — a screenshot's second attempt — budgets from what is
+ * left instead of a fixed figure that could outlast the call (EXT-04).
+ */
+const callDeadlines = new Map(); // tabId → epoch ms
+
+export function bindCallDeadline(tabId, deadlineAt) {
+  if (tabId == null || !(Number(deadlineAt) > 0)) return () => {};
+  const at = Number(deadlineAt);
+  callDeadlines.set(tabId, at);
+  return () => {
+    if (callDeadlines.get(tabId) === at) callDeadlines.delete(tabId);
+  };
+}
+
+/** Milliseconds left before this tab's running call must answer, or null when nobody said. */
+export function callTimeLeft(tabId) {
+  const at = callDeadlines.get(tabId);
+  return at == null ? null : at - Date.now();
+}
+
 /** Why a call was cancelled, as the signal says, for the stop message. */
 function cancelReason(signal) {
   const why = signal?.reason instanceof Error ? signal.reason.message : typeof signal?.reason === 'string' ? signal.reason : '';

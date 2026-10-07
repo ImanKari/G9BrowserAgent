@@ -61,6 +61,7 @@ import zlib from 'node:zlib';
 
 import { WsClient } from '../lib/ws-client.mjs';
 import { VERSION } from '../lib/version.mjs';
+import { resultFromContent } from '../mcp/mcp.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -264,7 +265,9 @@ class Mcp {
     const text = content.filter((c) => c.type === 'text').map((c) => c.text).join('\n');
     const images = content.filter((c) => c.type === 'image');
     let data = null;
-    try { data = JSON.parse(content.find((c) => c.type === 'text')?.text ?? 'null'); } catch { data = null; }
+    // (3.4) Compact results carry a tree/text in a block of its own (mcp/mcp.js resultFromContent).
+    data = resultFromContent(content);
+    if (typeof data === 'string') data = null;
     return { ok: !res.result?.isError && !res.error, data, text: text || JSON.stringify(res.error ?? ''), images, ms: Date.now() - started };
   }
 
@@ -1509,7 +1512,9 @@ async function sectionRecording() {
       check(list.recordings?.some((r) => r.id === S.recordedId && r.engine === 'launched'), 'the recording is in the launched-engine store', `${list.recordings?.length} recording(s)`);
       await must(A, 'browser_navigate', { action: 'goto', url: S.testUrl, tabId: tab });
       await must(A, 'browser_navigate', { action: 'wait', selector: '#e2lab', tabId: tab });
-      const rp = await A.call('browser_recording', { action: 'replay', id: S.recordedId, timing: 'adaptive', tabId: tab }, 300_000);
+      // Since 3.3.0 the recorder never keeps a password: the step says {{secret:password}}, and a
+      // replay is given the secret the way the runner gives it (--data / G9_SECRET_PASSWORD).
+      const rp = await A.call('browser_recording', { action: 'replay', id: S.recordedId, timing: 'adaptive', tabId: tab, variables: { password: 'g9secret' } }, 300_000);
       const status = await pageEval(A, tab, 'document.getElementById("status").textContent');
       check(rp.ok && /^PASS/.test(rp.data?.verdict ?? '') && status === 'Signed in as admin.', 'replay of the recording: verdict and the page signed in',
         short({ verdict: rp.data?.verdict ?? rp.text, status }));

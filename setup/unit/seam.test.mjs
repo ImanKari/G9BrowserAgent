@@ -24,6 +24,7 @@
  * Run: node setup/unit/seam.test.mjs
  */
 import assert from 'node:assert/strict';
+import vm from 'node:vm';
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { join, relative, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -451,6 +452,11 @@ class FakeEngine {
   async send(method, params = {}, sessionId = null) {
     this.sent.push({ method, params, sessionId });
     const target = sessionId ? this.targets.get(this.sessions.get(sessionId)) : null;
+    // (3.4) A test may serve a richer page (or a command that never answers): its answer wins.
+    if (this.override) {
+      const answer = await this.override(method, params, sessionId, target);
+      if (answer !== undefined) return answer;
+    }
     switch (method) {
       case 'Target.getBrowserContexts': return { browserContextIds: [], defaultBrowserContextId: 'DEFAULT' };
       case 'Target.createBrowserContext': return { browserContextId: `CTX${++this.n}` };
@@ -973,10 +979,13 @@ await test("Node: another agent's snapshots never age out this agent's refs (liv
   const still = await runtime.runTool('browser_inspect', { what: 'dom', ref, tabId: tab.id });
   assert.equal(still.ref, ref, "A's ref survives B's reads");
 
-  // A's own newer snapshots still retire it, exactly as documented.
-  for (let i = 0; i < refs.KEEP_GENERATIONS; i++) await runtime.runTool('browser_snapshot', { tabId: tab.id }, A);
-  await assert.rejects(runtime.runTool('browser_inspect', { what: 'dom', ref, tabId: tab.id }),
-    /Unknown element ref/, 'the fifth snapshot of your own retires your first');
+  // (3.4) Refs are stable per element: A's own newer snapshots name the same element with the same
+  // ref, so the ref lives as long as the element does (it used to retire after four snapshots of A's).
+  for (let i = 0; i < refs.KEEP_GENERATIONS + 1; i++) await runtime.runTool('browser_snapshot', { tabId: tab.id }, A);
+  const node = (await refs.getRefs(tab.id)).map[ref];
+  assert.ok(node, 'the newest snapshot hands the same element the same ref');
+  const again = await runtime.runTool('browser_inspect', { what: 'dom', ref, tabId: tab.id });
+  assert.equal(again.ref, ref, 'and it still resolves after more than KEEP_GENERATIONS snapshots of your own');
   return undefined;
 });
 
@@ -1047,6 +1056,317 @@ await test('Node: handoff_export, unscoped cookies, and popout refused on a laun
 });
 
 // ================================================ (c) the extension side
+
+// ------------------------------------------------------- (3.4) long, unattended work, through runTool
+
+/**
+ * A richer page for the fake engine: a profile form whose state the test changes, and a MAIN world
+ * that really runs (node:vm) — evaluate, predicate waits and evaluate jobs execute their code.
+ */
+function profilePage(engine) {
+  const st = { name: 'Ada', help: true, del: false, lines: 30 };
+  const mainWorld = () => {
+    const sandbox = { setTimeout, clearTimeout, AbortController, console, JSON, Promise, Date, Error, Object, String, Number, isFinite };
+    sandbox.window = sandbox;
+    return vm.createContext(sandbox);
+  };
+  let world = mainWorld();
+  const node = (nodeId, parentId, role, name, backendDOMNodeId, extra = {}) => ({
+    nodeId, ...(parentId ? { parentId } : {}), role: { value: role }, name: { value: name }, childIds: [], backendDOMNodeId, ...extra,
+  });
+  const nodes = () => {
+    const out = [
+      node('1', null, 'RootWebArea', 'Editor', 1),
+      node('2', '1', 'navigation', 'Main', 20),
+      node('4', '2', 'link', 'Home', 21),
+      ...(st.help ? [node('5', '2', 'link', 'Help', 22)] : []),
+      node('3', '1', 'form', 'Profile', 30),
+      node('6', '3', 'textbox', 'Name', 31, { value: { value: st.name } }),
+      node('7', '3', 'button', 'Save', 32),
+      node('8', '3', 'button', 'Cancel', 33),
+      ...(st.del ? [node('10', '3', 'button', 'Delete', 34)] : []),
+      node('9', '1', 'heading', 'Your profile', 40, { properties: [{ name: 'level', value: { value: 2 } }] }),
+    ];
+    for (let i = 0; i < st.lines; i++) out.push(node(`p${i}`, '1', 'paragraph', `Line ${i} of the profile help text that a full tree repeats`, 100 + i));
+    const byId = new Map(out.map((n) => [n.nodeId, n]));
+    for (const n of out) if (n.parentId) byId.get(n.parentId).childIds.push(n.nodeId);
+    return out;
+  };
+  const connected = (id) => (id === 34 ? st.del : id === 22 ? st.help : true);
+  engine.override = async (method, params) => {
+    switch (method) {
+      case 'Accessibility.getFullAXTree': return { nodes: nodes() };
+      case 'DOM.querySelector': return params.selector === 'form' ? { nodeId: 300 } : { nodeId: 0 };
+      case 'DOM.describeNode':
+        if (params.nodeId === 300) return { node: { backendNodeId: 30 } };
+        if (params.backendNodeId === 30) return { node: { backendNodeId: 30, children: [31, 32, 33, ...(st.del ? [34] : [])].map((b) => ({ backendNodeId: b })) } };
+        return { node: { backendNodeId: params.backendNodeId ?? 0 } };
+      case 'DOM.resolveNode': return { object: { objectId: `obj-${params.backendNodeId}` } };
+      case 'Runtime.callFunctionOn':
+        if (String(params.functionDeclaration).includes('isConnected')) {
+          const id = Number(String(params.objectId).slice(4));
+          return { result: { type: 'object', value: connected(id) ? { connected: true, visible: true, disabled: false, checked: false } : { connected: false } } };
+        }
+        return undefined;
+      case 'Runtime.evaluate': {
+        const expr = String(params.expression);
+        if (expr === 'HANG') return new Promise(() => {}); // a command the page never answers
+        if (params.contextId != null) {
+          // G9BrowserAgent's isolated world: only what these tests ask.
+          if (expr.includes('#total')) return { result: { type: 'object', value: { text: 'Total: 42' } } };
+          return undefined;
+        }
+        try {
+          let value = vm.runInContext(expr, world);
+          if (params.awaitPromise && value && typeof value.then === 'function') value = await value;
+          return value === undefined ? { result: { type: 'undefined' } } : { result: { type: typeof value, value: JSON.parse(JSON.stringify(value)) } };
+        } catch (err) {
+          return { exceptionDetails: { text: 'Uncaught', exception: { description: String(err?.message ?? err) } } };
+        }
+      }
+      default: return undefined;
+    }
+  };
+  return { st, navigate: () => { world = mainWorld(); } };
+}
+
+await test('(3.4) snapshot: interactiveOnly, roles/name filters, scope, find and diff — with stable refs and the byte savings', async () => {
+  if (needsSmoke()) return needsSmoke();
+  const { runtime, cdpPlatform, engine } = smoke;
+  const tab = await cdpPlatform.createTab('smoke', null, 'https://shop.example.test/profile');
+  const page = profilePage(engine);
+  const A = { agentId: 'agent-snap', name: 'snap' };
+  try {
+    const full = await runtime.runTool('browser_snapshot', { tabId: tab.id }, A);
+    const size = (r) => JSON.stringify(r).length;
+    const only = await runtime.runTool('browser_snapshot', { tabId: tab.id, interactiveOnly: true }, A);
+    assert.equal(only.tree.split('\n').length, 5, 'links, the field and the buttons — nothing else');
+    assert.ok(!/^\s/m.test(only.tree), 'filtered output is flat');
+    const buttons = await runtime.runTool('browser_snapshot', { tabId: tab.id, roles: ['button'], name: 'sav' }, A);
+    assert.match(buttons.tree, /^- button "Save" \[ref=e\d+\]$/);
+    const saveRef = /ref=(e\d+)/.exec(buttons.tree)[1];
+    assert.ok(full.tree.includes(`"Save" [ref=${saveRef}]`), 'the same element keeps its ref across snapshots (stable refs)');
+    const scoped = await runtime.runTool('browser_snapshot', { tabId: tab.id, scope: 'form' }, A);
+    assert.ok(/Name/.test(scoped.tree) && !/Home|Line 3/.test(scoped.tree), 'a CSS scope walks only that subtree');
+    const found = await runtime.runTool('browser_inspect', { what: 'find', tabId: tab.id, role: 'form' }, A);
+    const formRef = /ref=(e\d+)/.exec(found.tree)[1];
+    assert.equal(found.count, 1);
+    const byRef = await runtime.runTool('browser_snapshot', { tabId: tab.id, scope: formRef, interactiveOnly: true }, A);
+    assert.equal(byRef.tree.split('\n').length, 3, 'a ref scope with a filter: the form\'s three controls');
+
+    const first = await runtime.runTool('browser_snapshot', { tabId: tab.id, diff: true }, A);
+    assert.equal(first.diff.base, null, 'the first diff:true is the full tree');
+    page.st.name = 'Grace';
+    page.st.help = false;
+    page.st.del = true;
+    const d = await runtime.runTool('browser_snapshot', { tabId: tab.id, diff: true }, A);
+    assert.deepEqual({ added: d.diff.added, changed: d.diff.changed, removed: d.diff.removed }, { added: 1, changed: 1, removed: 1 });
+    assert.match(d.tree, /^\+ - button "Delete" \[ref=e\d+\]/m);
+    assert.match(d.tree, /^~ - textbox "Name" \[ref=e\d+\] \(value="Grace"\) {3}\(was: - textbox "Name" \[ref=e\d+\] \(value="Ada"\)\)/m);
+    assert.match(d.tree, /^- - link "Help"/m);
+    const same = await runtime.runTool('browser_snapshot', { tabId: tab.id, diff: true }, A);
+    assert.equal(same.tree, '(no change)');
+    const other = await runtime.runTool('browser_snapshot', { tabId: tab.id, diff: true }, { agentId: 'agent-other' });
+    assert.equal(other.diff.base, null, 'diff bases are per caller');
+    const bytes = { full: size(full), interactiveOnly: size(only), find: size(buttons), diff: size(d), unchanged: size(same) };
+    console.log(`      (3.4) snapshot bytes on the fake page: ${JSON.stringify(bytes)}`);
+    assert.ok(bytes.diff < bytes.full / 3 && bytes.find < bytes.full / 4, 'filters and diffs are a fraction of the full tree');
+    await assert.rejects(runtime.runTool('browser_snapshot', { tabId: tab.id, name: '(' }, A), /regular expression/);
+  } finally {
+    engine.override = null;
+  }
+  return undefined;
+});
+
+await test('(3.4) waits: a page predicate polled to its final value, a ref reaching "gone", a timeout naming the last look', async () => {
+  if (needsSmoke()) return needsSmoke();
+  const { runtime, cdpPlatform, engine } = smoke;
+  const tab = await cdpPlatform.createTab('smoke', null, 'https://shop.example.test/render');
+  const page = profilePage(engine);
+  try {
+    const t0 = Date.now();
+    const done = await runtime.runTool('browser_navigate', { action: 'wait', tabId: tab.id, predicate: '(window.__n = (window.__n || 0) + 1) >= 3 && { frames: window.__n }', timeoutMs: 10_000 });
+    assert.deepEqual(done.value, { frames: 3 });
+    assert.equal(done.polls, 3);
+    assert.ok(done.waitedMs >= 400 && Date.now() - t0 < 3_000, `polled server-side (${done.waitedMs} ms)`);
+    await assert.rejects(runtime.runTool('browser_navigate', { action: 'wait', tabId: tab.id, predicate: 'window.__missing.x', timeoutMs: 600 }),
+      /Timed out after 600ms waiting for the predicate.*The last look threw/s);
+    page.st.del = true;
+    const snap = await runtime.runTool('browser_inspect', { what: 'find', tabId: tab.id, role: 'button', name: 'delete' });
+    const ref = /ref=(e\d+)/.exec(snap.tree)[1];
+    setTimeout(() => { page.st.del = false; }, 300);
+    const gone = await runtime.runTool('browser_navigate', { action: 'wait', tabId: tab.id, ref, state: 'gone', timeoutMs: 5_000 });
+    assert.equal(gone.satisfied, true);
+    assert.ok(gone.waitedMs >= 250, `it waited for the element to go (${gone.waitedMs} ms)`);
+    await assert.rejects(runtime.runTool('browser_navigate', { action: 'wait', tabId: tab.id, ref, state: 'sideways' }), /state must be one of/);
+  } finally {
+    engine.override = null;
+  }
+  return undefined;
+});
+
+await test('(3.4) evaluate jobs: answer at once, report progress, finish with a bounded value, cancel, and say "lost" after a navigation', async () => {
+  if (needsSmoke()) return needsSmoke();
+  const { runtime, cdpPlatform, engine } = smoke;
+  const tab = await cdpPlatform.createTab('smoke', null, 'https://shop.example.test/video');
+  const page = profilePage(engine);
+  try {
+    const t0 = Date.now();
+    const started = await runtime.runTool('browser_console', {
+      action: 'evaluate', job: true, tabId: tab.id,
+      expression: "new Promise((resolve) => { __g9job.progress(0.25, 'encoding'); setTimeout(() => { __g9job.progress(0.75, 'muxing'); setTimeout(() => resolve({ frames: 300 }), 200); }, 200); })",
+    });
+    assert.ok(Date.now() - t0 < 1_000, 'the call answers at once');
+    assert.match(started.jobId, /^job-/);
+    const early = await runtime.runTool('browser_console', { action: 'job_status', jobId: started.jobId, tabId: tab.id });
+    assert.equal(early.state, 'running');
+    assert.equal(early.progress, 0.25);
+    assert.equal(early.note, 'encoding');
+    // A different caller (a fresh MCP session) reads it: the job lives in the page.
+    const end = await runtime.runTool('browser_console', { action: 'job_status', jobId: started.jobId, tabId: tab.id, waitMs: 5_000 }, { agentId: 'agent-fresh' });
+    assert.equal(end.state, 'done');
+    assert.deepEqual(end.value, { frames: 300 });
+    assert.equal((await runtime.runTool('browser_console', { action: 'jobs', tabId: tab.id })).jobs.some((j) => j.jobId === started.jobId), true);
+    const big = await runtime.runTool('browser_console', { action: 'evaluate', job: true, tabId: tab.id, expression: "'x'.repeat(300000)" });
+    const bigEnd = await runtime.runTool('browser_console', { action: 'job_status', jobId: big.jobId, tabId: tab.id, waitMs: 2_000 });
+    assert.equal(bigEnd.truncated, true, 'a large value comes back bounded');
+    assert.ok(bigEnd.valuePreview.length <= 256 * 1024);
+    const stoppable = await runtime.runTool('browser_console', {
+      action: 'evaluate', job: true, tabId: tab.id,
+      expression: "new Promise((resolve, reject) => __g9job.signal.addEventListener('abort', () => reject(new Error('stopped'))))",
+    });
+    const cancelled = await runtime.runTool('browser_console', { action: 'job_cancel', jobId: stoppable.jobId, tabId: tab.id });
+    assert.equal(cancelled.state, 'cancelled');
+    const failing = await runtime.runTool('browser_console', { action: 'evaluate', job: true, tabId: tab.id, expression: "Promise.reject(new Error('render failed'))" });
+    const failed = await runtime.runTool('browser_console', { action: 'job_status', jobId: failing.jobId, tabId: tab.id, waitMs: 1_000 });
+    assert.equal(failed.state, 'failed');
+    assert.match(failed.error, /render failed/);
+    page.navigate();
+    const lost = await runtime.runTool('browser_console', { action: 'job_status', jobId: started.jobId, tabId: tab.id });
+    assert.equal(lost.state, 'lost', 'a job does not survive its page');
+    // Without job, timeoutMs bounds an awaited evaluate.
+    const slow = await runtime.runTool('browser_console', { action: 'evaluate', tabId: tab.id, timeoutMs: 5_000, expression: 'new Promise((r) => setTimeout(() => r(7), 300))' });
+    assert.equal(slow.value, 7);
+  } finally {
+    engine.override = null;
+  }
+  return undefined;
+});
+
+await test('(3.4) batch: steps in one call with saved values; the first failure stops it with an excerpt of the page', async () => {
+  if (needsSmoke()) return needsSmoke();
+  const { runtime, cdpPlatform, engine } = smoke;
+  const tab = await cdpPlatform.createTab('smoke', null, 'https://shop.example.test/cart');
+  profilePage(engine);
+  try {
+    const result = await runtime.runTool('browser_recording', {
+      action: 'batch', tabId: tab.id,
+      steps: [
+        { action: 'evaluate', expression: "window.__total = 42; 'cart-7'", saveAs: 'cart' },
+        { action: 'extract', selector: '#total', saveAs: 'total' },
+        { action: 'wait', predicate: "window.__total === 42 && '{{cart}}' === 'cart-7'", timeoutMs: 2_000 },
+        { action: 'click', role: 'button', name: '^Pay now$' },
+        { action: 'evaluate', expression: "'never reached'" },
+      ],
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.failedAt, 4);
+    assert.deepEqual(result.steps.map((s) => [s.action, s.ok]), [['evaluate', true], ['extract', true], ['wait', true], ['click', false]]);
+    assert.equal(result.steps[1].value, 'Total: 42');
+    assert.equal(result.vars.total, 'Total: 42');
+    assert.match(result.error, /No element with role "button" name \/\^Pay now\$\/i/);
+    assert.equal(result.excerpt.of, 'every button on the page');
+    assert.match(result.excerpt.tree, /"Save" \[ref=e\d+\][\s\S]*"Cancel"/, 'the excerpt lists the buttons there are');
+    await assert.rejects(runtime.runTool('browser_recording', { action: 'batch', tabId: tab.id, steps: [{ action: 'fly' }] }), /unknown action "fly"/);
+    await assert.rejects(runtime.runTool('browser_recording', { action: 'batch', tabId: tab.id, steps: [{ action: 'evaluate', expression: '1' }, { action: 'click' }] }),
+      /step 2: click needs a ref/, 'the list is checked before anything runs');
+  } finally {
+    engine.override = null;
+  }
+  return undefined;
+});
+
+await test('(3.4) watchdog: a command the page never answers is abandoned when its call is cancelled; the tab works again', async () => {
+  if (needsSmoke()) return needsSmoke();
+  const { runtime, cdpPlatform, engine } = smoke;
+  const cdp = await import(pathToFileURL(join(EXT, 'lib', 'cdp.js')).href);
+  const tab = await cdpPlatform.createTab('smoke', null, 'https://shop.example.test/stuck');
+  profilePage(engine);
+  try {
+    const ctl = new AbortController();
+    const t0 = Date.now();
+    const stuck = runtime.runTool('browser_console', { action: 'evaluate', expression: 'HANG', tabId: tab.id }, { agentId: 'agent-w', signal: ctl.signal });
+    await new Promise((r) => setTimeout(r, 100));
+    assert.deepEqual(cdp.pendingCommands(tab.id).map((c) => c.method), ['Runtime.evaluate'], 'the stuck command is visible');
+    ctl.abort(new Error('it ran past its deadline'));
+    const err = await stuck.then(() => null, (e) => e);
+    const ms = Date.now() - t0;
+    assert.ok(err, 'the call ended');
+    assert.match(err.message, /^\[recovered\] The CDP command "Runtime\.evaluate" was abandoned/);
+    assert.deepEqual(err.recovered.abandoned, ['Runtime.evaluate']);
+    assert.ok(ms < 4_000, `ended ${ms} ms after it started (the watchdog's grace is ${runtime.WATCHDOG_GRACE_MS} ms)`);
+    assert.deepEqual(cdp.pendingCommands(tab.id), []);
+    assert.equal((await runtime.runTool('browser_console', { action: 'evaluate', expression: '1 + 1', tabId: tab.id })).value, 2, 'the tab answers again');
+
+    // Close never waits for a stuck command: it is abandoned and the tab goes.
+    const second = runtime.runTool('browser_console', { action: 'evaluate', expression: 'HANG', tabId: tab.id });
+    const secondSettled = second.then(() => 'resolved', (e) => e.message);
+    await new Promise((r) => setTimeout(r, 50));
+    const t1 = Date.now();
+    const closed = await runtime.runTool('browser_tabs', { action: 'close', tabId: tab.id });
+    assert.deepEqual(closed.abandoned, ['Runtime.evaluate']);
+    assert.ok(Date.now() - t1 < 1_000, 'close answered at once');
+    assert.match(await secondSettled, /abandoned.*the tab is being closed/);
+  } finally {
+    engine.override = null;
+  }
+  return undefined;
+});
+
+await test('(3.4, EXT-04) screenshot attempts are budgeted from the call\'s time left; both stalling ends with the cause, inside the deadline', async () => {
+  if (needsSmoke()) return needsSmoke();
+  const { runtime, cdpPlatform, engine } = smoke;
+  const capture = await import(pathToFileURL(join(EXT, 'tools', 'capture.js')).href);
+  assert.deepEqual(capture.captureBudgets(null), { first: 45_000, second: 45_000 }, 'no deadline known: the old fixed budgets');
+  assert.deepEqual(capture.captureBudgets(120_000), { first: 45_000, second: 45_000 });
+  assert.deepEqual(capture.captureBudgets(30_000), { first: 13_500, second: 13_500 }, 'two halves of what is left, less a reserve');
+  assert.equal(capture.captureBudgets(4_000).second, -1_000, 'too little left for a second attempt');
+  const tab = await cdpPlatform.createTab('smoke', null, 'https://shop.example.test/frozen');
+  engine.override = async (method) => (method === 'Page.captureScreenshot' ? new Promise(() => {}) : undefined);
+  try {
+    const t0 = Date.now();
+    const err = await runtime.runTool('browser_screenshot', { tabId: tab.id }, { agentId: 'agent-s', deadlineAt: Date.now() + 10_000 }).then(() => null, (e) => e);
+    const ms = Date.now() - t0;
+    assert.ok(err, 'the capture failed');
+    assert.match(err.message, /did not arrive in either attempt \(\d s, then \d s\)/);
+    assert.ok(ms < 10_000 - 1_000, `answered in ${ms} ms, before the call's own deadline (10 s)`);
+    const short = await runtime.runTool('browser_screenshot', { tabId: tab.id }, { agentId: 'agent-s', deadlineAt: Date.now() + 5_500 }).then(() => null, (e) => e);
+    assert.match(short.message, /too little of this call's time is left for a second attempt/);
+  } finally {
+    engine.override = null;
+  }
+  return undefined;
+});
+
+await test('(3.4) keep awake: focus emulation and an active page lifecycle, sent again after a recovery', async () => {
+  if (needsSmoke()) return needsSmoke();
+  const { runtime, cdpPlatform, engine } = smoke;
+  const cdp = await import(pathToFileURL(join(EXT, 'lib', 'cdp.js')).href);
+  const tab = await cdpPlatform.createTab('smoke', null, 'https://shop.example.test/long');
+  const before = engine.sent.length;
+  const awake = await runtime.runTool('browser_tabs', { action: 'keep_awake', tabId: tab.id });
+  assert.equal(awake.keepAwake, true);
+  assert.equal(awake.focusEmulation, true);
+  assert.equal(awake.lifecycle, 'active');
+  const sentNow = engine.sent.slice(before).map((s) => s.method);
+  assert.ok(sentNow.includes('Emulation.setFocusEmulationEnabled') && sentNow.includes('Page.setWebLifecycleState'));
+  const mark = engine.sent.length;
+  const rec = await cdp.recoverTab(tab.id, { reason: 'test', wait: true });
+  assert.equal(rec.reattached, true);
+  assert.ok(engine.sent.slice(mark).some((s) => s.method === 'Emulation.setFocusEmulationEnabled' && s.params.enabled === true), 'the re-attach puts it back');
+  assert.equal((await runtime.runTool('browser_tabs', { action: 'keep_awake', tabId: tab.id, on: false })).keepAwake, false);
+  return undefined;
+});
 
 await test('extension side (child process, stubbed chrome): sw.js boots on platform-extension', async () => {
   const missing = OTHER_PACKAGE.filter((p) => !existsSync(join(ROOT, p)));

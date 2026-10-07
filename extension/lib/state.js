@@ -230,10 +230,31 @@ export async function getState() {
  */
 let writeQueue = Promise.resolve();
 
+/**
+ * (3.4) How long one step may hold the chain. A storage call that never answers (or a serialized
+ * function that calls another one — the deadlock rule above) used to stop every later write AND
+ * every reply waiting on one: a browser node's extension stopped answering anything until its
+ * container restarted. Past this the chain moves on to the next write; the slow step still runs,
+ * and its own caller still gets its real outcome — it is never failed by this deadline.
+ */
+export const WRITE_STEP_MS = 5_000;
+let lastStallNote = 0;
+
 export function serialize(fn) {
   const run = writeQueue.then(fn, fn);
-  // Keep the chain alive even if one mutation throws.
-  writeQueue = run.catch(() => {});
+  // Keep the chain alive even if one mutation throws — and even if it never ends (WRITE_STEP_MS).
+  let timer;
+  const released = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      if (Date.now() - lastStallNote > 60_000) {
+        lastStallNote = Date.now();
+        console.warn(`[G9BrowserAgent] a state write took longer than ${WRITE_STEP_MS} ms; later writes no longer wait for it`);
+      }
+      resolve();
+    }, WRITE_STEP_MS);
+    timer.unref?.();
+  });
+  writeQueue = Promise.race([run.then(() => {}, () => {}), released]).finally(() => clearTimeout(timer));
   return run;
 }
 

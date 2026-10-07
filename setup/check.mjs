@@ -119,7 +119,10 @@ if (!toRun.length && !plan.syntax.length) console.log('  nothing to run for thes
 const liveNotRun = plan.live.filter((c) => !toRun.includes(c));
 if (liveNotRun.length) {
   console.log(`\n  Also covers this change, NOT run now (add --live, or run before shipping):`);
-  for (const c of liveNotRun) console.log(`    ${c.label} (${est(c.est)}): node ${c.cmd[0]}`);
+  for (const c of liveNotRun) {
+    const envText = Object.entries(c.env ?? {}).map(([k, v]) => `${k}=${v} `).join('');
+    console.log(`    ${c.label} (${est(c.est)}): ${envText}node ${c.cmd[0]}`);
+  }
 }
 if (plan.uncovered.length) {
   console.log('\n  Changed, and no automated check covers it:');
@@ -157,7 +160,7 @@ const running = new Map();
 function runCheck(check) {
   return new Promise((resolve) => {
     const args = check.cmd.map((a, i) => (i === 0 ? path.join(ROOT, a) : a.replace('{tmp}', tmp)));
-    const env = { ...process.env, ...(check.unit ? { G9_UNIT: '1' } : {}) };
+    const env = { ...process.env, ...(check.unit ? { G9_UNIT: '1' } : {}), ...(check.env ?? {}) };
     const child = spawn(process.execPath, args, { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     const job = { check, child, started: Date.now(), lastOutput: Date.now(), passes: 0, out: '', partial: '' };
     running.set(check.id, job);

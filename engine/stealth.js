@@ -20,7 +20,11 @@ export function normalizeLevel(level = 'off') {
   return l;
 }
 
-const BASE_DOMAINS = ['Page', 'Runtime', 'Log', 'Network', 'DOM', 'CSS'];
+/**
+ * (3.4) CSS is no longer enabled on every page: no capture needs it, it is the enable most likely to
+ * block on a background page, and `inspect styles` enables it when it is used.
+ */
+const BASE_DOMAINS = ['Page', 'Runtime', 'Log', 'Network', 'DOM'];
 
 /**
  * CDP domains the engine may enable automatically on every page of a context at this level.

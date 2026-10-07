@@ -98,11 +98,12 @@ Both implementations export an object with **this exact surface** (Promise-retur
 platform.name: 'extension' | 'cdp'
 
 platform.debugger = {
-  attach(tabId): Promise<void>,                 // idempotent
-  detach(tabId): Promise<void>,
+  attach(tabId, { timeoutMs }? = {}): Promise<void>,   // idempotent; (3.4) the extension bounds it by timeoutMs
+  detach(tabId, { timeoutMs }? = {}): Promise<void>,
   sendCommand(tabId, method, params = {}, sessionId = null, { timeoutMs }? = {}): Promise<object>,
       // sessionId = CHILD session (iframe) or null. timeoutMs = cdp.js's budget for this command:
-      // platform-cdp forwards it +2 s to conn.send so cdp.js's own (named) timeout wins; the extension ignores it.
+      // platform-cdp forwards it +2 s to conn.send so cdp.js's own (named) timeout wins; (3.4) the extension
+      // races chrome.debugger.sendCommand against it too (it used to ignore it).
   getTargets(): Promise<Array<{ tabId, attached: boolean }>>,
   onEvent(fn: (source: { tabId, sessionId?: string }, method, params) => void): () => void,   // add listener → unsubscribe
   onDetach(fn: (source: { tabId }, reason: string) => void): () => void,                       // → unsubscribe
@@ -435,7 +436,12 @@ status, openerTabId, session? }` — tab identity is always the key **`tabId`**,
   `parseDomain(domain)`, `hostMatches(url, domains)` (exact host or subdomain; a domain's port must match
   when given; http(s) only), `displayUrl(url)` → `{ origin, host, path, query, hash, href }`. `lib/cdp.js`:
   `attach(tabId, { log = true })` (`log:false` leaves the activity line to the caller), `forgetAttached(state,
-  tabIds)` (the `attachedTabs`/`attachedSince` patch without those tabs). `tools/tabs.js`: `attachTab(tabId,
+  tabIds)` (the `attachedTabs`/`attachedSince` patch without those tabs). ***(3.4)*** every step of `attach`
+  bounded (`ATTACH_TIMEOUT_MS` 10 s, `ENABLE_TIMEOUT_MS` 5 s per domain, sent together), one attach per tab
+  at a time, `CSS` no longer in the attach set (`ensureDomain` when used); `pendingCommands(tabId)` →
+  `[{method, ms}]`; `recoverTab(tabId, { reason, wait, reattach, detach })` → `{ tabId, recovered, reason,
+  abandoned, detached, reattached|reattaching, ms, problem? }` (never throws); `keepAwake(tabId, on)`,
+  `forgetKeepAwake(tabId)`, `attachIssuesOf(tabId)`; `evaluate(…, { timeoutMs })`. `tools/tabs.js`: `attachTab(tabId,
   { clearHalt, log })`. `lib/state.js`: `AUTO_ATTACH_MODES`, `autoAttachMode(value)`. `lib/store.js`:
   `issueIndexEntry(record, attachments)`, `issueEvidence(record, attachments)`.
 * ***(3.2)*** `lib/approved.js` (new, pure, R2) — what a person approved, as a sidecar beside the flow file

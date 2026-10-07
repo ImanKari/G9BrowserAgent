@@ -29,6 +29,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { resultFromContent } from '../mcp/mcp.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -129,7 +130,7 @@ class Agent {
     const r = await this.request('tools/call', { name, arguments: args });
     const text = (r?.content ?? []).filter((c) => c.type === 'text').map((c) => c.text).join('\n');
     if (r?.isError) throw new Error(`${name}: ${text.slice(0, 300)}`);
-    try { return JSON.parse(text); } catch { return text; }
+    return resultFromContent(r?.content ?? []) ?? text;
   }
 }
 

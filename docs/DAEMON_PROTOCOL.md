@@ -99,6 +99,15 @@ browser whose G9BrowserAgent extension is reconnecting …"; `browser_tabs list`
 (and the last URL seen), and `engines` rows carry `reconnecting:true, parkedAt, resumeUntil`.
 
 * `role: "runner"` is accepted as an alias of `agent` (the runner is an agent like any other).
+* ***(3.4)*** An agent may send `client.identity` (a string, ≤ 120 characters): who it is ACROSS
+  connections. A new connection with an identity takes over what that identity held — the tabs another
+  connected agent of the same identity owns (that older connection keeps its socket and owns nothing
+  after), else the tabs a departed one owned that nobody has claimed since (remembered for 10 minutes;
+  a departed owner never blocks anyone), and the current tab. `welcome.adopted` then says
+  `{ from:[agentId…], tabs:[handle…], current }`, and the agent rows carry `identity` (and
+  `supersededBy` on the older connection). `mcp/http.mjs` sends the `X-G9-Agent` header, else the MCP
+  client's name (G9_MCP_AGENT_IDENTITY); the stdio shim only `G9_AGENT_ID`. Session names are the
+  daemon's, not an agent's: they survive the agent that set them.
 * An agent's `client.cwd` (and optional `client.project`, the value of `G9_PROJECT`) selects the
   project adapter (`g9.project.json`) reported to that agent in `welcome` and `browser_status` — one
   daemon serves agents working in different repositories. ***(v3)*** Its environments' hosts reach
@@ -165,6 +174,13 @@ for any call at this table's value + 30 s (`mcp/shim.mjs`). Internal relays set 
 `handoff_export` gets the base, `browser_status` gives the extension 20 s and `browser_tabs list` 15 s
 per extension.
 
+***(3.4)*** Deadlines grow with what a call asks for: `browser_navigate wait` its `timeoutMs` up to 2 h,
+`browser_console evaluate` with `timeoutMs` up to 4 h (`job:true` answers at once), `browser_network
+fetch` its `timeoutMs` (default 60 s, up to 2 h), `browser_recording batch` its `timeoutMs` (default
+30 min, up to 2 h) — each + 15 s, with the base as a floor. `browser_tabs close` and `focus` have their
+own 20 s and never wait in the tab's queue: close first ends every call running or waiting for an answer
+on that tab (relayed ones are also cancelled in the extension).
+
 ***(as built, 2026-09-22)*** **A call that reaches its deadline is CANCELLED, not abandoned.** The
 daemon aborts it (Engine 2: an `AbortSignal` the tool layer binds to the tab, so `lib/humanize.js
 perform` stops between input steps, exactly as Stop does; Engine 1: a `{type:'cancel', id}` frame,
@@ -174,6 +190,22 @@ not stop, the answer says the call may STILL be running and the next call on tha
 it. A call still waiting for a maxParallel slot when its deadline passes is removed from the queue
 and answered `[delivery: not-delivered] … waited Ns for one of maxParallel=K slots … nothing was sent
 to the page` — it never runs later.
+
+***(3.4)*** **The watchdog.** A cancelled call that is still running 1.5 s later has its TAB recovered in
+its engine (`extension/tools/index.js runTool` → `lib/cdp.js recoverTab`): every CDP command still waiting
+on that tab is rejected (so the call ends now), what was enabled is forgotten, and in the extension the
+debugger is detached and attached again (a launched engine's page session has nothing to detach; its
+domains are enabled again). The call's error then starts with `[recovered]` and the result frame carries
+`recovered: { tabId, abandoned:[method…], detached, … }`. The extension answers a cancelled call within
+5 s whatever happens (`[recovered] … did not stop`), and the daemon waits 8 s for that answer on a relayed
+call (5 s on a launched engine) before it frees the tab's queue anyway.
+
+***(3.4)*** **Files on the browser's machine.** The daemon runs where the browser runs (both engines), so
+it finishes three results itself: `browser_network fetch` (the engine returns the bytes; the daemon adds
+the sha256 and either writes `savePath` — absolute, or relative to `<G9_HOME>/files/` — or returns a body
+bounded by `maxBytes`), `browser_screenshot savePath` (written there; `thumbnail:true` returns a small
+viewport JPEG instead of the image), and the extension's downloads (`wait_download`, `downloads`: the
+final `path` and, when the daemon can read the file, `sha256` and `file` with `source:'disk (daemon)'`).
 
 ### 3.1 What the daemon answers itself
 
@@ -294,7 +326,8 @@ when the call reaches its deadline, when a dialog blocks that tab, and when the 
 agent. An extension that does not know the message ignores it, as the protocol says for unknown types.
 
 An engine's `ok:false` result for an input error carries the same `delivery`, `hit` and `hidden` fields
-as §3, and the daemon passes them on to the caller.
+as §3, and the daemon passes them on to the caller. ***(3.4)*** A result for a call the watchdog ended
+carries `recovered` (§3), and its error text starts with `[recovered]`.
 
 `caller.relayed: true` (F7) marks every call the daemon sends to an engine (relayed to Engine 1 or run
 in-process on Engine 2). The engine's activity record of such a call carries `relayed: true`, and the

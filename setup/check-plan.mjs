@@ -84,6 +84,21 @@ export const CHECKS = [
     entry: ['setup/isolated-livetest.mjs', 'setup/livetest.mjs', 'daemon/g9d.mjs', 'mcp/shim.mjs'],
     reads: ['extension/**', 'daemon/**', 'mcp/**', 'lib/**', 'engine/**', 'setup/serve.mjs', 'setup/*.html', 'setup/fixtures/**'],
   },
+  {
+    // (3.4) Long, unattended work end to end on both engines, inside the Engine 1 harness: background
+    // tabs, the watchdog, close while stuck, snapshot sizes, waits, a 3-minute evaluate job, fetch to
+    // file, screenshot to file, batch, and stateless MCP-over-HTTP sessions. G9_TIMEOUT_MS shortens
+    // the daemon's base deadline so the stuck command is cut after 10 s. Reached only by the files of
+    // that work (not by every input change: the two suites above cover those).
+    id: 'longwork-livetest', label: 'long-work live suite (both engines, a 3-minute job)', tier: 'live', est: 420, browser: true,
+    cmd: ['setup/isolated-livetest.mjs'],
+    env: { G9_TIMEOUT_MS: '10000', G9_LIVE_SCRIPT: 'setup/longwork-livetest.mjs' },
+    entry: [],
+    reads: ['setup/longwork-livetest.mjs', 'extension/lib/cdp.js', 'extension/lib/state.js', 'extension/lib/refs.js', 'extension/lib/platform-extension.js',
+      'extension/sw.js', 'extension/tools/index.js', 'extension/tools/jobs.js', 'extension/tools/fetch.js', 'extension/tools/batch.js',
+      'extension/tools/snapshot.js', 'extension/tools/navigate.js', 'daemon/router.js', 'daemon/registry.js', 'mcp/http.mjs',
+      'mcp/link.mjs', 'setup/fixtures/longwork.html'],
+  },
 ];
 
 function unit(name, est, reads) {
@@ -107,6 +122,9 @@ export const LIVE_TRIGGERS = [
   'extension/tools/record.js', 'extension/lib/cdp.js', 'extension/lib/refs.js', 'extension/lib/frames.js',
   'extension/lib/world.js', 'extension/lib/screencast.js', 'extension/lib/platform*.js', 'extension/sw.js',
   'engine/**', 'daemon/router.js', 'daemon/handoff.js', 'mcp/tools.js',
+  // (3.4) long, unattended work: jobs, fetch, batch, stateless HTTP sessions.
+  'extension/tools/jobs.js', 'extension/tools/fetch.js', 'extension/tools/batch.js', 'extension/lib/state.js',
+  'daemon/registry.js', 'mcp/http.mjs', 'setup/longwork-livetest.mjs',
   // The live suites' own scripts and the pages they test against.
   'setup/livetest.mjs', 'setup/isolated-livetest.mjs', 'setup/engine2-livetest.mjs', 'setup/serve.mjs', 'setup/*.html',
   'setup/fixtures/**',

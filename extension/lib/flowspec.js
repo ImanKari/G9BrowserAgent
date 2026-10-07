@@ -37,7 +37,20 @@ export const FLOWSPEC_FORMAT = 'g9/flowspec';
 export const KNOWN_ACTIONS = new Set([
   'navigate', 'click', 'double_click', 'rightclick', 'type', 'select',
   'check', 'key', 'drag', 'scroll', 'upload', 'assert',
+  // (3.4) Read a value from the page: `evaluate` runs an expression in the
+  // page's main world, `extract` reads an element's visible text. Either may
+  // check it (`expect`) and keep it for later steps (`saveAs` → `{{name}}`).
+  'evaluate', 'extract',
 ]);
+
+/** Steps that produce a value — the only ones `saveAs`, `expect` and `operator` belong to. */
+export const VALUE_ACTIONS = new Set(['evaluate', 'extract']);
+
+/** What `saveAs` must look like: the name a later `{{name}}` placeholder uses. */
+export const SAVE_AS_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** How an `extract` step compares its text with `expect`. */
+export const EXTRACT_OPERATORS = ['exact', 'contains', 'matches'];
 
 export const DEFAULT_SENSITIVITY = {
   /** off | layout | strict — how a visual difference is judged. */
@@ -111,6 +124,7 @@ export function toFlowSpec(recording, { platform = 'web', adapter = 'chromium-cd
     if (step.x != null || step.y != null) base.scrollTo = { x: step.x ?? 0, y: step.y ?? 0 };
     if (step.files) base.files = step.files;
     if (step.waitMs != null) base.waitBudgetMs = step.waitMs;
+    if (VALUE_ACTIONS.has(step.type)) Object.assign(base, valueFields(step));
 
     if (step.type === 'assert') {
       base.oracle = compactObject({
@@ -187,6 +201,7 @@ export function fromFlowSpec(spec) {
     if (step.checked != null) out.checked = step.checked;
     if (step.scrollTo) { out.x = step.scrollTo.x; out.y = step.scrollTo.y; }
     if (step.files) out.files = step.files;
+    if (VALUE_ACTIONS.has(step.action)) Object.assign(out, valueFields(step));
     if (step.action === 'assert' && step.oracle) {
       const o = step.oracle;
       Object.assign(out, compactObject({
@@ -262,6 +277,7 @@ export function validateFlowSpec(spec, { actions = KNOWN_ACTIONS } = {}) {
     if (step.action === 'assert' && !step.oracle?.kind) {
       problems.push(`${where} is an assert with no oracle kind.`);
     }
+    problems.push(...valueStepProblems(step, where));
   });
 
   for (const [name, param] of Object.entries(spec.parameters ?? {})) {
@@ -301,6 +317,61 @@ export function validateFlowSpec(spec, { actions = KNOWN_ACTIONS } = {}) {
     if (surprise && !['off', 'warn', 'fail'].includes(surprise)) problems.push(`sensitivity.surprise "${surprise}" is not off|warn|fail.`);
   }
 
+  return problems;
+}
+
+/**
+ * The fields of a value step (`evaluate` / `extract`), identical in the stored
+ * and the spec form, so the round trip is a copy. `expect` is kept when it is
+ * null — null is a value an expression can be expected to return — and dropped
+ * only when absent.
+ */
+function valueFields(step) {
+  return compactObject({
+    expression: step.expression ?? undefined,
+    selector: step.selector ?? undefined,
+    saveAs: step.saveAs ?? undefined,
+    expect: step.expect,
+    operator: step.operator ?? undefined,
+    timeoutMs: step.timeoutMs ?? undefined,
+  });
+}
+
+/** What is wrong with one step's value fields; `[]` for a step that has none. */
+function valueStepProblems(step, where) {
+  const problems = [];
+  const isValue = VALUE_ACTIONS.has(step.action);
+  if (step.action === 'evaluate' && (typeof step.expression !== 'string' || !step.expression.trim())) {
+    problems.push(`${where} is an evaluate with no expression (a non-empty string).`);
+  }
+  if (step.action === 'extract') {
+    const hasSelector = typeof step.selector === 'string' && step.selector.trim() !== '';
+    if (!step.target && !hasSelector) {
+      problems.push(`${where} is an extract with neither a target nor a selector, so it reads nothing.`);
+    }
+    if (step.expect !== undefined && typeof step.expect !== 'string') {
+      problems.push(`${where} is an extract whose expect is not a string (extracted text is always a string).`);
+    }
+    if (step.operator !== undefined && !EXTRACT_OPERATORS.includes(step.operator)) {
+      problems.push(`${where} has operator "${step.operator}", which is not ${EXTRACT_OPERATORS.join('|')}.`);
+    } else if (step.operator === 'matches' && typeof step.expect === 'string') {
+      try {
+        new RegExp(step.expect);
+      } catch (err) {
+        problems.push(`${where} has an expect that is not a valid regular expression: ${err.message}`);
+      }
+    }
+  }
+  if ('saveAs' in step && step.saveAs !== undefined) {
+    if (!isValue) {
+      problems.push(`${where} is a ${step.action} with saveAs; only evaluate and extract produce a value to save.`);
+    } else if (typeof step.saveAs !== 'string' || !SAVE_AS_PATTERN.test(step.saveAs)) {
+      problems.push(`${where} has saveAs ${JSON.stringify(step.saveAs)}, which is not an identifier (letters, digits, _; not starting with a digit).`);
+    }
+  }
+  if (step.action === 'evaluate' && step.timeoutMs !== undefined && !(Number(step.timeoutMs) > 0)) {
+    problems.push(`${where} has timeoutMs ${JSON.stringify(step.timeoutMs)}; it must be a positive number of milliseconds.`);
+  }
   return problems;
 }
 

@@ -36,7 +36,7 @@
  * failure you can watch again.
  */
 
-import { send } from '../lib/cdp.js';
+import { send, evaluateUserExpression } from '../lib/cdp.js';
 // Every page read and every piece of bookkeeping replay leaves in the page
 // (the resolved target, the settle box, the event proofs) lives in G9BrowserAgent's
 // isolated world: the page never sees __g9target or __g9ReplayProof.
@@ -57,7 +57,7 @@ import {
   calibrateVolatile, emptyKnownWorld, describeSurprise,
   envKeyOf, knownWorldFor, withKnownWorld, renormalizeKnownWorld,
 } from '../lib/signature.js';
-import { DEFAULT_SENSITIVITY } from '../lib/flowspec.js';
+import { DEFAULT_SENSITIVITY, canonicalize } from '../lib/flowspec.js';
 
 /** Two consecutive identical boxes is the cheapest proof an element has settled. */
 const POLL_MS = 120;
@@ -141,6 +141,11 @@ export async function replay(tabId, {
     ...(recording.environment?.variables ?? {}),
     ...variables,
   };
+  // (3.4) Values an `evaluate`/`extract` step kept with `saveAs`, for the `{{name}}` placeholders
+  // of the steps AFTER it. Kept apart from `data` so `dataParameters` still lists only what the
+  // caller and the flow supplied; a saved name shadows a parameter of the same name from then on.
+  const saved = {};
+  const savedNames = new Set((recording.steps ?? []).map((s) => s?.saveAs).filter((name) => typeof name === 'string' && name));
 
   await ensureLocators(tabId);
   await setReplaying(tabId, true);
@@ -154,11 +159,28 @@ export async function replay(tabId, {
   try {
     for (let i = 0; i < recording.steps.length; i++) {
     const raw = recording.steps[i];
-    // Assertions that write evidence need to know which recording owns it.
-    const step = substitute({ ...raw, recordingId: recording.id }, data);
     const stepId = raw.id ?? `s${i + 1}`;
     const label = `step ${i + 1}/${recording.steps.length}`;
     const stepStarted = Date.now();
+    // Substituted per step, at the moment it runs — which is what lets a step see what an earlier
+    // step saved. A flow with no saveAs substitutes against `data` itself, exactly as before.
+    let step;
+    try {
+      // Assertions that write evidence need to know which recording owns it.
+      step = substitute({ ...raw, recordingId: recording.id }, Object.keys(saved).length ? { ...data, ...saved } : data);
+    } catch (err) {
+      // A placeholder some step was meant to save is a consequence of THAT step failing (or of
+      // it coming later), reported on this step. Any other missing name stays what it always
+      // was: the whole replay is refused before it acts on a value nobody supplied.
+      const missing = /Missing data parameter "([^"]+)"/.exec(String(err?.message ?? err))?.[1];
+      if (!missing || !savedNames.has(missing)) throw err;
+      results.push({
+        step: i + 1, id: stepId, type: raw.type, ok: false, ms: 0,
+        error: `Variable "${missing}" was never saved: the step that saves it (saveAs) did not run before ${label}, or it failed, so {{${missing}}} has no value.`,
+      });
+      if (stopOnFailure) break;
+      continue;
+    }
 
     // Tell whoever is watching, before the step runs rather than after.
     //
@@ -189,8 +211,11 @@ export async function replay(tabId, {
 
     try {
       const outcome = dryRun ? await probe(tabId, step) : await runStep(tabId, step, mode, {
-        ...input, seed: `${runSeed}:s${i + 1}`,
+        ...input, seed: `${runSeed}:s${i + 1}`, save: (name, value) => { saved[name] = value; },
       });
+      // A dry run reads no values, so a later step's {{name}} resolves to the placeholder itself:
+      // the probe still resolves that step's element instead of failing on a value never read.
+      if (dryRun && typeof step.saveAs === 'string' && step.saveAs) saved[step.saveAs] = `{{${step.saveAs}}}`;
       const record = { step: i + 1, id: stepId, type: step.type, ok: true, ms: Date.now() - stepStarted, ...outcome };
       results.push(record);
 
@@ -276,6 +301,7 @@ export async function replay(tabId, {
     humanizeSeed: runSeed,
     ...(pointerStart ? { pointerStart } : {}),
     dataParameters: Object.keys(data),
+    ...(Object.keys(saved).length ? { savedVariables: Object.keys(saved) } : {}),
     steps: results.map(publicStep),
     ...(settledAfterLastStep ? { settledAfterLastStep } : {}),
   };
@@ -623,6 +649,14 @@ const AUTOMATION_FAILURE_PATTERNS = [
   /^Timed out waiting for the page/i,
   /^The tab (?:was closed|no longer exists)/i,
   /debugger detached/i,
+
+  // (3.4) A value step that cannot be carried out as written: the test is broken, not the page.
+  // A value that came back DIFFERENT ("evaluate check failed", "extract check failed") is the
+  // page's answer, and stays FAIL_PRODUCT.
+  /^This (?:evaluate|extract) step has no /,
+  /^The extract step's (?:selector|pattern|operator) /,
+  // A consequence of an earlier failed step, never a cause of its own.
+  /^Variable "[^"]+" was never saved/,
 ];
 
 const AUTOMATION_FAILURE = {
@@ -786,7 +820,7 @@ async function ensureLocators(tabId) {
  * lines; the rest turns "not found" into a sentence naming what was sought,
  * where, what was tried, and what is there now instead.
  */
-async function locate(tabId, step, { budgetMs }) {
+async function locate(tabId, step, { budgetMs, forRead = false }) {
   const deadline = Date.now() + Math.max(budgetMs, MIN_WAIT_MS);
   let last = null;
 
@@ -832,7 +866,9 @@ async function locate(tabId, step, { budgetMs }) {
        })()`,
     ).catch(() => null);
 
-    if (last?.ok && last.visible && last.enabled && last.settled && !last.loading) return last;
+    // A read (extract) needs the element present and visible; enabled and motionless are what an
+    // ACTION needs, and a disabled field's text is still its text.
+    if (last?.ok && last.visible && (forRead || (last.enabled && last.settled)) && !last.loading) return last;
     if (Date.now() >= deadline) break;
     await sleep(POLL_MS);
   }
@@ -917,8 +953,14 @@ async function assertWithin(tabId, step, budgetMs) {
 /** What a dry run does: resolve everything, change nothing. */
 async function probe(tabId, step) {
   if (step.type === 'assert') return executeAssertion(tabId, step);
-  if (step.type === 'navigate' || step.type === 'scroll' || (step.type === 'key' && !step.target)) {
+  // An expression is the page's own code and may change anything, so a dry run never runs one.
+  if (step.type === 'navigate' || step.type === 'scroll' || step.type === 'evaluate' || (step.type === 'key' && !step.target)) {
     return { skipped: 'not element-bound' };
+  }
+  if (step.type === 'extract' && !step.target) {
+    if (typeof step.selector !== 'string' || !step.selector.trim()) throw new Error('This extract step has no target or selector.');
+    await readBySelector(tabId, step.selector, 0);
+    return { resolved: `selector ${step.selector}` };
   }
   const found = await locate(tabId, step, { budgetMs: 0 });
   return { matchedBy: found.matchedBy, resolved: found.describe };
@@ -934,6 +976,9 @@ async function runStep(tabId, step, mode, input = {}) {
   const humanLevel = !!input.level && input.level !== 'off';
 
   if (step.type === 'assert') return assertWithin(tabId, step, budgetMs);
+
+  if (step.type === 'evaluate') return runEvaluate(tabId, step, input.save);
+  if (step.type === 'extract') return runExtract(tabId, step, { budgetMs, save: input.save });
 
   if (step.type === 'navigate') {
     await nav.navigate(tabId, { url: step.url, waitUntil: 'load' });
@@ -1091,6 +1136,151 @@ async function runStep(tabId, step, mode, input = {}) {
   }
 }
 
+// ---------------------------------------------------------- value steps (3.4)
+
+/** An evaluate step's budget when it names none, and the most it may name. */
+const EVALUATE_TIMEOUT_MS = 30_000;
+const EVALUATE_TIMEOUT_CAP_MS = 4 * 60 * 60 * 1000;
+/** How much of a value a step result carries (the saved variable keeps it whole). */
+const VALUE_ECHO_CHARS = 2000;
+
+/**
+ * `evaluate`: the flow's own expression, in the page's MAIN world.
+ *
+ * The one deliberate main-world evaluation in replay, for the reason
+ * `browser_console action:"evaluate"` is one (§4.7): the flow is asking about the page's own
+ * JavaScript — its state, its stores, its globals — which G9BrowserAgent's isolated world cannot
+ * see. Everything G9BrowserAgent reads for ITSELF (extract included) stays in the isolated world.
+ */
+async function runEvaluate(tabId, step, save) {
+  if (typeof step.expression !== 'string' || !step.expression.trim()) {
+    throw new Error('This evaluate step has no expression.');
+  }
+  const asked = Number(step.timeoutMs);
+  const timeoutMs = Math.min(asked > 0 ? asked : EVALUATE_TIMEOUT_MS, EVALUATE_TIMEOUT_CAP_MS);
+  const res = await evaluateUserExpression(tabId, step.expression, { timeoutMs });
+  if (res?.exceptionDetails) {
+    const d = res.exceptionDetails;
+    throw new Error(`The expression threw: ${d.exception?.description ?? d.exception?.value ?? d.text ?? 'an exception'}`);
+  }
+  const result = res?.result ?? {};
+  // NaN, Infinity, -0 and bigints cannot travel as JSON; CDP names them instead.
+  const value = 'value' in result ? result.value : (result.unserializableValue ?? undefined);
+  if (step.expect !== undefined && jsonOf(value) !== jsonOf(step.expect)) {
+    throw new Error(`evaluate check failed: expected ${preview(jsonOf(step.expect))}, got ${preview(jsonOf(value))}.`);
+  }
+  return finishValue(step, value, save);
+}
+
+/**
+ * `extract`: an element's visible text, read in G9BrowserAgent's isolated world.
+ *
+ * A form field answers with its current value (a textarea's innerText is its DEFAULT text, not
+ * what is in it now; a select answers with its chosen option's label); anything else with
+ * innerText, else textContent. Trimmed.
+ */
+async function runExtract(tabId, step, { budgetMs, save }) {
+  let text;
+  let common = {};
+  if (step.target) {
+    const found = await locate(tabId, step, { budgetMs, forRead: true });
+    const read = await inWorld(tabId, `(() => { const el = window.__g9target; return el ? { text: (${READ_TEXT})(el) } : null; })()`);
+    if (!read) throw new Error('Lost the resolved element before reading it — the page changed mid-step.');
+    text = read.text;
+    common = { matchedBy: found.matchedBy, resolved: found.describe };
+  } else if (typeof step.selector === 'string' && step.selector.trim()) {
+    text = await readBySelector(tabId, step.selector, budgetMs);
+    common = { resolved: `selector ${step.selector}` };
+  } else {
+    throw new Error('This extract step has no target or selector.');
+  }
+  if (step.expect !== undefined) checkExtracted(text, String(step.expect ?? ''), step.operator ?? 'exact');
+  return { ...common, ...finishValue(step, text, save) };
+}
+
+/** The text-reading rule of `extract`, as page-side source (runs in the isolated world). */
+const READ_TEXT = `function (el) {
+  const tag = String(el.tagName || '').toUpperCase();
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return String(el.value == null ? '' : el.value).trim();
+  if (tag === 'SELECT') {
+    const chosen = el.selectedOptions && el.selectedOptions[0];
+    return String(chosen ? chosen.text : (el.value == null ? '' : el.value)).trim();
+  }
+  const inner = typeof el.innerText === 'string' ? el.innerText : '';
+  return String(inner.trim() ? inner : (el.textContent || '')).trim();
+}`;
+
+/**
+ * Read the first element matching a CSS selector, polling within the step's budget (at least
+ * MIN_WAIT_MS, like `locate`): an element that has not rendered yet is waited for, one that never
+ * appears fails the step.
+ */
+async function readBySelector(tabId, selector, budgetMs) {
+  const deadline = Date.now() + Math.max(budgetMs, MIN_WAIT_MS);
+  const expression = `(() => {
+    let el;
+    try { el = document.querySelector(${JSON.stringify(selector)}); } catch (e) { return { invalid: String((e && e.message) || e) }; }
+    return el ? { found: true, text: (${READ_TEXT})(el) } : { found: false };
+  })()`;
+  for (;;) {
+    const read = await inWorld(tabId, expression).catch(() => null);
+    if (read?.invalid) throw new Error(`The extract step's selector "${selector}" is not valid CSS: ${read.invalid}`);
+    if (read?.found) return read.text;
+    if (Date.now() >= deadline) break;
+    await sleep(POLL_MS);
+  }
+  throw new Error(`Could not find an element matching selector "${selector}" — nothing on the page matches it.`);
+}
+
+/** `expect` for extracted text: exact (default), contains, or matches (a regular expression). */
+function checkExtracted(actual, expected, operator) {
+  let pass;
+  if (operator === 'exact') pass = actual === expected;
+  else if (operator === 'contains') pass = actual.includes(expected);
+  else if (operator === 'matches') {
+    let pattern;
+    try {
+      pattern = new RegExp(expected);
+    } catch (err) {
+      throw new Error(`The extract step's pattern ${JSON.stringify(expected)} is not a valid regular expression: ${err.message}`);
+    }
+    pass = pattern.test(actual);
+  } else {
+    throw new Error(`The extract step's operator "${operator}" is not exact, contains or matches.`);
+  }
+  if (!pass) {
+    throw new Error(`extract check failed (${operator}): expected ${JSON.stringify(expected)}, got ${preview(JSON.stringify(actual))}.`);
+  }
+}
+
+/** The step's result (`value`, bounded) and, with `saveAs`, the variable (whole). */
+function finishValue(step, value, save) {
+  const out = echoValue(value);
+  if (typeof step.saveAs === 'string' && step.saveAs) {
+    // Placeholders are text, so a non-string is saved as its JSON.
+    save?.(step.saveAs, typeof value === 'string' ? value : value === undefined ? '' : (JSON.stringify(value) ?? String(value)));
+    out.savedAs = step.saveAs;
+  }
+  return out;
+}
+
+/** A value as a step result carries it: strings up to 2000 chars, other values while their JSON fits. */
+function echoValue(value) {
+  if (typeof value === 'string') {
+    return value.length > VALUE_ECHO_CHARS ? { value: `${value.slice(0, VALUE_ECHO_CHARS)}…`, valueTruncated: true } : { value };
+  }
+  const json = JSON.stringify(value);
+  if (json === undefined || json.length <= VALUE_ECHO_CHARS) return { value };
+  return { value: `${json.slice(0, VALUE_ECHO_CHARS)}…`, valueTruncated: true };
+}
+
+/** Deep equality as JSON with sorted keys; `undefined` is its own value. */
+function jsonOf(value) {
+  return value === undefined ? 'undefined' : String(JSON.stringify(canonicalize(value)));
+}
+
+const preview = (text) => (text.length > 500 ? `${text.slice(0, 500)}…` : text);
+
 /**
  * Interaction tools address elements by ref, and a replay has no refs — it has
  * a locator that just resolved. Rather than teach every tool a second address
@@ -1210,6 +1400,9 @@ async function resolvedNodeId(tabId) {
 
 function describeStep(step) {
   if (step.type === 'assert') return summarizeAssertion(step);
+  // The expression itself is not echoed: it may carry a substituted secret.
+  if (step.type === 'evaluate') return `evaluate${step.saveAs ? ` → {{${step.saveAs}}}` : ''}`;
+  if (step.type === 'extract' && !step.target) return `extract ${step.selector ?? ''}`.trim();
   const fp = step.target?.fingerprint;
   return fp ? `${step.type} ${fp.role || fp.tag}${fp.name ? ` "${fp.name}"` : ''}` : step.type;
 }

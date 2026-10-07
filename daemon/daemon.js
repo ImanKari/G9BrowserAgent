@@ -362,6 +362,9 @@ export class Daemon {
       browser: c.browser ?? null,
       cwd: c.cwd ?? null,
       origin: meta.origin,
+      // (3.4) An agent that says who it is across connections (mcp/http.mjs: the MCP client's name or
+      // the X-G9-Agent header) takes over what its previous connection held (registry adoptIdentity).
+      identity: role === 'agent' && typeof c.identity === 'string' && c.identity.trim() ? c.identity.trim() : null,
       ...(instanceId ? {
         instanceId,
         loadId: typeof c.loadId === 'string' ? c.loadId.slice(0, 128) : null,
@@ -370,6 +373,7 @@ export class Daemon {
     });
     client.conn = conn;
     client.project = role === 'agent' && (c.cwd || c.project) ? this.#projectFor(c.cwd, c.project) : this.project;
+    const adopted = role === 'agent' ? this.registry.adoptIdentity(client.id) : null;
 
     conn.send({
       type: 'welcome',
@@ -385,6 +389,7 @@ export class Daemon {
       halted: { global: this.registry.global.halted, ...(this.registry.global.halted ? { by: this.registry.global.by } : {}) },
       port: this.port,
       home: this.home.replace(/\\/g, '/'),
+      ...(adopted ? { adopted } : {}),
     });
     this.log(`[g9d] ${role} connected: ${this.registry.describe(client.id)}${c.pid ? ` pid ${c.pid}` : ''}${role === 'engine' ? ` v${msg.version}` : ''}` +
       `${client.resumed ? ` (resumed: ${client.resumed.kept.length} tab handle(s) kept, ${client.resumed.dropped.length} dropped)` : ''}`);

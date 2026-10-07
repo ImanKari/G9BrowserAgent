@@ -71,9 +71,16 @@ export class DaemonLink {
    * @param {string} [o.cwd]      the agent's working folder (the daemon loads its g9.project.json)
    * @param {string} [o.project]  an explicit g9.project.json path (G9_PROJECT)
    */
-  constructor({ name = 'mcp-agent', cwd = process.cwd(), project = process.env.G9_PROJECT || null } = {}) {
+  constructor({ name = 'mcp-agent', cwd = process.cwd(), project = process.env.G9_PROJECT || null, identity = process.env.G9_AGENT_ID || null } = {}) {
     this.cwd = cwd;
     this.project = project;
+    /**
+     * (3.4) Who this agent is across connections. A new connection with the same identity takes over
+     * the tabs and current tab the previous one held (daemon/registry.js adoptIdentity). The HTTP
+     * endpoint sets it per session; the stdio shim only from G9_AGENT_ID — two editors on one machine
+     * are two agents even when their MCP clients share a name.
+     */
+    this.identity = identity;
     this.ws = null;
     this.welcome = null;
     this.connecting = null;
@@ -209,7 +216,7 @@ export class DaemonLink {
         type: 'hello',
         role: 'agent',
         version: VERSION,
-        client: { name: this.name, pid: process.pid, cwd: this.cwd, project: this.project },
+        client: { name: this.name, pid: process.pid, cwd: this.cwd, project: this.project, ...(this.identity ? { identity: this.identity } : {}) },
       });
     });
   }

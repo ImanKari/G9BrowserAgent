@@ -20,8 +20,13 @@
  * real tab the agent may want next).
  */
 
+import fsp from 'node:fs/promises';
+import path from 'node:path';
+import crypto from 'node:crypto';
+
 import { TOOL_NAMES } from '../mcp/tools.js';
 import { handoff as runHandoff } from './handoff.js';
+import { fileInfo } from './evidence.js';
 
 // ------------------------------------------------------------------ pure helpers
 
@@ -82,8 +87,9 @@ export function fallbackIsReadOnly(tool, args = {}) {
       // As tools/index.js isReadOnly: an element or full-page capture scrolls or resizes the page.
       return (args.area ?? 'viewport') === 'viewport';
     case 'browser_console':
-      return (action ?? 'read') === 'read' && !args.clear;
+      return ['read', 'job_status', 'jobs'].includes(action ?? 'read') && !args.clear;
     case 'browser_network':
+      if (action === 'fetch' && !args.clear) return ['GET', 'HEAD'].includes(String(args.method ?? 'GET').toUpperCase());
       return [undefined, 'list', 'pin_status', 'intercept_status', 'downloads'].includes(action) && !args.clear;
     case 'browser_diagnose':
       return [undefined, 'health', 'vitals', 'memory'].includes(args.what);
@@ -110,6 +116,17 @@ export function fallbackIsReadOnly(tool, args = {}) {
 export const STOP_GRACE_MS = 5_000;
 
 /**
+ * (3.4) The same grace for a call relayed to the extension. Longer than STOP_GRACE_MS because the
+ * extension's own watchdog runs inside it: the tab is recovered 1.5 s after the cancel (every stuck
+ * CDP command abandoned, the debugger detached and attached again) and the extension answers within
+ * 5 s of the cancel whatever happens (sw.js CANCEL_ANSWER_MS), so the answer normally arrives here.
+ */
+export const RELAY_STOP_GRACE_MS = 8_000;
+
+/** (3.4) The deadline of `browser_tabs` close/focus, which never wait in the tab's queue. */
+export const TAB_CONTROL_TIMEOUT_MS = 20_000;
+
+/**
  * An upper bound of the time a humanized `type`/`key` spends on its own input, per character:
  * the human profile's median inter-key interval is 140 ms (x1.6 after spaces and punctuation, x2
  * before a shifted key, clamped at 1.5 s), stealth's 160 ms; about 6 characters a second. A flat
@@ -131,20 +148,34 @@ export function interactInputMs(args = {}) {
  * timeout under a runner that allowed 600 s for a replay): the deadline has to
  * follow what the call itself asked for, with the base as a floor.
  */
+/** (3.4) The longest a `browser_navigate action:"wait"` may wait (a render, a queue). */
+export const MAX_WAIT_MS = 2 * 60 * 60_000;
+/** (3.4) The longest a `browser_console action:"evaluate"` may run in the call (job:true has no call to hold). */
+export const MAX_EVALUATE_MS = 4 * 60 * 60_000;
+
 export function timeoutFor(tool, args = {}, base = 120_000) {
   const t = (n) => Math.max(base, n);
-  const asked = (fallback) => (Number.isFinite(Number(args.timeoutMs)) && Number(args.timeoutMs) > 0 ? Number(args.timeoutMs) : fallback);
+  const asked = (fallback, cap = Infinity) => Math.min(cap, Number.isFinite(Number(args.timeoutMs)) && Number(args.timeoutMs) > 0 ? Number(args.timeoutMs) : fallback);
   switch (tool) {
     case 'browser_interact':
       return base + interactInputMs(args);
     case 'browser_recording':
       if (args.action === 'replay' || args.action === 'calibrate') return t(30 * 60_000);
+      // (3.4) A batch's own deadline is the whole list's, asked or 30 minutes.
+      if (args.action === 'batch') return t(asked(30 * 60_000, MAX_WAIT_MS) + 15_000);
+      return base;
+    case 'browser_console':
+      // (3.4) An evaluate whose promise takes minutes (job:true answers at once and runs on).
+      if (args.action === 'evaluate' && args.job !== true && args.timeoutMs != null) return t(asked(30_000, MAX_EVALUATE_MS) + 15_000);
+      // (3.4) job_status waitMs: wait for the job to end, up to 10 minutes per call.
+      if (args.action === 'job_status' && Number(args.waitMs) > 0) return t(Math.min(10 * 60_000, Number(args.waitMs)) + 15_000);
       return base;
     case 'browser_diagnose':
       return args.what === 'performance' ? t((Number(args.durationMs) || 4_000) + 60_000) : base;
     case 'browser_navigate':
-      return t(asked(args.action === 'wait' ? 15_000 : 30_000) + 15_000);
+      return t(asked(args.action === 'wait' ? 15_000 : 30_000, MAX_WAIT_MS) + 15_000);
     case 'browser_network':
+      if (args.action === 'fetch') return t(asked(60_000, MAX_WAIT_MS) + 15_000);
       return args.action === 'wait_download' ? t(asked(30_000) + 15_000) : base;
     case 'browser_tabs':
       if (args.action === 'wait') return t(asked(15_000) + 15_000);
@@ -161,7 +192,7 @@ export function timeoutFor(tool, args = {}, base = 120_000) {
 
 /** Tab-free store actions vs actions that act on a page, per store tool. */
 const PAGE_ACTIONS = {
-  browser_recording: new Set(['start', 'stop', 'replay', 'assert', 'suggest', 'calibrate', 'status']),
+  browser_recording: new Set(['start', 'stop', 'replay', 'assert', 'suggest', 'calibrate', 'status', 'batch']),
   browser_issue: new Set(['create', 'screenshot', 'video_start', 'video_stop', 'video_status']),
 };
 /** Store actions that CREATE something: they go to one store, never "whichever has it". */
@@ -172,7 +203,7 @@ const NOT_FOUND = /\bNo (recording|issue|attachment|flow)\b|not found in this br
 /** What a store learns about a flow by running it; never part of a FlowSpec (daemon/flows.js LOCAL_ONLY). */
 const LOCAL_TRUTH = ['runHistory', 'lastRun', 'flaky', 'knownWorld', 'knownWorlds', 'surpriseHistory', 'lastSignature'];
 
-const TABS_ACTIONS = ['list', 'open', 'close', 'focus', 'attach', 'claim', 'release', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch'];
+const TABS_ACTIONS = ['list', 'open', 'close', 'focus', 'attach', 'claim', 'release', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch', 'keep_awake'];
 
 /**
  * An input error's delivery state ("not-delivered" | "missed" | "partial"), carried as fields from
@@ -191,6 +222,43 @@ export function withDelivery(error, from) {
 export function deliveryFields(err) {
   return typeof err?.delivery === 'string' ? { delivery: err.delivery, hit: err.hit ?? null, hidden: err.hidden === true } : {};
 }
+
+// ------------------------------------------------------------------ files on the browser's machine (3.4)
+
+/** Textual content types: a fetched body of one of these is returned as text. */
+function isTextual(contentType) {
+  const t = String(contentType ?? '').toLowerCase();
+  return /^text\//.test(t) || /json|xml|javascript|ecmascript|csv|yaml|x-www-form-urlencoded|svg/.test(t);
+}
+
+/**
+ * Where a `savePath` lands: an absolute path as given, a relative one under `<G9_HOME>/files/`. The
+ * daemon runs on the browser's machine (both engines), so this is a path THERE — on a browser node,
+ * inside its container. Local trust (D7): any path the daemon's user may write.
+ */
+export function resolveSavePath(savePath, home) {
+  const text = String(savePath ?? '').trim();
+  if (!text) throw new Error('savePath is empty.');
+  if (/[\u0000]/.test(text)) throw new Error('savePath contains a NUL character.');
+  return path.isAbsolute(text) ? path.normalize(text) : path.join(home || process.cwd(), 'files', text);
+}
+
+/** Write `bytes` to `file` atomically (a temp name, then rename), creating its folder. → { path, size, sha256 } */
+export async function writeFileAtomic(file, bytes) {
+  await fsp.mkdir(path.dirname(file), { recursive: true });
+  const tmp = `${file}.g9part-${process.pid}-${Date.now().toString(36)}`;
+  await fsp.writeFile(tmp, bytes);
+  try {
+    await fsp.rename(tmp, file);
+  } catch (err) {
+    await fsp.rm(tmp, { force: true }).catch(() => {});
+    throw err;
+  }
+  return { path: file, size: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') };
+}
+
+/** Header names worth showing an agent from a fetch (the rest cost tokens and say little). */
+const FETCH_HEADERS = ['content-type', 'content-length', 'content-disposition', 'last-modified', 'etag', 'location', 'cache-control'];
 
 function stripRouting(args) {
   const { session, engine, context, ...rest } = args ?? {};
@@ -260,6 +328,11 @@ export class Router {
    */
   #caller(client) {
     return client ? { agentId: client.id, name: client.name, relayed: true } : { agentId: null, name: 'g9d', relayed: true };
+  }
+
+  /** (3.4) The caller with the call's deadline, so a tool that retries can budget from the time left (EXT-04). */
+  #withDeadline(caller, ms) {
+    return { ...caller, deadlineAt: Date.now() + ms };
   }
 
   /**
@@ -359,11 +432,12 @@ export class Router {
         entry.graceTimer = setTimeout(() => {
           if (!this.pending.delete(id)) return;
           reject(new Error(
-            `"${tool}" did not respond within ${secs}s. G9BrowserAgent asked the extension to stop it, but it has not answered, so it ` +
-              'may STILL be running on this tab: take a browser_snapshot before sending this tab more input. Likely causes: ' +
-              'the page is stuck loading, the tab is hidden, or a JavaScript dialog G9BrowserAgent did not see is open (browser_dialog handles one).',
+            `"${tool}" did not respond within ${secs}s. G9BrowserAgent asked the extension to stop it and recover the tab, but the ` +
+              'extension has not answered, so the call may STILL be running there: take a browser_snapshot before sending this tab ' +
+              "more input. This tab's queue is free again. If the extension keeps not answering, its service worker is stuck — " +
+              'reload the extension (or restart the browser).',
           ));
-        }, STOP_GRACE_MS);
+        }, RELAY_STOP_GRACE_MS);
         entry.graceTimer.unref?.();
       }, ms);
       timer.unref?.();
@@ -379,7 +453,7 @@ export class Router {
         agentId,
         client: engineClient,
       });
-      const sent = engineClient.send({ type: 'call', id, tool, args: outArgs, caller });
+      const sent = engineClient.send({ type: 'call', id, tool, args: outArgs, caller: caller ? this.#withDeadline(caller, ms) : caller });
       if (!sent) {
         clearTimeout(timer);
         this.pending.delete(id);
@@ -398,8 +472,35 @@ export class Router {
     if (msg.ok) entry.resolve(msg.result);
     else {
       const text = String(msg.error ?? 'The extension reported an error with no message.');
-      entry.reject(withDelivery(new Error(entry.overdue != null ? overdueMessage(entry.tool, entry.overdue, text) : text), msg));
+      const error = withDelivery(new Error(entry.overdue != null ? overdueMessage(entry.tool, entry.overdue, text) : text), msg);
+      if (msg.recovered) error.recovered = msg.recovered;
+      entry.reject(error);
     }
+  }
+
+  /**
+   * (3.4) Every call on this tab that is running or waiting for an answer ends NOW with `reason`:
+   * relayed ones are cancelled in the extension too (its watchdog recovers the tab), launched-engine
+   * ones are aborted. Their queue turn ends with them, so whatever comes next on the tab — a close,
+   * a focus — never waits behind a stuck call. → how many were ended.
+   */
+  abandonCallsOn(handle, reason) {
+    let n = 0;
+    for (const [id, entry] of this.pending) {
+      if (entry.handle !== handle) continue;
+      clearTimeout(entry.timer);
+      clearTimeout(entry.graceTimer);
+      this.pending.delete(id);
+      try { entry.client?.send?.({ type: 'cancel', id }); } catch { /* going */ }
+      entry.reject(new Error(reason));
+      n += 1;
+    }
+    for (const entry of [...this.local.values()]) {
+      if (entry.handle !== handle) continue;
+      entry.reject(new Error(reason));
+      n += 1;
+    }
+    return n;
   }
 
   /**
@@ -738,7 +839,7 @@ export class Router {
       if (tool === 'browser_recording' && (args.action === 'replay' || args.action === 'calibrate') && args.id) {
         await this.#ensureInLaunchedStore(args.id, caller);
       }
-      return this.#local(target.engineId, handle, tool, (ctl) => this.engines.runTool(tool, forward, caller, {
+      return this.#local(target.engineId, handle, tool, (ctl) => this.engines.runTool(tool, forward, this.#withDeadline(caller, timeoutMs), {
         ...ctl,
         // Checked again when the call gets its maxParallel slot, which can be long after its turn.
         precheck: () => this.#atTurn(client, handle, { mutating: !readOnly }),
@@ -747,11 +848,75 @@ export class Router {
 
     // Reads are never queued; browser_dialog is the call that unblocks a queue
     // stuck behind a dialog, so it must not wait in that queue itself.
-    const result = readOnly || tool === 'browser_dialog' ? await execute() : await this.registry.enqueue(handle, execute);
+    let result = readOnly || tool === 'browser_dialog' ? await execute() : await this.registry.enqueue(handle, execute);
+    result = await this.#finishFiles(tool, args, result, target.kind);
     if (forcedHere && result && typeof result === 'object' && !Array.isArray(result)) {
       // The replay opened this tab itself; say which, so the agent can read it,
       // act on it or close it rather than leave one tab behind per replay.
       return { ...result, ranOn: { tabId: handle, engine: this.registry.engineOf(handle), openedForThisReplay: true } };
+    }
+    return result;
+  }
+
+  /**
+   * (3.4) What the daemon adds to a result because it runs on the browser's machine:
+   * - `browser_network fetch`: the body's sha256; with `savePath` the file is written there and the
+   *   bytes are not returned; else a bounded body (text for textual types, base64 otherwise).
+   * - `browser_screenshot savePath`: the image is written there; the result carries its path, size
+   *   and sha256 — and, with `thumbnail:true`, a small JPEG of the viewport instead of the image, for
+   *   clients that drop inline images or should not pay for a full one.
+   * - Engine 1 downloads (`wait_download`, `downloads`): the browser knows only a path; the daemon
+   *   reads the file there and adds its size, sha256 and sniffed type when it can.
+   */
+  async #finishFiles(tool, args, result, engineKind) {
+    if (!result || typeof result !== 'object' || Array.isArray(result)) return result;
+    const home = this.info?.()?.home ?? null;
+    if (tool === 'browser_network' && args.action === 'fetch' && typeof result.bytesBase64 === 'string') {
+      const { bytesBase64, maxBytes = 256 * 1024, savePath, headers = {}, ...rest } = result;
+      const bytes = Buffer.from(bytesBase64, 'base64');
+      const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+      const shown = Object.fromEntries(Object.entries(headers ?? {}).filter(([k]) => FETCH_HEADERS.includes(String(k).toLowerCase())));
+      const out = { ...rest, size: bytes.length, sha256, headers: shown };
+      if (savePath) {
+        const written = await writeFileAtomic(resolveSavePath(savePath, home), bytes);
+        return { ...out, saved: true, path: written.path };
+      }
+      const limit = Math.max(0, Number(maxBytes) || 0);
+      const part = bytes.subarray(0, limit);
+      if (isTextual(rest.contentType)) out.text = part.toString('utf8');
+      else if (part.length) out.bodyBase64 = part.toString('base64');
+      if (bytes.length > limit) {
+        out.truncated = true;
+        out.note = `The body is ${bytes.length} bytes; ${part.length} are shown (maxBytes). Pass savePath to keep the whole file on the browser's machine.`;
+      }
+      return out;
+    }
+    if (tool === 'browser_screenshot' && args.savePath && typeof result.dataBase64 === 'string') {
+      const { dataBase64, thumbnail, ...rest } = result;
+      const ext = result.format === 'png' ? '.png' : '.jpg';
+      let file = resolveSavePath(args.savePath, home);
+      if (!path.extname(file)) file += ext;
+      const written = await writeFileAtomic(file, Buffer.from(dataBase64, 'base64'));
+      return {
+        ...rest,
+        saved: true, path: written.path, bytes: written.size, sha256: written.sha256,
+        ...(thumbnail?.dataBase64 ? {
+          thumbnail: { width: thumbnail.width, height: thumbnail.height, format: thumbnail.format ?? 'jpeg', of: thumbnail.via === 'scaled' ? 'the capture' : 'viewport' },
+          dataBase64: thumbnail.dataBase64, format: thumbnail.format ?? 'jpeg', imageFormat: result.format,
+        } : {}),
+      };
+    }
+    if (tool === 'browser_network' && engineKind === 'extension' && (args.action === 'wait_download' || args.action === 'downloads')) {
+      const addDisk = async (item) => {
+        if (!item || item.state !== 'complete' || item.file?.sha256) return item;
+        const where = item.path ?? item.filename;
+        if (!where || !path.isAbsolute(String(where))) return item;
+        const info = await fileInfo(String(where)).catch(() => null);
+        if (!info?.exists) return { ...item, path: String(where), diskNote: 'The daemon could not read the file at this path (moved, still being written, or on another machine).' };
+        return { ...item, path: String(where), sha256: info.sha256, file: { ...(item.file ?? {}), ...info, source: 'disk (daemon)' } };
+      };
+      if (args.action === 'wait_download') return addDisk(result);
+      if (Array.isArray(result.downloads)) return { ...result, downloads: await Promise.all(result.downloads.map(addDisk)) };
     }
     return result;
   }
@@ -988,31 +1153,43 @@ export class Router {
 
       case 'open': {
         if (!args.url) throw new Error('action:"open" needs a url.');
+        // (3.4) `session` names the new tab as `name` does. An agent that opened with session:"n-bs" and
+        // addressed the tab by that name on its next call was told "No session named n-bs": open only
+        // read `name`, so the tab was never named (field report, a panel gate).
+        const name = args.name ?? args.session ?? null;
         const opened = await this.#open(client, args.url, args);
-        if (args.name) this.registry.nameSession(String(args.name), opened.tabId);
-        return { ...opened, ...(args.name ? { session: String(args.name) } : {}), current: true };
+        if (name) this.registry.nameSession(String(name), opened.tabId);
+        const awake = args.keepAwake === true ? await this.#keepAwake(client, opened.tabId) : null;
+        return { ...opened, ...(name ? { session: String(name) } : {}), current: true, ...(awake ? { awake } : {}) };
       }
 
       case 'close': {
+        // (3.4) Close is how anyone gets out of a stuck tab, so it never waits in the tab's queue:
+        // the calls still running there end now (and are cancelled in their engine, whose watchdog
+        // frees the debugger session), then the tab is closed under its own short deadline.
         const handle = await this.#explicit(client, args, 'close');
         this.registry.ensureOwnership(handle, client.id);
         const target = this.#targetOf(handle);
-        await this.registry.enqueue(handle, () => (this.#atTurn(client, handle), target.kind === 'extension'
-          ? this.relay(target.client, 'browser_tabs', { action: 'close', tabId: handle }, caller, { handle })
-          : this.#local(target.engineId, handle, 'browser_tabs', () => this.engines.runTool('browser_tabs', { action: 'close', tabId: handle }, caller), this.timeoutMs)));
+        const ended = this.abandonCallsOn(handle, `Tab ${handle} was closed by ${this.registry.describe(client.id)} while this call was running on it.`);
+        const result = await this.#tabControl(client, target, handle, 'close', caller);
         this.registry.dropHandle(handle, 'closed by an agent');
-        return { closed: handle };
+        return { closed: handle, ...(ended ? { endedCalls: ended } : {}), ...(result?.abandoned ? { abandoned: result.abandoned } : {}) };
       }
 
       case 'focus': {
+        // (3.4) Bringing a tab to the front is not page work: it does not wait behind a stuck call.
         const handle = await this.#explicit(client, args, 'focus');
         this.registry.ensureOwnership(handle, client.id);
         const target = this.#targetOf(handle);
-        const result = await this.registry.enqueue(handle, () => (this.#atTurn(client, handle), target.kind === 'extension'
-          ? this.relay(target.client, 'browser_tabs', { action: 'focus', tabId: handle }, caller, { handle })
-          : this.#local(target.engineId, handle, 'browser_tabs', () => this.engines.runTool('browser_tabs', { action: 'focus', tabId: handle }, caller), this.timeoutMs)));
+        const result = await this.#tabControl(client, target, handle, 'focus', caller);
         this.registry.setCurrent(client.id, handle);
         return { ...(result ?? {}), focused: handle };
+      }
+
+      case 'keep_awake': {
+        // (3.4) Keep a tab working while it is in the background (lib/cdp.js keepAwake).
+        const handle = await this.#resolve(client, args);
+        return this.#pageTool(client, 'browser_tabs', { action: 'keep_awake', tabId: handle, on: args.on !== false });
       }
 
       case 'attach':
@@ -1115,6 +1292,26 @@ export class Router {
     }
   }
 
+  /** (3.4) keepAwake on a tab just opened; a failure is reported in the result, never thrown. */
+  async #keepAwake(client, handle) {
+    try {
+      return await this.#pageTool(client, 'browser_tabs', { action: 'keep_awake', tabId: handle, on: true });
+    } catch (err) {
+      return { keepAwake: false, problem: String(err?.message ?? err) };
+    }
+  }
+
+  /** (3.4) close/focus straight to the tab's engine, outside its queue, under TAB_CONTROL_TIMEOUT_MS. */
+  #tabControl(client, target, handle, action, caller) {
+    this.#atTurn(client, handle);
+    if (target.kind === 'extension') {
+      const live = this.#extensionClient(target.engineId);
+      if (!live) throw new Error('The browser extension disconnected. Ask the user to check that the browser is still open.');
+      return this.relay(live, 'browser_tabs', { action, tabId: handle }, caller, { handle: null, timeoutMs: TAB_CONTROL_TIMEOUT_MS });
+    }
+    return this.#local(target.engineId, null, 'browser_tabs', () => this.engines.runTool('browser_tabs', { action, tabId: handle }, caller), TAB_CONTROL_TIMEOUT_MS);
+  }
+
   /** A tab named by tabId or session — never an implicit default, for actions that destroy or move. */
   async #explicit(client, args, action) {
     if (args.tabId == null && !args.session) {
@@ -1211,7 +1408,8 @@ export class Router {
       const opened = await this.#open(client, args.url, args);
       if (previous != null && !args.focus) this.registry.setCurrent(client.id, previous);
       this.registry.nameSession(name, opened.tabId);
-      return { session: name, ...opened };
+      const awake = args.keepAwake === true ? await this.#keepAwake(client, opened.tabId) : null;
+      return { session: name, ...opened, ...(awake ? { awake } : {}) };
     }
     if (args.tabId == null) throw new Error('action:"session" needs a url (to open a tab) or a tabId (to name one already open).');
     const handle = await this.#resolve(client, { tabId: args.tabId });

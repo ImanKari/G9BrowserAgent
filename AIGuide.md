@@ -2,7 +2,13 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v3.2.0, 2026-09-26. 3.2.0 adds the live view (a headless tab watched from the person's
+**Status:** v3.4.0, 2026-10-07. 3.4.0 makes long, unattended work reliable and cheap (§9, the
+3.4.0 entry): every step before a CDP command is bounded, a watchdog recovers a tab whose call is
+stuck, close never waits behind a stuck call, and the state chain cannot hold a reply. A stateless
+MCP client keeps its tabs and session names across sessions. Snapshots take scopes, filters and diffs
+(stable refs). Waits take predicates, and evaluate jobs run in the page for hours. Files are
+fetched and saved on the browser's machine, and a batch runs many steps in one call. Still 15 tools;
+EXT-04 is done. 3.2.0 adds the live view (a headless tab watched from the person's
 browser, opened by an agent if it wishes), flow libraries per project and site with the approvals and
 baselines that travel with the flows (§6.10), and puts G9BrowserAgent on a server: MCP over HTTP with a bearer
 token (`mcp/http.mjs`) and `docker/`, a browser node image (a web desktop you watch, its Chromium
@@ -310,9 +316,9 @@ and R4, and [Rules for changing this codebase](#rules-for-changing-this-codebase
 
 ```
 G9BrowserAgent/
-├── package.json                  the ONE version (3.2.0) for the whole product; no dependencies; node >=22
+├── package.json                  the ONE version (3.4.0) for the whole product; no dependencies; node >=22
 ├── extension/                    Engine 1 (MV3), and the HOME of the shared tool code
-│   ├── manifest.json             3.2.0; minimum_chrome_version 125; permissions in §5
+│   ├── manifest.json             3.4.0; minimum_chrome_version 125; permissions in §5
 │   ├── sw.js                     service worker: lifecycle, transport to g9d, panel commands; calls tools/index.js
 │   ├── lib/
 │   │   ├── platform.js           THE SEAM: exports platform-extension or platform-cdp (rule R2)
@@ -337,13 +343,14 @@ G9BrowserAgent/
 │   │   └── transport.js          WebSocket client to g9d (extension only)
 │   ├── humanize/                 PURE human-input library (no I/O, no timers, seeded): prng, profiles, profile,
 │   │                             plan, mouse, wheel, keys, calibrate, index
-│   ├── tools/                    18 modules behind the 15 tools; NO chrome.* / node: (rule R2)
+│   ├── tools/                    21 modules behind the 15 tools; NO chrome.* / node: (rule R2)
 │   │   ├── index.js              TOOLS table + runTool pipeline + status() — shared by both engines
 │   │   ├── events.js             CDP event fan-out (console, network, recorder, dialogs, frames)
 │   │   ├── tabs.js               target resolution, listTabs, attach, popout, handoffExport, ensureFront
 │   │   ├── snapshot.js  interact.js  inspect.js  observe.js  navigate.js  capture.js  diagnose.js
 │   │   ├── emulate.js   record.js    replay.js   qa.js       netpin.js   netrules.js  downloads.js
-│   │   └── issues.js
+│   │   ├── issues.js
+│   │   └── jobs.js  fetch.js  batch.js   (3.4) evaluate jobs, fetch as the page, step batches
 │   └── panel/                    side panel (v3): Session (daemon, agents + their tabs, current tab and capture,
 │                                 auto-attach, keep working elsewhere, input level, Stop, activity), Automation
 │                                 (site → suite → flow), Issues (site → status), About; welcome.html/.js;
@@ -419,7 +426,11 @@ Every non-obvious decision traces back to one of these. Do not "simplify" past t
   (`sw.js`, and the `chrome.downloads` listeners in `platform-extension.js`).
 - State mutations go through one promise chain, `state.js serialize()`; `observe.js`, `store.js` and
   `downloads.js` use it too. A function inside `serialize()` must never call another serialized
-  function, or it deadlocks (v1.0.5, v1.0.7).
+  function, or it deadlocks (v1.0.5, v1.0.7). (3.4) No step holds the chain longer than
+  `WRITE_STEP_MS` (5 s): past it the next write runs while the slow one finishes on its own (its caller
+  still gets the real outcome). A stalled storage call used to stop every later write and every reply
+  waiting on one — a browser node's extension answered nothing until its container restarted. The
+  activity line of a tool call is written after its reply, never before it.
 - **A restart must not cost agents their tabs (D-c).** The extension sends a random `instanceId`
   (generated once, `storage.local`) and a `loadId` (`storage.session`: same across worker restarts, new
   after an extension reload or browser restart) plus its open tabs in every hello. The daemon parks a
@@ -446,6 +457,12 @@ own, from another page (numbering and history start over when the URL changes) o
 is refused with "take a fresh snapshot". Retention is per caller because reads are never queued: a
 second agent snapshotting every 100 ms used to evict the working agent's refs mid-action (live round 4).
 Replay's reserved refs live apart (`withPrivateRefs`).
+
+**Refs are stable per element (3.4).** A snapshot hands an element the ref a kept snapshot of the page
+already gave it (`refs.js knownRefs`, keyed by frame session + backend node id); new elements get new
+numbers, and a number is still never reused for another element. So a ref lives as long as its element
+does (it used to retire after four snapshots of your own), and a `diff:true` snapshot can leave out
+everything unchanged: the agent's refs for those elements stay valid.
 
 ### 4.3 Synthetic events fail on real applications — and machine-timed ones are a tell
 
@@ -538,6 +555,10 @@ windows, they report.
 `browser_dialog`, `browser_recording`, `browser_issue`. Each takes an `action`/`what` discriminator;
 new capabilities become actions, not tools. `setup/selftest.mjs` asserts 15 (`tools/list`, and through
 the v1 forwarder). Token counts depend on the schemas, model and client; no benchmark is maintained.
+3.4 kept the count at 15: snapshot options, `inspect find`, predicate/ref waits, evaluate jobs,
+`network fetch`, screenshot `savePath`, `tabs keep_awake` and `recording batch` are all arguments or
+actions of existing tools. Results are compact by default (`mcp/mcp.js`: JSON without indentation, a
+`tree`/`text` as a plain-text block of its own).
 
 ### 4.5 The person must stay in charge: Stop, activity, ownership
 
@@ -680,6 +701,24 @@ press/release drift and no typos in password fields.
 - **Identity across reconnects (D-c)**, as in §4.1. A hello that races the old socket supersedes it;
   an extension closed as "superseded" does not reconnect by itself (two browsers sharing a copied
   profile would otherwise displace each other in turn).
+- **(3.4) Agent identity across connections.** A stateless MCP client (a panel gate) may open a new
+  MCP session — a new agent-N — per request; its tabs stayed with the previous agent-N, refused as
+  "owned by agent-N" for 30 idle minutes. An agent hello may carry `client.identity`
+  (`mcp/http.mjs`: the X-G9-Agent header, else the MCP client's name; the stdio shim: `G9_AGENT_ID`
+  only, since two editors may share a client name): the new connection takes over the older
+  connection's claims, leases and current tab, or, when that one is gone, what it owned and nobody
+  claimed since (`registry.adoptIdentity`, remembered 10 min; a departed owner never blocks anyone).
+  The HTTP endpoint ends the idle older sessions of that identity at once. Session names were already
+  the daemon's, not an agent's; the field report ("No session named n-bs" right after `open
+  session:"n-bs"`) was `open` reading only `name`.
+- **(3.4) close and focus never queue.** `browser_tabs close` first ends every call running or waiting
+  on that tab (cancelled in its engine too), then closes it under its own 20 s; focus likewise goes
+  straight to the engine. Closing is how anyone gets out of a stuck tab.
+- **(3.4) The watchdog.** A cancelled call still running 1.5 s later has its tab recovered
+  (`cdp.recoverTab`): every CDP command waiting there is rejected, so the call ends with
+  `[recovered] …`; the extension detaches and re-attaches the debugger (a launched engine re-enables
+  its domains). The extension answers a cancelled call within 5 s whatever happens; the daemon gives a
+  relayed call 8 s after the cancel before it frees the queue.
 
 ### 4.11 Engine 2 holds every new target until it is prepared
 
@@ -778,7 +817,14 @@ not be broken.
   `sendOnLiveSession` for per-frame acks. v1's functions kept their signatures; v2 added exports
   (`timeoutFor`, `COMMAND_TIMEOUT_MS`, `SLOW_COMMANDS`, `NAVIGATION_COMMANDS`, `timeoutMessage`, `asPerson`,
   `attachHeld`, `forgetTab`, `applyStealthLevel`, `runtimeEnabledTabs`), and `sendOnLiveSession` takes a
-  `sessionId` (ARCHITECTURE_V2 §4.1b).
+  `sessionId` (ARCHITECTURE_V2 §4.1b). (3.4) Every step before a command is bounded — the debugger
+  attach 10 s, each domain enable 5 s (sent together; one that does not answer is enabled later, when a
+  tool needs it), `Target.setAutoAttach` 5 s, the state write 5 s — and one attach per tab runs at a
+  time. `CSS` left the attach set (`inspect styles` enables it). `pendingCommands`, `recoverTab`
+  (the watchdog, §4.10), `keepAwake` (focus emulation + `Page.setWebLifecycleState active`, applied
+  again after any re-attach), `evaluate(…, { timeoutMs })`, `evaluateUserExpression` (the one named
+  main-world helper for an agent's or a flow's own expression). `platform-extension` honours
+  `timeoutMs` on attach, detach and sendCommand (it used to ignore it).
 - **`lib/state.js`** — state over `platform.storage` (no modes: `currentTabId`, `attachedTabs`,
   `sessions`, `inputMode`, `autoAttach`, `dialogs`, daemon link state, activity), `serialize()`,
   `migrateLegacySettings()` (removes v1 `settings.mode` once), `getAbout/setAbout`.
@@ -830,11 +876,20 @@ not be broken.
 - **`tools/snapshot.js`** — accessibility tree, pruned (interactive roles always kept, unnamed
   structure dropped, 900 emitted lines); `a11y+text` extracts text in G9BrowserAgent's world; a tree with only
   its root while the body has elements is asked for again (a CfT flake mitigation). Every regex escape
-  in injected code is doubled (self-test section 17).
+  in injected code is doubled (self-test section 17). (3.4) `scope` (a ref, or a CSS selector — the
+  element's AX node, else the topmost AX nodes inside it), `roles`/`name` (regex) filters and
+  `interactiveOnly` (flat lines; every filtered match with a DOM node gets a ref), `diff:true` (against
+  the caller's previous diff:true snapshot of the page with the same options, kept in `snapdiff:<tab>`
+  for 8 callers, cleared on navigation: `+` added, `~` changed with what it was, `-` removed), and
+  `find()` behind `browser_inspect what:"find"`.
 - **`tools/navigate.js`** — goto/reload/back/forward/wait with real conditions; at human/stealth a
   post-load human idle (600–1500 ms, `humanIdleMs`). `timeoutMs` is the whole goto's deadline and
   `Page.navigate` gets it (at least 20 s): v2.0 cut `Page.navigate` at a fixed 20 s and called a slow
-  server "stuck" (round-3 fix; measured: a 25 s time-to-first-byte now returns after 26 s).
+  server "stuck" (round-3 fix; measured: a 25 s time-to-first-byte now returns after 26 s). (3.4)
+  `wait` also takes `predicate` (a main-world expression, polled until truthy; the final value comes
+  back) and `ref`+`state` (visible/hidden/enabled/disabled/checked/unchecked/gone/present, in G9's
+  world), up to 2 h, polling every 250 ms, then 1 s after 10 s, 2 s after 5 min; a cancelled call stops
+  the wait at its next look.
 - **`tools/capture.js`** — screenshots; at human/stealth an element is brought in with the wheel and
   clipped inside the viewport (no `captureBeyondViewport` resize, no `scrollIntoView`); full page
   refused at stealth when taller than the viewport, taken with a `pageSaw` note at human; results carry
@@ -848,7 +903,21 @@ not be broken.
 - **`tools/downloads.js`** — Engine 1 via `chrome.downloads` (attribution `exact`/`probable`/`unknown`,
   file facts = the browser's record, no hash); Engine 2 via the browser session with file facts from
   disk (size, sha256, magic bytes, sniffed type, `source:'disk'`). `verified:false` with the reason
-  when nothing could be checked; `watch_downloads` starts a fresh list.
+  when nothing could be checked; `watch_downloads` starts a fresh list. (3.4) For Engine 1 the daemon
+  reads the file at the browser's final path and adds `path`, `sha256` and `file` (`source:'disk
+  (daemon)'`) when it can.
+- **`tools/jobs.js`** (3.4) — `evaluate job:true`: the job lives in the PAGE (`window.__g9jobs[id]`:
+  state, progress, bounded value), so it survives its caller, a new MCP session and a worker restart,
+  not a navigation (`state:"lost"`). `__g9job.progress(fraction, note)`, `__g9job.signal` (aborted by
+  `job_cancel`). Status values ≤ 256 KiB of JSON, 20 finished jobs per page; visible to the page (not
+  for stealth runs).
+- **`tools/fetch.js`** (3.4) — `network fetch` from G9's isolated world (universal access: the
+  browser's cookies for the URL, no CORS refusal for the read), ≤ 40 MiB; the bytes go to the daemon
+  (router `#finishFiles`), which hashes them and writes `savePath` or bounds the body.
+- **`tools/batch.js`** (3.4) — `recording batch`: up to 200 steps validated before any runs, run in
+  the engine (navigate, input by ref or role+name with `nth`, wait, evaluate, extract, `saveAs` →
+  `{{name}}`), a compact line per step, stop at the first failure with an excerpt (the same-role
+  elements when a role+name matched nothing, else the step's area or the page's controls).
 - **`tools/record.js`** — the recorder in world `g9` (script by `worldName`, binding by name and by
   context id), raw input samples for calibration (`input-samples.json`: key classes and timing, never
   text; nothing from password fields), a second start on a recording tab refused, `calibrateFromRecording`.
@@ -937,7 +1006,10 @@ into view first"). Model limits are in §8.
   what the daemon answers itself (`browser_status` overlay, `browser_engine`, `browser_tabs`
   list/open/claim/release/popout/handoff/sessions, store-level recording/issue actions across both
   stores); per-tool timeouts (`G9_TIMEOUT_MS`, default 120 s, as a floor raised per tool — replay 30
-  min, handoff 3 min, …; DAEMON_PROTOCOL §3); `deliveryFields`.
+  min, handoff 3 min, …; DAEMON_PROTOCOL §3); `deliveryFields`. (3.4) `caller.deadlineAt` on every call
+  it sends (a retrying tool budgets from it — screenshots, EXT-04); `abandonCallsOn(handle)` for close;
+  `#finishFiles` (fetch, screenshot `savePath`, Engine 1 download paths and hashes; relative paths under
+  `<G9_HOME>/files/`, written atomically); waits to 2 h, evaluate to 4 h.
 - **`handoff.js`** — cookie conversion (Chrome → CDP shapes; expired skipped), the one-shot storage
   seed script (world `g9`, top frame of that origin only), `NOT_TRANSFERRED` (in-memory state,
   IndexedDB, service workers). The result's `storageCheck` counts what actually holds after load.
@@ -981,12 +1053,16 @@ into view first"). Model limits are in §8.
   its own: one agent per session, with its own tabs, ownership and queue; DELETE, 30 idle minutes
   (`G9_MCP_IDLE_MINUTES`) or eviction at the 32-session limit (least recently used idle one) ends it.
   Security rules in §5. `G9_MCP_HTTP_HOST` (127.0.0.1), `G9_MCP_HTTP_PORT` (8931), `G9_MCP_TOKEN` or
-  `G9_MCP_TOKEN_FILE`, `G9_MCP_AGENT_CWD` (whose `g9.project.json` the sessions get).
+  `G9_MCP_TOKEN_FILE`, `G9_MCP_AGENT_CWD` (whose `g9.project.json` the sessions get). (3.4) Each
+  session's agent carries an identity (`X-G9-Agent`, else clientInfo.name; `G9_MCP_AGENT_IDENTITY`
+  name|header|off), and a new session ends the idle older ones of the same identity (§4.10).
 - **`mcp/mcp.js`** — hand-written MCP (`initialize`, `ping`, `tools/*`, `resources/*`; protocol
   versions 2025-06-18, 2025-03-26, 2024-11-05); tool failures are `isError:true` results, never
   JSON-RPC errors; `dataBase64` results become image blocks; remembers `clientInfo.name`. (3.2)
   `handle(msg)` answers one message and returns the response (or null for a notification), so the
-  HTTP transport uses the same routing as stdio.
+  HTTP transport uses the same routing as stdio. (3.4) Compact results by default (`G9_MCP_COMPACT=0`
+  restores indented JSON): no indentation, and a long `tree`/`text` as a `tree:`-headed plain-text block
+  after the JSON; `resultFromContent` puts it back for G9's own clients (the runner, the harnesses).
 - **`docker/`** (3.2) — see [docker/README.md](docker/README.md). Base: LinuxServer.io's Chromium on
   Selkies (Debian 13, s6-overlay, user `abc`, home `/config`), pinned by digest. Adds Node 22,
   `google-chrome-stable` (Engine 2's browser), Noto, emoji and Vazirmatn fonts, `/opt/g9` (package.json,
@@ -1288,12 +1364,12 @@ by being written down.
 | A headed Engine 2 window that is minimized renders about 1 frame per 1.5 s | matrix: click delivered after 28–29 s, screenshots 33–46 s | warned in `browser_status` and the capture note; the fix is not minimizing, or headless |
 | A popped-out Engine 1 window renders only while it is on screen | on Windows a window that another window covers completely is occluded, and Chromium stops rendering it unless the `WindowOcclusionEnabled` policy is off; a minimized one always stops. Reported from real use before 2.0.3: the side panel's Pop out put the new window behind the person's maximized window, and the tab seemed to vanish | **fixed for the panel in 2.0.3** (the window is created focused and in front, smaller than the source, and the person's window is not raised over it). An agent's popout stays unfocused so the person keeps the keyboard, and can still open behind another window: its result reports `visible:false` and the remedy. Checked against a stubbed browser only (`seam.test.mjs`); no harness puts a window on screen |
 | Locked session, another virtual desktop | not measured — both would disrupt the owner's workstation (the Engine 2 phase, P2, asked for a locked-session run) | open |
-| A call that reaches its deadline may still be running | live round 1; `daemon/router.js`. **Fixed 2026-09-22:** the call is cancelled (an `AbortSignal` into `lib/humanize.js perform` on Engine 2, a `{type:'cancel'}` frame to the extension) and the tab's queue is held until it stops, up to 5 s; only if it does not stop does the answer say it may still be running. `browser_interact`'s deadline also grows with the text it types (450 ms per character), which is what used to make a long humanized type hit the deadline and keep typing into the next call's target | mitigated; a call stuck outside `perform` (a wedged CDP command) can still overlap after the grace |
+| A call that reaches its deadline may still be running | live round 1; `daemon/router.js`. **Fixed 2026-09-22:** the call is cancelled (an `AbortSignal` into `lib/humanize.js perform` on Engine 2, a `{type:'cancel'}` frame to the extension) and the tab's queue is held until it stops, up to 5 s; only if it does not stop does the answer say it may still be running. `browser_interact`'s deadline also grows with the text it types (450 ms per character), which is what used to make a long humanized type hit the deadline and keep typing into the next call's target. **(3.4)** A field incident on a browser node — an evaluate on a background tab hung 120 s, then even `close` timed out until the container restarted — led to the watchdog (§4.10): a call stuck in a CDP command is ended 1.5 s after its cancel and its tab recovered (detach + re-attach); every step of an attach is bounded; close/focus bypass the queue; the state chain cannot hold a reply | mitigated; a call stuck OUTSIDE a CDP command (a storage call that never returns) is answered and abandoned, but if it later resumes it could still send commands |
 | A per-agent halt does not interrupt an Engine 2 call already running | only the global halt is mirrored into launched engines. **Fixed 2026-09-22:** `router.cancelFor(agentId)` aborts that agent's running calls and sends `cancel` for relayed ones | closed |
 | A witness listener may stay armed after Stop | `cdp.send` refuses every command while halted, so the release waited for the 10-minute safety net (live round 2) | mitigated: `interact.js cleanupSend` ends and releases G9BrowserAgent's own witness on the live session after Stop, bounded at 2 s; only if that fails does it stay armed until the safety net. It lives in G9BrowserAgent's world and reacts only to trusted events |
 | D-c limits | after an extension reload/browser restart a tab that navigated during the gap loses its handle (checked by URL on purpose); two browsers sharing a copied profile share one `instanceId` (the newer wins; the other waits for Reconnect); parked 10 min | by design |
 | Handoff moves cookies + local/session storage only; the page reloads | IndexedDB, service-worker state and in-memory state do not travel (listed in every result); a recording's screenshot-baseline attachments are not copied when it is relayed to the launched store | by design (v2.0) |
-| Engine 1 downloads | attribution inferred (`exact`/`probable`/`unknown`), no file hash or content | inherent to `chrome.downloads`; Engine 2 hashes from disk |
+| Engine 1 downloads | attribution inferred (`exact`/`probable`/`unknown`) | inherent to `chrome.downloads`. (3.4) The daemon hashes the file at the browser's final path when it can read it (same machine); Engine 2 hashes from disk |
 | Smaller known limits | a prerender activation gives the tab a new handle; `tabs.remove` on a page with a `beforeunload` prompt can re-register it under a new handle; netpin's HAR entry stays consumed when a fulfil fails and the request then goes to the live server (it is put back only when the request was cancelled); `verifiedContextFor` checks then uses a context in two commands (a cross-process navigation exactly between them is not excluded); `select` at stealth untested against a headed real popup | open, recorded |
 | Ref generations are not enforced | §4.2. **Fixed 2026-09-22 (EXT-03):** ref numbers are never reused on a page (a snapshot continues the page's numbering) and the last four snapshots each caller took stay resolvable (16 per page in all; per caller since live round 4), so a ref always names the element ITS snapshot showed — another agent's snapshot cannot renumber yours. A ref from an evicted snapshot, another page or a removed element is refused | closed |
 | Engine 1 downloads were attributed to a watched tab against contrary evidence | a download whose referrer origin belongs to no watched tab was claimed by the single watcher, and two tabs that had both requested the URL gave a false `exact`. **Fixed 2026-09-22:** `exact` needs exactly one watched tab that requested that URL since its own watch began; origin evidence (referrer, blob creator) is matched against the tab, its cross-origin frames and the tabs it opened, and evidence pointing elsewhere gives `unknown` instead of a time-based guess | closed |
@@ -1431,7 +1507,7 @@ any item's status.
 | EXT-01 | Repair input-delivery verification | **Partly done** — the defect is fixed and verified live. The witness is armed in G9BrowserAgent's isolated world before dispatch, hears trusted events only, is timed from the end of dispatch, and results carry `delivery`; `not-delivered`, `missed` and `partial` are errors (§4.3a) | The injected-checker-error and navigation-during-click cases are proven against the `node:vm` fake browser only; a frame removed mid-operation has no test; after Stop a witness can stay armed until its safety ceiling (mitigated, §8.2) |
 | EXT-02 | Replace unsupported download tracking | **Partly done** — `chrome.downloads` on Engine 1 (attribution `exact`/`probable`/`unknown`, never guessed), `Browser.setDownloadBehavior` plus a size/sha256/magic-bytes check from disk on Engine 2 | Live-verified on Engine 2 only; cancelled or interrupted transfers, repeated file names and concurrent unrelated downloads not exercised live |
 | EXT-03 | Enforce snapshot generation and frame identity | **Done for renumbering** (2026-09-22): ref numbers are never reused on a page and each caller's last four snapshots stay resolvable (§4.2) | Child-session node identity |
-| EXT-04 | Align screenshot retry and request deadlines | **Partly done** — deadlines follow the call (120 s floor), a stalled capture names its cause, a call that reaches its deadline is cancelled and its tab's queue held until it stops | Attempts are not budgeted from the time left in the call; a call stuck outside `perform` can still overlap after the grace; the relay-timeout text still names a JavaScript dialog as a possible cause; both-attempts-stall and late-reply cases untested |
+| EXT-04 | Align screenshot retry and request deadlines | **Done (3.4)** — deadlines follow the call (120 s floor), a stalled capture names its cause, a call that reaches its deadline is cancelled and its tab's queue held until it stops; the capture's two attempts are budgeted from the call's time left (`caller.deadlineAt`, `capture.js captureBudgets`), and when both stall the call ends with the cause before its deadline; a call stuck in a CDP command is ended by the watchdog (§4.10); the relay-timeout text names what happened, not a dialog; tests: both attempts stalling (seam), a late reply after the grace (daemon) | — (a call stuck outside any CDP command is the §8.2 residue, not a deadline-alignment item) |
 | EXT-05 | Complete cross-origin frame routing and lifecycle | **Partly done** — snapshot, typing and clicking inside an out-of-process frame verified live; frames listed with `crossProcess`; Engine 2 holds every child target until the persona reaches it | The operation-by-operation coverage matrix; the recorder does not arm cross-origin frames that attach after recording starts; element screenshots in frames, nested/transformed frames, frame navigation, removal and reinsertion |
 | EXT-06 | Extend closed Shadow DOM locator and recorder support | **Open** — locators and the recorder still rely on `element.shadowRoot` | Everything; no test covers a closed root |
 | EXT-07 | Establish background-operation support by experiment | **Partly done** — `setup/matrix.mjs` measured headless and off-screen/minimized headed windows on both engines; every cell agrees with the page (§8.2) | A locked session and another virtual desktop; separate key, drag and DOM-read columns; headed CfT after the round-3 fixes |
@@ -1444,7 +1520,7 @@ any item's status.
 | EXT-14 | Improve multi-client bridge routing and ownership | **Superseded** by the daemon (D5, §4.10) | A call that times out while its engine still runs it can overlap the next queued call on that tab (mitigated, §8.2) |
 | EXT-15 | Expose and improve Playwright export fidelity | **Open** — `export_test` generates Playwright code as in v1 | An export coverage report and executed-export fixtures |
 | EXT-16 | Make the regression suite portable and meaningful | **Partly done** — the fixture is in the repository and the suite passed from a copy outside the checkout; real-extension coverage through `setup/isolated-livetest.mjs` | A full clone plus `install.ps1` in another directory; no real-extension download case |
-| EXT-17 | Synchronize runtime guidance and capability reporting | **Partly done** — `mcp/tools.js` and the error texts describe measured behaviour and name the agent's remedy | The probed capability model (EXT-13); the relay-timeout text (EXT-04) |
+| EXT-17 | Synchronize runtime guidance and capability reporting | **Partly done** — `mcp/tools.js` and the error texts describe measured behaviour and name the agent's remedy; (3.4) the relay-timeout text no longer guesses a dialog, and `browser_status` reports a tab's slow CDP commands (`debugger`) | The probed capability model (EXT-13) |
 
 ### 8.6 Owner decisions still open
 
@@ -1813,6 +1889,180 @@ after every step of a forty-step flow doubles the run for evidence nobody reads.
 Entries below describe what was believed or tested at the time. Current capability claims and
 unresolved findings are in §§4, 7 and 8, which supersede historical assertions. Entries dated before
 2026-09-21 describe v1 (the bridge, the four control modes, the workspace allowlist).
+
+### 2026-10-07 — v3.4.0: long, unattended work — hang-proof, stateless-client-proof, and far fewer tokens
+
+**Why.** Agents now run long jobs unattended through G9BrowserAgent: social-media business tools, a
+music service, renders that take minutes inside the page. A field incident on a browser node showed
+how such a job dies. An evaluate on a background tab Engine 1 had just opened hung for 120 s. After
+that even `browser_tabs close` timed out, and only a container restart helped. A panel gate, whose
+every request is a fresh MCP session, was told "No session named n-bs" on the call right after it
+opened that session, and its own tabs were refused as "owned by agent-N". And every step re-read the
+whole page. One release fixes all three, in seven parts.
+
+**1. Hang-proofing.**
+- **Nothing before a command is unbounded any more** (`lib/cdp.js`): the debugger attach (10 s), each
+  domain enable (5 s, sent together), `Target.setAutoAttach` (5 s) and the state write (5 s). A domain
+  that did not answer is not marked enabled, and is asked for again when a tool needs it. One attach
+  per tab runs at a time. `platform-extension` now honours `timeoutMs` on attach, detach and
+  sendCommand; it used to ignore it.
+- **CSS left the attach set.** No capture needs it, and it is the enable most likely to block on a
+  background page; `inspect styles` enables it when used. Engine 2's list (`engine/stealth.js`) lost it
+  too.
+- **The watchdog** (§4.10, DAEMON_PROTOCOL §3). A cancelled call still running 1.5 s later has its tab
+  recovered (`recoverTab`): every CDP command waiting there is abandoned, so the call ends at once with
+  `[recovered] …`. In the extension the debugger is then detached and attached again; a launched
+  engine re-enables its domains. The extension answers a cancelled call within 5 s whatever happens,
+  and the daemon waits 8 s for that answer before it frees the tab's queue anyway. `browser_status`
+  shows a tab's slow CDP commands under `debugger`.
+- **close and focus bypass the tab's queue.** Close ends every call on the tab first (cancelled in
+  its engine too) and abandons stuck CDP commands in the engine, so it works while a call is stuck.
+- **The state chain cannot hold a reply.** A step longer than `WRITE_STEP_MS` (5 s) no longer blocks
+  the next one. The activity line is written after the reply.
+- **Background tabs.** Reads, evaluate and snapshots on hidden tabs are covered by tests, and
+  `keepAwake:true` on open, or `browser_tabs action:"keep_awake"`, keeps a tab working: focus
+  emulation plus `Page.setWebLifecycleState active`, applied again after any re-attach. Timer
+  throttling of a hidden page is a browser switch, not a command, and the result says so. Engine 2
+  already launches with `--disable-background-timer-throttling`; Engine 1 relies on the
+  `IntensiveWakeUpThrottlingEnabled=0` policy.
+- **Found by the tests:** a launched engine's recovery returned early from its re-attach, because the
+  tab was still listed as attached. Its domains and keep-awake were therefore never applied again. It
+  now forgets the attachment on both engines.
+
+**2. Stateless clients.**
+- **Session names.** The daemon's session names were never per agent. The report came from `open`
+  reading only `name`, so `open session:"n-bs"` never named the tab. `open` now takes `session` too.
+- **Agent identity.** An agent hello may carry `client.identity`. Over HTTP that is the `X-G9-Agent`
+  header, else the MCP client's name (`G9_MCP_AGENT_IDENTITY` name|header|off). The stdio shim sends
+  only `G9_AGENT_ID`, because two editors on one machine may share a client name.
+- **Takeover.** A new connection with an identity takes over the claims, leases and current tab of
+  the older connection with the same identity. If that connection is gone, it takes back what it
+  owned and nobody has claimed since (remembered 10 min; a departed owner never blocks anyone). The
+  HTTP endpoint ends the idle older sessions of that identity at once, which releases their claims
+  instead of after 30 idle minutes.
+
+**3. Token economy.**
+- **Snapshot options.** `browser_snapshot` takes `scope` (a ref or a CSS selector), `roles`/`name`
+  (regex) filters, `interactiveOnly` and `includeText:false`, with `maxNodes` as before.
+- **Diff.** `diff:true` returns only `+` added, `~` changed (with what it was) and `-` removed nodes,
+  against the caller's previous diff:true snapshot of the page with the same options.
+- **Stable refs** (§4.2). An element keeps its ref across snapshots of a page.
+- **find.** `browser_inspect what:"find"` (a role and/or a name regex) returns just the matching lines
+  with refs.
+- **Compact results** (`mcp/mcp.js`, default on, `G9_MCP_COMPACT=0` restores the old shape). JSON
+  carries no indentation, and a `tree` or long `text` comes as a plain-text block of its own instead of
+  an escaped string. `resultFromContent` reverses this for the runner and the harnesses.
+
+**4. Waiting and jobs.**
+- **Waits.** `browser_navigate wait` takes a `predicate` (a page expression, polled until truthy; the
+  final value comes back) and `ref`+`state` (visible, hidden, enabled, disabled, checked, unchecked,
+  gone, present), up to 2 h. The engine polls every 250 ms, then every 1 s after 10 s and every 2 s
+  after 5 min.
+- **Evaluate.** `browser_console evaluate` takes `timeoutMs` up to 4 h.
+- **Jobs.** `job:true` answers at once with a jobId (`tools/jobs.js`). The job lives in the page
+  (`window.__g9jobs`), so it outlives the caller, its MCP session and a worker restart, but not a
+  navigation (`state:"lost"`). Page code reports progress with `__g9job.progress(fraction, note)`.
+  `job_status` (`waitMs` waits up to 10 min), `job_cancel` (aborts `__g9job.signal`) and `jobs` read
+  and manage it. Values are bounded at 256 KiB of JSON.
+
+**5. Files on the browser's machine** (the daemon runs there for both engines; router `#finishFiles`).
+- **fetch.** `browser_network fetch` runs from G9's isolated world, which has universal access: it
+  sends the browser's cookies for the URL and is not refused by CORS. The method, headers and body are
+  the caller's; the limit is 40 MiB. The daemon hashes the body and writes `savePath` (relative paths
+  go under `<G9_HOME>/files/`), or returns a body bounded by `maxBytes`.
+- **Screenshots.** `browser_screenshot savePath` writes the image and returns its path, size and
+  sha256. With `thumbnail:true` it also returns a small JPEG of the viewport, or a scaled copy of the
+  capture when there is no time for a second one.
+- **Engine 1 downloads** now report the final path and, when the daemon can read the file, its sha256.
+
+**6. Batch.**
+- **The action.** `browser_recording action:"batch"` (`tools/batch.js`) runs a list of steps in one
+  call: navigate; input by ref or role+name with `nth`; wait; evaluate; extract. Values saved with
+  `saveAs` feed `{{name}}` in later steps.
+- **Results.** The list is validated before anything runs. Each step gets one compact line, and the
+  batch stops at the first failure with an excerpt: the same-role elements when a role+name matched
+  nothing.
+- **FlowSpec.** FlowSpec gained `evaluate` and `extract` steps (flowspec, replay, outline, Playwright
+  export; runner/README.md). A FlowSpec `evaluate` runs through `cdp.evaluateUserExpression`, the one
+  named main-world helper the interaction suite's scan allows.
+
+**7. EXT-04 is done** (§8.5). The call's deadline travels with it (`caller.deadlineAt`), so the
+screenshot's two attempts are budgeted from the time left. When both stall, the call ends with the
+cause before its deadline. The relay-timeout text no longer guesses a dialog, and both the late-reply
+and both-attempts-stall cases are tested. **EXT-13 stays open**: its probed capability model and a
+measured worker restart were not part of this work.
+
+**Tests.**
+- **New:** daemon 112 (+12: identity, the session alias, close past a stuck call, the recovered relay,
+  files, the deadlines, compact results, a late reply); seam 23 (+7 through the real runtime, with a
+  `node:vm` main world for jobs); extension suite 111 (+4 Engine 1 hang tests, +7 FlowSpec
+  value steps); mcp-http 9 (+1).
+- **Changed:** one seam assertion — your own fifth snapshot no longer retires your first ref; it is
+  the same element's stable ref. One F7 test now waits for the activity line, which is written after
+  the reply.
+- **The new live suite** `setup/longwork-livetest.mjs` runs inside the Engine 1 harness:
+  `G9_TIMEOUT_MS=10000 G9_LIVE_SCRIPT=setup/longwork-livetest.mjs node setup/isolated-livetest.mjs`, or
+  `check.mjs --live`, which learned a per-check `env`.
+
+**Measured on the owner's workstation (2026-10-07), on headless Edge 154, Engine 1 = the real
+extension, Engine 2 = a launched headless browser:** `setup/longwork-livetest.mjs` **54 passed, 0 failed**.
+- **Background tab** (Engine 1: `visibilityState` "hidden"): evaluate answered in 35 ms, and a full
+  snapshot (125 refs) in 225 ms.
+- **Watchdog.** A command the page never answers was cut, and its tab recovered, 11.5 s into a call
+  with a 10 s deadline, on both engines. The tab then answered in 12 ms (Engine 1) and 3 ms (Engine 2).
+- **Close** returned in 23 ms (Engine 1) and 5 ms (Engine 2) while a call was stuck on the tab, and
+  ended that call.
+- **Snapshot bytes the agent receives**, on the same page (identical on both engines within 9 bytes):
+
+  | Variant | Bytes | Less than full |
+  |---|---|---|
+  | full | 14,609 | — |
+  | indented JSON (the pre-3.4 shape) | 15,396 | — |
+  | `includeText:false` | 11,751 | −20 % |
+  | `interactiveOnly` (the page has 125 links and buttons) | 11,419 | −22 % |
+  | `roles:["button"]` | 245 | −98 % |
+  | `scope:"form"` | 293 | −98 % |
+  | `find` "^Save$" | 146 | −99 % |
+  | `diff` after a change (+1 ~1 −1) | 453 | −97 % |
+  | `diff` with no change | 263 | −98 % |
+
+  Compact JSON alone saved 5 % here: the tree is most of the bytes.
+- **Predicate wait.** The render, ready after 3 s, was seen after 4.7 s (14 looks) on Engine 1 and
+  3.1 s (13 looks) on Engine 2, each in one call.
+- **Evaluate jobs of 185 s** finished in one tab on each engine (185.0 s, value returned). Progress
+  read while they ran: Engine 1 1 % → 7 % → 14 % → 60 % → 92 %; Engine 2 14 % → 17 % → 24 %.
+- **Fetch to file.** 3,135 bytes, with a sha256 equal to the file served, in an answer of 471 bytes.
+- **Screenshot to file.** Engine 1: 135 KB on disk, a 200 px PNG thumbnail scaled from the capture,
+  because a background tab's second capture did not fit the 10 s deadline; answer 39 KB. Engine 2:
+  187 KB on disk, a 320 px JPEG thumbnail; answer 6 KB.
+- **Batch.** Seven steps ran 5, then stopped at the failing 6th with the page's buttons as the
+  excerpt: 545 ms on Engine 1 and 281 ms on Engine 2, in a 759-byte answer. A value one step saved fed
+  a later step.
+- **MCP over HTTP.** A fresh session of the same client found "n-bs" (132 ms) and could act on it;
+  `owned` and `current` had moved to it, while another client was still refused. A job outlived the
+  session that started it.
+- **Not clean on the first try.** In one earlier run the first tab of a launched browser started at
+  that very moment, on a loaded machine, did not answer for about 15 s. The watchdog recovered it, as
+  designed. The suite now starts the launched engine before the jobs. Another earlier run lost a
+  thumbnail to the short deadline, which led to the time-budgeted thumbnail with its fallback.
+
+**Runs on 3.4.0 (2026-10-07).** `check.mjs --release --keep-going` passed 20 of 22 checks in 906 s:
+- **Unit:** 713 tests in 15 suites (desktop 201, daemon 112, panel 84, interaction 78, engine 56,
+  humanize 51, platform-cdp 34, world 26, seam 23, check 13, mcp-http 9, version 8, sites 7, docker 6,
+  runtime 5).
+- **Other offline checks:** self-test 136, extension suite 111, the panel render, links.
+- **Live:** Engine 1 live 212/0, and the long-work live suite 64/0 (counted with the harness's checks;
+  54 of them its own).
+- **The two failures:**
+  - The engine suite's D-a launch: Chrome 154 closed its pipe at start while four checks ran at once.
+    Alone, the suite passed, 56 with 1 skip.
+  - Engine 2 live 371/1. Its recording replay had been failing since 3.3.0: the recorder no longer
+    keeps the password, and the test gave no secret. The test now passes it, as the runner does, and
+    that section passed 41/0.
+- **Not rebuilt here:** the installers. The pipeline builds them and runs the update test.
+
+Version 3.4.0 in `package.json`, `extension/manifest.json`, `desktop/package.json` and
+`desktop/package-lock.json`.
 
 ### 2026-09-27 — v3.3.0: secrets, environments, requires, and an honest SKIPPED
 

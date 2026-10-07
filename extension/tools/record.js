@@ -932,6 +932,10 @@ export function summarize(step) {
     case 'drag': return `drag ${name} onto ${step.to?.fingerprint?.name ?? 'target'}`;
     case 'scroll': return `scroll to ${step.x},${step.y}`;
     case 'assert': return 'assert ' + step.assertion + (name ? ' on ' + name : '');
+    // (3.4) Value steps. The expression is code, often long, so the line names what it keeps instead.
+    case 'evaluate': return 'evaluate an expression' + (step.saveAs ? ` → {{${step.saveAs}}}` : '');
+    case 'extract': return `extract the text of ${name || (step.selector ? JSON.stringify(step.selector) : 'an element')}` +
+      (step.saveAs ? ` → {{${step.saveAs}}}` : '');
     default: return step.type;
   }
 }

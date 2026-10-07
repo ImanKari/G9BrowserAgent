@@ -486,9 +486,9 @@ test('find: resolveBrowser — kinds, auto without CfT, paths, and useful errors
 
 test('stealth: levels, domain sets (never Runtime in stealth), and the one stealth switch (decision D-a)', () => {
   assert.deepEqual(stealth.LEVELS, ['off', 'human', 'stealth']);
-  assert.deepEqual(stealth.autoEnableDomains('off'), ['Page', 'Runtime', 'Log', 'Network', 'DOM', 'CSS']);
-  assert.deepEqual(stealth.autoEnableDomains('human'), ['Page', 'Runtime', 'Log', 'Network', 'DOM', 'CSS']);
-  assert.deepEqual(stealth.autoEnableDomains('stealth'), ['Page', 'Log', 'Network', 'DOM', 'CSS']);
+  assert.deepEqual(stealth.autoEnableDomains('off'), ['Page', 'Runtime', 'Log', 'Network', 'DOM']);
+  assert.deepEqual(stealth.autoEnableDomains('human'), ['Page', 'Runtime', 'Log', 'Network', 'DOM']);
+  assert.deepEqual(stealth.autoEnableDomains('stealth'), ['Page', 'Log', 'Network', 'DOM']);
   assert.equal(stealth.isDomainAllowed('stealth', 'Runtime'), false);
   assert.equal(stealth.isDomainAllowed('human', 'Runtime'), true);
   const expected = { off: [], human: [], stealth: ['--disable-blink-features=AutomationControlled'] };

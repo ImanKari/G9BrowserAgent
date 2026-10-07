@@ -11,7 +11,7 @@
  */
 
 import { platform } from '../lib/platform.js';
-import { send } from '../lib/cdp.js';
+import { send, ensureDomain } from '../lib/cdp.js';
 import { resolveRef, sessionForNode } from '../lib/refs.js';
 import { inWorld, callInWorld } from '../lib/world.js';
 import * as frameSessions from '../lib/frames.js';
@@ -98,10 +98,13 @@ export async function styles(tabId, { ref, selector, properties, all = false, ur
   const backendNodeId = await nodeIdFor(tabId, { ref, selector, url });
   const opts = { sessionId: await sessionForNode(tabId, backendNodeId) };
   if (opts.sessionId) {
-    // attach() enables DOM and CSS on the page session only; a frame's own
-    // session needs them before it will hand out node ids and styles.
+    // attach() enables DOM on the page session only; a frame's own
+    // session needs DOM and CSS before it will hand out node ids and styles.
     await send(tabId, 'DOM.enable', {}, opts).catch(() => {});
     await send(tabId, 'CSS.enable', {}, opts).catch(() => {});
+  } else {
+    // (3.4) CSS is enabled here, when styles are asked for, not at every attach (lib/cdp.js).
+    await ensureDomain(tabId, 'CSS');
   }
   // Resolve once — pushNodesByBackendIdsToFrontend is not free, and calling it
   // twice in parallel can return different nodeIds for the same node.

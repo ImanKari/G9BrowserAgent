@@ -18,10 +18,16 @@
  *   rebinding rule) unless that origin is listed in G9_MCP_ALLOWED_ORIGINS. MCP clients send none.
  * - **One agent per MCP session**: `initialize` opens a daemon connection of its own (its own tabs,
  *   ownership and queue, named by clientInfo.name); DELETE or 30 idle minutes close it.
+ * - **(3.4) One identity across sessions.** A stateless client (a panel gate) may initialize a fresh
+ *   session for every request. Each session's agent says who it is — the `X-G9-Agent` header, else
+ *   clientInfo.name (G9_MCP_AGENT_IDENTITY: "name", the default; "header" — the header only; "off") —
+ *   and a new session of the same identity takes over the previous one's tabs and current tab
+ *   (daemon/registry.js adoptIdentity). The older sessions of that identity that are not in a call
+ *   are ended then, which releases their claims at once instead of after 30 idle minutes.
  * - Bodies over 64 MiB are refused; at most 32 sessions (the least recently used idle one goes).
  *
  * Environment: G9_MCP_HTTP_HOST (127.0.0.1), G9_MCP_HTTP_PORT (8931), G9_MCP_TOKEN or
- * G9_MCP_TOKEN_FILE, G9_MCP_ALLOWED_ORIGINS (comma list), G9_MCP_IDLE_MINUTES (30),
+ * G9_MCP_TOKEN_FILE, G9_MCP_ALLOWED_ORIGINS (comma list), G9_MCP_IDLE_MINUTES (30), G9_MCP_AGENT_IDENTITY,
  * G9_MCP_AGENT_CWD (the folder whose g9.project.json the sessions' agents get), and G9_PORT/G9_HOME
  * for the daemon, as the shim.
  *
@@ -68,15 +74,29 @@ export function isLoopback(host) {
  * @param {string[]} [o.allowedOrigins]
  * @param {number} [o.maxSessions]
  */
+/**
+ * (3.4) The identity a session's agent carries: the X-G9-Agent header, else (mode "name") the MCP
+ * client's name; null with mode "off", or when there is neither.
+ */
+export function identityFor({ header = null, clientName = null, mode = 'name' } = {}) {
+  if (mode === 'off') return null;
+  const h = typeof header === 'string' ? header.trim().slice(0, 120) : '';
+  if (h) return h;
+  if (mode === 'header') return null;
+  const n = typeof clientName === 'string' ? clientName.trim().slice(0, 120) : '';
+  return n || null;
+}
+
 export function createGateway({
   token = '',
-  makeLink = ({ name }) => new DaemonLink({ name, cwd: process.env.G9_MCP_AGENT_CWD || process.cwd() }),
+  makeLink = ({ name }) => new DaemonLink({ name, cwd: process.env.G9_MCP_AGENT_CWD || process.cwd(), identity: null }),
   idleMs = 30 * 60_000,
   allowedOrigins = [],
   maxSessions = MAX_SESSIONS,
+  identityMode = 'name',
   now = () => Date.now(),
 } = {}) {
-  const sessions = new Map(); // id → { link, server, lastUsed, inFlight }
+  const sessions = new Map(); // id → { link, server, lastUsed, inFlight, identity }
 
   // The reason is what the daemon logs beside "agent disconnected".
   const endSession = (id, reason = 'MCP session ended') => {
@@ -174,6 +194,7 @@ export function createGateway({
     if (!messages.length) return send(res, 400, rpcError(-32600, 'Invalid Request: empty batch.'));
 
     const isInit = messages.some((m) => m && typeof m === 'object' && m.method === 'initialize');
+    const agentHeader = req.headers['x-g9-agent'] ? String(req.headers['x-g9-agent']) : null;
     let id = sessionId ? String(sessionId) : null;
     let opened = false;
     if (isInit) {
@@ -195,6 +216,7 @@ export function createGateway({
       for (const m of messages) {
         const r = await s.server.handle(m);
         if (r) out.push(r);
+        if (opened && m?.method === 'initialize') adoptIdentity(id, s, agentHeader);
       }
       const headers = opened ? { 'Mcp-Session-Id': id } : {};
       if (!out.length) return send(res, 202, undefined, headers);
@@ -202,6 +224,20 @@ export function createGateway({
     } finally {
       s.inFlight--;
       s.lastUsed = now();
+    }
+  }
+
+  /**
+   * (3.4) Name the new session's agent and end the older sessions of the same identity that are not
+   * in a call: their agent's tabs pass to this one when it connects (the daemon remembers them).
+   */
+  function adoptIdentity(id, s, header) {
+    const identity = identityFor({ header, clientName: s.server.clientInfo?.name ?? null, mode: identityMode });
+    if (!identity) return;
+    s.identity = identity;
+    s.link.identity = identity;
+    for (const [other, o] of [...sessions]) {
+      if (other !== id && o.identity === identity && o.inFlight === 0) endSession(other, 'MCP session superseded (same agent)');
     }
   }
 
@@ -228,7 +264,8 @@ export async function main(env = process.env) {
   }
   const allowedOrigins = String(env.G9_MCP_ALLOWED_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   const idleMinutes = Number(env.G9_MCP_IDLE_MINUTES) > 0 ? Number(env.G9_MCP_IDLE_MINUTES) : 30;
-  const gw = createGateway({ token, allowedOrigins, idleMs: idleMinutes * 60_000 });
+  const identityMode = ['name', 'header', 'off'].includes(env.G9_MCP_AGENT_IDENTITY) ? env.G9_MCP_AGENT_IDENTITY : 'name';
+  const gw = createGateway({ token, allowedOrigins, idleMs: idleMinutes * 60_000, identityMode });
   const server = http.createServer((req, res) => {
     gw.handler(req, res).catch((err) => {
       log(`[g9-mcp-http] ${err?.stack ?? err}`);

@@ -137,6 +137,32 @@ export async function refNumbering(tabId, url) {
   return { next: () => `e${++c.n}` };
 }
 
+/** The key that names one element across snapshots: its frame session and its backend node id. */
+export function nodeKey(sessionId, backendNodeId) {
+  return `${sessionId ?? ''}:${backendNodeId}`;
+}
+
+/**
+ * (3.4) The refs this page's kept snapshots already gave elements: nodeKey → ref (newest first wins).
+ * A new snapshot hands an element the ref it already has instead of a new number — refs are STABLE
+ * per element while any kept snapshot of the page holds them. That is what makes a snapshot diff
+ * readable (an unchanged element keeps its ref, so it need not be repeated) and keeps an agent's refs
+ * to elements it no longer sees in a diff alive. Numbers are still never reused for ANOTHER element.
+ */
+export async function knownRefs(tabId, url) {
+  const out = new Map();
+  const table = await getRefs(tabId).catch(() => null);
+  if (!table || stripHash(table.url ?? '') !== stripHash(url ?? '')) return out;
+  for (const map of [table.map, ...(table.history ?? []).map((h) => h.map)]) {
+    for (const [ref, node] of Object.entries(map ?? {})) {
+      if (node?.backendNodeId == null) continue;
+      const key = nodeKey(node.sessionId ?? null, node.backendNodeId);
+      if (!out.has(key)) out.set(key, ref);
+    }
+  }
+  return out;
+}
+
 /** The node a ref names: the newest snapshot first, then the kept older ones, newest first. */
 function lookup(table, ref) {
   if (!table) return null;

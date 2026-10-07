@@ -3324,4 +3324,414 @@ await test('a harvested candidate is never mistaken for a flow', async () => {
   });
 });
 
+// ===========================================================================
+// (3.4) FlowSpec evaluate/extract — value steps: an expression in the page's
+// main world, an element's text in G9BrowserAgent's isolated world, `expect`
+// and `saveAs` → `{{name}}` in later steps. Everything below is this section's.
+// ===========================================================================
+
+/**
+ * A tiny page for real replays of value steps. The stub's CDP answers
+ * Runtime.evaluate by RUNNING the expression in one of two node:vm contexts
+ * that share one fake DOM: the main world (no contextId) and G9BrowserAgent's
+ * isolated world (contextId from Page.createIsolatedWorld). So world.js's guard,
+ * replay's page-side readers and the flow's own expressions all execute for
+ * real; only the DOM is a model.
+ */
+async function withValuePage(fn) {
+  const vm = await import('node:vm');
+  const world = await import('../extension/lib/world.js');
+  const element = (props) => ({ textContent: '', innerText: '', ...props });
+  const elements = new Map([
+    ['#total', element({ tagName: 'SPAN', innerText: '  42 items \n', textContent: '42 items' })],
+    ['#name', element({ tagName: 'INPUT', value: 'Ada' })],
+    ['#notes', element({ tagName: 'TEXTAREA', innerText: 'default text', value: 'typed text' })],
+    ['#empty', element({ tagName: 'DIV', innerText: '', textContent: '  only in the DOM  ' })],
+  ]);
+  const location = { href: 'https://shop.test/' };
+  const document = {
+    readyState: 'complete',
+    title: 'Shop',
+    querySelector(selector) {
+      if (/[[\]]{2}|^\s*$/.test(selector)) throw new SyntaxError(`'${selector}' is not a valid selector.`);
+      return elements.get(selector) ?? null;
+    },
+  };
+  const main = vm.createContext({ document, location, app: { slug: 'orders', count: 3, user: 'ada' } });
+  const isolated = vm.createContext({ document, location });
+  const log = [];
+  const toRemote = (value) => (value === undefined ? { type: 'undefined' } : { type: typeof value, value: JSON.parse(JSON.stringify(value)) });
+  const originalSend = chrome.debugger.sendCommand;
+  chrome.debugger.sendCommand = async (source, method, params = {}) => {
+    log.push({ method, params });
+    if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'F1', loaderId: 'L1', url: location.href } } };
+    if (method === 'Page.createIsolatedWorld') return { executionContextId: 4242 };
+    if (method === 'Page.navigate') {
+      location.href = params.url;
+      return { frameId: 'F1', loaderId: 'L2' };
+    }
+    if (method === 'Runtime.evaluate') {
+      const context = params.contextId != null ? isolated : main;
+      try {
+        let value = vm.runInContext(params.expression, context);
+        if (params.awaitPromise && value && typeof value.then === 'function') value = await value;
+        return { result: params.returnByValue === false ? { type: typeof value, objectId: 'obj-1' } : toRemote(value) };
+      } catch (err) {
+        // CDP's description of a thrown Error starts "<Name>: <message>"; a thrown string is itself.
+        const description = err && typeof err === 'object' ? `${err.name}: ${err.message}\n    at <anonymous>:1:1` : String(err);
+        return { exceptionDetails: { text: 'Uncaught', exception: { type: 'object', description } } };
+      }
+    }
+    return originalSend(source, method, params);
+  };
+  world.invalidate(7);
+  try {
+    return await fn({ log, location, elements, main, mainEvaluations: () => log.filter((c) => c.method === 'Runtime.evaluate' && c.params.contextId == null) });
+  } finally {
+    chrome.debugger.sendCommand = originalSend;
+    world.invalidate(7);
+  }
+}
+
+/** Save a recording, replay it on tab 7 at input level off, and delete it again. */
+async function replayValueFlow(id, steps, options = {}) {
+  const store = await import('../extension/lib/store.js');
+  const replayModule = await import('../extension/tools/replay.js');
+  await store.saveRecording({ id, name: id, startUrl: 'https://shop.test/', steps });
+  try {
+    return await within(30_000, replayModule.replay(7, {
+      id, timing: 'fast', humanize: 'off', signature: 'off', compare: false, ...options,
+    }), `replay of ${id}`);
+  } finally {
+    await store.deleteRecording(id).catch(() => {});
+  }
+}
+
+await test('(3.4) FlowSpec round-trips evaluate and extract steps, canonical and compact', () => {
+  const target = { locators: [{ kind: 'testid', value: 'name' }], fingerprint: { role: 'textbox', name: 'Name' } };
+  const rec = {
+    id: 'rec_value_spec', name: 'Value steps',
+    steps: [
+      { id: 's1', type: 'evaluate', waitMs: 0, expression: 'window.app.slug', saveAs: 'slug', expect: 'orders', timeoutMs: 5000 },
+      { id: 's2', type: 'evaluate', waitMs: 0, expression: 'null', expect: null },
+      { id: 's3', type: 'extract', waitMs: 0, selector: '#total', saveAs: 'total', expect: '42', operator: 'contains' },
+      { id: 's4', type: 'extract', waitMs: 0, target, expect: '^A', operator: 'matches' },
+      { id: 's5', type: 'evaluate', waitMs: 0, expression: '1 + 1', expect: { b: [1, 2], a: 'x' } },
+      { id: 's6', type: 'evaluate', waitMs: 0, expression: 'document.title' },
+    ],
+  };
+  const spec = flowspec.toFlowSpec(rec);
+  assert.deepEqual(flowspec.validateFlowSpec(spec), [], 'a spec built from value steps is valid');
+  assert.ok(flowspec.KNOWN_ACTIONS.has('evaluate') && flowspec.KNOWN_ACTIONS.has('extract'));
+  assert.deepEqual(spec.steps[0], { action: 'evaluate', expect: 'orders', expression: 'window.app.slug', id: 's1', saveAs: 'slug', timeoutMs: 5000, waitBudgetMs: 0 });
+  assert.deepEqual(spec.steps[2], { action: 'extract', expect: '42', id: 's3', operator: 'contains', saveAs: 'total', selector: '#total', waitBudgetMs: 0 });
+  assert.deepEqual(Object.keys(spec.steps[3]), ['action', 'expect', 'id', 'operator', 'target', 'waitBudgetMs'], 'canonical key order');
+  assert.equal(spec.steps[1].expect, null, 'expect:null is a value and survives');
+  assert.deepEqual(spec.steps[5], { action: 'evaluate', expression: 'document.title', id: 's6', waitBudgetMs: 0 }, 'nothing absent is emitted');
+  assert.ok(spec.steps.every((step) => !('unsupported' in step)), 'neither action is marked unsupported');
+  assert.doesNotMatch(flowspec.canonicalJson(spec), /undefined/);
+
+  const back = flowspec.fromFlowSpec(spec);
+  assert.deepEqual(back.steps[0], rec.steps[0]);
+  assert.deepEqual(back.steps[1], rec.steps[1]);
+  assert.ok('expect' in back.steps[1], 'expect:null comes back as null, not as absent');
+  assert.deepEqual(back.steps[2], rec.steps[2]);
+  assert.deepEqual(back.steps[3], { ...rec.steps[3], target: { locators: target.locators, fingerprint: target.fingerprint } });
+  assert.deepEqual(back.steps[4].expect, { a: 'x', b: [1, 2] });
+  assert.equal('expect' in back.steps[5], false);
+  // And a second trip changes no byte.
+  assert.equal(flowspec.canonicalJson(flowspec.toFlowSpec({ ...rec, steps: back.steps })), flowspec.canonicalJson(spec));
+});
+
+await test('(3.4) validation refuses an evaluate without expression, an extract with nothing to read, and a bad saveAs', () => {
+  const spec = (...steps) => ({ format: 'g9/flowspec', schemaVersion: 1, id: 'v', name: 'v', steps: steps.map((s, i) => ({ id: `s${i + 1}`, ...s })) });
+  const problems = (...steps) => flowspec.validateFlowSpec(spec(...steps)).join('\n');
+
+  assert.match(problems({ action: 'evaluate' }), /step 1 is an evaluate with no expression/);
+  assert.match(problems({ action: 'evaluate', expression: '   ' }), /evaluate with no expression/);
+  assert.match(problems({ action: 'evaluate', expression: 42 }), /evaluate with no expression/);
+  assert.match(problems({ action: 'extract' }), /extract with neither a target nor a selector/);
+  assert.match(problems({ action: 'extract', selector: '' }), /extract with neither a target nor a selector/);
+  for (const bad of ['1st', 'has-dash', 'a.b', '', 'with space', 7]) {
+    assert.match(problems({ action: 'evaluate', expression: '1', saveAs: bad }), /saveAs .* is not an identifier/, `saveAs ${JSON.stringify(bad)}`);
+  }
+  assert.match(problems({ action: 'extract', selector: '#x', saveAs: 'x-y' }), /not an identifier/);
+  assert.match(problems({ action: 'click', target: { locators: [] }, saveAs: 'x' }), /only evaluate and extract produce a value/);
+  assert.match(problems({ action: 'extract', selector: '#x', operator: 'startsWith' }), /operator "startsWith"/);
+  assert.match(problems({ action: 'extract', selector: '#x', operator: 'matches', expect: '([' }), /not a valid regular expression/);
+  assert.match(problems({ action: 'extract', selector: '#x', expect: 42 }), /expect is not a string/);
+  assert.match(problems({ action: 'evaluate', expression: '1', timeoutMs: -5 }), /timeoutMs/);
+  assert.throws(() => flowspec.fromFlowSpec(spec({ action: 'evaluate' })), /FlowSpec is not valid[\s\S]*no expression/);
+
+  // What IS allowed, so the rules above are not simply refusing everything.
+  assert.equal(problems(
+    { action: 'evaluate', expression: 'x', saveAs: '_ok1' },
+    { action: 'extract', selector: '#x', saveAs: 'Total', expect: 'a', operator: 'exact' },
+    { action: 'extract', target: { locators: [{ kind: 'testid', value: 't' }] }, expect: '^\\d+$', operator: 'matches' },
+  ), '');
+});
+
+await test('(3.4) replay: an evaluated value saved with saveAs feeds a later step\'s {{var}}; extract reads text and checks it', async () => {
+  await withValuePage(async ({ log, mainEvaluations }) => {
+    const steps = [
+      { id: 's1', type: 'evaluate', expression: 'app.slug', saveAs: 'slug', expect: 'orders' },
+      { id: 's2', type: 'evaluate', expression: 'Promise.resolve({ tags: ["a", "b"], n: app.count })', saveAs: 'info', expect: { n: 3, tags: ['a', 'b'] } },
+      { id: 's3', type: 'navigate', url: 'https://shop.test/{{slug}}/list' },
+      { id: 's4', type: 'extract', selector: '#total', saveAs: 'total', expect: '42 items' },
+      { id: 's5', type: 'evaluate', expression: '"{{total}}".toUpperCase() + ":" + JSON.parse(\'{{info}}\').n', expect: '42 ITEMS:3' },
+      { id: 's6', type: 'extract', selector: '#name', expect: 'A', operator: 'contains' },
+      { id: 's7', type: 'extract', selector: '#notes', expect: '^typed', operator: 'matches' },
+      { id: 's8', type: 'extract', selector: '#empty', expect: 'only in the DOM' },
+    ];
+    const run = await replayValueFlow('rec_value_run', steps);
+    assert.equal(run.verdict, 'PASS', JSON.stringify(run.steps.filter((s) => !s.ok)));
+    assert.equal(run.failed, 0);
+    assert.equal(run.ran, 8);
+
+    // The saved value reached the LATER step, substituted when it ran.
+    const navigated = log.find((c) => c.method === 'Page.navigate');
+    assert.equal(navigated.params.url, 'https://shop.test/orders/list');
+    assert.equal(run.steps[2].url, 'https://shop.test/orders/list');
+    const fifth = mainEvaluations().find((c) => c.params.expression.includes('toUpperCase'));
+    assert.equal(fifth.params.expression, '"42 items".toUpperCase() + ":" + JSON.parse(\'{"tags":["a","b"],"n":3}\').n',
+      'a non-string is saved as its JSON; a string as itself');
+
+    // Results: the value, and which variable it became.
+    assert.equal(run.steps[0].value, 'orders');
+    assert.equal(run.steps[0].savedAs, 'slug');
+    assert.deepEqual(run.steps[1].value, { tags: ['a', 'b'], n: 3 });
+    assert.equal(run.steps[3].value, '42 items', 'innerText, trimmed');
+    assert.equal(run.steps[5].value, 'Ada', 'an input answers with its value');
+    assert.equal(run.steps[6].value, 'typed text', 'a textarea answers with what is in it, not its default text');
+    assert.equal(run.steps[7].value, 'only in the DOM', 'textContent when nothing is rendered');
+    assert.deepEqual(run.savedVariables, ['slug', 'info', 'total']);
+    assert.equal(run.dataParameters.includes('slug'), false, 'saved values are not data parameters');
+
+    // Where each ran: the flow's expressions in the MAIN world, with a user gesture and an awaited
+    // promise; extract's reads in G9BrowserAgent's isolated world (a contextId), never the main one.
+    const flowEvaluations = mainEvaluations().filter((c) => /app\.|toUpperCase/.test(c.params.expression));
+    assert.equal(flowEvaluations.length, 3);
+    for (const c of flowEvaluations) {
+      assert.equal(c.params.awaitPromise, true);
+      assert.equal(c.params.returnByValue, true);
+      assert.equal(c.params.userGesture, true);
+    }
+    assert.ok(log.some((c) => c.method === 'Runtime.evaluate' && c.params.contextId === 4242 && c.params.expression.includes('"#total"')));
+    assert.equal(mainEvaluations().some((c) => c.params.expression.includes('querySelector')), false, 'no page read of ours ran in the main world');
+  });
+
+  // The 4-hour cap and the 30 s default are where the budget is decided.
+  const replaySource = await readFile(new URL('../extension/tools/replay.js', import.meta.url), 'utf8');
+  assert.match(replaySource, /const EVALUATE_TIMEOUT_MS = 30_000;/);
+  assert.match(replaySource, /const EVALUATE_TIMEOUT_CAP_MS = 4 \* 60 \* 60 \* 1000;/);
+});
+
+await test('(3.4) replay: a value that differs fails as FAIL_PRODUCT; a selector matching nothing as FAIL_AUTOMATION', async () => {
+  await withValuePage(async () => {
+    const extractDiffers = await replayValueFlow('rec_value_extract_fail', [
+      { id: 's1', type: 'extract', selector: '#total', expect: '41 items' },
+      { id: 's2', type: 'evaluate', expression: '"never reached"' },
+    ]);
+    assert.equal(extractDiffers.verdict, 'FAIL_PRODUCT');
+    assert.equal(extractDiffers.ran, 1, 'stopOnFailure stops at the failed check');
+    assert.match(extractDiffers.steps[0].error, /^extract check failed \(exact\): expected "41 items", got "42 items"\.$/);
+
+    const containsDiffers = await replayValueFlow('rec_value_contains_fail', [
+      { id: 's1', type: 'extract', selector: '#total', expect: 'pallets', operator: 'contains' },
+    ]);
+    assert.equal(containsDiffers.verdict, 'FAIL_PRODUCT');
+    assert.match(containsDiffers.steps[0].error, /extract check failed \(contains\)/);
+
+    const evaluateDiffers = await replayValueFlow('rec_value_eval_fail', [
+      { id: 's1', type: 'evaluate', expression: '({ n: app.count })', expect: { n: 4 } },
+    ]);
+    assert.equal(evaluateDiffers.verdict, 'FAIL_PRODUCT');
+    assert.match(evaluateDiffers.steps[0].error, /^evaluate check failed: expected \{"n":4\}, got \{"n":3\}\.$/);
+
+    const missing = await replayValueFlow('rec_value_missing', [
+      { id: 's1', type: 'extract', selector: '#nothing-here' },
+    ]);
+    assert.equal(missing.verdict, 'FAIL_AUTOMATION', 'the selector no longer addresses anything: the test, not the product');
+    assert.match(missing.steps[0].error, /^Could not find an element matching selector "#nothing-here"/);
+
+    const invalid = await replayValueFlow('rec_value_invalid', [
+      { id: 's1', type: 'extract', selector: '[[' },
+    ]);
+    assert.equal(invalid.verdict, 'FAIL_AUTOMATION');
+    assert.match(invalid.steps[0].error, /^The extract step's selector "\[\[" is not valid CSS/);
+  });
+});
+
+await test('(3.4) replay: an evaluate that throws fails its step, and a later {{var}} it should have saved says so', async () => {
+  await withValuePage(async () => {
+    const run = await replayValueFlow('rec_value_throw', [
+      { id: 's1', type: 'evaluate', expression: '(() => { throw new Error("boom: cart is empty"); })()', saveAs: 'cart' },
+      { id: 's2', type: 'evaluate', expression: '"{{cart}}".length' },
+      { id: 's3', type: 'evaluate', expression: 'Promise.reject(new TypeError("async boom"))' },
+      { id: 's4', type: 'evaluate', expression: 'app.user' },
+    ], { stopOnFailure: false });
+    assert.equal(run.ran, 4, 'stopOnFailure:false runs every step; the missing variable did not abort the replay');
+    assert.equal(run.steps[0].ok, false);
+    assert.match(run.steps[0].error, /^The expression threw: Error: boom: cart is empty/);
+    assert.equal(run.steps[1].ok, false);
+    assert.match(run.steps[1].error, /^Variable "cart" was never saved/);
+    assert.match(run.steps[2].error, /^The expression threw: TypeError: async boom/, 'a rejected promise is a throw');
+    assert.equal(run.steps[3].ok, true);
+    assert.equal(run.steps[3].value, 'ada');
+    assert.equal(run.verdict, 'FAIL_PRODUCT', 'the page threw: a product failure');
+    assert.equal(run.savedVariables, undefined, 'nothing was saved');
+
+    // A {{name}} that NO step saves is still what it always was: the replay is refused.
+    await assert.rejects(
+      replayValueFlow('rec_value_unknown', [{ id: 's1', type: 'evaluate', expression: '"{{nobody}}"' }]),
+      /Missing data parameter "nobody"/,
+    );
+  });
+});
+
+await test('(3.4) a dry run skips evaluate, resolves extract, and runs no expression', async () => {
+  await withValuePage(async ({ mainEvaluations }) => {
+    const run = await replayValueFlow('rec_value_dry', [
+      { id: 's1', type: 'evaluate', expression: 'app.slug = "changed"', saveAs: 'slug' },
+      { id: 's2', type: 'extract', selector: '#total', saveAs: 'total' },
+      { id: 's3', type: 'extract', selector: '#{{slug}}' },
+    ], { dryRun: true });
+    assert.equal(run.steps[0].skipped, 'not element-bound');
+    assert.equal(run.steps[1].ok, true);
+    assert.equal(run.steps[1].resolved, 'selector #total');
+    assert.equal(run.steps[2].ok, false, 'the placeholder stands in for the unread value, and resolves to nothing');
+    assert.doesNotMatch(run.steps[2].error, /never saved|Missing data parameter/);
+    assert.equal(mainEvaluations().some((c) => c.params.expression.includes('changed')), false, 'the expression never ran');
+  });
+});
+
+await test('(3.4) the signature, the step outline and the Playwright export understand value steps', async () => {
+  const signature = await import('../extension/lib/signature.js');
+  const sig = signature.buildSignature({
+    flowId: 'f', steps: [
+      { id: 's1', type: 'evaluate', ok: true, ms: 3, value: { n: 3 }, savedAs: 'info' },
+      { id: 's2', type: 'extract', ok: true, ms: 4, value: '42 items', resolved: 'selector #total' },
+    ],
+  });
+  assert.deepEqual(sig.steps.map((s) => [s.type, s.url, s.data]), [['evaluate', null, null], ['extract', null, null]],
+    'a value never becomes part of the signature');
+
+  assert.equal(record.summarize({ type: 'evaluate', expression: 'secret()', saveAs: 'token' }), 'evaluate an expression → {{token}}');
+  assert.equal(record.summarize({ type: 'extract', selector: '#total' }), 'extract the text of "#total"');
+  assert.equal(record.summarize({ type: 'extract', target: { fingerprint: { role: 'heading', name: 'Total' } }, saveAs: 't' }), 'extract the text of heading "Total" → {{t}}');
+
+  const store = await import('../extension/lib/store.js');
+  await store.saveRecording({
+    id: 'rec_value_pw', name: 'Value export', steps: [
+      { id: 's1', type: 'evaluate', expression: 'app.slug', saveAs: 'slug', expect: 'orders' },
+      { id: 's2', type: 'evaluate', expression: 'app.count', expect: 3 },
+      { id: 's3', type: 'extract', selector: '#total', expect: '42', operator: 'contains' },
+      { id: 's4', type: 'extract', target: { locators: [{ kind: 'testid', value: 'name' }] }, saveAs: 'name', expect: '^A', operator: 'matches' },
+      { id: 's5', type: 'evaluate', expression: 'window.scrollY' },
+    ],
+  });
+  try {
+    const { code } = await qa.exportPlaywright('rec_value_pw');
+    assert.match(code, /const slug = await page\.evaluate\("app\.slug"\);\n {2}expect\(slug\)\.toEqual\("orders"\);/);
+    assert.match(code, /\{\n {4}const evaluated = await page\.evaluate\("app\.count"\);\n {4}expect\(evaluated\)\.toEqual\(3\);\n {2}\}/);
+    assert.match(code, /const extracted = \(await page\.locator\("#total"\)\.first\(\)\.innerText\(\)\)\.trim\(\);\n {4}expect\(extracted\)\.toContain\("42"\);/);
+    assert.match(code, /const name = \(await page\.getByTestId\("name"\)\.innerText\(\)\)\.trim\(\);\n {2}expect\(name\)\.toMatch\(new RegExp\("\^A"\)\);/);
+    assert.match(code, /\n {2}await page\.evaluate\("window\.scrollY"\);\n/);
+    assert.doesNotMatch(code, /Unsupported/);
+  } finally {
+    await store.deleteRecording('rec_value_pw').catch(() => {});
+  }
+});
+
+// ------------------------------------------------- (3.4) hang-proofing in the person's browser (Engine 1)
+
+await test('(3.4) attach is bounded: a domain the page never answers does not hold it, and is enabled lazily later', async () => {
+  const cdp = await import('../extension/lib/cdp.js');
+  const TAB = 4242;
+  browserModel.tabs.set(TAB, { id: TAB, url: 'http://example.test/background', title: 'Bg', windowId: 1, active: false, status: 'complete' });
+  const originalSend = chrome.debugger.sendCommand;
+  let hang = true;
+  chrome.debugger.sendCommand = async (source, method, params) => {
+    if (source?.tabId === TAB && method === 'Network.enable' && hang) return new Promise(() => {});
+    return originalSend(source, method, params);
+  };
+  try {
+    await cdp.detach(TAB).catch(() => {});
+    const t0 = Date.now();
+    await cdp.attach(TAB);
+    const ms = Date.now() - t0;
+    assert.ok(ms < cdp.ENABLE_TIMEOUT_MS + 2_000, `the attach finished in ${ms} ms instead of waiting forever`);
+    assert.deepEqual(cdp.attachIssuesOf(TAB).unanswered, ['Network']);
+    assert.ok(!commandLog.some((c) => c.tabId === TAB && c.method === 'CSS.enable'), 'CSS is no longer enabled at attach');
+    hang = false;
+    await cdp.ensureDomain(TAB, 'Network');
+    assert.ok(commandLog.filter((c) => c.tabId === TAB && c.method === 'Network.enable').length >= 1, 'asked again when needed');
+  } finally {
+    chrome.debugger.sendCommand = originalSend;
+    await cdp.detach(TAB).catch(() => {});
+    browserModel.tabs.delete(TAB);
+  }
+});
+
+await test('(3.4) the debugger platform honours timeoutMs, and recoverTab detaches, abandons and re-attaches', async () => {
+  const cdp = await import('../extension/lib/cdp.js');
+  const { platform } = await import('../extension/lib/platform.js');
+  const TAB = 4343;
+  browserModel.tabs.set(TAB, { id: TAB, url: 'http://example.test/stuck', title: 'Stuck', windowId: 1, active: false, status: 'complete' });
+  const originalSend = chrome.debugger.sendCommand;
+  chrome.debugger.sendCommand = async (source, method, params) => {
+    if (method === 'Runtime.evaluate' && params?.expression === 'HANG') return new Promise(() => {});
+    return originalSend(source, method, params);
+  };
+  const detached = [];
+  const originalDetach = chrome.debugger.detach;
+  chrome.debugger.detach = async (target) => { detached.push(target.tabId); return originalDetach(target); };
+  try {
+    await assert.rejects(platform.debugger.sendCommand(TAB, 'Runtime.evaluate', { expression: 'HANG' }, null, { timeoutMs: 150 }), /did not return after/);
+    await cdp.attach(TAB);
+    const stuck = cdp.send(TAB, 'Runtime.evaluate', { expression: 'HANG' }, { timeoutMs: 60_000 }).then(() => null, (e) => e);
+    await new Promise((r) => setTimeout(r, 30));
+    const rec = await cdp.recoverTab(TAB, { reason: 'test', wait: true });
+    const err = await stuck;
+    assert.equal(err.recovered, true);
+    assert.match(err.message, /abandoned: G9BrowserAgent recovered this tab's debugger session \(test\)/);
+    assert.deepEqual(rec.abandoned, ['Runtime.evaluate']);
+    assert.equal(rec.detached, true);
+    assert.equal(rec.reattached, true);
+    assert.deepEqual(detached, [TAB], 'chrome.debugger.detach was called for that tab');
+    assert.ok(attachedTabs.has(TAB), 'and it is attached again');
+  } finally {
+    chrome.debugger.sendCommand = originalSend;
+    chrome.debugger.detach = originalDetach;
+    await cdp.detach(TAB).catch(() => {});
+    browserModel.tabs.delete(TAB);
+  }
+});
+
+await test('(3.4) the state chain moves on past a write that never ends; its own caller still gets the real outcome', async () => {
+  const { serialize, WRITE_STEP_MS } = await import('../extension/lib/state.js');
+  let release;
+  const slow = serialize(() => new Promise((r) => { release = r; }));
+  const t0 = Date.now();
+  const after = await serialize(async () => 'next write ran');
+  const ms = Date.now() - t0;
+  assert.equal(after, 'next write ran');
+  assert.ok(ms >= WRITE_STEP_MS - 100 && ms < WRITE_STEP_MS + 2_000, `the next write waited ${ms} ms, not forever`);
+  release('slow done');
+  assert.equal(await slow, 'slow done', 'the slow write is never failed by the deadline');
+});
+
+await test('(3.4) a tool call answers even while the activity log is stuck', async () => {
+  const state = await import('../extension/lib/state.js');
+  const runtime = await import('../extension/tools/index.js');
+  let release;
+  state.serialize(() => new Promise((r) => { release = r; })); // a stalled write at the head of the chain
+  const t0 = Date.now();
+  const result = await runtime.runTool('browser_tabs', { action: 'list' }, { agentId: 'agent-x', relayed: true });
+  assert.ok(Array.isArray(result.tabs));
+  assert.ok(Date.now() - t0 < 1_000, `answered in ${Date.now() - t0} ms: the activity line is written after the reply`);
+  release();
+});
+
+
 console.log('\n' + passed + ' passed, 0 failed\n');

@@ -98,6 +98,17 @@ A bare name that is no flow's id or name is tried as a suite name (the desktop's
 one); on `--platform agripad` only ids and names match. A selection that matches nothing is an error
 that lists the known flows, never an empty PASS.
 
+**Value steps (3.4).** `{ "action": "evaluate", "expression": "…", "saveAs"?, "expect"?, "timeoutMs"? }`
+runs the expression in the page's own (main) world, awaiting a promise (default 30 s, at most 4 h);
+a throw fails the step. `{ "action": "extract", "target"? | "selector"?, "saveAs"?, "expect"?, "operator"? }`
+reads an element's trimmed visible text (a form field's value) in G9BrowserAgent's isolated world; a
+selector that matches nothing fails the step. With `expect`, a different value fails the step as
+**FAIL_PRODUCT** — evaluate compares as deep JSON equality, extract by `operator` (`exact` by default,
+`contains`, `matches` = a regular expression). With `saveAs` (an identifier), the value — JSON for a
+non-string — is available to `{{name}}` placeholders in the **later** steps of the same run;
+placeholders in the expression itself are substituted too. A dry run skips `evaluate` and resolves
+`extract`'s element.
+
 ## Run options
 
 | Option | Meaning |

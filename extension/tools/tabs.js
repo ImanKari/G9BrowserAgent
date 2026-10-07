@@ -26,7 +26,7 @@
 
 import { platform } from '../lib/platform.js';
 import { getState, setState, updateState } from '../lib/state.js';
-import { attach, attachedTabIds, detach, detachMany } from '../lib/cdp.js';
+import { attach, attachedTabIds, detach, detachMany, pendingCommands, recoverTab, forgetKeepAwake } from '../lib/cdp.js';
 import { clearRefs } from '../lib/refs.js';
 import { inWorld } from '../lib/world.js';
 import { clearBuffers } from './observe.js';
@@ -442,15 +442,25 @@ export async function openTab(url, { active = false } = {}) {
   return { tabId: tab.id, url: tab.url || tab.pendingUrl || url, current };
 }
 
-/** Close a tab. Its refs, buffers and session names are cleaned up by events.onTabRemoved. */
+/**
+ * Close a tab. Its refs, buffers and session names are cleaned up by events.onTabRemoved.
+ *
+ * (3.4) It must work when a call on that tab is stuck — closing is how a person or an agent gets
+ * out of that. So every CDP command still waiting on the tab is abandoned first (their calls fail
+ * now, with the reason), and nothing here waits on the page: the browser closes a tab without the
+ * renderer's help.
+ */
 export async function closeTab(tabId) {
   await platform.tabs.get(tabId).catch(() => {
     throw new Error(`Tab ${tabId} does not exist.`);
   });
+  const stuck = pendingCommands(tabId);
+  if (stuck.length) await recoverTab(tabId, { reason: 'the tab is being closed', reattach: false, detach: false }).catch(() => {});
   await platform.tabs.remove(tabId);
+  forgetKeepAwake(tabId).catch(() => {});
   const state = await getState();
   if (state.currentTabId === tabId) await setState({ currentTabId: null });
-  return { closed: tabId };
+  return { closed: tabId, ...(stuck.length ? { abandoned: stuck.map((c) => c.method) } : {}) };
 }
 
 export async function focusTab(tabId) {

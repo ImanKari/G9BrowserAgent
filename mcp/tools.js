@@ -151,6 +151,30 @@ user agent on its own — \`browser_emulate\` device presets do, and at stealth 
 are refused. Pass a \`seed\` to reproduce a run's motion from the same pointer
 position (a replay homes the pointer and reports \`pointerStart\`).
 
+## Long, unattended work (and fewer tokens)
+- Read less: \`browser_snapshot\` takes \`scope\` (a ref or CSS selector), \`roles\`/\`name\`
+  (a regex) filters, \`interactiveOnly\`, \`includeText:false\`, \`maxNodes\`, and \`diff:true\` —
+  only what changed since YOUR previous diff snapshot of that page (refs are stable per element).
+  \`browser_inspect what:"find" role:"button" name:"save"\` returns just the matching lines with refs.
+- Wait on the server, not in a loop: \`browser_navigate action:"wait"\` with \`predicate\` (a page
+  expression, until truthy) or \`ref\`+\`state\` (visible/hidden/enabled/disabled/gone…), up to 2 h.
+- Long page work: \`browser_console action:"evaluate" job:true\` answers at once with a jobId; the
+  job runs on in the page (page code may call \`__g9job.progress(fraction, note)\`) and survives your
+  session ending — read it with \`action:"job_status"\` (waitMs waits for the end), stop it with
+  \`job_cancel\`. Without job, \`timeoutMs\` (up to 4 h) bounds an awaited evaluate.
+- Many steps, one call: \`browser_recording action:"batch" steps:[…]\` (navigate, click/type by ref
+  or role+name, wait, evaluate, extract) stops at the first failure with an excerpt of that area.
+- Files: \`browser_network action:"fetch"\` fetches a URL with the browser's cookies; \`savePath\`
+  writes it on the BROWSER's machine (path, size, sha256). \`browser_screenshot savePath\` does the
+  same for a screenshot (thumbnail:true shows a small one instead).
+- A background tab in the user's browser can be read and evaluated; for long in-page work open it
+  with \`keepAwake:true\` (or \`browser_tabs action:"keep_awake"\`).
+- A call stuck past its deadline is ended and its tab RECOVERED (the error starts with
+  [recovered]): take a snapshot before acting on it again. \`browser_tabs action:"close"\` never
+  waits behind a stuck call.
+- Stateless clients: over HTTP a new MCP session with the same client name (or X-G9-Agent header)
+  takes over the previous session's tabs, current tab and session names keep working.
+
 ## Debugging
 \`browser_diagnose\` answers "what is wrong with this page" in one call. Capture
 starts when a tab is attached, not when it loaded: if \`browser_network\` shows
@@ -236,18 +260,19 @@ export const TOOLS = [
   {
     name: 'browser_tabs',
     description:
-      'Tabs across ALL engines, with full titles and URLs. "list" every tab (engine, owner, session); "open" a URL (in the user\'s browser when the extension is connected, else a launched browser — or choose with engine) and make it your current tab (in the user\'s browser it opens in the BACKGROUND: readable, not clickable, unless focus:true; a launched engine gives it its own window); "close"/"focus" a tab; "attach" the tab the user is on (extension) and make it current; "claim"/"release" ownership (force:true takes over — only when the user asks); "popout" an extension tab into its own window without reloading it (never minimise that window); "handoff" an extension tab into a launched browser (cookies + local/session storage travel, the page reloads, in-memory state/IndexedDB/service workers do not); "session" names a tab (with url: opens or re-points it); "sessions"/"end_session" list or forget names (the tab stays open); "wait" for a popup/new tab by url/title/opener; "watch" opens a LIVE VIEW of a tab for the user (frames and your cursor, view only) — the way to let them see a headless launched tab, which has no window: the watch window opens in their browser without taking the keyboard (focus:true brings it to the front), on:false closes it. NOTE (the user\'s browser): a browser only delivers input to the tab it is SHOWING, so a background tab or session can be read (snapshot, console, network, screenshot) but not clicked or typed into — "focus" it first, or "popout"/"handoff" it.',
+      'Tabs across ALL engines, with full titles and URLs. "close" and "focus" never wait behind a stuck call (close ends the calls running on that tab). "keep_awake" keeps a background tab working for long in-page work. "list" every tab (engine, owner, session); "open" a URL (in the user\'s browser when the extension is connected, else a launched browser — or choose with engine) and make it your current tab (in the user\'s browser it opens in the BACKGROUND: readable, not clickable, unless focus:true; a launched engine gives it its own window); "close"/"focus" a tab; "attach" the tab the user is on (extension) and make it current; "claim"/"release" ownership (force:true takes over — only when the user asks); "popout" an extension tab into its own window without reloading it (never minimise that window); "handoff" an extension tab into a launched browser (cookies + local/session storage travel, the page reloads, in-memory state/IndexedDB/service workers do not); "session" names a tab (with url: opens or re-points it); "sessions"/"end_session" list or forget names (the tab stays open); "wait" for a popup/new tab by url/title/opener; "watch" opens a LIVE VIEW of a tab for the user (frames and your cursor, view only) — the way to let them see a headless launched tab, which has no window: the watch window opens in their browser without taking the keyboard (focus:true brings it to the front), on:false closes it. NOTE (the user\'s browser): a browser only delivers input to the tab it is SHOWING, so a background tab or session can be read (snapshot, console, network, screenshot) but not clicked or typed into — "focus" it first, or "popout"/"handoff" it.',
     inputSchema: {
       type: 'object',
       properties: {
         action: str('What to do.', {
-          enum: ['list', 'open', 'close', 'focus', 'attach', 'claim', 'release', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch'],
+          enum: ['list', 'open', 'close', 'focus', 'attach', 'claim', 'release', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch', 'keep_awake'],
           default: 'list',
         }),
-        on: bool('For watch: false closes the live view again.', true),
+        on: bool('For watch: false closes the live view again. For keep_awake: false ends it.', true),
+        keepAwake: bool('For open/session: keep the new tab working in the background (focus emulation, page lifecycle kept active) — for long in-page work such as rendering. keep_awake does the same for a tab already open.', false),
         url: str('For open/session: the URL. For wait: a URL substring.'),
         tabId: num('For close/focus/attach/claim/release/popout/handoff/watch, or session (name a tab already open). A G9BrowserAgent handle. watch without one: your current tab.'),
-        session: str('Instead of tabId: a session name.'),
+        session: str('Instead of tabId: a session name. For open: names the new tab (as name does).'),
         name: str('For session/end_session: the session name, e.g. "buyer". For open: also name the new tab.'),
         engine: str('For open/session/attach: "extension", "launched", or an engineId from browser_engine. For handoff: the launched engine to receive the tab. Default for open: the extension if connected, else a launched browser (launched on demand).'),
         context: str('For open/handoff: a contextId from browser_engine action:"context" (launched engines only). Handoff defaults to a fresh isolated context.'),
@@ -270,12 +295,18 @@ export const TOOLS = [
   {
     name: 'browser_snapshot',
     description:
-      'PRIMARY PERCEPTION TOOL. The accessibility tree of the tab, with a [ref=eN] handle on every interactive element; pass those refs to browser_interact. Take a fresh snapshot after navigation or any significant DOM change.',
+      'PRIMARY PERCEPTION TOOL. The accessibility tree of the tab, with a [ref=eN] handle on every interactive element; pass those refs to browser_interact. Take a fresh snapshot after navigation or any significant DOM change. Save tokens on big pages and long jobs: scope, roles/name filters, interactiveOnly, maxNodes, and diff:true (only the changes since your previous diff snapshot). Works on background tabs.',
     inputSchema: {
       type: 'object',
       properties: {
         mode: str('"a11y" (default) or "a11y+text" to also include all visible page text.', { enum: ['a11y', 'a11y+text'], default: 'a11y' }),
         maxNodes: num('Cap on emitted nodes. Default 900. Raise for very large pages.', { default: 900 }),
+        scope: str('Only this element\'s subtree: a ref ("e12") or a CSS selector.'),
+        roles: { type: 'array', items: { type: 'string' }, description: 'Only nodes with these roles (e.g. ["button","link"]), as flat lines; every match gets a ref.' },
+        name: str('Only nodes whose accessible name matches this regular expression (case-insensitive), as flat lines.'),
+        interactiveOnly: bool('Only the controls (buttons, links, fields…), as flat lines.', false),
+        includeText: bool('false = no named content beyond controls and named structure.', true),
+        diff: bool('Only what changed since YOUR previous diff:true snapshot of this page with the same options: "+" added, "~" changed (with what it was), "-" removed. The first one returns the full tree. Refs are stable per element.', false),
         tabId: TAB_ID,
       },
     },
@@ -344,8 +375,12 @@ export const TOOLS = [
         selector: str('For action:"wait" — wait until this CSS selector matches.'),
         gone: bool('For action:"wait" — invert: wait until it DISAPPEARS. Useful for spinners.', false),
         idle: bool('For action:"wait" — wait until the DOM is mutation-free for 500ms and no captured request is in flight.', false),
+        predicate: str('For action:"wait" — a JavaScript expression evaluated in the PAGE (main world; a promise is awaited), polled until truthy. Returns the final value and the time it took.'),
+        ref: str('For action:"wait" — an element from browser_snapshot to wait on, with state.'),
+        state: str('For action:"wait" with ref.', { enum: ['visible', 'hidden', 'enabled', 'disabled', 'checked', 'unchecked', 'gone', 'present'], default: 'visible' }),
+        pollMs: num('For action:"wait" — how often to look (default: 250 ms, slowing to 1-2 s on long waits).'),
         waitUntil: str('Load condition for goto/reload.', { enum: ['load', 'domcontentloaded', 'idle'], default: 'load' }),
-        timeoutMs: num('Deadline in milliseconds. Defaults to 30000 for goto/reload and 15000 for wait.'),
+        timeoutMs: num('Deadline in milliseconds. Defaults to 30000 for goto/reload and 15000 for wait; a wait may take up to 7200000 (2 h).'),
         tabId: TAB_ID,
       },
     },
@@ -354,11 +389,16 @@ export const TOOLS = [
   {
     name: 'browser_inspect',
     description:
-      'DevTools-panel inspection. what:"dom" = Elements, "styles" = Computed styles, "box" = layout geometry and visibility, "storage" = Application storage, "cookies" = cookies of any site in that browser (HttpOnly included), "frames" = the iframe tree.',
+      'DevTools-panel inspection. what:"dom" = Elements, "styles" = Computed styles, "box" = layout geometry and visibility, "storage" = Application storage, "cookies" = cookies of any site in that browser (HttpOnly included), "frames" = the iframe tree, "find" = only the elements with a role and/or a name (regex), as lines with refs — the cheapest way to get the ref of one control on a big page.',
     inputSchema: {
       type: 'object',
       properties: {
-        what: str('Which panel.', { enum: ['dom', 'styles', 'box', 'storage', 'cookies', 'frames'], default: 'dom' }),
+        what: str('Which panel.', { enum: ['dom', 'styles', 'box', 'storage', 'cookies', 'frames', 'find'], default: 'dom' }),
+        role: str('For what:"find" — the role, e.g. "button", "link", "textbox", "heading".'),
+        roles: { type: 'array', items: { type: 'string' }, description: 'For what:"find" — several roles.' },
+        name: str('For what:"find" — a regular expression the accessible name must match (case-insensitive).'),
+        interactiveOnly: bool('For what:"find" — only controls.', false),
+        scope: str('For what:"find" — search only inside this ref or CSS selector.'),
         ref: str('Element handle from browser_snapshot.'),
         selector: str('CSS selector, as an alternative to ref.'),
         properties: { type: 'array', description: 'For what:"styles" — return only these CSS properties.', items: { type: 'string' } },
@@ -366,7 +406,7 @@ export const TOOLS = [
         depth: num('For what:"dom" with no ref/selector — levels of structure to show; deeper subtrees collapse.', { default: 3 }),
         kind: str('For what:"storage".', { enum: ['all', 'local', 'session', 'indexeddb', 'cache', 'serviceworker'], default: 'all' }),
         url: str('For what:"cookies" — read the cookies for this URL instead of the tab\'s own.'),
-        limit: num('For what:"cookies" — max cookies to return.', { default: 40 }),
+        limit: num('For what:"cookies" — max cookies to return (default 40). For what:"find" — max matches (default 50).'),
         tabId: TAB_ID,
       },
     },
@@ -376,12 +416,16 @@ export const TOOLS = [
   {
     name: 'browser_console',
     description:
-      'Read buffered console output (log, warn, error, uncaught exceptions with stack frames), or evaluate JavaScript. "evaluate" runs in the PAGE\'s own main world — you are asking about the page\'s JavaScript, and the page can see what you run. In a stealth context the page runtime is never enabled, so "read" reports page console capture as unavailable instead of pretending the page was silent.',
+      'Read buffered console output (log, warn, error, uncaught exceptions with stack frames), or evaluate JavaScript. "evaluate" runs in the PAGE\'s own main world — you are asking about the page\'s JavaScript, and the page can see what you run. Long work: timeoutMs (up to 4 h), or job:true — answers at once with a jobId while the work runs on in the page (it survives your session ending; not across a navigation); "job_status" reads state, progress and the bounded result (waitMs waits for the end), "job_cancel" aborts __g9job.signal, "jobs" lists them. Page code reports progress with __g9job.progress(fraction, note). In a stealth context the page runtime is never enabled, so "read" reports page console capture as unavailable instead of pretending the page was silent.',
     inputSchema: {
       type: 'object',
       properties: {
-        action: str('"read" (default) or "evaluate".', { enum: ['read', 'evaluate'], default: 'read' }),
-        expression: str('For action:"evaluate" — JavaScript to run in the page. Async expressions are awaited.'),
+        action: str('"read" (default), "evaluate", "job_status", "job_cancel" or "jobs".', { enum: ['read', 'evaluate', 'job_status', 'job_cancel', 'jobs'], default: 'read' }),
+        expression: str('For action:"evaluate" — JavaScript to run in the page. Async expressions are awaited. In a job, __g9job is the job (progress, signal, cancelled).'),
+        job: bool('For action:"evaluate" — run it as a job: answer at once with a jobId.', false),
+        jobId: str('For job_status/job_cancel.'),
+        timeoutMs: num('For action:"evaluate" — how long an awaited result may take (default 20000; up to 14400000 = 4 h). For a job: its budget before it is reported overdue.'),
+        waitMs: num('For job_status — wait up to this long (max 600000) for the job to finish, then answer.'),
         level: { description: 'Filter by level, e.g. "error" or ["error","warning"].', anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
         contains: str('Only messages containing this substring.'),
         since: num('Only messages with seq greater than this. Use lastSeq from a previous call to poll.'),
@@ -395,15 +439,21 @@ export const TOOLS = [
   {
     name: 'browser_network',
     description:
-      'Network: list requests, or pass a requestId for one in full (headers, timing, POST body, response body). Capture begins when the tab is attached — if an already-open page shows 0 requests, reload it (browser_navigate action:"reload") and read again. RECORD AND FREEZE: "record_har", then "pin" serves matching requests from that HAR (strict:true fails the rest) so a remaining difference is the client\'s; "unpin"; "pin_status". BREAK IT ON PURPOSE: "intercept" with rules makes chosen requests fail, stall or return your body (test the UI on a 500/429/timeout); "intercept_status"; "clear_intercept". Rules apply before a pinned HAR. DOWNLOADS: "watch_downloads" BEFORE the click that starts one (each watch starts a fresh list), then "wait_download" returns the finished file (name, bytes; in launched engines also sha256 and the type sniffed from its content), "downloads" lists them, "stop_downloads" ends the watch — proof an export produced a real file, which a 200 response cannot give.',
+      'Network: list requests, or pass a requestId for one in full (headers, timing, POST body, response body). Capture begins when the tab is attached — if an already-open page shows 0 requests, reload it (browser_navigate action:"reload") and read again. RECORD AND FREEZE: "record_har", then "pin" serves matching requests from that HAR (strict:true fails the rest) so a remaining difference is the client\'s; "unpin"; "pin_status". BREAK IT ON PURPOSE: "intercept" with rules makes chosen requests fail, stall or return your body (test the UI on a 500/429/timeout); "intercept_status"; "clear_intercept". Rules apply before a pinned HAR. DOWNLOADS: "watch_downloads" BEFORE the click that starts one (each watch starts a fresh list), then "wait_download" returns the finished file (name, bytes; in launched engines also sha256 and the type sniffed from its content), "downloads" lists them, "stop_downloads" ends the watch — proof an export produced a real file, which a 200 response cannot give; in the user\'s browser the result gives the final path and, when the daemon can read it, the sha256. FETCH: "fetch" gets a URL with the browser\'s cookies (method, headers, body) and returns a bounded body — or, with savePath, writes it on the browser\'s machine and returns path, size, sha256 and content type (up to 40 MiB).',
     inputSchema: {
       type: 'object',
       properties: {
         action: str('Default "list".', {
           enum: ['list', 'record_har', 'pin', 'unpin', 'pin_status', 'intercept', 'intercept_status', 'clear_intercept',
-            'watch_downloads', 'downloads', 'wait_download', 'stop_downloads'],
+            'watch_downloads', 'downloads', 'wait_download', 'stop_downloads', 'fetch'],
           default: 'list',
         }),
+        url: str('For action:"fetch" — the URL (relative to the page is fine).'),
+        headers: { type: 'object', description: 'For action:"fetch" — request headers.' },
+        body: { description: 'For action:"fetch" — the request body (a string, or JSON).', anyOf: [{ type: 'string' }, { type: 'object' }] },
+        bodyBase64: str('For action:"fetch" — a binary request body, base64.'),
+        savePath: str('For action:"fetch" — write the response body to this path on the BROWSER\'s machine (relative = under the G9BrowserAgent data folder\'s files/); the result gives path, size, sha256, content type and no body.'),
+        maxBytes: num('For action:"fetch" without savePath — how much of the body to return (default 262144).'),
         har: { type: 'object', description: 'For action:"pin" — a HAR from action:"record_har" or format:"har".' },
         rules: {
           type: 'array',
@@ -415,11 +465,11 @@ export const TOOLS = [
           items: { type: 'object' },
         },
         contains: str('For action:"wait_download" — a download whose filename or URL contains this. Omit for any.'),
-        timeoutMs: num('For action:"wait_download" — how long to wait. Default 30000.'),
+        timeoutMs: num('For action:"wait_download" — how long to wait. Default 30000. For action:"fetch" — the whole fetch\'s deadline (default 60000).'),
         strict: bool('For action:"pin" — fail requests the HAR does not contain instead of letting them through.', false),
         requestId: str('Fetch full detail including the response body for this request.'),
         filter: str('Substring match on the URL (list), or the URL filter for pin/intercept.'),
-        method: str('Filter by HTTP method.'),
+        method: str('Filter by HTTP method. For action:"fetch": the method to send (default GET).'),
         status: { description: '"failed" (network error or 4xx/5xx), "pending", or an exact status code.', anyOf: [{ type: 'string' }, { type: 'number' }] },
         includeBody: bool('When fetching one request, include the response body.', true),
         format: str('Return a HAR 1.2 document instead of the compact list.', { enum: ['list', 'har'], default: 'list' }),
@@ -458,6 +508,9 @@ export const TOOLS = [
         ref: str('For area:"element".'),
         format: str('Image format.', { enum: ['jpeg', 'png'], default: 'jpeg' }),
         quality: num('JPEG quality 0-100.', { default: 70 }),
+        savePath: str('Write the image to this path on the BROWSER\'s machine (relative = under the G9BrowserAgent data folder\'s files/) and return path, bytes and sha256 instead of the image.'),
+        thumbnail: bool('With savePath: also return a small JPEG of the viewport to look at.', false),
+        thumbnailWidth: num('With thumbnail: its width in CSS pixels.', { default: 320 }),
         humanize: HUMANIZE,
         tabId: TAB_ID,
       },
@@ -503,15 +556,21 @@ export const TOOLS = [
   {
     name: 'browser_recording',
     description:
-      'Recorded user flows, replayable as tests WITH MEMORY. A QA records in the side panel (or you call start/stop); each element is stored with several independent locators so a step survives a redeploy, and replay reports WHICH locator matched (a step that matched only by xpath passes with a warning). A failing step says what it looked for, what it tried and the closest thing on the page. Every replay also compares what the flow did against its approved known world and reports surprises — see Regression memory in the instructions. replay engine:"launched" runs in a launched browser (copying the recording there if needed); humanize/seed control input style and reproduce motion. "calibrate_humanize" fits a humanize profile from the raw pointer/keyboard events a recording captured and saves it under name (then use humanize:"<name>"). "export_spec"/"import_spec" move a flow in and out as a Git-diffable FlowSpec, with what a person approved beside it (approved: the known world and the screenshot/aria baselines). approve also writes that approval next to the flow in the project repository when the flow is there. Without a tab, list shows the recordings of every engine\'s store (engine field), and id-based actions use the store that has the id.',
+      'Recorded user flows, replayable as tests WITH MEMORY — and "batch": a list of steps (navigate, click/type by ref or role+name, wait, evaluate, extract) in ONE call with a compact result per step, stopping at the first failure with an excerpt of the page there. A QA records in the side panel (or you call start/stop); each element is stored with several independent locators so a step survives a redeploy, and replay reports WHICH locator matched (a step that matched only by xpath passes with a warning). A failing step says what it looked for, what it tried and the closest thing on the page. Every replay also compares what the flow did against its approved known world and reports surprises — see Regression memory in the instructions. replay engine:"launched" runs in a launched browser (copying the recording there if needed); humanize/seed control input style and reproduce motion. "calibrate_humanize" fits a humanize profile from the raw pointer/keyboard events a recording captured and saves it under name (then use humanize:"<name>"). "export_spec"/"import_spec" move a flow in and out as a Git-diffable FlowSpec, with what a person approved beside it (approved: the known world and the screenshot/aria baselines). approve also writes that approval next to the flow in the project repository when the flow is there. Without a tab, list shows the recordings of every engine\'s store (engine field), and id-based actions use the store that has the id.',
     inputSchema: {
       type: 'object',
       properties: {
         action: str('What to do. list/get/update/delete/export/import/export_spec/import_spec/approve/known_world/signature/calibrate_humanize work with no tab.', {
           enum: ['list', 'get', 'status', 'start', 'stop', 'replay', 'assert', 'update', 'delete', 'export', 'import', 'export_test',
-            'export_spec', 'import_spec', 'calibrate', 'approve', 'known_world', 'signature', 'suggest', 'calibrate_humanize'],
+            'export_spec', 'import_spec', 'calibrate', 'approve', 'known_world', 'signature', 'suggest', 'calibrate_humanize', 'batch'],
           default: 'list',
         }),
+        steps: {
+          type: 'array',
+          items: { type: 'object' },
+          description: 'For action:"batch" — steps run in order in ONE call, each { action, … }: "navigate" {url}; "click"|"double_click"|"right_click"|"hover"|"type"|"key"|"select"|"scroll" with ref, or role + name (regex; nth when several match) and the browser_interact options (text, clear, pressEnter, key, values…); "wait" with the browser_navigate wait options (text, selector, predicate, ref+state, idle, timeoutMs); "evaluate" {expression, timeoutMs?}; "extract" {ref | selector | role+name} → the element\'s text. saveAs:"x" keeps a value for {{x}} in later steps. Stops at the first failure with an excerpt of the page there.',
+        },
+        continueOnError: bool('For action:"batch" — run every step even after one fails.', false),
         id: str('Recording id, for get/replay/assert/update/delete/export_test/calibrate_humanize/…'),
         engine: str('Which engine: for replay, "launched" runs it in a launched browser (opening the recording\'s start URL); for tab-free actions, which store ("extension" or "launched"). Default: your current tab\'s engine.'),
         context: str('For replay engine:"launched": the context to open the tab in.'),
@@ -526,7 +585,7 @@ export const TOOLS = [
         seed: SEED,
         dryRun: bool('For replay — resolve every element and change nothing. The cheapest check that a recording has rotted.', false),
         stopOnFailure: bool('For replay — stop at the first failing step.', true),
-        variables: { type: 'object', description: 'For replay — values substituted into {{name}} placeholders.' },
+        variables: { type: 'object', description: 'For replay and batch — values substituted into {{name}} placeholders.' },
         signature: str('For replay — evidence for the surprise detector: "lite" (default), "full" (UI shape every step; used by calibration), "off".', { enum: ['off', 'lite', 'full'], default: 'lite' }),
         compare: bool('For replay — compare against the approved known world. Off only for a deliberate reference run.', true),
         seedKnownWorld: bool('For replay — if the flow has no known world yet, create one from this run. Never overwrites an approved one.', false),

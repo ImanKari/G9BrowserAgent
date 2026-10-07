@@ -39,6 +39,18 @@ import { EventEmitter } from 'node:events';
 /** How long a disconnected extension engine keeps its identity (decision D-c). */
 export const ENGINE_RESUME_MS = 10 * 60_000;
 
+/**
+ * (3.4) How long the tabs a departed agent IDENTITY owned are remembered for its successor. A
+ * stateless MCP client (a panel gate, a script) may open a fresh MCP session — so a fresh daemon
+ * connection, a new agent-N — for every request. Its tabs and current tab used to stay with the
+ * previous agent-N (refused as "owned by agent-N" until that session idled out after 30 minutes).
+ * Now an agent that says who it is (`identity`: the MCP client's name, or the X-G9-Agent header)
+ * takes over what the previous connection of the same identity owned. Remembering costs nobody
+ * anything: a departed owner never blocks another agent (ensureOwnership ignores a disconnected
+ * owner), the successor only takes back what is still unclaimed.
+ */
+export const AGENT_RESUME_MS = 10 * 60_000;
+
 /** The same page, ignoring the fragment (a #hash change is not another document). */
 function samePage(a, b) {
   const strip = (u) => String(u ?? '').split('#')[0];
@@ -53,6 +65,8 @@ export class Registry extends EventEmitter {
     this.resumeMs = Number.isFinite(Number(resumeMs)) && Number(resumeMs) >= 0 ? Number(resumeMs) : ENGINE_RESUME_MS;
     /** instanceId → { id, instanceId, loadId, parkedAt, timer } — extension engines waiting to reconnect. */
     this.parked = new Map();
+    /** (3.4) agent identity → { id, owned:[handle], current, at, timer } — what a departed agent held. */
+    this.departed = new Map();
     this.counters = { agent: 0, engine: 0, ui: 0, viewer: 0, launched: 0 };
     this.clients = new Map();
 
@@ -86,7 +100,7 @@ export class Registry extends EventEmitter {
    */
   addClient({
     role, name = null, pid = null, version = null, send = () => false, browser = null, cwd = null, project = null, origin = null,
-    instanceId = null, loadId = null, tabs = null,
+    instanceId = null, loadId = null, tabs = null, identity = null,
   }) {
     if (!['agent', 'engine', 'ui', 'viewer'].includes(role)) throw new Error(`Unknown client role "${role}".`);
     // An extension engine that was here a moment ago (same instanceId) gets its identity back.
@@ -113,6 +127,7 @@ export class Registry extends EventEmitter {
       halted: false,
       haltedBy: null,
       current: null,
+      ...(role === 'agent' ? { identity: identity ? String(identity).slice(0, 120) : null } : {}),
       ...(role === 'engine' ? { instanceId: instanceId ? String(instanceId) : null, loadId: loadId ? String(loadId) : null, resumed } : {}),
     };
     this.clients.set(id, client);
@@ -134,7 +149,12 @@ export class Registry extends EventEmitter {
     const client = this.clients.get(id);
     if (!client || (expected && client !== expected)) return { released: [], dropped: [], parked: false };
     this.clients.delete(id);
+    // (3.4) What an agent with an identity held is remembered for its successor (AGENT_RESUME_MS).
+    const heldCurrent = client.role === 'agent' ? client.current : null;
     const released = this.releaseAll(id);
+    if (client.role === 'agent' && client.identity && (released.length || heldCurrent != null)) {
+      this.#rememberDeparted(client, released, heldCurrent);
+    }
     // A client that goes away (a runner that ended or crashed) holds no engine any more.
     for (const engineId of this.leasesOf(id)) this.releaseLease(engineId, id);
     let dropped = [];
@@ -229,6 +249,68 @@ export class Registry extends EventEmitter {
     }
     this.log(`[engines] ${entry.id} reconnected after ${Math.round((Date.now() - entry.parkedAt) / 1000)} s (${sameLoad ? 'same browser session' : 'extension or browser restarted'}): kept ${kept.length} tab handle(s), dropped ${dropped.length}`);
     return { id: entry.id, kept, dropped, sameLoad, parkedMs: Date.now() - entry.parkedAt };
+  }
+
+  #rememberDeparted(client, owned, current) {
+    const previous = this.departed.get(client.identity);
+    if (previous) clearTimeout(previous.timer);
+    const entry = { id: client.id, owned: [...owned], current, at: Date.now(), timer: null };
+    entry.timer = setTimeout(() => {
+      if (this.departed.get(client.identity) === entry) this.departed.delete(client.identity);
+    }, AGENT_RESUME_MS);
+    entry.timer.unref?.();
+    this.departed.set(client.identity, entry);
+  }
+
+  /**
+   * (3.4) A new connection of an agent identity takes over what the identity held: the tabs owned by
+   * another CONNECTED agent of the same identity (an older MCP session the client simply abandoned),
+   * else what a departed one owned that nobody has claimed since, and the current tab. The older
+   * connection keeps its socket and owns nothing afterwards. → { from:[agentId], tabs:[handle],
+   * current } or null when there was nothing to take.
+   */
+  adoptIdentity(clientId) {
+    const client = this.clients.get(clientId);
+    if (!client || client.role !== 'agent' || !client.identity) return null;
+    const tabs = [];
+    const from = [];
+    let current = null;
+    const others = this.agents()
+      .filter((a) => a.id !== clientId && a.identity === client.identity)
+      .sort((a, b) => b.connectedAt - a.connectedAt);
+    for (const other of others) {
+      for (const handle of this.ownedBy(other.id)) {
+        this.owners.set(handle, clientId);
+        tabs.push(handle);
+      }
+      if (current == null && other.current != null && this.handles.has(other.current)) current = other.current;
+      for (const engineId of this.leasesOf(other.id)) {
+        const lease = this.leases.get(engineId);
+        lease.holders.delete(other.id);
+        lease.holders.add(clientId);
+      }
+      other.supersededBy = clientId;
+      from.push(other.id);
+    }
+    const gone = this.departed.get(client.identity);
+    if (gone) {
+      clearTimeout(gone.timer);
+      this.departed.delete(client.identity);
+      for (const handle of gone.owned) {
+        if (!this.handles.has(handle) || tabs.includes(handle)) continue;
+        const owner = this.owners.get(handle);
+        if (owner && owner !== gone.id && this.clients.has(owner)) continue; // someone else took it meanwhile
+        this.owners.set(handle, clientId);
+        tabs.push(handle);
+      }
+      if (current == null && gone.current != null && this.handles.has(gone.current)) current = gone.current;
+      from.push(gone.id);
+    }
+    if (!from.length) return null;
+    if (current != null && client.current == null) client.current = current;
+    this.log(`[agents] ${this.describe(clientId)} took over identity "${client.identity}" from ${from.join(', ')}: tabs ${tabs.join(', ') || 'none'}${current != null ? `, current tab ${current}` : ''}`);
+    this.emit('agents');
+    return { from, tabs: tabs.sort((a, b) => a - b), current: client.current ?? null };
   }
 
   isParked(engineId) {
@@ -623,6 +705,8 @@ export class Registry extends EventEmitter {
     return this.agents().map((a) => ({
       id: a.id,
       name: a.name,
+      ...(a.identity ? { identity: a.identity } : {}),
+      ...(a.supersededBy ? { supersededBy: a.supersededBy } : {}),
       pid: a.pid,
       owned: this.ownedBy(a.id),
       current: this.current(a.id),
