@@ -727,6 +727,8 @@ async function handleCall(msg) {
       type: 'result', id, ok: false, error: String(err?.message ?? err),
       ...(typeof err?.delivery === 'string' ? { delivery: err.delivery, hit: err.hit ?? null, hidden: err.hidden === true } : {}),
       ...(err?.recovered ? { recovered: err.recovered } : {}),
+      // (3.6) Its code too (lib/errcode.js); the message already carries the [code: …] tag.
+      ...(typeof err?.errorCode === 'string' ? { code: err.errorCode } : {}),
     });
     if (caller?.relayed === true) afterRelayedCall(tool, args, caller, err);
   } finally {

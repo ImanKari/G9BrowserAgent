@@ -6,8 +6,9 @@
  * and a page that renders the control a moment later answered "No element matches". So an
  * interaction may name its target by:
  *
- * - `role` (+ `name`, a case-insensitive regex, + `nth` when several match) — the accessibility
- *   tree, as browser_inspect what:"find" reads it;
+ * - `role` (+ `name`, a case-insensitive regex — (3.6) case-sensitive with `matchCase`, literal
+ *   with `exact` — + `nth` when several match) — the accessibility tree, as browser_inspect
+ *   what:"find" reads it;
  * - `selector` — a CSS selector in the top document (only visible matches count; `nth` picks one);
  * - `ref`, as before.
  *
@@ -20,7 +21,8 @@
 import { send } from '../lib/cdp.js';
 import { callInWorld } from '../lib/world.js';
 import { adoptNodes, ownerOf } from '../lib/refs.js';
-import { find } from './snapshot.js';
+import { find, nameLabel } from './snapshot.js';
+import { codedError } from '../lib/errcode.js';
 
 export const MAX_WAIT_MS = 60_000;
 const POLL_MS = 250;
@@ -33,13 +35,13 @@ export function wantsLookup(args = {}) {
 
 function label(args) {
   if (args.selector != null) return `selector ${JSON.stringify(String(args.selector))}`;
-  return `${args.role != null ? `role ${JSON.stringify(String(args.role))}` : 'any role'}${args.name != null ? ` name /${args.name}/i` : ''}`;
+  return `${args.role != null ? `role ${JSON.stringify(String(args.role))}` : 'any role'}${args.name != null ? ` ${nameLabel(args.name, { matchCase: args.matchCase === true, exact: args.exact === true })}` : ''}`;
 }
 
 /** One look: → { refs:[…], lines:[…] } (lines for messages). */
 async function lookOnce(tabId, args, caller, url) {
   if (args.selector != null) return bySelector(tabId, String(args.selector), caller, url);
-  const found = await find(tabId, { roles: args.role != null ? [String(args.role)] : null, name: args.name ?? null, limit: 30, url }, caller);
+  const found = await find(tabId, { roles: args.role != null ? [String(args.role)] : null, name: args.name ?? null, limit: 30, url, matchCase: args.matchCase === true, exact: args.exact === true }, caller);
   const lines = found.tree === '(no match)' ? [] : found.tree.split('\n');
   const refs = lines.map((l) => /\[ref=(e\d+)\]/.exec(l)?.[1]).filter(Boolean);
   return { refs, lines };
@@ -91,7 +93,7 @@ export async function lookupRef(tabId, args, caller, { url = null, signal = null
   }
   const what = label(args);
   if (!last.refs.length) {
-    const err = new Error(`No element with ${what} on the page${waitMs ? ` after waiting ${Math.round((Date.now() - started) / 100) / 10} s` : ''}; nothing was sent. ` +
+    const err = codedError('not_found', `No element with ${what} on the page${waitMs ? ` after waiting ${Math.round((Date.now() - started) / 100) / 10} s` : ''}; nothing was sent. ` +
       'Check the name with browser_inspect what:"find", or pass waitMs if it appears later.');
     err.delivery = 'not-delivered';
     err.lookedFor = { role: args.role ?? null, name: args.name ?? null, selector: args.selector ?? null };
@@ -100,12 +102,12 @@ export async function lookupRef(tabId, args, caller, { url = null, signal = null
   if (args.nth != null) {
     const n = Number(args.nth);
     if (!(Number.isInteger(n) && n >= 1 && n <= last.refs.length)) {
-      throw new Error(`${what} matched ${last.refs.length}; nth ${args.nth} is out of range (1..${last.refs.length}). Nothing was sent.`);
+      throw codedError('bad_argument', `${what} matched ${last.refs.length}; nth ${args.nth} is out of range (1..${last.refs.length}). Nothing was sent.`);
     }
     return { ref: last.refs[n - 1], matched: `${what}, #${n} of ${last.refs.length}`, waitedMs: Date.now() - started };
   }
   if (last.refs.length > 1) {
-    const err = new Error(`${what} matched ${last.refs.length} elements: ${last.lines.slice(0, 8).join(' | ')}. Pass nth (1-based) or a stricter name. Nothing was sent.`);
+    const err = codedError('ambiguous', `${what} matched ${last.refs.length} elements: ${last.lines.slice(0, 8).join(' | ')}. Pass nth (1-based) or a stricter name (exact:true). Nothing was sent.`);
     err.delivery = 'not-delivered';
     throw err;
   }

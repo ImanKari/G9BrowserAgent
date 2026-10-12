@@ -21,6 +21,8 @@ import { getState, logActivity, forgetDialog } from '../lib/state.js';
 import { inWorld } from '../lib/world.js';
 import { evaluate, send as cdpSend, attachedTabIds, recoverTab, keepAwake, attachIssuesOf, pendingCommands, detach as detachDebugger } from '../lib/cdp.js';
 import { bindCallSignal, bindCallDeadline, callSignalFor } from '../lib/humanize.js';
+import { tagCode, codeFor, codedError } from '../lib/errcode.js';
+import * as navwatch from '../lib/navwatch.js';
 import * as store from '../lib/store.js';
 import { toFlowSpec, canonicalJson } from '../lib/flowspec.js';
 import { envKeyOf, knownWorldFor } from '../lib/signature.js';
@@ -529,6 +531,9 @@ const RETRY_GAP_MS = 300;
  *   refusing, bring it to the front of its window or move it into a window of its own, then act.
  *   The refusal sent nothing, so acting after it is safe.
  */
+/** (3.6) How long expectSamePage looks for a navigation that starts after the action's answer. */
+const NAV_SETTLE_MS = 400;
+
 async function interactWithRetry(tabId, tab, args, caller) {
   const base = { ...args, url: tab.url };
   if (Array.isArray(args.modifiers)) base.modifiers = interact.modifierMask(args.modifiers);
@@ -546,11 +551,30 @@ async function interactWithRetry(tabId, tab, args, caller) {
       if (args.action === 'drag' && a.from == null) a.from = found.ref;
     }
     try {
+      const navMark = await navwatch.mark(tabId);
       const out = await interactOnce(tabId, a);
+      // (3.6) Did it take the page somewhere else (a "button" that was a link)? Said in the result;
+      // an error with expectSamePage — after a short look, since a navigation may start late.
+      let navigated = navwatch.since(navMark, tab.url);
+      if (!navigated && args.expectSamePage === true) {
+        await new Promise((r) => setTimeout(r, NAV_SETTLE_MS));
+        navigated = navwatch.since(navMark, tab.url);
+      }
+      if (navigated && args.expectSamePage === true) {
+        const err = codedError(
+          'navigated',
+          `The ${args.action} was delivered, and it took the page to ${navigated.url}${navigated.sameDocument ? ' (a route change inside the page)' : ''} — it was on ${tab.url}; expectSamePage was set. ` +
+            'The action happened: do not repeat it. Go back with browser_navigate action:"back" if that was not meant, and take a fresh browser_snapshot.',
+        );
+        err.result = { ...(out && typeof out === 'object' ? out : {}), navigated };
+        err.delivered = true;
+        throw err;
+      }
       const extra = {
         ...(found ? { ref: found.ref, matched: found.matched } : {}),
         ...(attempt ? { retried: attempt } : {}),
         ...(unhid ? { unhid } : {}),
+        ...(navigated ? { navigated } : {}),
       };
       return Object.keys(extra).length && out && typeof out === 'object' ? { ...out, ...extra } : out;
     } catch (err) {
@@ -953,7 +977,8 @@ export async function runTool(tool, args = {}, caller = null) {
     if (entry.allowWhenHalted !== true) {
       const dialog = await dialogBlocks(tool, callArgs, state, tabId);
       if (dialog) {
-        throw new Error(
+        throw codedError(
+          'dialog',
           `The page is blocked by a JavaScript ${dialog.type} dialog: ` +
             `"${String(dialog.message ?? '').slice(0, 200)}". Nothing else will run on that tab until it is ` +
             `handled — call browser_dialog to accept or dismiss it, then retry this.`,
@@ -979,6 +1004,8 @@ export async function runTool(tool, args = {}, caller = null) {
           `${info?.abandoned?.length ? ` (abandoned: ${info.abandoned.join(', ')})` : ''}; the tab is usable again. Take a browser_snapshot before acting on it.`;
       }
     }
+    // (3.6) The machine-readable code, after the [delivery]/[recovered] tags (lib/errcode.js).
+    tagCode(error, codeFor(error) ?? (error.recovered ? 'timeout' : null));
     void log({
       kind: 'tool',
       tool,

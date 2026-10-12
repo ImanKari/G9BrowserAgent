@@ -40,7 +40,24 @@ export function layout(home) {
     logsDir: path.join(home, 'logs'),
     daemonLog: path.join(home, 'logs', 'daemon.log'),
     installLog: path.join(home, 'logs', 'install.log'),
+    updating: path.join(home, 'updating.json'),
   };
+}
+
+/**
+ * (3.6) While the desktop app installs an update it writes G9_HOME/updating.json
+ * (`{ version, until }`): an MCP front end that finds no daemon then does NOT start one from the
+ * files the installer is replacing (mcp/link.mjs) — a daemon started from them held the program
+ * open, and the install failed whenever an agent was still connected. Fresh only until `until`,
+ * so an install that failed never blocks the daemon for long. Returns the marker, or null.
+ */
+export function updatingMarker(home, now = Date.now()) {
+  try {
+    const m = JSON.parse(fs.readFileSync(path.join(home, 'updating.json'), 'utf8'));
+    return m && Number(m.until) > now ? m : null;
+  } catch {
+    return null;
+  }
 }
 
 /** A port from a flag/env/setting, or null when the value is not a usable TCP port. */

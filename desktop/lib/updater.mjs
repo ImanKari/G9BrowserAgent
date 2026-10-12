@@ -13,9 +13,20 @@
  * How an update is installed depends on what can replace the running app (`installMode`):
  *   - 'auto'   Windows (NSIS) and a Linux AppImage: downloaded in the background, then the person
  *              chooses (install now / when I quit / not now / skip this version).
- *   - 'manual' macOS (the app is not signed with a Developer ID, and Squirrel.Mac refuses to
- *              install into an unsigned app) and a Linux .deb (replacing it needs root): the check
- *              runs the same way, nothing is downloaded, and the person gets the release page.
+ *   - 'self'   (3.6) macOS, when the app can write where it is installed: Squirrel.Mac refuses an
+ *              app without a Developer ID, so the app downloads the release's zip itself, checks
+ *              its SHA-512, and swaps its own bundle after it quits (lib/mac-update.mjs). The same
+ *              four choices as 'auto'.
+ *   - 'manual' a Mac that cannot write its own bundle (opened from Downloads, or installed by
+ *              another user) and a Linux .deb (replacing it needs root): the check runs the same
+ *              way, nothing is downloaded, and the person gets the release page.
+ *
+ * Force install (3.6): "Install now" waits for an idle daemon — no open run, no launched browser —
+ * and an agent that keeps a launched browser open kept it waiting for ever; the processes the
+ * agents' MCP servers run from the installed files also made the installer fail. Force install
+ * does not wait: `beforeInstall({force:true})` shuts the daemon down (its browsers close, open
+ * runs are closed as interrupted), stops every MCP server and leftover daemon running this program
+ * (lib/install-stop.mjs), and installs. Every install, forced or not, clears the way like that.
  *
  * What it promises, and nothing more:
  *   - A development (unpackaged) build → status 'dev'; electron-updater cannot update it.
@@ -100,10 +111,19 @@ export function installMode({ platform = process.platform, appImage = false } = 
 }
 
 /** Why an installation updates by hand, in the words the UI uses. Pure. */
-export function manualReason({ platform = process.platform } = {}) {
-  if (platform === 'darwin') return 'macOS installs updates only into apps signed with an Apple Developer ID, and G9BrowserAgent is not signed yet';
+export function manualReason({ platform = process.platform, macReason = null } = {}) {
+  if (platform === 'darwin') return macReason ? `G9BrowserAgent installs its own updates on a Mac only where it can replace itself, and ${macReason}` : 'G9BrowserAgent cannot replace itself where it is installed';
   if (platform === 'linux') return 'a .deb package is replaced with the system package manager, which needs your password';
   return 'this installation cannot replace itself';
+}
+
+/**
+ * How this installation can be updated, on every OS (installMode with the macOS check). Pure.
+ * @param {{platform, appImage, macSelf}} o  macSelf: lib/mac-update.mjs selfUpdatable().ok
+ */
+export function installModeFor({ platform = process.platform, appImage = false, macSelf = false } = {}) {
+  if (platform === 'darwin') return macSelf ? 'self' : 'manual';
+  return installMode({ platform, appImage });
 }
 
 /** The one line the UI shows. Pure. */
@@ -125,7 +145,7 @@ export function describeUpdate(s) {
     case 'downloading': return `Updates: downloading ${s.version ?? ''} ${Math.round(s.percent ?? 0)}%`.replace(/\s+/g, ' ').trim();
     case 'downloaded': return `Updates: ${s.version} is ready to install`;
     case 'deferred': return `Updates: ${s.version} waits for the daemon to be idle (${(s.reasons ?? []).join('; ')})`;
-    case 'installing': return `Updates: installing ${s.version}…`;
+    case 'installing': return `Updates: installing ${s.version}${s.forced ? ' (forced)' : ''}…`;
     case 'error': return /\b404\b|No published versions|ERR_UPDATER_LATEST_VERSION_NOT_FOUND|CHANNEL_FILE_NOT_FOUND/.test(s.error ?? '')
       ? `Updates: no G9BrowserAgent release is published at ${s.source === 'custom' ? 'the custom address' : 'the official releases'} yet`
       : `Updates: the last check failed (${String(s.error ?? '').trim()})`;
@@ -150,10 +170,13 @@ export class UpdateController extends EventEmitter {
    * @param {() => Promise<void>} o.beforeInstall   stops the daemon (it is idle by then)
    * @param {(info) => Promise<'now'|'later'>} o.promptInstall
    */
-  constructor({ getAutoUpdater, isPackaged, currentVersion, getConfig, queryActivity, beforeInstall, promptInstall, mode = 'auto', notifyManual = null, ensureUpdateConfig = null, getSkippedVersion = null, onSkipVersion = null, log = null, timers = globalThis, now = () => Date.now() }) {
+  constructor({ getAutoUpdater, isPackaged, currentVersion, getConfig, queryActivity, beforeInstall, promptInstall, confirmForce = null, mode = 'auto', selfUpdate = null, notifyManual = null, ensureUpdateConfig = null, getSkippedVersion = null, onSkipVersion = null, log = null, timers = globalThis, now = () => Date.now() }) {
     super();
-    /** 'auto' | 'manual' — see installMode(). */
+    /** 'auto' | 'self' | 'manual' — see installModeFor(). */
     this.mode = mode;
+    /** 'self' mode: lib/mac-update.mjs MacSelfUpdate (downloads, verifies, stages, swaps). */
+    this.selfUpdate = selfUpdate;
+    this.selfPreparing = null;
     /** Told once per version found in manual mode (a notification); optional. */
     this.notifyManual = notifyManual;
     this.notifiedManual = null;
@@ -167,6 +190,8 @@ export class UpdateController extends EventEmitter {
     this.queryActivity = queryActivity;
     this.beforeInstall = beforeInstall;
     this.promptInstall = promptInstall;
+    /** (3.6) "Install now" found the daemon busy: may the install go ahead anyway? Optional. */
+    this.confirmForce = confirmForce;
     this.log = log;
     this.timers = timers;
     this.now = now;
@@ -232,6 +257,10 @@ export class UpdateController extends EventEmitter {
         return;
       }
       this.#set({ status: 'available', version, releaseUrl, releaseNotes: info?.releaseNotes ?? null });
+      if (this.mode === 'self') {
+        this.#prepareSelf(info);
+        return;
+      }
       // electron-updater's download promise has no handler of its own; its 'error' event reports a
       // failed download (network drop, bad hash, full disk), so the rejection is only swallowed here.
       Promise.resolve().then(() => u.downloadUpdate()).catch(() => {});
@@ -245,6 +274,23 @@ export class UpdateController extends EventEmitter {
     u.on('error', (err) => this.#set({ status: 'error', error: String(err?.message ?? err).split('\n')[0] }));
     this.updater = u;
     return u;
+  }
+
+  /** 'self' mode: download, verify and stage the release (once at a time), then offer it. */
+  #prepareSelf(info) {
+    if (this.selfPreparing) return;
+    this.selfPreparing = this.selfUpdate.prepare({
+      info,
+      feed: this.feed,
+      onProgress: (p) => this.#set({ status: 'downloading', percent: p?.percent ?? null }),
+    }).then((staged) => {
+      this.#set({ status: 'downloaded', version: staged?.version ?? info?.version ?? this.state.version, percent: 100 });
+      this.#offerInstall({ version: staged?.version ?? info?.version }).catch((err) => this.log?.error?.('Install prompt failed', String(err)));
+    }, (err) => {
+      this.#set({ status: 'error', error: String(err?.message ?? err).split('\n')[0] });
+    }).finally(() => {
+      this.selfPreparing = null;
+    });
   }
 
   /** Read the configured feed and apply it. Returns true when updates are configured. */
@@ -373,7 +419,10 @@ export class UpdateController extends EventEmitter {
     if (choice === 'now') {
       // Chosen: it also installs on quit if the daemon is busy now.
       this.installOnQuit = true;
-      return this.installWhenIdle();
+      const s = await this.installWhenIdle();
+      // Busy (an agent's launched browser, a run): the person may install anyway (3.6).
+      if (s.status === 'deferred' && this.confirmForce && (await this.confirmForce({ version, reasons: s.reasons ?? [] }).catch(() => false))) return this.forceInstall();
+      return s;
     }
     if (choice === 'later') return this.installOnQuitChoice();
     if (choice === 'skip' && version) return this.skip(version);
@@ -394,9 +443,25 @@ export class UpdateController extends EventEmitter {
     return this.installing;
   }
 
-  async #installWhenIdle({ quitting }) {
+  /**
+   * (3.6) Install now, whatever the daemon is doing: its runs are closed as interrupted, its launched
+   * browsers close, and every MCP server running this program is stopped (beforeInstall). The
+   * person confirms it first (main.mjs). Resolves 'installing', or the state unchanged when there
+   * is nothing downloaded to install.
+   */
+  async forceInstall({ quitting = false } = {}) {
+    if (this.installing) await this.installing.catch(() => {});
+    if (this.state.status === 'installing') return this.snapshot();
+    this.installOnQuit = true;
+    this.installing = this.#installWhenIdle({ quitting, force: true }).finally(() => {
+      this.installing = null;
+    });
+    return this.installing;
+  }
+
+  async #installWhenIdle({ quitting, force = false }) {
     if (!['downloaded', 'deferred'].includes(this.state.status)) return this.snapshot();
-    const activity = await this.queryActivity();
+    const activity = force ? { busy: false, reasons: [] } : await this.queryActivity();
     if (activity.busy) {
       this.#set({ status: 'deferred', reasons: activity.reasons });
       this.log?.info?.('Update install deferred', activity.reasons);
@@ -406,13 +471,23 @@ export class UpdateController extends EventEmitter {
       }
       return this.snapshot();
     }
-    this.#set({ status: 'installing', reasons: [] });
+    this.timers.clearTimeout?.(this.busyTimer);
+    this.#set({ status: 'installing', reasons: [], forced: force });
     try {
-      await this.beforeInstall();
+      await this.beforeInstall({ force, version: this.state.version });
     } catch (err) {
       this.log?.warn?.('Stopping the daemon before install failed', String(err?.message ?? err));
     }
-    this.log?.info?.('Installing the update', { version: this.state.version });
+    this.log?.info?.('Installing the update', { version: this.state.version, forced: force });
+    if (this.mode === 'self') {
+      // macOS: a script swaps the bundle once this app has quit, then starts it unless quitting.
+      try {
+        this.selfUpdate.install({ relaunch: !quitting });
+      } catch (err) {
+        this.#set({ status: 'error', error: `The update could not be installed: ${String(err?.message ?? err)}` });
+      }
+      return this.snapshot();
+    }
     // isSilent: the person already chose; isForceRunAfter: reopen G9BrowserAgent unless we are quitting anyway.
     this.updater.quitAndInstall(true, !quitting);
     return this.snapshot();

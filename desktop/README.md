@@ -100,9 +100,9 @@ tray on Linux): the daemon connection, schedules and the updater live while it r
   Switching it off (Settings, or the tray menu's **Start at sign-in** checkbox) is the person's
   choice, and no later start turns it back on. A development build never registers itself.
   Started at sign-in, G9BrowserAgent opens no window (`--hidden`; macOS's own login flag).
-- **The icon** (3.5) is the same design as the extension's: a frosted browser window on an aurora
-  tile, with a pointer reaching in. The tray recolours the tile by state: aurora (connected), red
-  (agents stopped), slate (daemon offline), amber (the port is held by something else). On macOS
+- **The icon** is the same design as the extension's: "Human Wave", the curved path a person's
+  pointer takes, in white on an ocean-blue tile. The tray recolours the tile by state: blue
+  (connected), red (agents stopped), slate (daemon offline), amber (the port is held by something else). On macOS
   the menu-bar image is a monochrome template, so the system draws it for a light or dark bar;
   stopped and port-taken keep their colour there.
 
@@ -202,9 +202,23 @@ another folder: the "older build" the update test installs first.
   host. `updateChannel` `beta` also takes prereleases.
 * **Install mode** (`installMode`) — `auto` on Windows and a Linux AppImage: it checks on start and
   every 6 hours, downloads by itself (SHA-512 checked), then asks: install now, install when you quit
-  G9BrowserAgent, not now, or skip this version (a skipped version is never downloaded again). `manual` on macOS
-  (Squirrel.Mac installs only into a Developer-ID-signed app) and a .deb (needs root): the same check,
-  no download, a notification once per version, and **Open the release page**.
+  G9BrowserAgent, not now, or skip this version (a skipped version is never downloaded again). `self`
+  on macOS (3.6, `lib/mac-update.mjs`): Squirrel.Mac installs only into a Developer-ID-signed app, so
+  the app downloads the release's zip for its architecture itself, checks its SHA-512 against
+  `latest-mac.yml`, unpacks it, and after it quits a small script swaps the app bundle (the old one is
+  put back if the copy fails) and starts the new version — the same four choices as `auto`. `manual`
+  only for a Mac that cannot write its own bundle (opened from Downloads, or installed by another user:
+  move it to Applications) and a .deb (needs root): the same check, no download, a notification once
+  per version, and **Open the release page**.
+* **Force install** (3.6) — **Settings → Updates → Force install**, the "install anyway?" question
+  after **Install now** finds the daemon busy, and **Force install and quit** when quitting: after a
+  confirmation naming what stops, it installs without waiting. Every install, forced or not, first
+  writes `G9_HOME/updating.json` (so no AI client's MCP server starts the daemon from the files being
+  replaced), shuts the daemon down (its launched browsers close, open runs end as interrupted), and
+  stops every other process running this program — the agents' MCP servers, which held the program
+  open and made every install fail while an agent was connected (`lib/install-stop.mjs`). The AI
+  client starts its G9BrowserAgent server again (or reconnect it there), and its next call reaches
+  the new version; the extension is refreshed as after any update.
 * **Never mid-run** — installing restarts the daemon, so it waits until the daemon reports no run in
   progress and no launched browser; a busy daemon defers it (re-checked every minute), and quitting
   while busy leaves it for the next quit. `autoInstallOnAppQuit` is off, because the installer closes

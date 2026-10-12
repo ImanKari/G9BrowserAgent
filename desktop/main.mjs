@@ -148,7 +148,9 @@ async function startApp() {
   const { DaemonLauncher, probeHealth, restartDaemonIfIdle, queryActivity, activityFromHealth, waitForPortFree, mismatchAction } = await import('./lib/daemon-launch.mjs');
   const { DesktopSettings, pickUpdateConfig, detectUpdate, decideLoginDefault, trayPlace } = await import('./lib/settings.mjs');
   const { createLogger, tailLog } = await import('./lib/log.mjs');
-  const { UpdateController, installMode, manualReason, releasePageUrl } = await import('./lib/updater.mjs');
+  const { UpdateController, installModeFor, manualReason, releasePageUrl } = await import('./lib/updater.mjs');
+  const { MacSelfUpdate, selfUpdatable } = await import('./lib/mac-update.mjs');
+  const { stopInstallProcesses, updatingMarkerBody } = await import('./lib/install-stop.mjs');
   const { Wizard } = await import('./lib/wizard.mjs');
   const { execReg, elevatedRegBatch } = await import('./lib/policies.mjs');
   const { readRunLocal, readFrame, saveVideo, runDir } = await import('./lib/runs-store.mjs');
@@ -219,6 +221,11 @@ async function startApp() {
   // G9_HOME/extension as the daemon sees it (extension.install writes there; welcome.home says where).
   const extensionDir = () => path.join(ctx.daemonHome, 'extension');
 
+  // (3.6) An install that this app started is over (it is running again): MCP servers may start the
+  // daemon again (lib/install-stop.mjs, mcp/link.mjs).
+  const clearUpdatingMarker = (dir) => { try { if (dir) fs.rmSync(path.join(dir, 'updating.json'), { force: true }); } catch { /* it expires by itself */ } };
+  clearUpdatingMarker(home);
+
   const updateInfo = detectUpdate(settings.get().lastRunVersion, version);
   if (updateInfo.updated) {
     log.info(`Updated from ${updateInfo.from} to ${version}`);
@@ -258,7 +265,7 @@ async function startApp() {
   const snapshot = () => ({
     app: {
       version, packaged: isPackaged, home: ctx.daemonHome, desktopHome: home, port, user, platform: process.platform, resourceRoot: root,
-      appImage: appImage?.file ?? null, installMode: updateInstallMode, manualReason: updateInstallMode === 'manual' ? manualReason({ platform: process.platform }) : null,
+      appImage: appImage?.file ?? null, installMode: updateInstallMode, manualReason: updateInstallMode === 'manual' ? manualReason({ platform: process.platform, macReason: macSelf.reason }) : null,
     },
     connection: client.state,
     halted: ctx.store.halted,
@@ -408,6 +415,7 @@ async function startApp() {
     }
     if (daemonHome) {
       ctx.daemonHome = path.resolve(daemonHome);
+      clearUpdatingMarker(ctx.daemonHome);
       ctx.store.notices = ctx.store.notices.filter((n) => n.id !== 'home');
       if (ctx.daemonHome.toLowerCase() !== path.resolve(home).toLowerCase()) {
         ctx.store.notices.push({ id: 'home', tone: 'warn', text: `The daemon uses G9_HOME ${daemonHome}; this app was started with ${home}. Runs are read from the daemon's folder.` });
@@ -519,8 +527,25 @@ async function startApp() {
 
   // ------------------------------------------------------------------ updater
 
-  // Windows (NSIS) and a Linux AppImage replace themselves; macOS (unsigned) and a .deb do not.
-  const updateInstallMode = installMode({ platform: process.platform, appImage: !!appImage });
+  // Windows (NSIS) and a Linux AppImage replace themselves through electron-updater; a Mac replaces
+  // its own bundle when it can write it (3.6, lib/mac-update.mjs); a .deb does not.
+  const macSelf = process.platform === 'darwin' && isPackaged ? selfUpdatable({ execPath: process.execPath }) : { ok: false, reason: null };
+  const updateInstallMode = installModeFor({ platform: process.platform, appImage: !!appImage, macSelf: macSelf.ok });
+  if (process.platform === 'darwin' && isPackaged) log.info('macOS updates', { mode: updateInstallMode, bundle: macSelf.bundle ?? null, reason: macSelf.ok ? null : macSelf.reason });
+  const selfUpdate = updateInstallMode === 'self'
+    ? new MacSelfUpdate({
+      // Where electron-updater keeps its downloads on a Mac (the same folder, so one cache).
+      cacheDir: path.join(os.homedir(), 'Library', 'Caches', 'g9browseragent-updater', 'pending'),
+      execPath: process.execPath,
+      // Chromium's network stack: the system proxy and certificates apply, as for electron-updater.
+      fetch: electron.net?.fetch ? (url, opts) => electron.net.fetch(url, opts) : globalThis.fetch,
+      log,
+      quit: () => {
+        ctx.quitting = true;
+        app.quit();
+      },
+    })
+    : null;
   const updater = new UpdateController({
     // --check-render never checks, downloads or installs: a feed configured in the daemon it connects
     // to would otherwise download an update and raise the install dialog (focus) over the person's
@@ -555,6 +580,7 @@ async function startApp() {
       }
     },
     mode: updateInstallMode,
+    selfUpdate,
     // Manual installs (macOS, .deb): say once per version that a release is out, and where.
     notifyManual: ({ version: next, releaseUrl }) => {
       if (CHECKING || !Notification?.isSupported?.()) return;
@@ -590,16 +616,31 @@ async function startApp() {
       }
       return queryActivity(client, { enginesFallback: ctx.store.engines });
     },
-    beforeInstall: async () => {
-      if (!client.connected) return;
-      try {
-        await client.admin('shutdown', {});
-      } catch {
-        /* the socket closes as it exits */
+    // Clear the way (lib/install-stop.mjs): no MCP server may start the daemon meanwhile; the daemon
+    // shuts down (closing its browsers and its open runs); every other process running this program
+    // — the agents' MCP servers, a daemon that did not exit — is stopped, or the installer cannot
+    // replace the program (3.6: with an agent connected, every install failed).
+    beforeInstall: async ({ force = false, version: next = null } = {}) => {
+      const marker = JSON.stringify(updatingMarkerBody({ version: next }));
+      for (const dir of new Set([home, ctx.daemonHome].filter(Boolean))) {
+        try { fs.writeFileSync(path.join(dir, 'updating.json'), marker); } catch (err) { log.warn('Could not write the updating marker', { dir, error: String(err?.message ?? err) }); }
+      }
+      if (client.connected) {
+        try {
+          await client.admin('shutdown', {});
+        } catch {
+          /* the socket closes as it exits */
+        }
       }
       client.stop();
-      await waitForPortFree(port, { timeoutMs: 15_000 });
+      const free = await waitForPortFree(port, { timeoutMs: force ? 10_000 : 15_000 });
+      if (!free) log.warn('The daemon did not stop in time; it is stopped with the other processes', { port });
+      if (!isPackaged) return; // a development build's executable is Electron itself, shared with others
+      const r = await stopInstallProcesses({ execPath: process.execPath, log });
+      log.info('Cleared the way for the update', { forced: force, stopped: r.stopped, left: r.left });
     },
+    // "Install now" found the daemon busy: offer to install anyway (3.6).
+    confirmForce: async ({ version: next, reasons }) => confirmForceInstall(next, reasons),
     promptInstall: async ({ version: next }) => {
       const r = await messageBox({
         type: 'info',
@@ -618,6 +659,25 @@ async function startApp() {
     push('updater', s);
     scheduleState();
   });
+
+  /** Force install asks first, naming what it stops (3.6). */
+  async function confirmForceInstall(next, reasons = []) {
+    if (CHECKING || !isPackaged) return false;
+    const r = await messageBox({
+      type: 'warning',
+      title: 'Install the G9BrowserAgent update now?',
+      message: `Install G9BrowserAgent ${next ?? 'update'} now, without waiting?`,
+      detail: `${reasons.length ? `Right now: ${reasons.join('; ')}.\n\n` : ''}Installing now stops the daemon: its launched browsers close, a run in progress ends as interrupted, ` +
+        "and every AI client's G9BrowserAgent MCP server is stopped (the client starts it again, or reconnect it there). " +
+        'G9BrowserAgent and the browser extension come back at the new version.',
+      buttons: ['Force install now', 'Wait until idle'],
+      defaultId: 1,
+      cancelId: 1,
+    });
+    const ok = r.response === 0;
+    log.info(ok ? 'Force install confirmed' : 'Force install declined', { version: next, reasons });
+    return ok;
+  }
 
   /**
    * A feed URL that arrived from the daemon's settings and is not the one this app has: the person
@@ -874,6 +934,13 @@ async function startApp() {
     'updater.state': () => updater.snapshot(),
     'updater.check': () => updater.check({ manual: true }),
     'updater.install': () => updater.installWhenIdle(),
+    // Install without waiting for an idle daemon — after the person confirms it here, in main (3.6).
+    'updater.forceInstall': async () => {
+      const s = updater.snapshot();
+      if (!['downloaded', 'deferred'].includes(s.status)) return s;
+      if (!(await confirmForceInstall(s.version, s.reasons ?? []))) return updater.snapshot();
+      return updater.forceInstall();
+    },
     'updater.skip': () => updater.skip(),
     'updater.installOnQuit': () => updater.installOnQuitChoice(),
     // Quit G9BrowserAgent (the tray's "Quit G9BrowserAgent"): installs a downloaded update first when the person chose so.
@@ -1202,14 +1269,21 @@ async function startApp() {
         type: 'question',
         title: 'G9BrowserAgent update waiting',
         message: 'An update is ready, but the daemon is busy.',
-        detail: `${reasons.join('; ')}.\n\nInstalling restarts the daemon, which would stop that work. Quit now and the update installs the next time you quit while nothing runs, or keep G9BrowserAgent in the tray and it installs as soon as the daemon is idle.`,
-        buttons: ['Quit without updating', 'Install when idle'],
+        detail: `${reasons.join('; ')}.\n\nInstalling restarts the daemon, which would stop that work. Quit now and the update installs the next time you quit while nothing runs, keep G9BrowserAgent in the tray and it installs as soon as the daemon is idle, or force it: the work stops and the update installs now.`,
+        buttons: ['Quit without updating', 'Install when idle', 'Force install and quit'],
         defaultId: 1,
         cancelId: 1,
       });
       if (r.response === 1) {
         updater.installWhenIdle().catch(() => {});
         return;
+      }
+      if (r.response === 2) {
+        const s = await updater.forceInstall({ quitting: true }).catch(() => null);
+        if (s?.status === 'installing') {
+          ctx.quitting = true;
+          return;
+        }
       }
     }
     ctx.quitting = true;

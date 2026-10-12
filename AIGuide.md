@@ -2,7 +2,15 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v3.5.0, 2026-10-12. 3.5.0 (§9, the 3.5.0 entry): one icon drawn in code for the
+**Status:** v3.6.0, 2026-10-13. 3.6.0 (§9, the 3.6.0 entry): the "Human Wave" icon everywhere; the
+desktop updater clears the way before it installs (the agents' MCP servers no longer make every
+install fail), installs on demand with **Force install**, and a Mac updates itself instead of opening
+the release page; and the next agent field report — case-sensitive and literal name matching, an
+error `code` on every actionable error, `navigated` / `expectSamePage`, focus-aware `set_value` on
+custom sliders, an emptied file input that is `indeterminate`, not an error, and session cookies that
+survive a relaunch of a launched profile. **TEMPORARY in 3.6: the suggestions box** (`browser_issue
+action:"feedback"`, see [Rules](#rules-for-changing-this-codebase) item 9) — remove it in a later
+version. 3.5.0 (§9, the 3.5.0 entry): one icon drawn in code for the
 extension, app, installer and tray; the desktop app starts at sign-in by default and says where it
 went when its window closes; and every general point of an agent's field report — a call log with
 idempotent `opId`s and pending answers, interaction by role/name/selector with safe retries,
@@ -1433,7 +1441,7 @@ by being written down.
   checked: a screen reader, high-contrast or forced-colors mode, right-to-left page titles, and a
   real Windows desktop with the panel detached. **Project sites** depends on the connected agents'
   `g9.project.json` environments; with no agent connected it attaches nothing, which the panel says.
-- **The icon (3.5).** One design, drawn in code by `desktop/lib/icon.mjs` for the extension
+- **The icon (3.5; "Human Wave" since 3.6.0).** One design, drawn in code by `desktop/lib/icon.mjs` for the extension
   (`setup/make-icons.mjs` writes the PNGs; the panel suite checks them pixel for pixel), the app, the
   installer and the tray; looked at in pictures at 16–128 px on light and dark backgrounds, not in a
   real toolbar here (the harnesses are headless). Before 3.5: the extension's icons came from the owner's artwork through
@@ -1558,6 +1566,8 @@ Recorded on 2026-09-25; none blocks a release.
 3. **Where updates are hosted** — an http(s) URL for `updateUrl` ([docs/INSTALL.md](docs/INSTALL.md),
    "Updates and update hosting").
 4. **Whether `runner/drivers/agripad.mjs` is still needed.** Kept as is.
+5. **When to retire the suggestions box (3.6, TEMPORARY).** See Rules item 9: ask the owner at every
+   release after 3.6.0 whether to remove it.
 5. **The stealth-critical third-party components.** `setup/stealth-pages.json` lists only the six
    public detector pages; the product's own widgets would join them.
 6. **A dedicated VM or desktop for headed stealth runs.** Headed runs were measured only off-screen on
@@ -1914,6 +1924,105 @@ Entries below describe what was believed or tested at the time. Current capabili
 unresolved findings are in §§4, 7 and 8, which supersede historical assertions. Entries dated before
 2026-09-21 describe v1 (the bridge, the four control modes, the workspace allowlist).
 
+### 2026-10-13 — v3.6.0: updates that always install, a Mac that updates itself, and the next field report
+
+**Why.** The owner's list for this version: the "Human Wave" icon on both products; an updater that
+failed to install whenever an AI agent was connected, and a Mac that only opened the release page;
+start-at-sign-in and the tray confirmed on every system; a temporary suggestions box so agents on the
+company's machines report what they miss while they work; and the general points of another agent's
+field report.
+
+**1. The icon: "Human Wave" (`desktop/lib/icon.mjs`).** Chosen by the owner from 80 drawn candidates:
+the curved path a person's pointer takes — what humanized input draws for every agent action — as one
+white stroke on an ocean-blue tile, from a faint start point to the point it arrives at. One stroke and
+two dots, legible at 16 px on light and dark toolbars. The same code draws the extension's PNGs
+(`setup/make-icons.mjs`), the app, the installer and the tray (recoloured by state: blue, red, slate,
+amber); the macOS menu bar gets the wave alone as a template image. The unused shape helpers went.
+
+**2. Updates that install (desktop).**
+- **Why every install failed with an agent connected.** Every AI client's MCP server is this same
+  program (`G9BrowserAgent.exe` with `ELECTRON_RUN_AS_NODE`), so it held the files the installer must
+  replace; and an agent that called a tool while the daemon was down started the daemon again from
+  those files (`mcp/link.mjs`). An agent that kept a launched browser open also kept "Install now"
+  deferred for ever.
+- **Clearing the way (`lib/install-stop.mjs`), before every install:** the app writes
+  `G9_HOME/updating.json` (`{version, until}`, 5 minutes) — while it is fresh, an MCP front end that
+  finds no daemon refuses to start one and says to retry in a minute (`daemon/paths.js
+  updatingMarker`); the daemon is asked to shut down (its browsers close, open runs end as
+  interrupted); then every other process running this program — MCP servers, a daemon that did not
+  exit — is stopped and waited for (Windows: `Win32_Process` by executable path; macOS/Linux: `ps`),
+  never this process or its own Electron helpers. The new app removes the marker when it starts.
+- **Force install:** Settings → Updates → **Force install**, the question "install anyway?" when
+  **Install now** finds the daemon busy, and **Force install and quit** in the quit dialog. Each asks
+  first, naming what stops, then installs without waiting (`UpdateController.forceInstall`; the state
+  line says "(forced)").
+- **macOS updates itself (`lib/mac-update.mjs`, install mode `self`).** Squirrel.Mac refuses an app
+  without a Developer ID, so: electron-updater still checks `latest-mac.yml`; the app downloads the zip
+  for its architecture over the same feed (Electron's `net.fetch`, so the system proxy applies),
+  checks its SHA-512 (and its size), unpacks it with `ditto`, checks that the bundle is G9BrowserAgent
+  at the announced version, and offers the same four choices as Windows. Installing runs a small
+  shell script after the app quits: it moves the old bundle aside, copies the new one in (putting the
+  old one back if the copy fails), and starts the new version unless the person was quitting. Only
+  when the app can write where it is installed and is not running from App Translocation; otherwise
+  `manual`, with the reason (move it to Applications). The update end-to-end test now runs the
+  download scenarios (corrupt, interrupted, skip, busy, install, reload-busy) on macOS too.
+- **Start at sign-in and the tray** (asked to be confirmed): unchanged from 3.5.0 — on by default for an
+  installed app on Windows (login item), macOS (login item, `--hidden`) and Linux (XDG autostart entry
+  naming the AppImage file or the installed command), closing the window keeps the app in the tray /
+  menu bar, and the tray menu has the checkbox.
+
+**3. TEMPORARY: the suggestions box.** For this version only (Rules item 9 says what to remove later):
+the MCP instructions now open with "IMPORTANT — send us what G9BrowserAgent is missing", and
+`browser_issue action:"feedback"` (`title`, `body`, `category`, `tool`) makes the daemon POST the
+suggestion to the company's suggestions box (`settings.feedbackUrl`, https only, `''` turns it off;
+`G9_FEEDBACK_URL` overrides). The box takes 5000 characters per suggestion and 100 suggestions an hour
+in all; a full hour and a refusal are said as such. The agent name, the project folder's name and the
+version travel with it — no page content.
+
+**4. The field report, general points.**
+- **Name matching:** `matchCase:true` (case-sensitive regex) and `exact:true` (the whole name,
+  literally — no regex escaping; case-insensitive unless `matchCase`) on `browser_interact`
+  role/name targets, `browser_snapshot` `name`, `browser_inspect what:"find"` and batch steps
+  (`snapshot.js compileName`, `nameLabel`).
+- **Error codes (`extension/lib/errcode.js`):** `not_found`, `ambiguous`, `bad_argument`,
+  `unknown_argument`, `no_snapshot`, `stale_ref`, `not_delivered`, `tab_hidden`, `missed`, `partial`,
+  `not_verified`, `navigated`, `dialog`, `timeout`, `halted`, `owned` — a `[code: …]` tag after any
+  `[delivery: …]` / `[recovered]` tag (so readers of those tags keep working), `err.errorCode` in
+  process (not `err.code`, which Node's own errors use), and `code` in the daemon's and the
+  extension's result messages.
+- **A click that navigates:** `browser_interact` results carry `navigated: {url, sameDocument}` when
+  the action took the page to another URL (`lib/navwatch.js`: the top frame's requested, started,
+  committed and same-document navigations since the action began; the top frame is identified first,
+  so an iframe's navigation never counts). `expectSamePage:true` makes it an error, code `navigated`,
+  that says the action happened and must not be repeated.
+- **`set_value` on custom sliders:** keys go to whatever has focus, and a drag does not focus every
+  custom slider. Before the arrow keys, an ARIA slider without focus gets a real click on its thumb
+  where the value already is (then `focus()` if even that fails); keys go out at most five at a time,
+  the value read again after each batch, stopping on a value that no longer moves or overshoots back
+  and forth. An unverified result says where keyboard focus was.
+- **Upload into an input the page emptied:** many sites take the file in their change handler and
+  clear the input. That was an error, which made a working upload look failed and invited a second
+  one; it is now `delivery:"indeterminate"` with a note to check the page first.
+- **Signed out after a relaunch (Engine 2):** the previous session is not restored on purpose (its
+  tabs came back), and with it went the SESSION cookies — part of how Google and YouTube keep a
+  sign-in. A graceful stop now saves the profile's session cookies beside it
+  (`profiles/<name>.session-cookies.json`, owner-only), and the next launch sets them again
+  (`keepSessionCookies:false` opts out; older than 14 days → not restored). Measured live: a session
+  cookie set before a stop is there after the relaunch, and no old tab came back.
+- **Drag to a percentage on a third-party site:** nothing to build — no general defect was shown.
+
+**Tests.** New: `desktop/test/install-update.test.mjs` (what is stopped and what never is; the marker;
+the Mac download over a local feed with a changed and a cut file; the swap script run through `sh`,
+including the copy that fails); updater force/self-mode tests; the feedback endpoint against a local
+server; interaction tests for exact/matchCase lookups with their codes, a custom slider that loses
+focus after a drag, a page that steals focus (the error names it), a navigating click with and
+without `expectSamePage`, and the emptied file input; the session-cookie file functions; a live check
+in the Engine 2 suite's relaunch. Two existing assertions now expect the code tag after the delivery
+and recovered tags. On this machine: `check.mjs --keep-going` 17 of 17 after the seam assertion was
+updated (unit 720+ across the suites, self-test 136, extension suite 112, desktop 16 files), Engine 2
+live `--only locale,interact` 135/0. Not run here: the macOS packages and the update end-to-end test
+on a Mac (the release pipeline runs it).
+
 ### 2026-10-12 — v3.5.0: one icon, a tray app that starts with you, and what weeks of real agent work asked for
 
 **Why.** Three things from the owner. The extension and the desktop app had two different icons, and
@@ -2031,8 +2140,9 @@ history; a final refusal names the cause and the fix.
   compared.
 - **Upload brings its files:** `fileData` (`[{name, base64}]`, ≤ 40 MiB) or `fileUrls` (fetched as the
   page, through `fetch` on the same tab), written under `G9_HOME/files/uploads/` first; `waitMs` for a
-  late or rebuilt file input; `inputHolds` (names and sizes) proves what the input holds, and an input
-  the page emptied is an error.
+  late or rebuilt file input; `inputHolds` (names and sizes) proves what the input holds. An input
+  the page emptied is `indeterminate` (3.6; it was an error until then — pages that take the file and
+  clear the input made a working upload look failed, inviting a second one).
 - **`fetch` of a blob: URL** falls back to the page's own world when G9's world cannot read it (`via:"page"`).
 
 **10. Launched browsers.**
@@ -6070,5 +6180,17 @@ When you change anything:
 6. Run what the change needs (§7.0): `npm run check` runs the offline checks the changed files reach and names the live suites the change calls for. Run those live suites (`--live`) when it names them for input, perception, launching or the seam, and before a release; `npm run check:all` before handing over a change that touched several areas; the installer build (`cd desktop && npm run build:win && npm run test:packaged`) only for a change in `desktop/` or a build the owner will install. A new module a check cannot reach makes `check.test.mjs` fail: add it to that check's `reads` or to NO_CHECK in `setup/check-plan.mjs`. The self-test asserts the tool count, so it fails until everything is updated. Update the assertion last, deliberately — not reflexively. Before a step that takes more than a minute, say what it is and how long it should take.
 7. Test safely: a temp `G9_HOME`, temp profiles, random ports in 18000–18999, never port 8765, never a person's browser profile, registry or MCP client config, no on-screen windows, and kill only processes the test started.
 8. If you remove a deliberate omission from §8, say so and explain what changed.
+9. **TEMPORARY — remove in a later version: the suggestions box (added in 3.6.0).** For the 3.6 line
+   only, on the company's machines, agents send what G9BrowserAgent is missing to one place so that
+   developers' and QA's needs are collected (owner's decision, 2026-10-12). **At every release after
+   3.6.0, remind the owner and, once they agree, remove all of it:** `browser_issue action:"feedback"`
+   (`daemon/router.js #feedback` and its dispatch line; the `feedback` enum value and the `category`
+   and `tool` properties of `browser_issue` in `mcp/tools.js`); the **"IMPORTANT — send us what
+   G9BrowserAgent is missing"** section at the top of the MCP instructions (`mcp/tools.js`
+   INSTRUCTIONS); the `feedbackUrl` setting and its validation (`daemon/settings.js`); the
+   `G9_FEEDBACK_URL` override; the daemon test "(3.6) browser_issue feedback …"
+   (`setup/unit/daemon.test.mjs`); and the mentions in README, REFERENCE and this file. The box itself
+   is a small service on the company's server (a POST endpoint, 5000 characters per suggestion, 100
+   suggestions an hour in all); retiring it there is the server owner's step, not this repository's.
 
 **Do not simplify past the constraints in §4** without recording why. Each one exists because the obvious approach fails in a specific, non-obvious way.

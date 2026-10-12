@@ -18,7 +18,7 @@ import { log } from './mcp.js';
 import { VERSION, REPO_ROOT } from '../lib/version.mjs';
 import { WsClient } from '../lib/ws-client.mjs';
 import { timeoutFor } from '../daemon/router.js';
-import { resolveHome } from '../daemon/paths.js';
+import { resolveHome, updatingMarker } from '../daemon/paths.js';
 import { runningDaemonFor } from '../daemon/home-lock.js';
 import { scriptCommand, isAppImageRuntime, ensureBootstrap } from '../lib/runtime.mjs';
 
@@ -119,6 +119,15 @@ export class DaemonLink {
             // lacks G9_PORT, or names another), a second one here would run every schedule again
             // and fight over the settings — and it now refuses to start (daemon/home-lock.js).
             await this.#refuseOtherPort();
+            // (3.6) The desktop app is installing an update: starting the daemon now would run it
+            // from the files being replaced, and hold them open so the install fails.
+            const updating = updatingMarker(resolveHome(process.env.G9_HOME));
+            if (updating) {
+              throw new Error(
+                `G9BrowserAgent is installing an update${updating.version ? ` (to ${updating.version})` : ''}, so its daemon is stopped for a moment. ` +
+                  'Retry this call in a minute: the daemon starts again by itself once the update is in place.',
+              );
+            }
             this.#spawnDaemon();
             spawned = true;
           }
@@ -232,6 +241,7 @@ export class DaemonLink {
       const error = new Error(String(msg.error ?? 'The daemon reported an error with no message.'));
       // An input error's delivery state (DAEMON_PROTOCOL §3); its text already carries the tag.
       if (typeof msg.delivery === 'string') Object.assign(error, { delivery: msg.delivery, hit: msg.hit ?? null, hidden: msg.hidden === true });
+      if (typeof msg.code === 'string') error.errorCode = msg.code;
       entry.reject(error);
     }
   }

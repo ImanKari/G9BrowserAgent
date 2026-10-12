@@ -166,14 +166,18 @@ function renderUpdates(s) {
   const install = h('button', { type: 'button', class: 'btn primary', hidden: !['downloaded', 'deferred'].includes(u.status) }, `Install ${u.version ?? ''}`.trim());
   install.addEventListener('click', () => busy(install, async () => {
     const r = await api.invoke('updater.install');
-    if (r?.status === 'deferred') toast(`Waiting: ${(r.reasons ?? []).join('; ')}. It installs by itself when the daemon is idle.`);
+    if (r?.status === 'deferred') toast(`Waiting: ${(r.reasons ?? []).join('; ')}. It installs by itself when the daemon is idle — or use "Force install".`);
   }));
+  // (3.6) Without waiting: stops the daemon, its launched browsers and the agents' MCP servers. The
+  // main process asks the person first, naming what stops.
+  const force = h('button', { type: 'button', class: 'btn danger', hidden: !['downloaded', 'deferred'].includes(u.status) }, 'Force install');
+  force.addEventListener('click', () => busy(force, () => api.invoke('updater.forceInstall')));
   const onQuit = h('button', { type: 'button', class: 'btn', hidden: !['downloaded', 'deferred'].includes(u.status) || u.installOnQuit }, 'Install when I quit G9BrowserAgent');
   onQuit.addEventListener('click', () => busy(onQuit, async () => {
     await api.invoke('updater.installOnQuit');
     toast(`G9BrowserAgent ${u.version} installs the next time you quit G9BrowserAgent while nothing runs.`);
   }));
-  // Manual installs (macOS, .deb): the release is found here, and downloaded from its page.
+  // Manual installs (a Mac that cannot replace itself, a .deb): the release is found here, and downloaded from its page.
   const manual = u.status === 'available-manual';
   const open = h('button', { type: 'button', class: 'btn primary', hidden: !manual }, `Open the ${u.version ?? ''} release page`.replace(/\s+/g, ' '));
   open.addEventListener('click', () => busy(open, () => api.invoke('updater.openRelease')));
@@ -185,7 +189,7 @@ function renderUpdates(s) {
   const where = u.source === 'custom' ? `from ${u.url ?? 'your custom address'}` : u.source === 'off' ? null : 'from the official G9BrowserAgent releases on GitHub';
   const how = app.installMode === 'manual'
     ? `This installation updates by hand: ${app.manualReason ?? 'it cannot replace itself'}. G9BrowserAgent still checks and tells you when a release is out.`
-    : 'Downloads in the background, then asks. Installing waits until no run is in progress and no launched browser is open.';
+    : `Downloads in the background${app.installMode === 'self' ? ' (on this Mac, G9BrowserAgent replaces its own app bundle)' : ''}, then asks. Installing waits until no run is in progress and no launched browser is open; "Force install" does not wait — it stops that work and the agents' G9BrowserAgent connections, installs, and comes back at the new version.`;
   const help = u.status === 'not-configured'
     ? 'Update source is "custom" but no address is set. Set "Custom update URL" above to an https folder that holds latest.yml and the installers, or switch the source back to "official".'
     : u.status === 'off'
@@ -193,7 +197,7 @@ function renderUpdates(s) {
       : u.status === 'dev'
         ? 'This is a development build (run from the repository): update it with git pull. Installed builds update themselves.'
         : `Checks ${where} on start and every 6 hours${u.lastCheckAt ? `; last check ${new Date(u.lastCheckAt).toLocaleString()}` : ''}. ${how}`;
-  replace(updatesEl, h('p', null, h('strong', null, u.line ?? 'Updates: …')), h('p', { class: 'muted' }, help), h('div', { class: 'row' }, check, install, onQuit, open, skip));
+  replace(updatesEl, h('p', null, h('strong', null, u.line ?? 'Updates: …')), h('p', { class: 'muted' }, help), h('div', { class: 'row' }, check, install, onQuit, force, open, skip));
 }
 
 function renderDaemon(s) {

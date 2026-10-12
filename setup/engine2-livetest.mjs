@@ -2344,6 +2344,9 @@ async function sectionLocale() {
   // Leave a second page open, then stop: a relaunch must not bring either back.
   const o2 = await must(A, 'browser_tabs', { action: 'open', url: `${S.testUrl}?persona=left-open`, engine: engineId });
   await must(A, 'browser_navigate', { action: 'wait', selector: '#e2lab', tabId: o2.tabId, timeoutMs: 20_000 });
+  // (3.6) A sign-in kept in a SESSION cookie (no expiry) — Google's and YouTube's partly are —
+  // must survive the relaunch, although the pages do not come back.
+  await pageEval(A, o2.tabId, 'document.cookie = "e2session=kept-" + 36 + "; path=/"; document.cookie');
   const stop1 = await A.call('browser_engine', { action: 'stop', engineId });
   check(stop1.ok, 'stop the persona engine with two pages open', short(stop1.data ?? stop1.text));
   await waitFor(() => processesMatching(`${S.fragment}\\profiles\\e2de`).length === 0, 15_000, 500);
@@ -2360,6 +2363,8 @@ async function sectionLocale() {
   await must(A, 'browser_navigate', { action: 'wait', selector: '#e2lab', tabId: o3.tabId, timeoutMs: 20_000 });
   const p3 = await personaProbe(o3.tabId);
   check(good(p3), 'relaunched persona: the page still sees de-DE / Europe/Berlin everywhere', short(p3, 400));
+  const cookieAfter = await pageEval(A, o3.tabId, 'document.cookie');
+  check(/(^|; )e2session=kept-36(;|$)/.test(cookieAfter ?? ''), '(3.6) relaunch: the session cookie set before the stop is there again (a sign-in kept in session cookies survives)', short({ cookies: cookieAfter, restored: again.data.sessionCookiesRestored }));
   const stop2 = await A.call('browser_engine', { action: 'stop', engineId });
   check(stop2.ok, 'stop the relaunched persona engine', short(stop2.data ?? stop2.text));
 

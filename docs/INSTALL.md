@@ -108,9 +108,12 @@ Mac, drag **G9BrowserAgent** into **Applications**, and start it from there.
   a randomized read-only copy (App Translocation, `/private/var/folders/…/AppTranslocation/…`) or from
   `/Volumes/…`. An MCP entry naming that path breaks at the next start, so the wizard refuses to
   register the AI clients until G9BrowserAgent runs from a stable place, and says so.
-- **Updates are installed by hand.** macOS's updater (Squirrel.Mac) installs only into an app signed
-  with a Developer ID. G9BrowserAgent checks the releases as on the other systems, downloads nothing, and tells
-  you (a notification and **Settings → Updates**, with **Open the release page**).
+- **Updates install themselves (3.6).** macOS's updater (Squirrel.Mac) installs only into an app
+  signed with a Developer ID, so G9BrowserAgent does it itself: it downloads the release's zip, checks
+  its SHA-512, and replaces its own app bundle after it quits. That needs the app in a folder you can
+  write — drag it to **Applications** and open it from there. Opened straight from Downloads (macOS
+  then runs a read-only copy) or installed by another user, it updates by hand: a notification and
+  **Settings → Updates**, with **Open the release page**.
 - The app menu has the usual **Quit G9BrowserAgent** (Cmd+Q); closing the window keeps G9BrowserAgent in the menu bar, and
   clicking the Dock icon brings it back. "Start G9BrowserAgent when I sign in" is a login item that starts it
   hidden.

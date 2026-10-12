@@ -108,15 +108,17 @@ t.test('the icon is a valid PNG: signature, IHDR, CRCs, inflated size, transpare
   assert.ok(iconPng(256).length > 1000);
 });
 
-t.test('(3.5) the macOS menu-bar template is black on transparent, with the pointer cut out of the window', () => {
+t.test('(3.5) the macOS menu-bar template is the wave alone, black on transparent', () => {
   const png = templatePng(32);
   assert.deepEqual([...png.subarray(1, 4)], [0x50, 0x4e, 0x47]);
   const raw = zlib.inflateSync(png.subarray(41, 41 + png.readUInt32BE(33)));
   const at = (x, y) => raw.subarray(y * (32 * 4 + 1) + 1 + x * 4, y * (32 * 4 + 1) + 1 + x * 4 + 4);
   for (let y = 0; y < 32; y++) for (let x = 0; x < 32; x++) assert.deepEqual([...at(x, y).subarray(0, 3)], [0, 0, 0]);
-  assert.equal(at(0, 31)[3], 0, 'corner transparent');
-  assert.ok(at(10, 4)[3] > 200, 'title bar opaque');
-  assert.ok(at(8, 16)[3] > 60 && at(8, 16)[3] < 220, 'window body translucent');
+  assert.equal(at(0, 31)[3], 0, 'no tile: the corner is transparent');
+  assert.equal(at(16, 4)[3], 0, 'nothing above the wave');
+  assert.ok(at(26, 11)[3] > 240, 'the end point is solid');
+  assert.ok(at(9, 13)[3] > 200 && at(19, 18)[3] > 200, 'the wave runs through its crest and trough');
+  assert.ok(at(5, 19)[3] > 60, 'it starts at the lower left');
 });
 
 t.run();

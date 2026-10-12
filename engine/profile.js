@@ -339,6 +339,68 @@ export async function clearSessionRestore(name, { home = g9Home(), dir = null } 
   return { removed };
 }
 
+// ─── session cookies (3.6) ───────────────────────────────────────────────────────────────────
+
+/**
+ * A browser keeps SESSION cookies (no expiry) only while it runs — and across a restart only when it
+ * restores the previous session, which clearSessionRestore turns off on purpose. Sites that keep a
+ * sign-in partly in session cookies (Google and YouTube among them) were signed out after every
+ * relaunch of a profile (field report). So a graceful stop saves the profile's session cookies here,
+ * and the next launch of the profile sets them again: the sign-in survives, the old tabs do not.
+ *
+ * `G9_HOME/profiles/<name>.session-cookies.json` — beside the profile's metadata, outside the
+ * user-data-dir the browser owns; readable only by its owner where the OS has modes. Older than
+ * SESSION_COOKIES_MAX_AGE_MS → not restored (a session that old would have ended in a browser too).
+ */
+export const SESSION_COOKIES_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+
+export function sessionCookiesFile(name, { home = g9Home() } = {}) {
+  return `${profileDir(name, { home })}.session-cookies.json`;
+}
+
+/** CDP Storage.getCookies rows → the session ones, as Storage.setCookies params. Pure. */
+export function sessionCookieParams(cookies) {
+  const out = [];
+  for (const c of cookies ?? []) {
+    if (!c || c.session !== true || !c.name || !c.domain) continue;
+    const p = { name: c.name, value: String(c.value ?? ''), domain: c.domain, path: c.path || '/', secure: !!c.secure, httpOnly: !!c.httpOnly };
+    if (c.sameSite) p.sameSite = c.sameSite;
+    if (c.priority) p.priority = c.priority;
+    if (c.sourceScheme) p.sourceScheme = c.sourceScheme;
+    if (Number.isInteger(c.sourcePort) && c.sourcePort > 0) p.sourcePort = c.sourcePort;
+    if (c.partitionKey) p.partitionKey = c.partitionKey;
+    out.push(p);
+  }
+  return out;
+}
+
+/** Save a profile's session cookies (from Storage.getCookies). → { saved } */
+export async function saveSessionCookies(name, cookies, { home = g9Home(), now = Date.now() } = {}) {
+  const params = sessionCookieParams(cookies);
+  const file = sessionCookiesFile(name, { home });
+  if (!params.length) {
+    await rm(file, { force: true }).catch(() => {});
+    return { saved: 0 };
+  }
+  await mkdir(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  await writeFile(tmp, JSON.stringify({ savedAt: new Date(now).toISOString(), cookies: params }), { mode: 0o600 });
+  await rename(tmp, file);
+  return { saved: params.length };
+}
+
+/** The saved session cookies still young enough to restore, or []. */
+export async function readSessionCookies(name, { home = g9Home(), now = Date.now() } = {}) {
+  try {
+    const data = JSON.parse(await readFile(sessionCookiesFile(name, { home }), 'utf8'));
+    const at = Date.parse(data?.savedAt);
+    if (!Number.isFinite(at) || now - at > SESSION_COOKIES_MAX_AGE_MS) return [];
+    return Array.isArray(data.cookies) ? data.cookies : [];
+  } catch {
+    return [];
+  }
+}
+
 // ─── warm ────────────────────────────────────────────────────────────────────────────────────
 
 /**

@@ -80,9 +80,9 @@ nsis:
   include: build/installer.nsh
 
 # macOS. Not signed with a Developer ID (none exists yet): the app is ad-hoc signed ("-") so it runs
-# on Apple silicon, Gatekeeper asks once on first open, and updates are installed by hand — the app
-# finds them and links the release page (desktop/lib/updater.mjs, installMode 'manual'). The zip
-# exists because latest-mac.yml describes it; the dmg is what people download.
+# on Apple silicon, Gatekeeper asks once on first open, and (3.6) the app installs its own updates:
+# it downloads the zip latest-mac.yml describes, checks its SHA-512 and swaps its bundle after it quits
+# (desktop/lib/mac-update.mjs, installMode 'self'). The dmg is what people download.
 mac:
   target:
     - target: dmg

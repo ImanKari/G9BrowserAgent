@@ -410,7 +410,12 @@ Without either, the call acts on the caller's **current tab**.
 
 - **`launch`** starts an engine. Options: `browser` (`auto`, `edge`, `chrome`, `cft`), `headless`,
   `profile` (default `automation`), `stealth`, `humanize`, `proxy`, `locale`, `timezone`,
-  `windowSize` and `name`. A profile can be open in one browser at a time, so a second `launch` of
+  `windowSize`, `name` and `keepSessionCookies`. (3.6) A stop keeps the profile's **session cookies**
+  (cookies without an expiry, which a browser drops at exit unless it restores the last session) in
+  `G9_HOME/profiles/<name>.session-cookies.json`, and the next launch of that profile sets them again:
+  sites that keep a sign-in partly in them (Google, YouTube) stay signed in. The old tabs still do not
+  come back. `keepSessionCookies:false` starts a fresh session; saved sessions older than 14 days are
+  not restored. A profile can be open in one browser at a time, so a second `launch` of
   a profile that is already running is refused, naming the engine that has it: use that engine,
   stop it, or launch another profile. The daemon's own on-demand launches (`open`, handoff, replay
   `engine:"launched"`) reuse the running default engine instead. `lease:true` holds the engine for
@@ -545,7 +550,10 @@ snapshots failed with "Session storage quota bytes exceeded".
 (3.5) `browser_interact` can name its target without a snapshot:
 
 - **`role` + `name`** — the role in the accessibility tree and a case-insensitive regular expression
-  for the accessible name, as `browser_inspect what:"find"` reads them.
+  for the accessible name, as `browser_inspect what:"find"` reads them. (3.6) `matchCase:true` makes
+  it case-sensitive; `exact:true` compares the whole name literally — no regex, so `Save (2)` needs no
+  escaping — case-insensitively unless `matchCase`. Both work in `browser_snapshot` (`name`),
+  `browser_inspect what:"find"` and batch steps too.
 - **`selector`** — a CSS selector in the top document; only visible matches count.
 - **`nth`** picks one match (1-based). Several matches without `nth` are refused with the list —
   never guessed. The result names the ref the element got (`ref`, `matched`), for later calls.
@@ -563,14 +571,38 @@ never retried.
 | Control | How | Verified by |
 |---|---|---|
 | `<input type=range>` | a click at the value's point on the track, then arrow keys to the exact step | `.value` |
-| ARIA slider (`role=slider`) | a drag of the thumb to the value's point on its track, then arrow keys | `aria-valuenow` |
+| ARIA slider (`role=slider`) | a drag of the thumb to the value's point on its track, then (3.6) a real click on the thumb when focus is elsewhere, and arrow keys a few at a time, the value read again after each batch | `aria-valuenow` |
 | text field, textarea, contenteditable | `type` with `clear:true` | the field's value |
 | checkbox, radio, switch | a click when the state differs | `checked` / `aria-checked` |
 | `<select>` | `select` | the selected option |
 
 Only for a native range input, and never at stealth, a value the trusted input could not reach is
 set by script as a last resort; `via` then includes `script` and a note says the events were not
-trusted. A control that does not take the value is an error that says what it is now.
+trusted. A control that does not take the value is an error that says what it is now — and, for a
+slider (3.6), where keyboard focus was when the keys went out (`focus`).
+
+**A click that navigates** (3.6): when an action takes the page to another URL — a "button" that was a
+link — the result carries `navigated: { url, sameDocument }` (`sameDocument`: a single-page app's
+route change). With **`expectSamePage:true`** it is an error instead, code `navigated`, which says the
+action happened: never repeat it; go back if it was not meant.
+
+**Error codes** (3.6). An error an agent acts on carries a code — as a `[code: …]` tag at the start
+of the text, after a `[delivery: …]` or `[recovered]` tag when there is one, and as `code` in the
+daemon's result (DAEMON_PROTOCOL §3):
+
+| Code | Meaning |
+|---|---|
+| `not_found` | no element matched role/name/selector; nothing was sent |
+| `ambiguous` | several matched and no `nth`; nothing was sent |
+| `bad_argument` / `unknown_argument` | an argument out of range, or one the tool does not take; nothing ran |
+| `no_snapshot` / `stale_ref` | a ref with no snapshot, unknown, or from another page |
+| `not_delivered` / `tab_hidden` | the input was not sent (covered, moving…; or a background tab) |
+| `missed` / `partial` | input went out but reached another element / only part of it: verify, never repeat blindly |
+| `not_verified` | `set_value` acted, but the control does not show the value |
+| `navigated` | the action left the page while `expectSamePage` was set |
+| `dialog` | a JavaScript dialog blocks the page |
+| `timeout` | the call was stopped; its effect is unknown |
+| `halted` / `owned` | Stop is pressed / another agent owns the tab |
 
 **`drag`** takes `toPercent` (0–100 along the control's track) or `toX`/`toY` (viewport pixels)
 instead of `to`, and reports the value before and after when the control has one.
@@ -582,8 +614,9 @@ its own; then the call acts. The refusal sent nothing, so acting after it repeat
 **`upload`** also takes `fileData` (`[{ name, base64 }]`, up to 40 MiB per call) or `fileUrls`
 (fetched with the page's cookies): the daemon writes them under `G9_HOME/files/uploads/` on the
 browser's machine first, and the result lists them (`written`). It waits `waitMs` for the file input,
-and reads back what the input holds (`inputHolds`: names and sizes) — an input the page emptied is an
-error. When a page
+and reads back what the input holds (`inputHolds`: names and sizes). An input the page emptied again
+is `delivery:"indeterminate"` with a note, not an error (3.6): many pages take the file in their change
+handler and then clear the input — check the page for the upload, and never upload again blindly. When a page
 re-renders an element while a humanized click is on its way, the press lands on the identical
 replacement: that is reported as `indeterminate` (not `delivered`, not `missed`) and is never
 repeated automatically.
@@ -1072,12 +1105,18 @@ appears in the window title, the tray tooltip and a badge.
 - **When:** on start and every 6 hours, or **Check now**.
 - **How it installs** depends on the package. Windows (NSIS) and the Linux AppImage download in the
   background (the file's SHA-512 from `latest*.yml` is checked before anything runs) and then ask:
-  **Install now**, **Install when I quit G9BrowserAgent**, **Not now** or **Skip this version**. macOS (the app is
-  not signed with an Apple Developer ID, and macOS installs updates only into a signed app) and the
-  .deb (replacing it needs root) download nothing: G9BrowserAgent tells you, and **Open the release page** takes
-  you to the files.
-- **Never mid-run.** Installing restarts the daemon, so it waits until the daemon reports no run in
-  progress and no launched browser, and re-checks every minute.
+  **Install now**, **Install when I quit G9BrowserAgent**, **Not now** or **Skip this version**. (3.6) macOS
+  the same: the app is not signed with an Apple Developer ID, so instead of macOS's updater it
+  downloads the zip itself, checks its SHA-512 and swaps its own app bundle after it quits — when it
+  can write where it is installed (in Applications). A Mac that cannot, and the .deb (replacing it
+  needs root), download nothing: G9BrowserAgent tells you, and **Open the release page** takes you to
+  the files.
+- **Never mid-run, unless you force it.** Installing restarts the daemon, so it waits until the daemon
+  reports no run in progress and no launched browser, and re-checks every minute. (3.6) **Force
+  install** (Settings, the question after a busy **Install now**, or when quitting) installs at once
+  after a confirmation: the daemon's browsers close, a run in progress ends as interrupted, and the
+  AI clients' G9BrowserAgent MCP servers are stopped — they held the program open, and every install
+  failed while an agent was connected. Each install now clears the way like that first.
 - **The extension follows.** After an update the app refreshes `G9_HOME/extension` (the same folder,
   so the browser keeps the extension's identity); the extension reloads itself once no call is in
   flight, and a daemon that finds an older extension connected asks it to reload once.

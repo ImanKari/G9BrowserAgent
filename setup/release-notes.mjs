@@ -49,7 +49,7 @@ const notes = `## Download
 | System | File | Updates |
 |---|---|---|
 | Windows 10/11 (x64) | \`G9BrowserAgent-Setup-${version}.exe\` — per user, no administrator rights | Automatic: G9BrowserAgent checks these releases, downloads in the background and asks before installing |
-| macOS 12+ (Apple silicon) | \`G9BrowserAgent-${version}-mac-arm64.dmg\` | G9BrowserAgent tells you when a release is out; download it and replace the app (the app is not signed with an Apple Developer ID yet, so macOS cannot install updates into it) |
+| macOS 12+ (Apple silicon) | \`G9BrowserAgent-${version}-mac-arm64.dmg\` | Automatic since 3.6 when the app is in Applications: G9BrowserAgent downloads the update, verifies it and replaces itself (it is not signed with an Apple Developer ID yet, so macOS's own updater cannot). Opened from elsewhere, it tells you and you replace the app |
 | macOS 12+ (Intel) | \`G9BrowserAgent-${version}-mac-x64.dmg\` | As above |
 | Linux (x64) | \`G9BrowserAgent-x86_64.AppImage\` — keep this file name: updates replace the file in place | Automatic, like Windows |
 | Debian/Ubuntu (x64) | \`G9BrowserAgent_${version}_amd64.deb\` | G9BrowserAgent tells you; install the new .deb with your package manager |

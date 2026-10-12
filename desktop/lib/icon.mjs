@@ -4,12 +4,10 @@
  * app window, the installer and the .icns/.ico (scripts/make-icons.mjs writes build/icon.png), and
  * the tray, which recolours it by state. No binary artwork outside what these scripts write.
  *
- * The design (3.5.0): "an agent at work inside a real browser". A frosted browser window on an aurora
- * tile (cyan → violet → pink), and a faceted pointer that reaches into the window from outside it —
- * the agent's hand in the person's own page. Around the pointer's tip, at 32 px and up, a click
- * ripple; the window's three dots at 48 px and up. At 24 px and below a pixel-tuned variant: a
- * larger window and pointer, no dots, no ripple (they are a blur that small). Designed and checked
- * at 16, 24, 32, 48 and 128 px on light and dark toolbars.
+ * The design ("Human Wave", chosen by the owner from 80 candidates): the curved path a person's
+ * pointer takes — what G9BrowserAgent's humanized input draws for every agent action — as one white
+ * stroke on an ocean-blue tile, from a faint start point to the point it arrives at. One stroke and
+ * two dots, so it stays legible at 16 px on light and dark toolbars alike.
  *
  * Rendering: each shape is a signed distance field in a 0..1 unit square, anti-aliased analytically
  * (coverage = 0.5 − distance in pixels), composited back to front. One evaluation per pixel and
@@ -21,25 +19,17 @@ import zlib from 'node:zlib';
 
 // ------------------------------------------------------------------ colours
 
-const AURORA = [[34, 211, 238], [139, 92, 246], [244, 114, 182]]; // cyan-400, violet-500, pink-400
-
 /**
- * The tile's gradient stops per state. The tray recolours the tile: aurora when connected, red when
- * agents are stopped, slate when the daemon is offline, amber when the port is held by something else.
+ * The tile's gradient (top-left → bottom-right) per state. The tray recolours the tile: ocean blue
+ * when connected, red when agents are stopped, slate when the daemon is offline, amber when the port
+ * is held by something else.
  */
 export const ICON_GRADIENTS = {
-  connected: AURORA,
-  halted: [[251, 113, 133], [225, 29, 72], [159, 18, 57]],
-  offline: [[148, 163, 184], [100, 116, 139], [71, 85, 105]],
-  attention: [[252, 211, 77], [245, 158, 11], [217, 119, 6]],
+  connected: [[0, 119, 182], [0, 180, 216]],
+  halted: [[190, 18, 60], [251, 113, 133]],
+  offline: [[71, 85, 105], [148, 163, 184]],
+  attention: [[180, 83, 9], [245, 158, 11]],
 };
-
-/** One representative colour per state (the gradient's middle stop). */
-export const ICON_COLORS = Object.fromEntries(Object.entries(ICON_GRADIENTS).map(([k, v]) => [k, v[1]]));
-
-const INK = [17, 16, 42];
-const INK_LIT = [46, 42, 96];
-const DOTS = [139, 92, 246];
 
 const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
 function gradientAt(stops, t) {
@@ -47,6 +37,9 @@ function gradientAt(stops, t) {
   const i = Math.min(stops.length - 2, Math.floor(u));
   return mix(stops[i], stops[i + 1], u - i);
 }
+
+/** One representative colour per state (the middle of its gradient). */
+export const ICON_COLORS = Object.fromEntries(Object.entries(ICON_GRADIENTS).map(([k, v]) => [k, gradientAt(v, 0.5).map(Math.round)]));
 
 // ------------------------------------------------------------------ PNG
 
@@ -115,103 +108,39 @@ function segDist(px, py, ax, ay, bx, by) {
   return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
 }
 
-const sdPolygon = (pts) => (x, y) => {
-  let d = Infinity;
-  let inside = false;
-  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
-    const [xi, yi] = pts[i];
-    const [xj, yj] = pts[j];
-    d = Math.min(d, segDist(x, y, xj, yj, xi, yi));
-    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
-  }
-  return inside ? -d : d;
-};
-
 const sdPolyline = (pts, width) => (x, y) => {
   let d = Infinity;
   for (let i = 1; i < pts.length; i++) d = Math.min(d, segDist(x, y, pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1]));
   return d - width / 2;
 };
 
-const grow = (sd, by) => (x, y) => sd(x, y) - by;
-const union = (...sds) => (x, y) => Math.min(...sds.map((f) => f(x, y)));
-
-const arc = (cx, cy, r, a0, a1, n = 16) => Array.from({ length: n + 1 }, (_, i) => {
-  const a = a0 + ((a1 - a0) * i) / n;
-  return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
-});
 
 // ------------------------------------------------------------------ the design
 
-/**
- * The pointer, tip at the origin, one unit tall: a slightly stockier arrow than the live view's
- * cursor (renderer/lib/track.js), so its tail survives at 16 px. Points 0-1-2 and 5 bound its lit
- * left facet.
- */
-export const POINTER = [[0, 0], [0, 0.8], [0.21, 0.61], [0.33, 0.92], [0.5, 0.85], [0.38, 0.57], [0.62, 0.57]];
-
-const place = (pts, s, dx, dy) => pts.map(([x, y]) => [x * s + dx, y * s + dy]);
-
-/** Geometry for a size: the pixel-tuned small variant at 24 px and below. */
-function geometry(size) {
-  if (size <= 24) {
-    return {
-      window: [0.125, 0.125, 0.625, 0.5625, 0.1],
-      bar: 0.16,
-      pointer: { s: 0.5, x: 0.465, y: 0.42 },
-      gap: 0.055,
-      dots: false,
-      ripple: false,
-    };
-  }
-  return {
-    window: [0.11, 0.14, 0.62, 0.55, 0.09],
-    bar: 0.13,
-    pointer: { s: 0.47, x: 0.47, y: 0.44 },
-    gap: 0.04,
-    dots: size >= 48,
-    ripple: true,
-  };
-}
+/** A cubic Bézier as a polyline. */
+const cubic = (p0, p1, p2, p3, n = 28) => Array.from({ length: n + 1 }, (_, i) => {
+  const t = i / n;
+  const u = 1 - t;
+  return [0, 1].map((k) => u * u * u * p0[k] + 3 * u * u * t * p1[k] + 3 * u * t * t * p2[k] + t * t * t * p3[k]);
+});
 
 /**
- * The layers, back to front: { sd, color(x, y) → [r, g, b, a 0..1] }.
- * @param {number} size
- * @param {number[][]} stops the tile's gradient
+ * The wave on the 32-unit design grid, as the SVG it was designed as:
+ * `M5.5 20 c4-10 8-10 10.5-4 s7 6 10.5-4` (start dot r 1.8, end dot r 3, stroke 2.8, tile radius 8).
  */
-function layers(size, stops) {
-  const g = geometry(size);
-  const [wx, wy, ww, wh, wr] = g.window;
-  const p = place(POINTER, g.pointer.s, g.pointer.x, g.pointer.y);
-  const tip = p[0];
-  const facet = [p[0], p[1], p[2], p[5]];
-  const solid = (rgb, a = 1) => () => [rgb[0], rgb[1], rgb[2], a];
-  const out = [
-    // The tile: a diagonal gradient, more vertical than 45° so the pink gathers at the bottom.
-    { sd: sdRoundRect(0, 0, 1, 1, 0.23), color: (x, y) => [...gradientAt(stops, x * 0.45 + y * 0.55), 1] },
-    // A soft sheen from the top-left: light falling on the tile.
-    {
-      sd: sdRoundRect(0, 0, 1, 1, 0.23),
-      color: (x, y) => [255, 255, 255, 0.28 * Math.max(0, 1 - Math.hypot(x - 0.18, y - 0.1) / 0.75) ** 2],
-    },
-    // The browser window: a frosted body and a solid title bar.
-    { sd: sdRoundRect(wx, wy, ww, wh, wr), color: solid([255, 255, 255], 0.92) },
-    { sd: sdRoundRect(wx, wy, ww, g.bar, Math.min(wr, g.bar / 2)), color: solid([255, 255, 255]) },
+export const WAVE = [...cubic([5.5, 20], [9.5, 10], [13.5, 10], [16, 16]), ...cubic([16, 16], [18.5, 22], [23, 22], [26.5, 12]).slice(1)];
+const unit = (v) => v / 32;
+const waveUnits = WAVE.map(([x, y]) => [unit(x), unit(y)]);
+
+/** The layers, back to front: { sd, color(x, y) → [r, g, b, a 0..1] }. */
+function layers(stops) {
+  const white = (a = 1) => () => [255, 255, 255, a];
+  return [
+    { sd: sdRoundRect(0, 0, 1, 1, 0.25), color: (x, y) => [...gradientAt(stops, (x + y) / 2), 1] },
+    { sd: sdCircle(unit(5.5), unit(20), unit(1.8)), color: white(0.75) },
+    { sd: sdPolyline(waveUnits, unit(2.8)), color: white() },
+    { sd: sdCircle(unit(26.5), unit(12), unit(3)), color: white() },
   ];
-  if (g.dots) {
-    const y = wy + g.bar / 2;
-    out.push({ sd: union(sdCircle(wx + 0.08, y, 0.022), sdCircle(wx + 0.145, y, 0.022), sdCircle(wx + 0.21, y, 0.022)), color: solid(DOTS, 0.8) });
-  }
-  if (g.ripple) {
-    // Three short arcs around the tip, up and to the left of it: the click.
-    const arcs = [-0.75, -1.25, -1.75].map((a) => sdPolyline(arc(tip[0], tip[1], 0.1, a * Math.PI - 0.25, a * Math.PI + 0.25), 0.03));
-    out.push({ sd: union(...arcs), color: solid(DOTS, 0.9) });
-  }
-  // The pointer: a white outline that cuts it out of the window, an ink body, a lit left facet.
-  out.push({ sd: grow(sdPolygon(p), g.gap), color: solid([255, 255, 255]) });
-  out.push({ sd: sdPolygon(p), color: solid(INK) });
-  out.push({ sd: sdPolygon(facet), color: solid(INK_LIT) });
-  return out;
 }
 
 /** Composite layers at `size` px into straight RGBA. */
@@ -254,7 +183,7 @@ function rasterize(size, list) {
  */
 export function drawIcon(size, color = 'connected') {
   const stops = Array.isArray(color) ? [color, color] : ICON_GRADIENTS[color] ?? ICON_GRADIENTS.connected;
-  return { width: size, height: size, rgba: rasterize(size, layers(size, stops)) };
+  return { width: size, height: size, rgba: rasterize(size, layers(stops)) };
 }
 
 export function iconPng(size, color) {
@@ -263,22 +192,16 @@ export function iconPng(size, color) {
 }
 
 /**
- * The macOS menu-bar image: the same window and pointer in black on transparent, for
+ * The macOS menu-bar image: the wave alone, black on transparent, for
  * `nativeImage.setTemplateImage(true)` — macOS recolours a template for a light or dark menu bar,
- * and a coloured tile there is out of place. The pointer is cut out of the window by a clear gap.
+ * and a coloured tile there is out of place. A little bolder than on the tile, which it has no more.
  */
 export function templatePng(size) {
-  const g = geometry(size);
-  const [wx, wy, ww, wh, wr] = [0.04, 0.1, 0.74, 0.62, 0.12];
-  const p = place(POINTER, 0.56, 0.42, 0.4);
-  const black = () => [0, 0, 0, 1];
   const list = [
-    { sd: sdRoundRect(wx, wy, ww, wh, wr), color: () => [0, 0, 0, 0.55] },
-    { sd: sdRoundRect(wx, wy, ww, 0.17, 0.085), color: black },
-    { sd: grow(sdPolygon(p), g.gap * 1.2), color: () => [0, 0, 0, 0], erase: true },
-    { sd: sdPolygon(p), color: black },
+    { sd: sdCircle(unit(5.5), unit(20), unit(2.2)), a: 0.6 },
+    { sd: sdPolyline(waveUnits, unit(3.4)), a: 1 },
+    { sd: sdCircle(unit(26.5), unit(12), unit(3.4)), a: 1 },
   ];
-  // The cut-out: clear what lies under the pointer's outline before drawing the pointer.
   const rgba = new Uint8ClampedArray(size * size * 4);
   for (let py = 0; py < size; py++) {
     for (let px = 0; px < size; px++) {
@@ -286,9 +209,8 @@ export function templatePng(size) {
       const y = (py + 0.5) / size;
       let a = 0;
       for (const layer of list) {
-        const cov = Math.max(0, Math.min(1, 0.5 - layer.sd(x, y) * size));
-        if (layer.erase) a *= 1 - cov;
-        else a = layer.color()[3] * cov + a * (1 - layer.color()[3] * cov);
+        const ca = layer.a * Math.max(0, Math.min(1, 0.5 - layer.sd(x, y) * size));
+        a = ca + a * (1 - ca);
       }
       rgba[(py * size + px) * 4 + 3] = a * 255;
     }

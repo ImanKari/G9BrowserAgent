@@ -87,8 +87,8 @@ the pages you test (and, when you ask for it, the Chrome for Testing download an
 | System | Package | Updates |
 |---|---|---|
 | Windows 10 / 11 (x64) | `G9BrowserAgent-Setup-<version>.exe` — installs for your user only, no administrator rights | **Automatic** |
-| macOS 12 or newer, Apple silicon | `G9BrowserAgent-<version>-mac-arm64.dmg` | G9BrowserAgent tells you, you install ([why](#updates)) |
-| macOS 12 or newer, Intel | `G9BrowserAgent-<version>-mac-x64.dmg` | G9BrowserAgent tells you, you install |
+| macOS 12 or newer, Apple silicon | `G9BrowserAgent-<version>-mac-arm64.dmg` | **Automatic** from 3.6, when installed in Applications ([how](#updates)) |
+| macOS 12 or newer, Intel | `G9BrowserAgent-<version>-mac-x64.dmg` | **Automatic** from 3.6, when installed in Applications |
 | Linux x64, any distribution with a desktop | `G9BrowserAgent-x86_64.AppImage` | **Automatic** |
 | Debian / Ubuntu x64 | `G9BrowserAgent_<version>_amd64.deb` | G9BrowserAgent tells you, you install |
 
@@ -371,7 +371,7 @@ Agents get **15 tools**. The ones they use most:
 | `browser_navigate` | Go to a URL, reload, back, forward, wait for a load state — or for a condition in the page, for up to two hours. |
 | `browser_console`, `browser_network` | Read console messages and requests; run JavaScript, also as a long background job; record HAR; pin or intercept responses; fetch a file with the browser's cookies and save it; read a saved or downloaded file back, in chunks. |
 | `browser_screenshot`, `browser_inspect`, `browser_diagnose` | Pictures (also saved to a file), DOM / styles / storage / cookies, finding one control by role and name, and health, performance and memory checks. |
-| `browser_recording`, `browser_issue` | Record, replay and approve flows; run a list of steps in one call; file issues with evidence. |
+| `browser_recording`, `browser_issue` | Record, replay and approve flows; run a list of steps in one call; file issues with evidence. (3.6, temporary) `browser_issue action:"feedback"` sends a suggestion for G9BrowserAgent itself to the team's suggestions box. |
 | `browser_engine`, `browser_emulate`, `browser_dialog` | Start background browsers; emulate devices, networks and color schemes; answer dialogs. |
 
 The full list, with every argument, is in the [technical reference](docs/REFERENCE.md#the-15-tools).
@@ -438,10 +438,13 @@ in [docker/README.md](docker/README.md).
 | System | What happens |
 |---|---|
 | Windows, Linux AppImage | G9BrowserAgent checks the official releases when it starts and every 6 hours, downloads a new version in the background, verifies its SHA-512, and asks: **Install now**, **Install when I quit G9BrowserAgent**, **Not now**, or **Skip this version**. |
-| macOS, Linux .deb | G9BrowserAgent checks the same way and tells you a new version is out; **Open the release page** takes you to the download. (macOS installs updates by itself only into apps signed with an Apple Developer ID, which G9BrowserAgent is not yet; a .deb needs your password to replace.) |
+| macOS (from 3.6) | The same. macOS's own updater works only for apps signed with an Apple Developer ID, which G9BrowserAgent is not yet, so G9BrowserAgent downloads the update itself, verifies its SHA-512, and replaces its app after it quits. That needs the app in **Applications**; a copy opened straight from Downloads updates by hand. |
+| Linux .deb | G9BrowserAgent checks the same way and tells you a new version is out; **Open the release page** takes you to the download (a .deb needs your password to replace). |
 
 - Nothing is interrupted: G9BrowserAgent installs only when no run is in progress and no background browser is
-  open, and re-checks every minute until then.
+  open, and re-checks every minute until then — unless you choose **Force install** (Settings →
+  Updates, or when it asks): then it closes the background browsers, stops the AI clients'
+  G9BrowserAgent connections (they reconnect) and installs at once.
 - **The extension updates with the app.** After an update, G9BrowserAgent refreshes its extension folder and the
   extension reloads itself once no agent call is in flight. The side panel's badge shows the new
   version. If it ever does not, press **Reload** on the extension (or **Engines → Update and reload**).

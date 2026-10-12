@@ -9,7 +9,7 @@
  * | Control | How (trusted input first) | Verified by |
  * |---|---|---|
  * | `<input type=range>` | a click at the value's point on the track, then arrow keys to the exact step | `.value` |
- * | ARIA slider (`role=slider`) | a drag of the thumb to the value's point on its track, then arrow keys | `aria-valuenow` |
+ * | ARIA slider (`role=slider`) | a drag of the thumb to the value's point on its track, then arrow keys (3.6: focused by a real click on the thumb first, sent a few at a time) | `aria-valuenow` |
  * | text field, textarea, contenteditable | `type` with `clear:true` | the field's value |
  * | checkbox, radio, switch | a click when the state differs | `checked` / `aria-checked` |
  * | `<select>` | `select` | the selected option |
@@ -72,6 +72,28 @@ const SCRIPT_SET_FN = `function (v) {
     return this.value;
   }`;
 
+/**
+ * (3.6) Is focus on this control (or inside it)? And where is it, in words, for the error when it
+ * is not — keys go to whatever has focus, and "the slider did not move" said nothing about why.
+ */
+const FOCUS_FN = `function () {
+    const d = this.ownerDocument;
+    let a = d.activeElement;
+    while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
+    const focused = !!a && (a === this || (typeof this.contains === 'function' && this.contains(a)));
+    let where = 'nothing';
+    if (a === d.body || !a) where = 'the page itself (no element had focus)';
+    else {
+      const label = String(a.getAttribute && (a.getAttribute('aria-label') || a.getAttribute('title')) || '').replace(/\\s+/g, ' ').trim().slice(0, 40);
+      const role = a.getAttribute && a.getAttribute('role');
+      where = '<' + String(a.tagName || '?').toLowerCase() + (a.id ? '#' + a.id : '') + (role ? ' role=' + role : '') + '>' + (label ? ' "' + label + '"' : '');
+    }
+    return { focused, where };
+  }`;
+
+/** How many arrow keys an ARIA slider gets before its value is read again. */
+const KEY_BATCH = 5;
+
 /** Range input thumb width in CSS px (Chromium's default track thumb). */
 const RANGE_THUMB = 16;
 const MAX_KEYS = 200;
@@ -128,6 +150,59 @@ async function keyToward(tabId, ref, f, target, read, opts) {
   if (n > 0) {
     await interact.key(tabId, { ...opts, ref, key: Number(target) > Number(now) ? up : down, repeat: n });
     now = await read();
+  }
+  return now;
+}
+
+/**
+ * (3.6) Focus a custom (ARIA) slider the way a person does: a real click on its thumb where it is
+ * now — so the value does not jump — and, when even that leaves focus elsewhere, element.focus().
+ * → { focused, how, where }
+ */
+async function focusSlider(tabId, node, f, current, opts) {
+  const now = await callInWorld(tabId, node.backendNodeId, FOCUS_FN).catch(() => null);
+  if (now?.focused) return { focused: true, how: null, where: now.where };
+  // The element is the thumb when it is smaller than its track; otherwise click the track where
+  // the value already is.
+  const isThumb = f.el.w * f.el.h > 0 && (f.el.w < f.track.w * 0.6 || f.el.h < f.track.h * 0.6);
+  const at = isThumb ? { x: f.el.x + f.el.w / 2, y: f.el.y + f.el.h / 2 } : pointAt(f, fractionOf(f, current ?? f.min));
+  await interact.click(tabId, { ...opts, x: at.x, y: at.y }).catch(() => {});
+  let after = await callInWorld(tabId, node.backendNodeId, FOCUS_FN).catch(() => null);
+  if (after?.focused) return { focused: true, how: 'click on the thumb', where: after.where };
+  await callInWorld(tabId, node.backendNodeId, 'function () { this.focus && this.focus(); }').catch(() => {});
+  after = await callInWorld(tabId, node.backendNodeId, FOCUS_FN).catch(() => null);
+  return { focused: !!after?.focused, how: after?.focused ? 'focus()' : null, where: after?.where ?? 'unknown' };
+}
+
+/**
+ * (3.6) Arrow keys to an ARIA slider a few at a time, its value read again after each batch: a
+ * custom slider's step can change along the track, keys can accelerate, and a value that stops
+ * moving ends the attempt instead of sending the remaining 200 keys into the void. → the value after.
+ */
+async function keyInBatches(tabId, f, target, read, opts) {
+  const up = f.vertical ? 'ArrowUp' : 'ArrowRight';
+  const down = f.vertical ? 'ArrowDown' : 'ArrowLeft';
+  let now = await read();
+  let step = null;
+  let stalls = 0;
+  let turns = 0;
+  let lastDir = null;
+  for (let sent = 0; sent < MAX_KEYS && !closeEnough(f, now, target);) {
+    const dir = Number(target) > Number(now) ? up : down;
+    if (lastDir && dir !== lastDir && ++turns > 3) break; // it overshoots back and forth: stop
+    const n = step ? Math.max(1, Math.min(KEY_BATCH, Math.round(Math.abs(Number(target) - Number(now)) / step))) : 1;
+    await interact.key(tabId, { ...opts, key: dir, repeat: n });
+    sent += n;
+    const after = await read();
+    const moved = Math.abs(Number(after) - Number(now));
+    if (after == null || !(moved > 0)) {
+      if (++stalls >= 2) { now = after; break; }
+    } else {
+      stalls = 0;
+      step = moved / n;
+    }
+    lastDir = dir;
+    now = after;
   }
   return now;
 }
@@ -191,16 +266,28 @@ export async function setValue(tabId, opts = {}) {
     f = await facts(tabId, node);
   }
   let after = f.value;
+  let focus = null;
   if (!closeEnough(f, after, target)) {
-    after = await keyToward(tabId, ref, f, target, read, pass);
+    if (f.kind === 'slider') {
+      // Keys go to whatever has focus, and a drag does not focus every custom slider (3.6).
+      focus = await focusSlider(tabId, node, f, after, pass);
+      if (focus.how) via.push(focus.how);
+      after = await keyInBatches(tabId, f, target, read, pass);
+    } else {
+      after = await keyToward(tabId, ref, f, target, read, pass);
+    }
     via.push('arrow keys');
   }
   if (!closeEnough(f, after, target) && f.kind === 'range' && hz.level !== 'stealth') {
     after = Number(await callInWorld(tabId, node.backendNodeId, SCRIPT_SET_FN, [target]));
     via.push('script');
   }
+  const verified = closeEnough(f, after, target);
+  // Unverified: where focus was when the keys went out — the first thing to know (3.6).
+  const focusNow = !verified && f.kind === 'slider' ? await callInWorld(tabId, node.backendNodeId, FOCUS_FN).catch(() => null) : null;
   return done({
-    kind: f.kind, before, after, target, verified: closeEnough(f, after, target), via,
+    kind: f.kind, before, after, target, verified, via,
+    ...(focusNow ? { focus: focusNow.focused ? 'on the slider' : focusNow.where } : {}),
     ...(via.includes('script') ? { note: 'Trusted input did not reach the value, so it was set by script: the page saw input/change events that are not trusted (isTrusted false).' } : {}),
   });
 }
@@ -209,9 +296,10 @@ function done(r) {
   if (!r.verified) {
     const err = new Error(
       `The ${r.kind} did not take the value: wanted ${JSON.stringify(r.target)}, it is ${JSON.stringify(r.after)} (was ${JSON.stringify(r.before)}) after ${r.via.join(', ') || 'nothing'}. ` +
-        'The control may ignore this kind of input, or clamp or round the value.',
+        `${r.focus ? `Keyboard focus was on ${r.focus} when the keys were sent. ` : ''}The control may ignore this kind of input, or clamp or round the value.`,
     );
     err.result = r;
+    err.errorCode = 'not_verified';
     throw err;
   }
   return { set: true, ...r };

@@ -674,7 +674,8 @@ await test('the delivery state leads the message a tool call returns: [delivery:
   tab.hidden = true;
   try {
     await assert.rejects(tools.runTool('browser_interact', { action: 'click', ref: 'e1', tabId: TAB, humanize: 'off' }), (err) => {
-      assert.match(err.message, /^\[delivery: not-delivered; tab hidden\] The click was not sent/);
+      assert.match(err.message, /^\[delivery: not-delivered; tab hidden\] \[code: tab_hidden\] The click was not sent/);
+      assert.equal(err.errorCode, 'tab_hidden');
       assert.equal(err.delivery, 'not-delivered');
       return true;
     });
@@ -2118,6 +2119,19 @@ await test('(3.5) browser_interact finds its target by selector or role+name, wa
     assert.equal(byRole.delivery, 'delivered');
     assert.match(byRole.matched, /role "button" name \/\^share\$\/i/);
     await assert.rejects(runtime.runTool('browser_interact', { action: 'click', role: 'button', name: 'share', tabId: TAB, humanize: 'off' }), /matched 2/);
+    // (3.6) exact: the whole name, literally (case-insensitive); matchCase: case-sensitive. Each
+    // refusal carries its code after the delivery tag.
+    const exact = await runtime.runTool('browser_interact', { action: 'click', role: 'button', name: 'share', exact: true, tabId: TAB, humanize: 'off' });
+    assert.match(exact.matched, /name "share" \(exact\)/);
+    await assert.rejects(runtime.runTool('browser_interact', { action: 'click', role: 'button', name: 'share', exact: true, matchCase: true, tabId: TAB, humanize: 'off' }),
+      (err) => /^\[delivery: not-delivered\] \[code: not_found\] No element with role "button" name "share" \(exact case\)/.test(err.message) && err.errorCode === 'not_found');
+    const cased = await runtime.runTool('browser_interact', { action: 'click', role: 'button', name: 'later', matchCase: true, tabId: TAB, humanize: 'off' });
+    assert.match(cased.matched, /name \/later\/(?!i)/);
+    await assert.rejects(runtime.runTool('browser_interact', { action: 'click', role: 'button', name: 'LATER', matchCase: true, tabId: TAB, humanize: 'off' }), /\[code: not_found\]/);
+    await assert.rejects(runtime.runTool('browser_interact', { action: 'click', role: 'button', name: 'share', tabId: TAB, humanize: 'off' }), /\[code: ambiguous\].*matched 2/s);
+    await assert.rejects(runtime.runTool('browser_interact', { action: 'click', role: 'button', name: 'share', nth: 3, tabId: TAB, humanize: 'off' }), /\[code: bad_argument\]/);
+    const found = await runtime.runTool('browser_inspect', { what: 'find', role: 'button', name: 'Share Later', exact: true, tabId: TAB });
+    assert.equal(found.count, 1);
   } finally {
     tab.nodes.delete(SHARE.backendNodeId);
     tab.nodes.delete(OTHER.backendNodeId);
@@ -2201,6 +2215,89 @@ await test('(3.5) set_value: a range input by a click on its track (+ arrow keys
     assert.equal(d.to.percent, 20);
   } finally {
     for (const n of [RANGE, SLIDER, CHECK]) tab.nodes.delete(n.backendNodeId);
+    await refs.saveRefs(TAB, { url: URL0, entries: Object.entries(saved.map) });
+  }
+});
+
+await test('(3.6) set_value on a custom ARIA slider: a drag that leaves focus elsewhere → a real click on the thumb, then keys a few at a time, verified', async () => {
+  const runtime = await import(extUrl('tools/index.js'));
+  const saved = await refs.getRefs(TAB);
+  // A custom slider: a drag does nothing, and its release hands focus back to the page; only keys
+  // move it, one step a key, while it has focus.
+  const SLIDER = fake.addNode(TAB, { backendNodeId: 170, tag: 'div', attrs: { role: 'slider', 'aria-valuenow': '20', 'aria-valuemin': '0', 'aria-valuemax': '100' }, box: { x: 400, y: 600, width: 300, height: 14 } });
+  let releases = 0;
+  SLIDER.onRelease = () => { if (releases++ === 0) tab.focused = null; };
+  const keys = [];
+  SLIDER.onKey = (key) => {
+    keys.push(key);
+    const v = Number(SLIDER.attrs['aria-valuenow']);
+    if (key === 'ArrowRight') SLIDER.attrs['aria-valuenow'] = String(Math.min(100, v + 1));
+    if (key === 'ArrowLeft') SLIDER.attrs['aria-valuenow'] = String(Math.max(0, v - 1));
+  };
+  await refs.saveRefs(TAB, { url: URL0, entries: [...Object.entries(saved.map), ['e70', { backendNodeId: 170, role: 'slider', name: 'Zoom', sessionId: null }]] });
+  try {
+    tab.focused = null;
+    const r = await runtime.runTool('browser_interact', { action: 'set_value', ref: 'e70', value: 33, tabId: TAB, humanize: 'off' });
+    assert.equal(r.verified, true);
+    assert.equal(r.after, 33);
+    assert.deepEqual(r.via, ['drag', 'click on the thumb', 'arrow keys']);
+    assert.equal(keys.length, 13, 'one key measured the step, then batches of at most five');
+    // A page that takes focus away on every key: refused, saying where focus was.
+    SLIDER.onKey = () => { tab.focused = null; };
+    await assert.rejects(runtime.runTool('browser_interact', { action: 'set_value', ref: 'e70', value: 60, tabId: TAB, humanize: 'off' }),
+      (err) => /\[code: not_verified\]/.test(err.message) && /Keyboard focus was on the page itself \(no element had focus\)/.test(err.message));
+  } finally {
+    tab.nodes.delete(SLIDER.backendNodeId);
+    tab.focused = null;
+    await refs.saveRefs(TAB, { url: URL0, entries: Object.entries(saved.map) });
+  }
+});
+
+await test('(3.6) a click that navigates says so (navigated); with expectSamePage it is an error with code "navigated" — and it is not repeated', async () => {
+  const runtime = await import(extUrl('tools/index.js'));
+  const docUrl = tab.frames.get(MAIN).url;
+  try {
+    LINK.navigatesOnPress = true;
+    const mark = since();
+    const out = await runtime.runTool('browser_interact', { action: 'click', ref: 'e6', tabId: TAB, humanize: 'off' });
+    assert.equal(out.navigated?.url, 'https://example.test/next');
+    assert.equal(out.navigated.sameDocument, false);
+    fake.navigate(TAB, { url: docUrl });
+    await refs.saveRefs(TAB, { url: URL0, entries: Object.entries((await refs.getRefs(TAB)).map) });
+    LINK.navigatesOnPress = true;
+    await assert.rejects(runtime.runTool('browser_interact', { action: 'click', ref: 'e6', expectSamePage: true, tabId: TAB, humanize: 'off' }),
+      (err) => /^\[code: navigated\] The click was delivered, and it took the page to https:\/\/example\.test\/next/.test(err.message) && /do not repeat it/.test(err.message));
+    assert.equal(mouseOf(slice(mark)).filter((c) => c.params.type === 'mousePressed').length, 2, 'one press per call: never retried');
+    // A click that stays: no navigated field.
+    fake.navigate(TAB, { url: docUrl });
+    await refs.saveRefs(TAB, { url: URL0, entries: Object.entries((await refs.getRefs(TAB)).map) });
+    const stay = await runtime.runTool('browser_interact', { action: 'click', ref: 'e1', expectSamePage: true, tabId: TAB, humanize: 'off' });
+    assert.equal(stay.navigated, undefined);
+  } finally {
+    LINK.navigatesOnPress = false;
+    if (tab.frames.get(MAIN).url !== docUrl) fake.navigate(TAB, { url: docUrl });
+    await refs.saveRefs(TAB, { url: URL0, entries: Object.entries((await refs.getRefs(TAB)).map) });
+  }
+});
+
+await test('(3.6) an upload whose input the page emptied again is "indeterminate" with a note — not an error that invites a second upload', async () => {
+  const runtime = await import(extUrl('tools/index.js'));
+  const saved = await refs.getRefs(TAB);
+  // The page took the file in its change handler and cleared the input.
+  const INPUT = fake.addNode(TAB, { backendNodeId: 180, tag: 'input', type: 'file', box: { x: 100, y: 500, width: 200, height: 30 } });
+  INPUT.files = [];
+  await refs.saveRefs(TAB, { url: URL0, entries: [...Object.entries(saved.map), ['e80', { backendNodeId: 180, role: 'button', name: 'Choose file', sessionId: null }]] });
+  try {
+    const r = await runtime.runTool('browser_interact', { action: 'upload', ref: 'e80', files: ['/tmp/a.png'], tabId: TAB });
+    assert.equal(r.delivery, 'indeterminate');
+    assert.deepEqual(r.inputHolds, []);
+    assert.match(r.deliveryNote, /take the file in their change handler and then clear the input/);
+    assert.match(r.deliveryNote, /do not upload again/);
+    INPUT.files = [{ name: 'a.png', size: 10, type: 'image/png' }];
+    const kept = await runtime.runTool('browser_interact', { action: 'upload', ref: 'e80', files: ['/tmp/a.png'], tabId: TAB });
+    assert.equal(kept.delivery, 'delivered');
+  } finally {
+    tab.nodes.delete(INPUT.backendNodeId);
     await refs.saveRefs(TAB, { url: URL0, entries: Object.entries(saved.map) });
   }
 });

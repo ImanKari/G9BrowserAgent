@@ -27,7 +27,7 @@ import { installId } from '../lib/runtime.mjs';
 const INSTALL_ID = installId({ root: REPO_ROOT });
 import { WsServer, classifyOrigin } from './ws-server.js';
 import { Registry } from './registry.js';
-import { Router, deliveryFields } from './router.js';
+import { Router, deliveryFields, codeFields } from './router.js';
 import { Settings } from './settings.js';
 import { FileStorageArea, MemoryStorageArea, FileBlobs } from './storage.js';
 import { Evidence } from './evidence.js';
@@ -491,7 +491,7 @@ export class Daemon {
       this.broadcastUi('activity', { kind: 'tool', agentId: client.id, name: client.name, tool: msg.tool, detail: summarize(msg.tool, msg.args ?? {}), ok: true, ms: Date.now() - started, at: Date.now() });
     } catch (err) {
       const error = String(err?.message ?? err);
-      client.send({ type: 'result', id: msg.id, ok: false, error, ...deliveryFields(err) });
+      client.send({ type: 'result', id: msg.id, ok: false, error, ...deliveryFields(err), ...codeFields(err) });
       this.broadcastUi('activity', { kind: 'tool', agentId: client.id, name: client.name, tool: msg.tool, detail: `${summarize(msg.tool, msg.args ?? {})} — ${error.slice(0, 300)}`, ok: false, ms: Date.now() - started, at: Date.now() });
     }
   }

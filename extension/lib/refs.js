@@ -48,6 +48,7 @@
  */
 
 import { platform } from './platform.js';
+import { codedError } from './errcode.js';
 
 const session = () => platform.storage.session;
 
@@ -347,14 +348,13 @@ export async function resolveRef(tabId, ref, currentUrl) {
   }
   const table = await getRefs(tabId);
   if (!table) {
-    throw new Error(
-      `No snapshot exists for this tab yet. Call browser_snapshot first, then use the refs it returns.`,
-    );
+    throw codedError('no_snapshot', `No snapshot exists for this tab yet. Call browser_snapshot first, then use the refs it returns.`);
   }
   const node = lookup(table, ref);
   if (!node) {
     const available = Object.keys(table.map).slice(0, 12).join(', ');
-    throw new Error(
+    throw codedError(
+      'stale_ref',
       `Unknown element ref "${ref}". Refs come from browser_snapshot, and a ref stays usable for the last ` +
         `${KEEP_GENERATIONS} snapshots YOU took of this page (another agent's reads never take yours away). ` +
         `Known refs of the newest snapshot include: ${available}${Object.keys(table.map).length > 12 ? ', …' : ''}. ` +
@@ -362,7 +362,8 @@ export async function resolveRef(tabId, ref, currentUrl) {
     );
   }
   if (currentUrl && table.url && stripHash(table.url) !== stripHash(currentUrl)) {
-    throw new Error(
+    throw codedError(
+      'stale_ref',
       `Stale snapshot: refs were captured on ${table.url} but the tab is now on ${currentUrl}. ` +
         `Take a fresh browser_snapshot before interacting.`,
     );

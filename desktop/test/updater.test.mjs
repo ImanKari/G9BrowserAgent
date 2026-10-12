@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { suite } from './harness.mjs';
-import { UpdateController, feedConfig, feedKey, describeUpdate, installMode, manualReason, releasePageUrl, OFFICIAL_REPO, CHECK_INTERVAL_MS, BUSY_RECHECK_MS } from '../lib/updater.mjs';
+import { UpdateController, feedConfig, feedKey, describeUpdate, installMode, installModeFor, manualReason, releasePageUrl, OFFICIAL_REPO, CHECK_INTERVAL_MS, BUSY_RECHECK_MS } from '../lib/updater.mjs';
 
 const t = suite('desktop: app updater (electron-updater: official GitHub releases, custom feed, off)');
 
@@ -105,7 +105,7 @@ t.test('installMode: Windows and a Linux AppImage install themselves; macOS (uns
   assert.equal(installMode({ platform: 'linux', appImage: true }), 'auto');
   assert.equal(installMode({ platform: 'linux', appImage: false }), 'manual');
   assert.equal(installMode({ platform: 'darwin' }), 'manual');
-  assert.match(manualReason({ platform: 'darwin' }), /Developer ID/);
+  assert.match(manualReason({ platform: 'darwin' }), /cannot replace itself/);
   assert.equal(releasePageUrl({ mode: 'official', version: '3.1.0' }), 'https://github.com/ImanKari/G9BrowserAgent/releases/tag/v3.1.0');
   assert.equal(releasePageUrl({ mode: 'official', version: '3.1.0', tag: 'v3.1.0' }), 'https://github.com/ImanKari/G9BrowserAgent/releases/tag/v3.1.0');
   assert.equal(releasePageUrl({ mode: 'custom', url: 'https://h/g9/', version: '3.1.0' }), 'https://h/g9/');
@@ -377,6 +377,93 @@ t.test('an unusable URL is reported as such (the daemon accepts file://; electro
   const f = await controller({ getConfig: async () => ({ url: 'file:///C:/share/g9' }) }).c.check();
   assert.equal(f.status, 'invalid-url');
   assert.match(f.line, /file:\/\/ feed cannot be used/);
+});
+
+t.test('(3.6) installModeFor: a Mac that can write its bundle updates itself ("self"); one that cannot stays manual, and says why', () => {
+  assert.equal(installModeFor({ platform: 'darwin', macSelf: true }), 'self');
+  assert.equal(installModeFor({ platform: 'darwin', macSelf: false }), 'manual');
+  assert.equal(installModeFor({ platform: 'win32' }), 'auto');
+  assert.equal(installModeFor({ platform: 'linux', appImage: true }), 'auto');
+  assert.equal(installModeFor({ platform: 'linux' }), 'manual');
+  assert.match(manualReason({ platform: 'darwin', macReason: 'it cannot write to /Applications' }), /replace itself.*cannot write to \/Applications/);
+});
+
+t.test('(3.6) force install: does not ask the daemon whether it is busy, clears the way with force, installs and reopens', async () => {
+  const seen = [];
+  const { c, u } = controller({
+    promptInstall: async () => 'later',
+    queryActivity: async () => { seen.push('activity'); return { busy: true, reasons: ['1 launched engine would be closed'] }; },
+    beforeInstall: async (o) => { seen.push(['beforeInstall', o]); },
+  });
+  await c.check();
+  u.emit('update-downloaded', { version: '2.0.1' });
+  await tick();
+  const waited = await c.installWhenIdle();
+  assert.equal(waited.status, 'deferred', 'an agent\'s launched browser keeps an ordinary install waiting');
+  const s = await c.forceInstall();
+  assert.equal(s.status, 'installing');
+  assert.equal(s.forced, true);
+  assert.match(s.line, /installing 2\.0\.1 \(forced\)/);
+  assert.deepEqual(seen, ['activity', ['beforeInstall', { force: true, version: '2.0.1' }]], 'forced: no activity query, beforeInstall told to force');
+  assert.deepEqual(u.calls.at(-1), ['quitAndInstall', true, true]);
+  // Nothing downloaded → nothing to force.
+  const idle = controller().c;
+  await idle.check();
+  assert.equal((await idle.forceInstall()).status, 'idle');
+});
+
+t.test('(3.6) "Install now" on a busy daemon offers force: yes installs at once, no keeps waiting', async () => {
+  for (const answer of [true, false]) {
+    const asked = [];
+    const { c, u } = controller({
+      promptInstall: async () => 'now',
+      queryActivity: async () => ({ busy: true, reasons: ['1 run is in progress'] }),
+      confirmForce: async (o) => { asked.push(o); return answer; },
+    });
+    await c.check();
+    u.emit('update-downloaded', { version: '2.0.1' });
+    await tick();
+    await tick();
+    await tick();
+    assert.deepEqual(asked, [{ version: '2.0.1', reasons: ['1 run is in progress'] }]);
+    assert.equal(c.snapshot().status, answer ? 'installing' : 'deferred');
+    assert.equal(u.calls.some((x) => x[0] === 'quitAndInstall'), answer);
+  }
+});
+
+t.test('(3.6) self mode (macOS): the app downloads and stages the release itself, then swaps its bundle — never electron-updater\'s download or quitAndInstall', async () => {
+  const self = {
+    calls: [],
+    async prepare({ info, feed, onProgress }) {
+      this.calls.push(['prepare', info.version, feed.provider]);
+      onProgress({ percent: 50 });
+      return { version: info.version, app: '/staged/G9BrowserAgent.app' };
+    },
+    install(o) { this.calls.push(['install', o]); },
+  };
+  const { c, u } = controller({ mode: 'self', selfUpdate: self, promptInstall: async () => 'later' });
+  await c.check();
+  u.emit('update-available', { version: '2.0.1', files: [{ url: 'G9BrowserAgent-2.0.1-mac-arm64.zip', sha512: 'x' }] });
+  u.emit('update-available', { version: '2.0.1' }); // a second check while it downloads: one download
+  await tick();
+  await tick();
+  await tick();
+  assert.equal(self.calls.filter((x) => x[0] === 'prepare').length, 1);
+  assert.equal(u.calls.some((x) => x[0] === 'download'), false, 'electron-updater does not download on a Mac (Squirrel.Mac would refuse it)');
+  assert.equal(c.snapshot().status, 'downloaded');
+  assert.equal(c.snapshot().installOnQuit, true);
+  assert.equal(await c.onQuit(), 'installing');
+  assert.deepEqual(self.calls.at(-1), ['install', { relaunch: false }]);
+  assert.equal(u.calls.some((x) => x[0] === 'quitAndInstall'), false);
+  // A failed download or check of the zip is an error state, not a prompt.
+  const bad = { prepare: async () => { throw new Error('sha512 checksum mismatch for G9BrowserAgent-2.0.1-mac-arm64.zip'); }, install() {} };
+  const b = controller({ mode: 'self', selfUpdate: bad });
+  await b.c.check();
+  b.u.emit('update-available', { version: '2.0.1' });
+  await tick();
+  await tick();
+  assert.equal(b.c.snapshot().status, 'error');
+  assert.match(b.c.snapshot().error, /sha512 checksum mismatch/);
 });
 
 t.run();

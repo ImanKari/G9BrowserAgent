@@ -617,6 +617,7 @@ export class EngineManager {
         headless,
         profile: profileName,
         profileDir: prof.dir,
+        keepSessionCookies: opts.keepSessionCookies !== false,
         pid: launched.pid ?? null,
         argv: launched.argv ?? [],
         stealth,
@@ -664,6 +665,12 @@ export class EngineManager {
       // a click on an attachment link with no watch_downloads saved the file into the profile's
       // default directory — the Windows user's Downloads — and G9BrowserAgent had no record of it).
       await this.#configureDownloads(engineId, defaultContextId, downloadPath);
+      if (opts.keepSessionCookies !== false) {
+        engine.info.sessionCookiesRestored = await this.#restoreSessionCookies(engineId, profileName).catch((err) => {
+          this.log(`[engine2] ${engineId}: session cookies not restored: ${err.message}`);
+          return 0;
+        });
+      }
       for (const tabId of this.registry.handlesOf(engineId)) await this.#applyTabDefaults(tabId).catch(() => {});
       if (!headless && !opts.windowSize) {
         const fitted = await this.#fitWindowToWorkArea(engineId).catch((err) => {
@@ -846,6 +853,9 @@ export class EngineManager {
 
   async stop(engineId) {
     const e = this.#requireEngine(engineId);
+    // (3.6) Keep the profile's sign-ins that live in session cookies for its next launch
+    // (profile.js saveSessionCookies) — read while the browser still answers.
+    if (e.ready !== false && e.info.keepSessionCookies !== false && !e.closing) await this.#saveSessionCookies(e).catch((err) => this.log(`[engine2] ${engineId}: session cookies not saved: ${err.message}`));
     e.closing = true;
     try {
       pick(this.cdp, 'unregisterEngine')?.(engineId);
@@ -858,6 +868,38 @@ export class EngineManager {
       this.log(`[engine2] close ${engineId}: ${err.message}`);
     }
     await this.#cleanup(engineId, 'the launched engine was stopped');
+  }
+
+  async #saveSessionCookies(e) {
+    const { profile } = await this.#engineModules();
+    const save = pick(profile, 'saveSessionCookies');
+    if (!save || !e.info.profile) return;
+    const { cookies } = await e.conn.send('Storage.getCookies', {}, null, { timeoutMs: 5_000 });
+    const r = await save(e.info.profile, cookies, { home: this.home });
+    if (r.saved) this.log(`[engine2] ${e.info.engineId}: kept ${r.saved} session cookie(s) of profile ${e.info.profile} for its next launch`);
+  }
+
+  /** (3.6) Set the session cookies the profile's last graceful stop kept. → how many were set. */
+  async #restoreSessionCookies(engineId, profileName) {
+    const e = this.engines.get(engineId);
+    const { profile } = await this.#engineModules();
+    const cookies = await Promise.resolve(pick(profile, 'readSessionCookies')?.(profileName, { home: this.home })).catch(() => []);
+    if (!e || !cookies?.length) return 0;
+    let set = 0;
+    try {
+      await e.conn.send('Storage.setCookies', { cookies });
+      set = cookies.length;
+    } catch {
+      // One cookie this browser refuses fails the batch: set them one by one.
+      for (const c of cookies) {
+        try {
+          await e.conn.send('Storage.setCookies', { cookies: [c] });
+          set += 1;
+        } catch { /* skipped */ }
+      }
+    }
+    if (set) this.log(`[engine2] ${engineId}: restored ${set} session cookie(s) of profile ${profileName}`);
+    return set;
   }
 
   #onClosed(engineId) {

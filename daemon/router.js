@@ -29,6 +29,7 @@ import { TOOL_NAMES, unknownArguments, unknownArgumentsMessage } from '../mcp/to
 import { handoff as runHandoff } from './handoff.js';
 import { fileInfo } from './evidence.js';
 import { CallLog, callContext } from './calls.js';
+import { tagCode, codeFor, codeOfMessage } from '../extension/lib/errcode.js';
 
 // ------------------------------------------------------------------ pure helpers
 
@@ -226,6 +227,12 @@ export function deliveryFields(err) {
   return typeof err?.delivery === 'string' ? { delivery: err.delivery, hit: err.hit ?? null, hidden: err.hidden === true } : {};
 }
 
+/** (3.6) An error's code for a result message (`code`, DAEMON_PROTOCOL §3); {} when it has none. */
+export function codeFields(err) {
+  const code = codeFor(err) ?? codeOfMessage(err?.message);
+  return code ? { code } : {};
+}
+
 // ------------------------------------------------------------------ files on the browser's machine (3.4)
 
 /** Textual content types: a fetched body of one of these is returned as text. */
@@ -391,7 +398,7 @@ export class Router {
    */
   #checkHalt(client) {
     const halted = this.registry.haltError(client.id);
-    if (halted) throw new Error(halted);
+    if (halted) throw Object.assign(new Error(halted), { errorCode: 'halted' });
   }
 
   /**
@@ -539,6 +546,8 @@ export class Router {
     else {
       const text = handlesInText(String(msg.error ?? 'The extension reported an error with no message.'), (n) => this.registry.handleForChrome(entry.engineId, n, { create: false }));
       const error = withDelivery(new Error(entry.overdue != null ? overdueMessage(entry.tool, entry.overdue, text) : text), msg);
+      if (typeof msg.code === 'string') error.errorCode = msg.code;
+      else if (entry.overdue != null) error.errorCode = 'timeout';
       if (msg.recovered) error.recovered = msg.recovered;
       entry.reject(error);
     }
@@ -750,7 +759,7 @@ export class Router {
             done();
             if (entry.overdue) {
               const wrapped = new Error(overdueMessage(tool, secs, String(err?.message ?? err)));
-              reject(Object.assign(wrapped, deliveryFields(err)));
+              reject(Object.assign(wrapped, deliveryFields(err), { errorCode: codeFor(err) ?? codeOfMessage(err?.message) ?? 'timeout' }));
             } else {
               reject(err);
             }
@@ -766,6 +775,17 @@ export class Router {
    * the agent reads — every refusal names its reason and its fix.
    */
   async call(client, tool, args = {}) {
+    try {
+      return await this.#call(client, tool, args);
+    } catch (err) {
+      // (3.6) Every error an agent can act on carries its code (extension/lib/errcode.js): set where
+      // it was thrown (here, or in the tool code of either engine — its text already has the tag).
+      if (err instanceof Error) tagCode(err, codeFor(err) ?? codeOfMessage(err.message));
+      throw err;
+    }
+  }
+
+  async #call(client, tool, args = {}) {
     if (!TOOL_NAMES.includes(tool)) {
       throw new Error(`Unknown tool "${tool}". Known: ${TOOL_NAMES.join(', ')}.`);
     }
@@ -774,12 +794,12 @@ export class Router {
     // G9_STRICT_ARGS=0 turns the refusal into a pass-through for an old client that sends extras.
     if (process.env.G9_STRICT_ARGS !== '0') {
       const unknown = unknownArguments(tool, args);
-      if (unknown.length) throw new Error(unknownArgumentsMessage(tool, unknown));
+      if (unknown.length) throw Object.assign(new Error(unknownArgumentsMessage(tool, unknown)), { errorCode: 'unknown_argument' });
     }
 
     if (tool !== 'browser_status') {
       const halted = this.registry.haltError(client.id);
-      if (halted) throw new Error(halted);
+      if (halted) throw Object.assign(new Error(halted), { errorCode: 'halted' });
     }
     if (tool === 'browser_status') return this.#status(client, args);
 
@@ -800,6 +820,8 @@ export class Router {
   #dispatch(client, tool, args) {
     // (3.5) Bytes out of the browser's machine: answered by the daemon, no tab needed.
     if (tool === 'browser_network' && args.action === 'read_file') return this.#readFile(args);
+    // (3.6, TEMPORARY) A suggestion for G9BrowserAgent itself, sent to the suggestions box.
+    if (tool === 'browser_issue' && args.action === 'feedback') return this.#feedback(client, args);
     switch (tool) {
       case 'browser_engine':
         return this.#engineTool(client, args);
@@ -1495,6 +1517,39 @@ export class Router {
     } finally {
       await fh.close();
     }
+  }
+
+  /**
+   * (3.6, TEMPORARY — remove with the suggestions box) `browser_issue action:"feedback"`: send what
+   * G9BrowserAgent is missing to the company's suggestions box (settings.feedbackUrl), so developers'
+   * and QA agents' needs land in one place while they work. The daemon posts it (an agent may have no
+   * HTTP of its own); the box accepts 5000 characters each and 100 suggestions an hour in all.
+   */
+  async #feedback(client, args) {
+    const url = String(process.env.G9_FEEDBACK_URL ?? this.settings?.get?.()?.feedbackUrl ?? '').trim();
+    if (!url) throw new Error('Suggestions are turned off on this machine (settings.feedbackUrl is empty).');
+    const text = String(args.body ?? args.text ?? '').trim();
+    if (!text) throw new Error('action:"feedback" needs body: what you needed, what happened, and what would have helped.');
+    if (text.length > 5000) throw new Error(`body is ${text.length} characters; the suggestions box takes at most 5000. Shorten it, or send it as two.`);
+    const payload = {
+      text,
+      ...(args.title ? { title: String(args.title).slice(0, 200) } : {}),
+      ...(args.category ? { category: String(args.category) } : {}),
+      agent: String(client.name ?? client.identity ?? 'agent').slice(0, 120),
+      ...(client.project?.path ? { project: path.basename(String(client.project.path)) } : {}),
+      ...(args.tool ? { tool: String(args.tool).slice(0, 120) } : {}),
+      version: this.version,
+    };
+    let res;
+    try {
+      res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload), signal: AbortSignal.timeout(15_000) });
+    } catch (err) {
+      throw new Error(`The suggestions box (${url}) could not be reached: ${err?.cause?.code ?? err?.message ?? err}. Keep the suggestion and send it later.`);
+    }
+    const answer = await res.json().catch(() => ({}));
+    if (res.status === 429) throw new Error(`The suggestions box is full for this hour (100 an hour in all); try again in ${answer.retryAfterSeconds ?? 'a few'} seconds.`);
+    if (!res.ok) throw new Error(`The suggestions box refused it (HTTP ${res.status}): ${answer.error ?? 'no reason given'}.`);
+    return { sent: true, ...(answer.id ? { id: answer.id } : {}), ...(answer.duplicate ? { duplicate: true } : {}), to: url };
   }
 
   /** (3.5) End the debugger session on an extension tab (tools/index.js detachTab). */

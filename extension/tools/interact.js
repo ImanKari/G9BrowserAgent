@@ -3297,11 +3297,19 @@ export async function upload(tabId, { ref, selector, files, url, waitMs = 0 } = 
     [],
     sessionId,
   ).catch(() => null);
+  // (3.6) An input the page emptied is NOT a failure: many sites read the file in their change
+  // handler and then clear the input so the same file can be chosen again (field report: the upload
+  // had worked, the error said otherwise, and a retry would have uploaded it twice). It is
+  // unproven — "indeterminate" — and the page, not the input, says whether the file arrived.
   if (Array.isArray(held) && held.length === 0) {
-    throw new Error(
-      `The file input holds no file after setting ${list.length}: the page cleared it, replaced the input, or it does not accept this file type. ` +
-        'Take a browser_snapshot to see what the page did.',
-    );
+    return {
+      uploaded: list,
+      inputHolds: [],
+      via: ref ? `ref ${ref}` : `selector ${selector}`,
+      delivery: 'indeterminate',
+      deliveryNote: `The files were set, and the input is empty again: many pages take the file in their change handler and then clear the input — or the page replaced the input, or refused this file type. ` +
+        'Check the page for the upload (a preview, a progress bar, the file name) before doing anything else, and do not upload again until you know it did not arrive.',
+    };
   }
   return {
     uploaded: list,

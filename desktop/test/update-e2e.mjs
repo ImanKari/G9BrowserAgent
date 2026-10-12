@@ -11,7 +11,8 @@
  *           the app, installed with no update configuration at all, must find that release on the
  *           official GitHub releases by itself.
  *
- * What runs (Windows and a Linux AppImage install updates themselves; macOS only finds them):
+ * What runs (Windows and a Linux AppImage install updates through electron-updater; since 3.6 a Mac
+ * downloads, verifies and swaps its own bundle — lib/mac-update.mjs — and runs the same scenarios):
  *   corrupt      the installer arrives with its bytes changed → SHA-512 mismatch, nothing installed
  *   interrupted  the connection drops mid-download → an error, and the next check downloads it
  *   skip         "Skip this version" → the next check does not download it again
@@ -21,7 +22,9 @@
  *                real headless Edge/Chrome with that folder loaded unpacked) and reconnects at the
  *                new version; the daemon is the new version; nothing reports a mismatch
  *   reload-busy  an extension reload asked for while a call runs waits for that call (60 s cap)
- *   manual       (macOS, a .deb) the release is found, nothing is downloaded, the release page is named
+ *   manual       (a .deb; a Mac that cannot write its bundle) the release is found, nothing is
+ *                downloaded, the release page is named — for a build whose mode is 'manual'; no
+ *                platform the pipeline tests is, since a Mac updates itself (3.6)
  *   official     (--feed official) a fresh install with no settings finds, downloads and installs the
  *                published GitHub release
  *
@@ -443,9 +446,11 @@ async function main() {
   const meta = readMeta(NEW_DIR);
   const old = oldArtifact();
   const NEW = meta.version;
-  const newInstaller = path.join(NEW_DIR, meta.path ?? meta.files[0].url);
+  // A Mac downloads the zip for its own architecture (latest-mac.yml lists both; `path` is one of them).
+  const macZip = PLATFORM === 'darwin' ? meta.files.find((f) => String(f.url).endsWith(`-mac-${process.arch === 'arm64' ? 'arm64' : 'x64'}.zip`)) : null;
+  const newInstaller = path.join(NEW_DIR, macZip?.url ?? meta.path ?? meta.files[0].url);
   const installerName = path.basename(newInstaller);
-  const mode = PLATFORM === 'darwin' ? 'manual' : 'auto';
+  const mode = PLATFORM === 'darwin' ? 'self' : 'auto';
   const all = FEED === 'official'
     ? (mode === 'manual' ? ['manual'] : ['official'])
     : (mode === 'manual' ? ['manual'] : ['corrupt', 'interrupted', 'skip', 'busy', 'install', 'reload-busy']);

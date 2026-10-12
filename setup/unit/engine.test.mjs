@@ -893,6 +893,29 @@ test('profile: clearSessionRestore removes the previous run\'s session files (an
   await profile.remove('restore-1').catch(() => {});
 });
 
+test('(3.6) profile: session cookies are kept for the next launch — only session ones, as setCookies params, not when too old', async () => {
+  // Field report: sites that keep a sign-in partly in session cookies (Google, YouTube) were signed
+  // out after every relaunch, because clearSessionRestore (rightly) drops the previous session.
+  await profile.ensure('sess-1');
+  const rows = [
+    { name: 'SID', value: 'a', domain: '.example.test', path: '/', expires: -1, size: 4, httpOnly: true, secure: true, session: true, sameSite: 'Lax', priority: 'High', sourceScheme: 'Secure', sourcePort: 443 },
+    { name: 'pref', value: 'b', domain: 'example.test', path: '/', expires: 2e9, size: 5, httpOnly: false, secure: false, session: false },
+    { name: '', value: 'c', domain: 'x.test', session: true },
+  ];
+  assert.deepEqual(profile.sessionCookieParams(rows), [
+    { name: 'SID', value: 'a', domain: '.example.test', path: '/', secure: true, httpOnly: true, sameSite: 'Lax', priority: 'High', sourceScheme: 'Secure', sourcePort: 443 },
+  ]);
+  const now = Date.now();
+  assert.deepEqual(await profile.saveSessionCookies('sess-1', rows, { now }), { saved: 1 });
+  assert.equal((await profile.readSessionCookies('sess-1', { now: now + 1000 }))[0].name, 'SID');
+  assert.deepEqual(await profile.readSessionCookies('sess-1', { now: now + profile.SESSION_COOKIES_MAX_AGE_MS + 1 }), [], 'a session that old is not brought back');
+  assert.ok(!profile.sessionCookiesFile('sess-1').startsWith(profile.profileDir('sess-1') + path.sep), 'kept outside the user-data-dir the browser owns');
+  // No session cookies at the next stop: the file goes.
+  assert.deepEqual(await profile.saveSessionCookies('sess-1', [rows[1]]), { saved: 0 });
+  assert.equal(existsSync(profile.sessionCookiesFile('sess-1')), false);
+  await profile.remove('sess-1').catch(() => {});
+});
+
 test('manager: a locale becomes the profile\'s languages in Chrome\'s own shape (acceptLanguagesFor)', async () => {
   // Live round 2: locale de-DE changed Intl only; navigator.languages and Accept-Language stayed
   // en-US because they come from intl.accept_languages, which the manager now writes.

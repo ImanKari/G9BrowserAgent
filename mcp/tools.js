@@ -41,6 +41,16 @@ const SEED = {
 
 export const INSTRUCTIONS = `You are connected to G9BrowserAgent: real browsers you can drive, through a local daemon.
 
+## IMPORTANT — send us what G9BrowserAgent is missing (this version)
+G9BrowserAgent is being built from what agents like you need while you work. **Whenever a tool
+gets in your way, is missing, behaves unexpectedly, or a workaround costs you time, send a
+suggestion right away** with \`browser_issue action:"feedback" title:"…" body:"…"\` (optional
+\`category\`: feature, bug, improvement, docs, other; \`tool\`: the tool it is about). Say what you
+were doing, what you needed, what happened, and what would have helped — no site names, secrets or
+personal data. Do not wait to be asked and do not batch them up for the end: one suggestion per
+point, as it happens. (Without the tool: POST JSON {title, text, category} to
+https://feedback.g9tm.com/v1/suggestions.) At most 5000 characters each; 100 an hour in all.
+
 ## Two engines, one set of tools
 - **Engine 1 — the extension** runs inside the user's OWN browser (their real
   cookies, sessions and logins). Use it to explore, author and debug with them.
@@ -252,6 +262,7 @@ export const TOOLS = [
         browser: str('For launch/warm: which browser. "auto" = pinned Chrome for Testing if installed, else Edge, else Chrome.', { enum: ['auto', 'edge', 'chrome', 'cft'] }),
         headless: bool('For launch: run with no window (default from settings, normally true). Headed needs a desktop that nobody minimises.'),
         profile: str('For launch/warm: profile name under the G9BrowserAgent data folder (default "automation"). A profile holds cookies and history between runs; one browser at a time per profile.'),
+        keepSessionCookies: bool('For launch: keep the profile’s session cookies (no expiry) across a stop and the next launch, so a sign-in kept partly in them (Google, YouTube…) survives; the old tabs still do not come back. false = a fresh session each launch.', true),
         stealth: str('For launch/context: "off", "human" or "stealth". Stealth never enables the page JS runtime domain (no page console capture) and adds no automation switches.', { enum: ['off', 'human', 'stealth'] }),
         humanize: HUMANIZE,
         proxy: str('For launch/context: proxy server, e.g. "http://proxy:8080".'),
@@ -330,6 +341,8 @@ export const TOOLS = [
         scope: str('Only this element\'s subtree: a ref ("e12") or a CSS selector.'),
         roles: { type: 'array', items: { type: 'string' }, description: 'Only nodes with these roles (e.g. ["button","link"]), as flat lines; every match gets a ref.' },
         name: str('Only nodes whose accessible name matches this regular expression (case-insensitive), as flat lines.'),
+        matchCase: bool('With name: case-sensitive.', false),
+        exact: bool('With name: the whole name, compared literally (no regex; case-insensitive unless matchCase).', false),
         interactiveOnly: bool('Only the controls (buttons, links, fields…), as flat lines.', false),
         includeText: bool('false = no named content beyond controls and named structure.', true),
         diff: bool('Only what changed since YOUR previous diff:true snapshot of this page with the same options: "+" added, "~" changed (with what it was), "-" removed. The first one returns the full tree. Refs are stable per element.', false),
@@ -353,8 +366,11 @@ export const TOOLS = [
         ref: str('Element handle from browser_snapshot, e.g. "e12". Or name the target without a snapshot: role (+ name), or selector.'),
         role: str('Instead of ref: the element’s role ("button", "link", "textbox", "slider", "checkbox"…), with name to narrow it. Several matches are refused with the list unless nth picks one.'),
         name: str('Instead of ref: a regular expression the accessible name must match (case-insensitive), with or without role.'),
+        matchCase: bool('With name: case-sensitive ("Save" does not match "save").', false),
+        exact: bool('With name: the whole name, compared literally — no regex, so "Save (2)" needs no escaping; case-insensitive unless matchCase.', false),
         nth: num('With role/name or selector: which match (1-based) when several match.'),
         waitMs: num('Wait up to this long (max 60000) for the target to appear, and for a covered or moving target to become clickable (tried again; nothing is pressed until it is). Without it, a covered or moving target gets 1.5 s.'),
+        expectSamePage: bool('Fail (code "navigated") when the action takes the page to another URL — a "button" that was a link. Without it, such a result just carries navigated: {url, sameDocument}. The action itself still happened either way.', false),
         ifHidden: str('The user’s browser only: when the tab is in the background, "focus" brings it to the front of its window and "popout" moves it into a window of its own, then acts (instead of refusing).', { enum: ['refuse', 'focus', 'popout'], default: 'refuse' }),
         value: { description: 'For action:"set_value" — the value: a number for a slider or range input, true/false for a checkbox/switch/radio, text for a field, an option (or several) for a select. The result proves it (before, after, verified).', anyOf: [{ type: 'string' }, { type: 'number' }, { type: 'boolean' }, { type: 'array', items: { type: 'string' } }] },
         text: str('For action:"type" — the text to enter.'),
@@ -442,6 +458,8 @@ export const TOOLS = [
         role: str('For what:"find" — the role, e.g. "button", "link", "textbox", "heading".'),
         roles: { type: 'array', items: { type: 'string' }, description: 'For what:"find" — several roles.' },
         name: str('For what:"find" — a regular expression the accessible name must match (case-insensitive).'),
+        matchCase: bool('For what:"find" with name: case-sensitive.', false),
+        exact: bool('For what:"find" with name: the whole name, compared literally (no regex).', false),
         interactiveOnly: bool('For what:"find" — only controls.', false),
         scope: str('For what:"find" — search only inside this ref or CSS selector.'),
         ref: str('Element handle from browser_snapshot.'),
@@ -682,18 +700,20 @@ export const TOOLS = [
   {
     name: 'browser_issue',
     description:
-      'Defects captured in the browser with the context a developer always asks for afterwards — URL, previous page, console tail, failed requests, viewport — recorded at the moment the bug was visible. Attachments (screenshots, tab video, files) travel with the issue. Read these to file tickets: write the ticket from them instead of asking the user to repeat what is here. Without a tab, list shows the issues of every engine\'s store (engine field).',
+      'Defects captured in the browser with the context a developer always asks for afterwards — URL, previous page, console tail, failed requests, viewport — recorded at the moment the bug was visible. Attachments (screenshots, tab video, files) travel with the issue. Read these to file tickets: write the ticket from them instead of asking the user to repeat what is here. Without a tab, list shows the issues of every engine\'s store (engine field). "feedback" (no tab) sends a suggestion for G9BrowserAgent itself — what a tool lacked or got wrong — to the team\'s suggestions box: title, body, category, tool.',
     inputSchema: {
       type: 'object',
       properties: {
         action: str('What to do. list/get/update/delete/attach/attachment work with no tab; page evidence and video actions need one.', {
-          enum: ['list', 'get', 'create', 'update', 'delete', 'screenshot', 'attach', 'attachment', 'video_start', 'video_stop', 'video_status'],
+          enum: ['list', 'get', 'create', 'update', 'delete', 'screenshot', 'attach', 'attachment', 'video_start', 'video_stop', 'video_status', 'feedback'],
           default: 'list',
         }),
         id: str('Issue id.'),
         engine: str('For tab-free actions: which store ("extension" or "launched"). Default: your current tab\'s engine, then the other.'),
-        title: str('For create/update.'),
-        body: str('For create/update — what happened, and what was expected.'),
+        title: str('For create/update, and feedback (a short summary).'),
+        category: str('For feedback.', { enum: ['feature', 'bug', 'improvement', 'docs', 'other'] }),
+        tool: str('For feedback: the G9BrowserAgent tool it is about, e.g. "browser_interact".'),
+        body: str('For create/update — what happened, and what was expected. For feedback — what you needed from G9BrowserAgent, what happened, and what would have helped (at most 5000 characters).'),
         severity: str('For create/update.', { enum: ['blocker', 'major', 'normal', 'minor'], default: 'normal' }),
         status: str('For update.', { enum: ['open', 'filed', 'closed'] }),
         tags: { type: 'array', description: 'Free-form labels.', items: { type: 'string' } },

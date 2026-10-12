@@ -51,6 +51,9 @@ const looksUnbuilt = (nodes) => (nodes ?? []).filter((n) => n.ignored !== true).
  * - `scope`: a ref ("e12") or a CSS selector — only that element's subtree.
  * - `roles` (a list) and/or `name` (a regex, case-insensitive): only matching nodes, as flat lines;
  *   every match with a DOM node gets a ref (headings and text included, so they can scope or be read).
+ *   (3.6) `matchCase:true` makes the regex case-sensitive ("Save" no longer matches "Save draft"'s
+ *   lower-case cousin "save"); `exact:true` compares the whole name literally — no regex, so "(1)"
+ *   or "?" in a name needs no escaping — case-insensitively unless matchCase.
  * - `interactiveOnly`: only the controls (flat).
  * - `includeText:false`: no named content beyond controls and named structure.
  * - `maxNodes`: the cap on emitted lines.
@@ -61,11 +64,11 @@ const looksUnbuilt = (nodes) => (nodes ?? []).filter((n) => n.ignored !== true).
 export async function snapshot(tabId, opts = {}, caller = null) {
   const {
     mode = 'a11y', includeText = true, scope = null, roles = null, name: namePattern = null,
-    interactiveOnly = false, diff = false, find = false,
+    interactiveOnly = false, diff = false, find = false, matchCase = false, exact = false,
   } = opts ?? {};
   const maxNodes = Math.max(1, Math.min(20_000, Number(opts?.maxNodes) || 900));
   const roleSet = normalizeRoles(roles);
-  const nameRe = compileName(namePattern);
+  const nameRe = compileName(namePattern, { matchCase, exact });
   const filtered = !!(roleSet || nameRe || interactiveOnly || find);
 
   await ensureDomain(tabId, 'Accessibility');
@@ -245,7 +248,7 @@ export async function snapshot(tabId, opts = {}, caller = null) {
     emittedNodes: emitted,
     truncated,
     ...(scope ? { scope: String(scope) } : {}),
-    ...(filtered ? { filter: compactFilter({ roles: roleSet ? [...roleSet] : null, name: namePattern, interactiveOnly }) } : {}),
+    ...(filtered ? { filter: compactFilter({ roles: roleSet ? [...roleSet] : null, name: namePattern, interactiveOnly, matchCase, exact }) } : {}),
     tree: lines.join('\n'),
   };
 
@@ -292,10 +295,10 @@ export async function snapshot(tabId, opts = {}, caller = null) {
  * (3.4) `browser_inspect what:"find"`: role and/or name regex → the matching lines with refs, and
  * nothing else. The cheapest way to get the ref of "the Save button" on a page of thousands of nodes.
  */
-export async function find(tabId, { roles = null, role = null, name = null, interactiveOnly = false, limit = 50, scope = null, url = null } = {}, caller = null) {
+export async function find(tabId, { roles = null, role = null, name = null, interactiveOnly = false, limit = 50, scope = null, url = null, matchCase = false, exact = false } = {}, caller = null) {
   const wanted = roles ?? (role ? [role] : null);
   if (!wanted && !name) throw new Error('what:"find" needs role (or roles) and/or name (a regular expression).');
-  const snap = await snapshot(tabId, { roles: wanted, name, interactiveOnly, maxNodes: Math.max(1, Math.min(500, Number(limit) || 50)), find: true, scope, url }, caller);
+  const snap = await snapshot(tabId, { roles: wanted, name, interactiveOnly, maxNodes: Math.max(1, Math.min(500, Number(limit) || 50)), find: true, scope, url, matchCase: matchCase === true, exact: exact === true }, caller);
   return {
     url: snap.url,
     count: snap.emittedNodes,
@@ -313,14 +316,30 @@ function normalizeRoles(roles) {
   return set.size ? set : null;
 }
 
-/** A name pattern as a case-insensitive RegExp; a bad pattern is refused by name. */
-function compileName(pattern) {
+const squash = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+
+/**
+ * A name pattern as a matcher `{ test(name) }`: a case-insensitive RegExp by default; (3.6)
+ * case-sensitive with `matchCase`; with `exact`, the whole name compared literally (whitespace
+ * runs count as one space; case-insensitive unless `matchCase`). A bad regex is refused by name.
+ */
+export function compileName(pattern, { matchCase = false, exact = false } = {}) {
   if (pattern == null || pattern === '') return null;
-  try {
-    return new RegExp(String(pattern), 'i');
-  } catch (err) {
-    throw new Error(`name must be a regular expression: ${err.message}`);
+  if (exact) {
+    const want = matchCase ? squash(pattern) : squash(pattern).toLowerCase();
+    return { test: (name) => (matchCase ? squash(name) : squash(name).toLowerCase()) === want };
   }
+  try {
+    return new RegExp(String(pattern), matchCase ? '' : 'i');
+  } catch (err) {
+    throw new Error(`name must be a regular expression (or pass exact:true to match it literally): ${err.message}`);
+  }
+}
+
+/** How a name filter reads in a message: /x/i, /x/ (matchCase), or "x" (exact). Pure. */
+export function nameLabel(pattern, { matchCase = false, exact = false } = {}) {
+  if (exact) return `name "${squash(pattern)}"${matchCase ? ' (exact case)' : ' (exact)'}`;
+  return `name /${pattern}/${matchCase ? '' : 'i'}`;
 }
 
 function compactFilter(f) {
@@ -328,6 +347,8 @@ function compactFilter(f) {
   if (f.roles) out.roles = f.roles;
   if (f.name) out.name = String(f.name);
   if (f.interactiveOnly) out.interactiveOnly = true;
+  if (f.matchCase) out.matchCase = true;
+  if (f.exact) out.exact = true;
   return out;
 }
 

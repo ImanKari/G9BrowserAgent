@@ -589,7 +589,7 @@ export class Registry extends EventEmitter {
     if (owner === agentId) return { tabId: handle, owner: agentId, claimed: false };
     if (owner && this.clients.has(owner)) {
       const idle = this.idleFor(owner);
-      if (idle == null) throw new Error(this.ownershipMessage(handle, owner));
+      if (idle == null) throw Object.assign(new Error(this.ownershipMessage(handle, owner)), { errorCode: 'owned' });
       // (3.5) The owner is connected but has done nothing for idleClaimMs (and has nothing running):
       // an abandoned session, a stateless client's old one, a crashed agent's socket kept open.
       this.log(`[ownership] ${this.describe(agentId)} took tab ${handle} from ${this.describe(owner)}, idle ${Math.round(idle / 60_000)} min`);
@@ -630,7 +630,7 @@ export class Registry extends EventEmitter {
     if (!this.handles.has(handle)) throw new Error(`Tab ${handle} does not exist (any more). Call browser_tabs action:"list".`);
     const previous = this.owners.get(handle) ?? null;
     if (previous === agentId) return { tabId: handle, owner: agentId, previousOwner: null, changed: false };
-    if (previous && this.clients.has(previous) && !force) throw new Error(this.ownershipMessage(handle, previous));
+    if (previous && this.clients.has(previous) && !force) throw Object.assign(new Error(this.ownershipMessage(handle, previous)), { errorCode: 'owned' });
     this.owners.set(handle, agentId);
     if (previous && this.clients.has(previous)) {
       this.log(`[ownership] ${this.describe(agentId)} took tab ${handle} over from ${this.describe(previous)} (force)`);

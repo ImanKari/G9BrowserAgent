@@ -23,8 +23,9 @@ import { resolveRef } from '../lib/refs.js';
 import { callSignalFor } from '../lib/humanize.js';
 import * as interact from './interact.js';
 import * as nav from './navigate.js';
-import { snapshot, find } from './snapshot.js';
+import { snapshot, find, nameLabel } from './snapshot.js';
 import { lookupRef } from './target.js';
+import { codedError } from '../lib/errcode.js';
 
 export const MAX_STEPS = 200;
 const INTERACT = new Set(['click', 'double_click', 'right_click', 'hover', 'type', 'key', 'select', 'scroll']);
@@ -80,22 +81,23 @@ const pageUrl = (tabId) => inWorld(tabId, 'location.href').catch(() => null);
  * stricter name) — guessing the first is how a step clicks the wrong "Delete".
  */
 async function refByRole(tabId, step, caller) {
-  const found = await find(tabId, { roles: [step.role], name: step.name ?? null, limit: 30 }, caller);
+  const opts = { matchCase: step.matchCase === true, exact: step.exact === true };
+  const found = await find(tabId, { roles: [step.role], name: step.name ?? null, limit: 30, ...opts }, caller);
   const lines = found.tree === '(no match)' ? [] : found.tree.split('\n');
   const refs = lines.map((l) => /\[ref=(e\d+)\]/.exec(l)?.[1]).filter(Boolean);
-  const label = `role ${JSON.stringify(step.role)}${step.name != null ? ` name /${step.name}/i` : ''}`;
+  const label = `role ${JSON.stringify(step.role)}${step.name != null ? ` ${nameLabel(step.name, opts)}` : ''}`;
   if (!refs.length) {
-    const err = new Error(`No element with ${label} on the page.`);
+    const err = codedError('not_found', `No element with ${label} on the page.`);
     err.lookedFor = { role: step.role };
     throw err;
   }
   if (step.nth != null) {
     const n = Number(step.nth);
-    if (!(n >= 1 && n <= refs.length)) throw new Error(`${label} matched ${refs.length}; nth ${step.nth} is out of range.`);
+    if (!(n >= 1 && n <= refs.length)) throw codedError('bad_argument', `${label} matched ${refs.length}; nth ${step.nth} is out of range.`);
     return refs[n - 1];
   }
   if (refs.length > 1) {
-    const err = new Error(`${label} matched ${refs.length} elements: ${lines.slice(0, 8).join(' | ')}. Pass nth (1-based) or a stricter name.`);
+    const err = codedError('ambiguous', `${label} matched ${refs.length} elements: ${lines.slice(0, 8).join(' | ')}. Pass nth (1-based) or a stricter name.`);
     err.lookedFor = { role: step.role, name: step.name };
     throw err;
   }

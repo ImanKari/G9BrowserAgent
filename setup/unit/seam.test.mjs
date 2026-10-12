@@ -1378,7 +1378,8 @@ await test('(3.4) watchdog: a command the page never answers is abandoned when i
     const err = await stuck.then(() => null, (e) => e);
     const ms = Date.now() - t0;
     assert.ok(err, 'the call ended');
-    assert.match(err.message, /^\[recovered\] The CDP command "Runtime\.evaluate" was abandoned/);
+    // (3.6) Its code follows the [recovered] tag: the effect of a stopped call is unknown.
+    assert.match(err.message, /^\[recovered\] \[code: timeout\] The CDP command "Runtime\.evaluate" was abandoned/);
     assert.deepEqual(err.recovered.abandoned, ['Runtime.evaluate']);
     assert.ok(ms < 4_000, `ended ${ms} ms after it started (the watchdog's grace is ${runtime.WATCHDOG_GRACE_MS} ms)`);
     assert.deepEqual(cdp.pendingCommands(tab.id), []);

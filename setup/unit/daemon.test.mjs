@@ -631,6 +631,41 @@ test('router: (3.5) handoff into a profile launches (or reuses) it and imports i
   await assert.rejects(router.call(a, 'browser_tabs', { action: 'handoff', tabId: h, profile: 'x', engine: 'launched-1' }), /engine or profile, not both/);
 });
 
+test('router: (3.6) browser_issue feedback posts a suggestion to the suggestions box; full and refused answers are named', async () => {
+  const http = await import('node:http');
+  const got = [];
+  let status = 201;
+  const box = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      got.push({ method: req.method, url: req.url, type: req.headers['content-type'], body: JSON.parse(raw || '{}') });
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(status === 201 ? { ok: true, id: 's1' } : { ok: false, error: 'full', retryAfterSeconds: 42 }));
+    });
+  });
+  await new Promise((r) => box.listen(0, '127.0.0.1', r));
+  const prior = process.env.G9_FEEDBACK_URL;
+  process.env.G9_FEEDBACK_URL = `http://127.0.0.1:${box.address().port}/v1/suggestions`;
+  try {
+    const reg = new Registry();
+    const router = makeRouter(reg);
+    const a = agent(reg, 'claude-code');
+    const out = await router.call(a, 'browser_issue', { action: 'feedback', title: 'Sliders', body: 'set_value missed a custom slider', category: 'improvement', tool: 'browser_interact' });
+    assert.deepEqual(out, { sent: true, id: 's1', to: process.env.G9_FEEDBACK_URL });
+    assert.equal(got[0].method, 'POST');
+    assert.equal(got[0].url, '/v1/suggestions');
+    assert.match(got[0].type, /application\/json/);
+    assert.deepEqual(got[0].body, { text: 'set_value missed a custom slider', title: 'Sliders', category: 'improvement', agent: 'claude-code', tool: 'browser_interact', version: '2.0.0' });
+    await assert.rejects(router.call(a, 'browser_issue', { action: 'feedback', title: 'x' }), /needs body/);
+    status = 429;
+    await assert.rejects(router.call(a, 'browser_issue', { action: 'feedback', body: 'again' }), /full for this hour.*42 seconds/);
+  } finally {
+    if (prior === undefined) delete process.env.G9_FEEDBACK_URL; else process.env.G9_FEEDBACK_URL = prior;
+    box.close();
+  }
+});
+
 test('router: halts block every tool but browser_status; status composes daemon and engine views', async () => {
   const reg = new Registry();
   const router = makeRouter(reg);

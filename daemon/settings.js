@@ -51,6 +51,11 @@ export const DEFAULTS = Object.freeze({
    */
   updateMode: 'official',
   /**
+   * (3.6, TEMPORARY — remove with the suggestions box) Where `browser_issue action:"feedback"` sends an
+   * agent's or a person's suggestion for G9BrowserAgent: the company's suggestions box. '' turns it off.
+   */
+  feedbackUrl: 'https://feedback.g9tm.com/v1/suggestions',
+  /**
    * For updateMode 'custom': an https:// URL of an electron-updater "generic" feed (http:// only on
    * localhost, for a test feed). file:// is refused (F6): electron-updater's generic provider
    * downloads over http(s) only, so a file:// feed saved fine and then failed every check on every
@@ -114,6 +119,10 @@ export function validateSettings(s) {
   int('idleExitMinutes', 0, 60 * 24 * 30);
   if (!UPDATE_MODES.includes(s.updateMode)) problems.push(`updateMode must be one of ${UPDATE_MODES.join(', ')} (got ${JSON.stringify(s.updateMode)}).`);
   if (s.updateMode === 'custom' && typeof s.updateUrl === 'string' && !s.updateUrl.trim()) problems.push('updateMode "custom" needs updateUrl (an https:// folder).');
+  if (typeof s.feedbackUrl !== 'string') problems.push('feedbackUrl must be a string: an https:// URL, or empty to turn suggestions off.');
+  else if (s.feedbackUrl.trim() && !/^https:\/\//i.test(s.feedbackUrl.trim()) && !/^http:\/\/(localhost|127\.0\.0\.1)([:/]|$)/i.test(s.feedbackUrl.trim())) {
+    problems.push('feedbackUrl must be an https:// URL (http:// only on localhost), or empty.');
+  }
   if (typeof s.updateUrl !== 'string') problems.push('updateUrl must be a string (used only when updateMode is "custom").');
   else if (/^file:/i.test(s.updateUrl.trim())) {
     problems.push(

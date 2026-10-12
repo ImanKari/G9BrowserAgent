@@ -152,9 +152,16 @@ An input action that failed with a delivery state (`browser_interact`: `"not-del
 — which is what an MCP client shows the agent, and the result carries the fields for programs:
 
 ```json
-{ "type": "result", "id": 18, "ok": false, "error": "[delivery: missed; hit <div#veil>] The click reached the page, but not …",
-  "delivery": "missed", "hit": "<div#veil>", "hidden": false }
+{ "type": "result", "id": 18, "ok": false, "error": "[delivery: missed; hit <div#veil>] [code: missed] The click reached the page, but not …",
+  "delivery": "missed", "hit": "<div#veil>", "hidden": false, "code": "missed" }
 ```
+
+***(3.6)*** Every error an agent can act on carries a **code** (`extension/lib/errcode.js`
+`ERROR_CODES`: `not_found`, `ambiguous`, `bad_argument`, `unknown_argument`, `no_snapshot`,
+`stale_ref`, `not_delivered`, `tab_hidden`, `missed`, `partial`, `not_verified`, `navigated`,
+`dialog`, `timeout`, `halted`, `owned`): a `[code: …]` tag in the text, after any `[delivery: …]` /
+`[recovered]` tag, and a `code` field in the result. An engine's `ok:false` result carries `code` the
+same way, and the daemon passes it on.
 
 Timeout per call: `G9_TIMEOUT_MS` (default 120 000 ms) as a floor, raised for calls that ask for more:
 `browser_recording` replay/calibrate 30 min; `browser_navigate` its `timeoutMs` (default 30 s goto, 15 s
