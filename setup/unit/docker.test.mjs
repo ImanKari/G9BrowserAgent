@@ -118,6 +118,9 @@ await test('the desktop\'s Chromium loads the G9BrowserAgent extension without t
   assert.match(dockerfile, /> \/opt\/g9\/extension\.build/, 'the image records a hash of the extension files');
   assert.match(s, /"exit_type":"Crashed"\/"exit_type":"Normal"/, 'a killed container does not ask to restore pages');
   assert.match(s, /\$\{CHROME_CLI\}/, 'the operator can still add switches');
+  // (3.5) Without ~/Downloads Chromium drops every download silently (field report).
+  assert.match(s, /mkdir -p "\$\{HOME:-\/config\}\/Downloads"/, 'the download folder exists before the browser starts');
+  assert.ok(s.indexOf('/Downloads"') < s.indexOf('exec wrapped-chromium'), 'created before the browser starts');
   assert.match(dockerfile, /G9_LAUNCH_ARGS="--no-sandbox --test-type"/, 'Engine 2 launches get the container switches');
 });
 

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { suite, tmpDir, rmrf } from './harness.mjs';
-import { DesktopSettings, detectUpdate, DESKTOP_DEFAULTS } from '../lib/settings.mjs';
+import { DesktopSettings, detectUpdate, DESKTOP_DEFAULTS, decideLoginDefault, trayPlace } from '../lib/settings.mjs';
 import { SETTINGS_FIELDS, readField, buildSettingsPatch, pickUpdateConfig, validateUpdateUrl, coerceField, getPath } from '../renderer/lib/settings-form.js';
 import { g9Home, daemonPort, homeLayout, resourceRoot, resourcePaths, forwardSlashes, osUserName } from '../lib/paths.mjs';
 import { createLogger, tailLog, formatLine } from '../lib/log.mjs';
@@ -145,6 +145,27 @@ t.test('atomic JSON writes and deepMerge', () => {
   assert.deepEqual(readJson(f), { a: 1 });
   assert.equal(readJson(path.join(dir, 'nope.json'), 'fallback'), 'fallback');
   assert.deepEqual(deepMerge({ a: { b: 1, c: 2 }, d: [1] }, { a: { b: 3 }, d: [2], e: undefined }), { a: { b: 3, c: 2 }, d: [2] });
+});
+
+t.test('(3.5) start at sign-in is on by default, once, for an installed app — never over the person’s choice', () => {
+  const now = '2026-10-12T08:00:00.000Z';
+  // A fresh install, and an update from a version that never asked: turned on, and recorded.
+  assert.deepEqual(decideLoginDefault({ packaged: true, supported: true, openAtLogin: false, record: DESKTOP_DEFAULTS.loginItem, now }),
+    { change: true, enable: true, record: { choice: null, at: null, defaultAppliedAt: now } });
+  assert.deepEqual(decideLoginDefault({ packaged: true, supported: true, openAtLogin: false, record: undefined, now }).enable, true);
+  // Already on (the person had it): recorded, nothing written to the OS.
+  assert.equal(decideLoginDefault({ packaged: true, supported: true, openAtLogin: true, record: {}, now }).enable, false);
+  // Applied once: switching it off afterwards is not undone at the next start.
+  assert.deepEqual(decideLoginDefault({ packaged: true, supported: true, openAtLogin: false, record: { choice: null, defaultAppliedAt: now } }), { change: false });
+  // The person's own choice wins, either way.
+  assert.deepEqual(decideLoginDefault({ packaged: true, supported: true, openAtLogin: false, record: { choice: false } }), { change: false });
+  assert.deepEqual(decideLoginDefault({ packaged: true, supported: true, openAtLogin: true, record: { choice: true } }), { change: false });
+  // A development build never registers itself (it would start an empty Electron at every sign-in).
+  assert.deepEqual(decideLoginDefault({ packaged: false, supported: false, openAtLogin: false, record: {} }), { change: false });
+  assert.deepEqual(decideLoginDefault({ packaged: true, supported: false, openAtLogin: false, record: {} }), { change: false });
+  assert.equal(trayPlace('darwin'), 'the menu bar');
+  assert.match(trayPlace('win32'), /notification area/);
+  assert.equal(trayPlace('linux'), 'the system tray');
 });
 
 t.run();

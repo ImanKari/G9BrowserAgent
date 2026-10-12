@@ -17,9 +17,10 @@
  */
 
 import { platform } from '../lib/platform.js';
-import { getState, logActivity } from '../lib/state.js';
-import { evaluate, send as cdpSend, attachedTabIds, recoverTab, keepAwake, attachIssuesOf, pendingCommands } from '../lib/cdp.js';
-import { bindCallSignal, bindCallDeadline } from '../lib/humanize.js';
+import { getState, logActivity, forgetDialog } from '../lib/state.js';
+import { inWorld } from '../lib/world.js';
+import { evaluate, send as cdpSend, attachedTabIds, recoverTab, keepAwake, attachIssuesOf, pendingCommands, detach as detachDebugger } from '../lib/cdp.js';
+import { bindCallSignal, bindCallDeadline, callSignalFor } from '../lib/humanize.js';
 import * as store from '../lib/store.js';
 import { toFlowSpec, canonicalJson } from '../lib/flowspec.js';
 import { envKeyOf, knownWorldFor } from '../lib/signature.js';
@@ -31,6 +32,8 @@ import * as jobs from './jobs.js';
 import { fetchResource } from './fetch.js';
 import { runBatch } from './batch.js';
 import * as interact from './interact.js';
+import * as target from './target.js';
+import * as setvalue from './setvalue.js';
 import * as inspect from './inspect.js';
 import * as observe from './observe.js';
 import * as nav from './navigate.js';
@@ -147,7 +150,7 @@ export const TOOLS = {
           return { ...opened, ...(args.name ? { session: args.name } : {}) };
         }
         case 'close':
-          return tabsTool.closeTab(requireTabId(args));
+          return tabsTool.closeTab(requireTabId(args), { leaveWithoutAsking: args.leaveWithoutAsking === true });
         case 'focus':
           return { focused: (await tabsTool.focusTab(requireTabId(args))).id };
         case 'attach':
@@ -161,6 +164,8 @@ export const TOOLS = {
         case 'keep_awake':
           // (3.4) Keep a background tab working: focus emulation + lifecycle active (lib/cdp.js).
           return { tabId: requireTabId(args), ...(await keepAwake(requireTabId(args), args.on !== false)) };
+        case 'detach':
+          return detachTab(requireTabId(args));
 
         // --- named sessions ----------------------------------------------
         // Several tabs at once was always possible at the CDP layer; these
@@ -240,23 +245,7 @@ export const TOOLS = {
     // humanize / seed / typos / fast ride through untouched: interact.js and
     // lib/humanize.js decide the input level (the tab's context, else the
     // panel's setting, else the explicit argument).
-    run: ({ tabId, tab, args }) => {
-      const a = { ...args, url: tab.url };
-      if (Array.isArray(args.modifiers)) a.modifiers = interact.modifierMask(args.modifiers);
-      switch (args.action) {
-        case 'click': return interact.click(tabId, a);
-        case 'double_click': return interact.click(tabId, { ...a, clickCount: 2 });
-        case 'right_click': return interact.click(tabId, { ...a, button: 'right' });
-        case 'hover': return interact.hover(tabId, a);
-        case 'type': return interact.type(tabId, a);
-        case 'key': return interact.key(tabId, a);
-        case 'scroll': return interact.scroll(tabId, a);
-        case 'drag': return interact.drag(tabId, a);
-        case 'select': return interact.select(tabId, a);
-        case 'upload': return interact.upload(tabId, a);
-        default: throw new Error(`Unknown interact action "${args.action}".`);
-      }
-    },
+    run: ({ tabId, tab, args, caller }) => interactWithRetry(tabId, tab, args, caller),
   },
 
   browser_navigate: {
@@ -502,6 +491,110 @@ export const TOOLS = {
     },
   },
 };
+
+// ------------------------------------------------------------------ interact (3.5)
+
+/** One browser_interact action on a resolved target. */
+function interactOnce(tabId, a) {
+  switch (a.action) {
+    case 'click': return interact.click(tabId, a);
+    case 'double_click': return interact.click(tabId, { ...a, clickCount: 2 });
+    case 'right_click': return interact.click(tabId, { ...a, button: 'right' });
+    case 'hover': return interact.hover(tabId, a);
+    case 'type': return interact.type(tabId, a);
+    case 'key': return interact.key(tabId, a);
+    case 'scroll': return interact.scroll(tabId, a);
+    case 'drag':
+      return a.to == null && (a.toPercent != null || a.toX != null) ? setvalue.dragTo(tabId, a) : interact.drag(tabId, a);
+    case 'select': return interact.select(tabId, a);
+    case 'upload': return interact.upload(tabId, a);
+    case 'set_value': return setvalue.setValue(tabId, a);
+    default: throw new Error(`Unknown interact action "${a.action}".`);
+  }
+}
+
+/** Without waitMs, how long a covered or moving target is given to become clickable. */
+export const DEFAULT_RETRY_MS = 1_500;
+const RETRY_GAP_MS = 300;
+
+/**
+ * (3.5) browser_interact around interactOnce:
+ * - the target may be named by role (+ name, nth) or selector instead of a ref (tools/target.js),
+ *   found again on every attempt, waiting up to `waitMs` for it to appear;
+ * - a refusal made BEFORE anything was pressed — covered by an overlay, moved, re-rendered (gone,
+ *   for a target found by role or selector) — is tried again until it works or `waitMs` (else
+ *   DEFAULT_RETRY_MS) runs out. Nothing reached the element, so this repeats no action (rule R6);
+ *   "missed", "partial" and every error after input went out are never retried;
+ * - `ifHidden:"focus"|"popout"`: in the person's browser a background tab gets no input; instead of
+ *   refusing, bring it to the front of its window or move it into a window of its own, then act.
+ *   The refusal sent nothing, so acting after it is safe.
+ */
+async function interactWithRetry(tabId, tab, args, caller) {
+  const base = { ...args, url: tab.url };
+  if (Array.isArray(args.modifiers)) base.modifiers = interact.modifierMask(args.modifiers);
+  const lookup = target.wantsLookup(args);
+  const waitMs = Math.max(0, Math.min(target.MAX_WAIT_MS, Number(args.waitMs) || 0));
+  const signal = callSignalFor(tabId);
+  const started = Date.now();
+  let unhid = null;
+  for (let attempt = 0; ; attempt += 1) {
+    let found = null;
+    const a = { ...base };
+    if (lookup) {
+      found = await target.lookupRef(tabId, { ...args, waitMs: Math.max(0, waitMs - (Date.now() - started)) }, caller, { url: tab.url, signal });
+      a.ref = found.ref;
+      if (args.action === 'drag' && a.from == null) a.from = found.ref;
+    }
+    try {
+      const out = await interactOnce(tabId, a);
+      const extra = {
+        ...(found ? { ref: found.ref, matched: found.matched } : {}),
+        ...(attempt ? { retried: attempt } : {}),
+        ...(unhid ? { unhid } : {}),
+      };
+      return Object.keys(extra).length && out && typeof out === 'object' ? { ...out, ...extra } : out;
+    } catch (err) {
+      // A background tab, refused before anything was sent: bring it forward once, as asked.
+      if (err?.hidden && err.delivery === 'not-delivered' && !unhid && (args.ifHidden === 'focus' || args.ifHidden === 'popout') && platform.name === 'extension') {
+        unhid = args.ifHidden === 'focus'
+          ? { how: 'focus', ...(await tabsTool.focusTab(tabId).then(() => ({ ok: true }), (e) => ({ ok: false, error: e.message }))) }
+          : { how: 'popout', ...(await tabsTool.popout(tabId, { focus: false }).catch((e) => ({ error: e.message }))) };
+        await new Promise((r) => setTimeout(r, 300));
+        continue;
+      }
+      const p = err?.predispatch;
+      const retryable = p === 'covered' || p === 'moved' || (p === 'gone' && lookup);
+      const budget = waitMs || DEFAULT_RETRY_MS;
+      if (!retryable || signal?.aborted || Date.now() - started + RETRY_GAP_MS > budget) {
+        if (retryable && attempt) err.message += ` (tried ${attempt + 1} times over ${Math.round((Date.now() - started) / 100) / 10} s)`;
+        if (err?.hidden && !args.ifHidden && platform.name === 'extension' && err.delivery === 'not-delivered') {
+          err.message += ' Or pass ifHidden:"popout" (its own window) or ifHidden:"focus" to let this call bring the tab forward itself.';
+        }
+        throw err;
+      }
+      await new Promise((r) => setTimeout(r, RETRY_GAP_MS));
+    }
+  }
+}
+
+// ------------------------------------------------------------------ detach (3.5)
+
+/**
+ * End G9BrowserAgent's debugger session on a tab of the person's browser: the page no longer has a
+ * debugger attached, and the browser's "started debugging this browser" bar goes once no tab is
+ * attached. `release` used to drop only the claim and leave the debugger on — and captcha and bot
+ * checks (hCaptcha, Cloudflare) kept seeing it (field report). A tab with a recording running is
+ * left attached: the recorder lives on that session. Launched engines are always attached.
+ */
+async function detachTab(tabId) {
+  if (platform.name !== 'extension') return { tabId, detached: false, note: 'A launched browser’s tabs are always attached (it has no debugger bar); nothing to detach.' };
+  const rec = await record.recordingStatus(tabId).catch(() => null);
+  if (rec?.recording) return { tabId, detached: false, note: 'A recording is running on this tab; it stays attached until the recording stops.' };
+  const held = await attachedTabIds().catch(() => []);
+  if (!held.includes(tabId)) return { tabId, detached: false, wasAttached: false };
+  const result = await detachDebugger(tabId);
+  return { ...result, tabId, note: 'The debugger is detached from this tab: console and network capture stop, and the debugging bar goes once no tab is attached. The next agent call on it attaches again.' };
+}
 
 // ------------------------------------------------------------------ status
 
@@ -750,20 +843,46 @@ async function dialogBlocks(tool, args, state, tabId) {
   const dialogs = state.dialogs ?? {};
   if (!state.dialogOpen && !Object.keys(dialogs).length) return null;
   if (tool === 'browser_dialog') return null;
-  // Closing the tab is the other way out, and the browser does it without the
-  // blocked renderer's help.
-  if (tool === 'browser_tabs' && args.action === 'close') return null;
+  // Tab management does not run in the blocked page: listing, opening, waiting for, naming,
+  // focusing, closing and popping out tabs are the browser's own work. Only keep_awake talks to a
+  // page. (3.5) This used to fall back to the engine's CURRENT tab, so a "Leave site?" there
+  // stopped every agent from opening a new tab (field report).
+  if (tool === 'browser_tabs' && args.action !== 'keep_awake') return null;
   // A dialog of unknown origin (state written by an older build) blocks everything, as before.
   if (state.dialogOpen && state.dialogOpen.tabId == null) return state.dialogOpen;
   const openOn = (id) => (id == null
     ? null
     : dialogs[id] ?? (state.dialogOpen?.tabId === id ? state.dialogOpen : null));
-  if (tabId != null) return openOn(tabId);
   // Tools without a target of their own: block only a mutating call aimed at a dialog's tab.
-  if (isReadOnly(tool, args)) return null;
-  const aimed = args.tabId ?? (args.session ? state.sessions?.[args.session] : null) ??
+  if (tabId == null && isReadOnly(tool, args)) return null;
+  const aimed = tabId ?? args.tabId ?? (args.session ? state.sessions?.[args.session] : null) ??
     (await tabsTool.peekTarget(state))?.id ?? null;
-  return openOn(aimed);
+  const dialog = openOn(aimed);
+  return dialog ? stillOpen(aimed, dialog) : null;
+}
+
+/**
+ * (3.5) Is a recorded dialog really still open? A dialog the person answered in the browser, or one
+ * a navigation took away, can leave its record behind when its "closed" event is missed (a worker
+ * restart, a re-attach) — and the tab then refused every call although nothing was blocking it
+ * (field report: browser_dialog's state "did not match reality"). A page frozen by a dialog cannot
+ * evaluate anything, so a one-expression probe in G9's world answers it: it returns → the record is
+ * stale and is forgotten. A dialog younger than DIALOG_TRUST_MS is taken as it is (it is real).
+ */
+export const DIALOG_TRUST_MS = 1_500;
+const DIALOG_PROBE_MS = 700;
+
+async function stillOpen(tabId, dialog) {
+  if (tabId == null || Date.now() - (dialog.at ?? 0) < DIALOG_TRUST_MS) return dialog;
+  // Raced as well: making G9's world on a frozen page can itself wait on the renderer.
+  const alive = await Promise.race([
+    inWorld(tabId, '1', { timeoutMs: DIALOG_PROBE_MS }).then(() => true, () => false),
+    new Promise((resolve) => { setTimeout(() => resolve(false), DIALOG_PROBE_MS + 100).unref?.(); }),
+  ]);
+  if (!alive) return dialog;
+  await forgetDialog(tabId).catch(() => {});
+  void log({ kind: 'system', tabId, ok: true, detail: 'A recorded dialog was no longer open (the page answered); its record was cleared.' });
+  return null;
 }
 
 /**

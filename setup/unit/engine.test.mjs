@@ -514,7 +514,7 @@ test('stealth: launch warnings — webdriver is named honestly at off/human; ste
   }
   const w = stealth.launchWarnings({ level: 'stealth', headless: true });
   assert.equal(w.length, 1);
-  assert.match(w[0], /HeadlessChrome/);
+  assert.match(w[0], /no longer says HeadlessChrome/, '(3.5) the user agent is fixed; the warning says so');
   // Live round 2: headless Edge and CfT reported the REAL GPU renderer in 30/30 runs, so the
   // warning names what was measured (UA brand, outer size 0×0 at load) and software GL only as
   // a possibility on machines without a GPU.
@@ -663,6 +663,11 @@ test('launch: switches that identify automation or bypass an option are refused 
   assert.throws(() => launch.buildArgs({ profileDir: dir, stealth: 'human', extraArgs: ['--disable-blink-features=Foo,AutomationControlled'] }), /at stealth "human"/);
   assert.throws(() => launch.buildArgs({ profileDir: dir, stealth: 'stealth', extraArgs: ['--enable-automation'] }), /never identifies as automation/, '--enable-automation is refused at every level');
   assert.equal(launch.parseProduct('HeadlessChrome/153.0.8010.52'), '153.0.8010.52');
+  // (3.5) headedUserAgent: HeadlessChrome becomes Chrome, nothing else; a headed UA needs nothing.
+  const edgeUa = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/154.0.0.0 Safari/537.36 Edg/154.0.0.0';
+  assert.equal(launch.headedUserAgent(edgeUa), edgeUa.replace('HeadlessChrome/', 'Chrome/'));
+  assert.equal(launch.headedUserAgent(edgeUa.replace('HeadlessChrome/', 'Chrome/')), null);
+  assert.equal(launch.headedUserAgent(null), null);
   assert.equal(launch.parseProduct('Edg/153.0.4234.32'), '153.0.4234.32');
 });
 
@@ -1387,7 +1392,7 @@ async function measureEnvironment(browser, stealthLevel, windowSize) {
     const { targetId } = await h.conn.send('Target.createTarget', { url: 'about:blank' });
     const { sessionId } = await h.conn.send('Target.attachToTarget', { targetId, flatten: true });
     const { result } = await h.conn.send('Runtime.evaluate', {
-      expression: 'JSON.stringify({ webdriver: navigator.webdriver, sw: screen.width, sh: screen.height, aw: screen.availWidth, ah: screen.availHeight, ow: outerWidth, oh: outerHeight })',
+      expression: 'JSON.stringify({ webdriver: navigator.webdriver, ua: navigator.userAgent, sw: screen.width, sh: screen.height, aw: screen.availWidth, ah: screen.availHeight, ow: outerWidth, oh: outerHeight })',
       returnByValue: true,
     }, sessionId);
     return { ...JSON.parse(result.value), args: h.args, warnings: h.warnings };
@@ -1411,6 +1416,11 @@ test('live: decision D-a — navigator.webdriver is false only at stealth; the h
   const st = await measureEnvironment('edge', 'stealth', windowSize);
   assert.equal(st.webdriver, false, `stealth: navigator.webdriver must be false (args: ${st.args.join(' ')})`);
   assert.ok(!st.warnings.some((w) => /webdriver/.test(w)));
+  // (3.5) Headless stealth starts with the headed user agent; off/human tell the truth.
+  assert.match(off.ua, /HeadlessChrome\//, 'off: the user agent says what the browser is');
+  assert.doesNotMatch(st.ua, /Headless/, `stealth: no HeadlessChrome in the user agent (${st.ua})`);
+  assert.equal(st.ua, off.ua.replace('HeadlessChrome/', 'Chrome/'), 'the headed user agent of the same browser, nothing else changed');
+  assert.ok(st.args.some((a) => a === `--user-agent=${st.ua}`), 'given as a launch switch, so workers and headers carry it too');
   for (const [name, m] of [['off', off], ['human', human], ['stealth', st]]) {
     assert.equal(m.sw, windowSize.width, `${name}: screen.width = windowSize width (${JSON.stringify(m)})`);
     assert.equal(m.sh, windowSize.height, `${name}: screen.height = windowSize height`);

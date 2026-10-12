@@ -29,6 +29,7 @@ import { getState, setState, updateState } from '../lib/state.js';
 import { attach, attachedTabIds, detach, detachMany, pendingCommands, recoverTab, forgetKeepAwake } from '../lib/cdp.js';
 import { clearRefs } from '../lib/refs.js';
 import { inWorld } from '../lib/world.js';
+import { armLeave, disarmLeave } from '../lib/leave.js';
 import { clearBuffers } from './observe.js';
 
 /**
@@ -450,17 +451,31 @@ export async function openTab(url, { active = false } = {}) {
  * now, with the reason), and nothing here waits on the page: the browser closes a tab without the
  * renderer's help.
  */
-export async function closeTab(tabId) {
+export async function closeTab(tabId, { leaveWithoutAsking = false } = {}) {
   await platform.tabs.get(tabId).catch(() => {
     throw new Error(`Tab ${tabId} does not exist.`);
   });
   const stuck = pendingCommands(tabId);
   if (stuck.length) await recoverTab(tabId, { reason: 'the tab is being closed', reattach: false, detach: false }).catch(() => {});
-  await platform.tabs.remove(tabId);
+  // (3.5) leaveWithoutAsking: the page's "Leave site?" prompt is accepted (lib/leave.js). G9 only
+  // hears that prompt on an attached tab, so a tab it is not attached to is attached first.
+  if (leaveWithoutAsking) {
+    armLeave(tabId);
+    setTimeout(() => disarmLeave(tabId), 10_000);
+    if (!(await attachedTabIds().catch(() => [])).includes(tabId)) await attach(tabId).catch(() => {});
+  }
+  const removed = await platform.tabs.remove(tabId);
   forgetKeepAwake(tabId).catch(() => {});
   const state = await getState();
   if (state.currentTabId === tabId) await setState({ currentTabId: null });
-  return { closed: tabId, ...(stuck.length ? { abandoned: stuck.map((c) => c.method) } : {}) };
+  return {
+    closed: tabId,
+    ...(stuck.length ? { abandoned: stuck.map((c) => c.method) } : {}),
+    ...(removed?.engineKept ? {
+      engineKept: true,
+      note: 'It was this browser’s last tab, so a blank tab was opened to keep the engine running. browser_engine action:"stop" ends the engine.',
+    } : {}),
+  };
 }
 
 export async function focusTab(tabId) {

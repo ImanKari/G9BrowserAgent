@@ -292,6 +292,12 @@ t.test('closing the window hides it (G9BrowserAgent stays in the tray); Windows 
   w.show();
   assert.equal(w.tryClose(), false, 'close is turned into hide');
   assert.equal(w.visible, false);
+  // (3.5) The first close to the tray is noted once (the notification itself needs a supported OS).
+  const desktopJson = JSON.parse(fs.readFileSync(path.join(home, 'desktop.json'), 'utf8'));
+  assert.ok(desktopJson.trayNoticeAt, 'the "still running in the tray" notice is recorded as shown');
+  // A development build never registers itself at sign-in, and offers no tray checkbox for it.
+  assert.equal(desktopJson.loginItem?.defaultAppliedAt ?? null, null);
+  assert.equal(trayItem('Start at sign-in'), undefined);
   w.emit('session-end');
   assert.equal(w.tryClose(), true, 'a sign-out is not held up by hide-to-tray');
 });

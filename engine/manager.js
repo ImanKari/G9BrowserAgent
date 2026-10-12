@@ -1598,7 +1598,8 @@ export class EngineManager {
       if (!eid) throw new Error('No launched engine is running, and launch:false was given.');
     }
     const e = await this.#usableEngine(eid);
-    let ctx = contextId ? e.contexts.get(contextId) : null;
+    // (3.5) "default" = the engine's own profile context: cookies written there persist.
+    let ctx = contextId === 'default' ? e.contexts.get(e.defaultContextId) : contextId ? e.contexts.get(contextId) : null;
     if (contextId && !ctx) throw new Error(`No context "${contextId}" in ${eid}.`);
     // A fresh context by default: the person's session must not leak into the
     // automation profile, and two handoffs must not share cookies.

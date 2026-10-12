@@ -31,7 +31,8 @@ every site. An install upgraded from 2.x keeps its setting.
 ## First, the five things to know
 
 1. **Behaviour can be made indistinguishable; environment can only be made consistent. Both are
-   needed.** A human-like mouse in a browser that says "HeadlessChrome" is still caught.
+   needed.** A human-like mouse in a browser that says "HeadlessChrome" is still caught (since 3.5
+   headless stealth no longer says it — see [Headless at stealth](#headless-at-stealth-the-user-agent-35)).
 2. **This is an arms race.** Vendors change their signals. Run the self-test before you trust a run,
    and never assume yesterday's pass still holds.
 3. **Do not fight your own product's detector in ordinary suites.** Give the runner a legitimate
@@ -186,14 +187,36 @@ Host facts that show on every run and are not G9BrowserAgent's:
 dedicated desktop ([the environment checklist](#the-environment-checklist)). The measured headed windows were parked off-screen at −32000, so
 `screenX/Y` read −32000. That is the harness's choice, not something to copy into a real run.
 
+### Headless at stealth: the user agent (3.5)
+
+Until 3.4, `navigator.userAgent` and the `User-Agent` header said `HeadlessChrome/153.0.0.0` in
+headless Edge and CfT — the only thing that detected headless Edge stealth on the local page in the
+final passes and in this guide's run. In that run Edge's userAgentData brands were already the real
+ones (`Microsoft Edge 153, Not_A Brand 8, Chromium 153`), and that check passed.
+
+Since 3.5, a stealth launch that is headless starts with **the user agent a headed window of the same
+browser sends**: only `HeadlessChrome/` becomes `Chrome/`, as a `--user-agent` launch switch learned
+from the browser's own first start (`engine/launch.js headedUserAgent`, cached per executable).
+Measured on 2026-10-12, Edge 154 and Chrome 155, headless, stealth, with a page that opens a
+cross-origin iframe and a dedicated worker:
+
+| Where | 3.4 | 3.5 |
+|---|---|---|
+| page, iframe and worker `navigator.userAgent`, `appVersion` | `HeadlessChrome/154.0.0.0` | `Chrome/154.0.0.0` (Edge), `Chrome/155.0.0.0` (Chrome), equal everywhere |
+| `User-Agent` header of every request | `HeadlessChrome/…` | the same as the page |
+| `navigator.userAgentData` brands, `Sec-CH-UA` | the browser's own | unchanged — the browser's own |
+
+Why a switch and not a CDP override: an override has to restate the brand list, and the one first
+tried got the GREASE brand wrong (`Not)A;Brand 8` against Edge's real `Not A(Brand 99`) — one tell
+swapped for another. The switch changes only the string, everywhere the browser uses it. Off and
+human still tell the truth (`HeadlessChrome`), and a caller's own `--user-agent` is never replaced.
+This removes the one headless-only mismatch; it invents nothing (consistency beats spoofing). The
+public detector pages have not been re-run with it; the rest of this section still applies.
+
 ### What no level removes (inherent)
 
-- **The headless user agent.** `navigator.userAgent` and the `User-Agent` header say
-  `HeadlessChrome/153.0.0.0` in headless Edge and CfT. This is the only thing that detected headless
-  Edge stealth on the local page in the final passes and in this guide's run (headless CfT was also
-  detected by its missing Widevine in the 2026-09-23 pass, a property of the binary). In this guide's
-  run Edge's userAgentData brands were `Microsoft Edge 153, Not_A Brand 8, Chromium 153`, and that
-  check passed.
+- **Headless itself.** Rendering without a window, and the next item, remain; run stealth-critical
+  suites headed on a dedicated desktop.
 - **Outer size 0×0 at the load event.** A document that `Page.navigate` loads while a CDP session is
   attached can read `outerWidth`/`outerHeight` (and `screenX/Y`) as 0 until just after `load`. The
   same document loaded with no session attached reads the real window. How often:

@@ -19,6 +19,7 @@
  */
 
 import { inWorld } from '../lib/world.js';
+import { evaluate } from '../lib/cdp.js';
 
 export const MAX_FETCH_BYTES = 40 * 1024 * 1024;
 export const DEFAULT_MAX_BODY = 256 * 1024;
@@ -94,9 +95,15 @@ export async function fetchResource(tabId, opts = {}) {
   const timeoutMs = Math.max(1_000, Math.min(2 * 60 * 60_000, Number(opts.timeoutMs) || 60_000));
   const headers = opts.headers && typeof opts.headers === 'object' && !Array.isArray(opts.headers) ? opts.headers : {};
   const body = opts.body == null ? null : typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body);
-  const res = await inWorld(tabId, fetchExpression({ url: parsed.href, method, headers, body, bodyBase64: opts.bodyBase64 ?? null, timeoutMs }), {
-    timeoutMs: timeoutMs + 5_000, idempotent: false,
-  });
+  const expression = fetchExpression({ url: parsed.href, method, headers, body, bodyBase64: opts.bodyBase64 ?? null, timeoutMs });
+  let res = await inWorld(tabId, expression, { timeoutMs: timeoutMs + 5_000, idempotent: false });
+  let via = null;
+  // (3.5) A blob: URL lives in the page's blob registry; when G9's world cannot read it, the page's
+  // own world can (the agent asked for that file, as with browser_console evaluate). Said in `via`.
+  if (parsed.protocol === 'blob:' && res?.error) {
+    res = await evaluate(tabId, expression, { timeoutMs: timeoutMs + 5_000 }).catch((err) => ({ error: String(err?.message ?? err) }));
+    via = 'page';
+  }
   if (!res) throw new Error('action:"fetch": the page returned nothing (it may have navigated mid-fetch).');
   if (res.error) {
     throw new Error(`action:"fetch" of ${parsed.href} failed: ${res.aborted ? `no complete answer within ${Math.round(timeoutMs / 1000)} s` : res.error}.`);
@@ -115,6 +122,7 @@ export async function fetchResource(tabId, opts = {}) {
     size: res.size,
     headers: res.headers,
     bytesBase64: res.dataBase64,
+    ...(via ? { via, viaNote: 'A blob: URL the page created was read in the page’s own world.' } : {}),
     ...(opts.savePath ? { savePath: String(opts.savePath) } : {}),
     maxBytes: Math.max(0, Math.min(MAX_FETCH_BYTES, opts.maxBytes != null ? Number(opts.maxBytes) : DEFAULT_MAX_BODY)),
   };

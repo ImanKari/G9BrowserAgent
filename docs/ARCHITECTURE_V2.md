@@ -760,7 +760,7 @@ WEBDRIVER_SWITCH = '--disable-blink-features=AutomationControlled'
 launchArgsFor(level): string[]           // off/human: []; stealth: [WEBDRIVER_SWITCH] — decision D-a, the only switch any level adds
 launchWarnings({ level, headless, kind }): string[]
   // off/human: "navigator.webdriver is true" (measured: the pipe sets it; only stealth clears it);
-  // stealth + headless: the HeadlessChrome user agent and userAgentData, an outer size that can read 0×0 at the
+  // stealth + headless: (3.5: the user agent is the headed one — launch.js headedUserAgent) an outer size that can read 0×0 at the
   // load event, a software GL string only on machines without a GPU; (as built) stealth on kind 'cft': a public
   // detector flags its brand, and its renderer ran at 10 Hz (launch.js adds --disable-frame-rate-limit for it).
   // (The headless screen is fixed by launch.js.)

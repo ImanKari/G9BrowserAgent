@@ -379,24 +379,27 @@ Agents are told to call `browser_status` first. It reports:
 
 | Tool | What it does |
 |---|---|
-| `browser_status` | Orientation: current tab, page health, engines, agents, ownership, halts, capabilities. The daemon answers it, and it still answers while Stop is pressed. |
+| `browser_status` | Orientation: current tab, page health, engines, agents, ownership, halts, capabilities. The daemon answers it, and it still answers while Stop is pressed. (3.5) `callId` (with `waitMs`) says how one call ended, `calls:true` lists your recent calls — see [Calls that outlive their client](#calls-that-outlive-their-client). |
 | `browser_engine` | **New in v2.** Launched browsers: `launch`, `list`, `stop`, `context`, `versions`, `warm`, `acquire`, `release`. |
-| `browser_tabs` | Tabs across all engines: `list`, `open`, `close`, `focus`, `attach`, `claim`, `release`, `popout`, `handoff`, `session`, `sessions`, `end_session`, `wait`, and (3.2) `watch`: a [live view](#the-live-view) of a tab for you. (3.4) `open`/`session` take `keepAwake:true` and `keep_awake` keeps a background tab working (focus emulation, page lifecycle active); `open session:"x"` names the tab; `close` and `focus` never wait behind a stuck call. |
+| `browser_tabs` | Tabs across all engines: `list`, `open`, `close`, `focus`, `attach`, `claim`, `release`, `popout`, `handoff`, `session`, `sessions`, `end_session`, `wait`, and (3.2) `watch`: a [live view](#the-live-view) of a tab for you. (3.4) `open`/`session` take `keepAwake:true` and `keep_awake` keeps a background tab working (focus emulation, page lifecycle active); `open session:"x"` names the tab; `close` and `focus` never wait behind a stuck call. (3.5) `detach`; `release` in your own browser also detaches the debugger; `close leaveWithoutAsking:true`; `handoff profile:"…"` (with `proxy`, `headless`, `stealth`, `locale`, `timezone`) keeps the login in that profile. |
 | `browser_snapshot` | Accessibility tree with a `[ref=eN]` handle on every interactive element. This is the **primary perception** tool. (3.4) `scope` (a ref or CSS selector), `roles`/`name` (regex) filters, `interactiveOnly`, `includeText:false`, `maxNodes`, and `diff:true` (only what changed since your previous diff snapshot; refs are stable per element). |
-| `browser_interact` | `click`, `double_click`, `right_click`, `hover`, `type`, `key`, `scroll`, `drag`, `select`, `upload`. Trusted input, humanized by default; every result reports `delivery`. |
-| `browser_navigate` | `goto`, `reload`, `back`, `forward`, and `wait` for text, a selector, its disappearance, or idle. (3.4) `wait` also takes a `predicate` (a page expression, polled until truthy; the final value comes back) or a `ref` + `state` (visible, hidden, enabled, disabled, checked, unchecked, gone, present), up to 2 hours. |
+| `browser_interact` | `click`, `double_click`, `right_click`, `hover`, `type`, `key`, `scroll`, `drag`, `select`, `upload`, and (3.5) `set_value`. Trusted input, humanized by default; every result reports `delivery`. (3.5) The target can be named without a snapshot — `role` + `name`, or a `selector`, with `nth` — and `waitMs` waits for it; see [Targets, retries and values](#targets-retries-and-values). |
+| `browser_navigate` | `goto`, `reload`, `back`, `forward` (3.5: `leaveWithoutAsking:true` accepts the page's own "Leave site?" prompt), and `wait` for text, a selector, its disappearance, or idle. (3.4) `wait` also takes a `predicate` (a page expression, polled until truthy; the final value comes back) or a `ref` + `state` (visible, hidden, enabled, disabled, checked, unchecked, gone, present), up to 2 hours. |
 | `browser_inspect` | `dom`, `styles`, `box`, `storage`, `cookies` (any site in that browser, HttpOnly included), `frames` (cross-origin frames included), and (3.4) `find`: only the elements with a role and/or a name (regex), as lines with refs. |
 | `browser_console` | Read buffered console output, or `evaluate` in the page's **main** world (the page can see what you run). (3.4) `timeoutMs` up to 4 hours, or `job:true`: a jobId at once, the work runs on in the page (`__g9job.progress(fraction, note)`); `job_status` (with `waitMs`), `job_cancel`, `jobs`. |
-| `browser_network` | Requests and bodies, HAR 1.2, `record_har` / `pin` (HAR pinning), `intercept` rules (fail, stall or replace chosen requests), and downloads (`watch_downloads`, `wait_download`, `downloads`, `stop_downloads`; in your own browser the final path and, when readable, the sha256). (3.4) `fetch`: a URL with the browser's cookies, returned bounded or written with `savePath` on the browser's machine (path, size, sha256, content type). |
+| `browser_network` | Requests and bodies, HAR 1.2, `record_har` / `pin` (HAR pinning), `intercept` rules (fail, stall or replace chosen requests), and downloads (`watch_downloads`, `wait_download`, `downloads`, `stop_downloads`; in your own browser the final path and, when readable, the sha256). (3.4) `fetch`: a URL with the browser's cookies, returned bounded or written with `savePath` on the browser's machine (path, size, sha256, content type). (3.5) `read_file`: the bytes of a file G9BrowserAgent saved or saw downloaded on the browser's machine, base64, in chunks; a failed download ends `wait_download` at once with the reason and the fix. |
 | `browser_diagnose` | `health` (correlated defects), `performance` trace, Core Web `vitals` and long tasks, `memory` leak signals. |
 | `browser_screenshot` | `viewport` (a read), `fullpage` or `element` (actions: they resize the viewport or scroll the element into view, so they claim the tab and are queued). Oversized full-page captures are scaled to fit, never cropped; at the human and stealth levels an element taller or wider than the viewport is captured as far as it shows on screen and the result's `cropped` gives its full size (take several viewport shots for all of it). |
 | `browser_emulate` | Device, viewport, network throttle, CPU throttle, colour scheme, locale, timezone. |
-| `browser_dialog` | Accept or dismiss `alert`, `confirm`, `prompt` or `beforeunload`. |
+| `browser_dialog` | Accept or dismiss `alert`, `confirm`, `prompt` or `beforeunload`. A dialog blocks only its own tab (3.5: never tab management such as `open`), and a recorded dialog that is no longer open clears itself. |
 | `browser_recording` | Recorded flows: record and replay, assertions, the suggestion wizard, calibration, the known world and approvals, FlowSpec export/import (3.2: with the approval sidecar, [what travels](#what-travels-with-a-flow)), Playwright export, `calibrate_humanize`. (3.4) `batch`: a list of steps (navigate, click/type by ref or role+name, wait, evaluate, extract) in one call, stopping at the first failure with an excerpt of the page there; FlowSpec `evaluate` and `extract` steps. |
 | `browser_issue` | Defects captured with screenshot, tab video with pointer track, console, failed requests and page context attached. |
 
 There are fifteen grouped tools rather than dozens, because tool definitions are re-sent on every
-request. Every tool that acts on a tab takes:
+request. (3.5) An argument a tool does not take is refused with the closest real one — for example
+`browser_snapshot does not take "selector" (did you mean "scope"?)` — instead of being ignored;
+`G9_STRICT_ARGS=0` in the daemon's environment lets an old client's extra arguments through. Every
+tool that acts on a tab takes:
 
 - `tabId`: a G9BrowserAgent handle from `browser_tabs action:"list"`, the same for every engine; or
 - `session`: a name you gave a tab.
@@ -435,11 +438,12 @@ You rarely call `launch` directly: `browser_tabs action:"open"` starts the defau
 | `list` | Every tab of every engine, with full title and URL. Each row carries `engine`, `owner`, `session`, `current` and `attachable`. Tabs of a reconnecting extension show `reconnecting:true`. |
 | `open` | `{url, engine?, context?, name?, focus?}`. The default engine is the extension when it is connected, otherwise a launched browser, started headless if none runs. The new tab is claimed by the caller and becomes its current tab. **In the person's browser it opens in the BACKGROUND** (`focus:false` by default): it can be read — snapshot, console, network, viewport screenshot — but not clicked or typed into, because a browser delivers input only to the tab it shows. Pass `focus:true`, or `action:"focus"` first. A launched engine gives every tab its own window, so nothing is needed there. |
 | `attach` | Takes the tab the person is on in the extension (or `tabId`), claims it and makes it current. |
-| `claim` / `release` | Ownership. `claim force:true` takes a tab from another agent, only when the user asks; it is logged. `release` without `tabId` releases every tab the caller holds. |
+| `claim` / `release` | Ownership. `claim force:true` takes a tab from another agent, only when the user asks; it is logged. `release` without `tabId` releases every tab the caller holds. (3.5) In the person's browser `release` also **detaches the debugger** from the released tabs (`detach:false` keeps it): a released tab is the person's page again, and bot checks look for an attached debugger. |
+| `detach` | (3.5) **Engine 1.** Ends G9BrowserAgent's debugger session on a tab: console and network capture stop, and the browser's debugging bar goes once no tab is attached. A tab with a recording running stays attached. The next agent call on the tab attaches again. |
 | `focus` | Brings the tab to the front and focuses its window. On Engine 1 this takes the screen from the person. |
-| `close` | Closes a tab. It needs an explicit `tabId` or `session`. |
+| `close` | Closes a tab. It needs an explicit `tabId` or `session`. (3.5) `leaveWithoutAsking:true` accepts the page's "Leave site?" prompt. Closing a launched browser's **last** tab opens a blank one first, so the engine keeps running (`engineKept:true`); `browser_engine action:"stop"` ends an engine. |
 | `popout` | **Engine 1 only.** `{tabId?, focus?, width?, height?, left?, top?}`. Moves the tab into its own window without reloading it (same renderer). An agent's popout opens that window **unfocused**, so the person keeps the keyboard, and gives focus back to the person's window only if the browser moved it; `focus:true` brings the new window to the front. The side panel's **⧉ Pop out tab** always opens it in front, focused. Without explicit geometry the window is half the source window's width and three quarters of its height (clamped to 640–1280 × 480–1000), at the source window's top-right. The result carries `focused`, and `visible`: what the page's `document.visibilityState` says about 600 ms after the move. Do not minimize that window, and do not let another window cover it completely: on Windows a completely covered window also stops rendering, unless the `WindowOcclusionEnabled` policy is off ([docs/INSTALL.md](INSTALL.md#background-policies-hkcu)). When `visible` is false, `focus` it. |
-| `handoff` | **Engine 1 → Engine 2.** Carries cookies (HttpOnly included) and the origin's localStorage and sessionStorage into a fresh launched context. The page **reloads** there. In-memory page state, IndexedDB and service-worker state do not travel. `storageCheck` and `warnings` say what actually arrived, for example a sign-in redirect. The new tab is claimed and becomes current; the caller's claim on the source tab is released; the user agent is never overridden. |
+| `handoff` | **Engine 1 → Engine 2.** Carries cookies (HttpOnly included) and the origin's localStorage and sessionStorage into a fresh launched context. The page **reloads** there. In-memory page state, IndexedDB and service-worker state do not travel. `storageCheck` and `warnings` say what actually arrived, for example a sign-in redirect. The new tab is claimed and becomes current; the caller's claim on the source tab is released; the user agent is never overridden. (3.5) **`profile:"name"`** hands the tab into that G9BrowserAgent profile instead — launched, or reused when it already runs — and writes the cookies into the profile itself, so the login stays for later runs (`persisted:true`). `proxy`, `headless`, `stealth`, `locale` and `timezone` set up that launch; `proxy` without a profile gives the fresh context that proxy. |
 | `session`, `sessions`, `end_session` | Names for tabs, stored in the daemon. `end_session` forgets the name; the tab stays open. |
 | `wait` | Waits for a popup or new tab by `url`, `title` or `openerTabId`. |
 
@@ -527,7 +531,59 @@ page (numbering and history start over when the URL changes), or for
 an element the page has since removed produces an error naming the fix.
 
 Take a fresh snapshot after navigation or a large DOM change anyway: a page that re-renders replaces
-the elements you saw, and the old refs are then refused rather than resolved elsewhere. When a page
+the elements you saw, and the old refs are then refused rather than resolved elsewhere.
+
+(3.5) The ref table lives in the extension's session storage, whose one 10 MB quota every tab's
+console and network capture shares. A stored ref keeps the element's ids, its role and at most 80
+characters of its name; one tab's table stays under about 1 MB (the oldest kept snapshots go first);
+and when the quota is full anyway, other tabs' older snapshots and diff bases make room before a
+snapshot could fail. Before 3.5, chat and media pages filled the quota with full message texts and
+snapshots failed with "Session storage quota bytes exceeded".
+
+### Targets, retries and values
+
+(3.5) `browser_interact` can name its target without a snapshot:
+
+- **`role` + `name`** — the role in the accessibility tree and a case-insensitive regular expression
+  for the accessible name, as `browser_inspect what:"find"` reads them.
+- **`selector`** — a CSS selector in the top document; only visible matches count.
+- **`nth`** picks one match (1-based). Several matches without `nth` are refused with the list —
+  never guessed. The result names the ref the element got (`ref`, `matched`), for later calls.
+- **`waitMs`** (up to 60 s) waits for the target to appear — a control a page renders late, a file
+  input it rebuilds — and for a covered or moving target to become clickable.
+
+A refusal made **before anything was pressed** — the target covered by an overlay or a toast,
+moved, or (for a role/selector target) re-rendered — is tried again until it works or `waitMs`
+(1.5 s without it) runs out; the result says `retried`. Nothing reached the element meanwhile, so
+no action is repeated (rule R6). `missed`, `partial` and every error after input went out are
+never retried.
+
+**`set_value`** sets a control and proves it: `before`, `after`, `verified`, and `via` (how).
+
+| Control | How | Verified by |
+|---|---|---|
+| `<input type=range>` | a click at the value's point on the track, then arrow keys to the exact step | `.value` |
+| ARIA slider (`role=slider`) | a drag of the thumb to the value's point on its track, then arrow keys | `aria-valuenow` |
+| text field, textarea, contenteditable | `type` with `clear:true` | the field's value |
+| checkbox, radio, switch | a click when the state differs | `checked` / `aria-checked` |
+| `<select>` | `select` | the selected option |
+
+Only for a native range input, and never at stealth, a value the trusted input could not reach is
+set by script as a last resort; `via` then includes `script` and a note says the events were not
+trusted. A control that does not take the value is an error that says what it is now.
+
+**`drag`** takes `toPercent` (0–100 along the control's track) or `toX`/`toY` (viewport pixels)
+instead of `to`, and reports the value before and after when the control has one.
+
+**`ifHidden`** (the person's browser): a background tab gets no input, and the call used to be
+refused. `"focus"` brings the tab to the front of its window, `"popout"` moves it into a window of
+its own; then the call acts. The refusal sent nothing, so acting after it repeats nothing.
+
+**`upload`** also takes `fileData` (`[{ name, base64 }]`, up to 40 MiB per call) or `fileUrls`
+(fetched with the page's cookies): the daemon writes them under `G9_HOME/files/uploads/` on the
+browser's machine first, and the result lists them (`written`). It waits `waitMs` for the file input,
+and reads back what the input holds (`inputHolds`: names and sizes) — an input the page emptied is an
+error. When a page
 re-renders an element while a humanized click is on its way, the press lands on the identical
 replacement: that is reported as `indeterminate` (not `delivered`, not `missed`) and is never
 repeated automatically.
@@ -551,6 +607,13 @@ repeated automatically.
   the tab's queue is held until it has stopped, up to 5 s more. If it has not stopped by then the
   error says so — it may still be running — and the next call on that tab can overlap it. Take a
   snapshot before sending that tab more input when you see that message.
+- **Idle claims (3.5).** An owner that is still connected but has sent nothing for 15 minutes, with
+  no call running, no longer blocks others: the next agent's state-changing call takes the tab, the
+  takeover is logged, and that agent's result says `tookOver` with the idle time. Connections outlive
+  their agents — an HTTP session stays open 30 idle minutes, a crashed client's socket lingers — and
+  their tabs used to stay locked. `G9_IDLE_CLAIM_MINUTES` (0 = never).
+- **Error text names handles (3.5).** An engine's error that mentions a Chrome tab id is rewritten to
+  the G9BrowserAgent handle the agent knows.
 - **`maxParallel`.** This setting (default 8) caps how many state-changing Engine 2 calls run at
   once across all tabs. Reads and waits (`navigate wait`, `wait_download`, `tabs wait`) hold no
   slot. In the Engine 2 live test, a click during another agent's 6 s wait took 26–63 ms.
@@ -572,6 +635,29 @@ stops between steps.
 
 The side panel and the desktop's Agents view show the activity log: each agent call, and the
 person's own panel actions. The panel's **↗** opens it in a separate window.
+
+### Calls that outlive their client
+
+(3.5) An agent's MCP client has its own timeout — often 20 to 90 seconds — and real actions can take
+longer: a click whose page takes a minute to publish. The client gave up, the agent recorded a
+failure, and the action had happened; a retry then did it twice. The daemon now gives every call an
+id and keeps its outcome for an hour (the last 300 calls):
+
+- **`opId`** — an idempotency key the agent chooses (`"publish-post-42"`), accepted by every tool.
+  The same agent sending the same `opId` again does not act again: a call still running is joined,
+  a finished one returns its recorded outcome with `deduplicated:true`. One that failed before it
+  acted may run again; one whose outcome is unknown (it ran past its deadline) is refused, with the
+  way to check.
+- **`replyWithinMs`** — answer within this long whatever happens. A call still running then answers
+  `{ pending:true, callId }` and goes on. Set it below the client's own timeout. `G9_REPLY_WITHIN_MS`
+  sets it for every call of a daemon (a browser node behind a client with a short timeout).
+- **`browser_status callId:"…"`** (with `waitMs`, up to 10 minutes) — how that call ended: `state`
+  (running, done, failed), its result or error. A call the daemon had to answer "may still be
+  running" that ended later in its engine is recorded with its real outcome and `late:true`.
+- **`browser_status calls:true`** — this agent's recent calls, newest first, by its identity, so a
+  stateless client's next session sees the previous session's calls.
+
+Neither key reaches an engine; both are documented in the agent instructions.
 
 ---
 
@@ -1344,9 +1430,12 @@ any stealth configuration in either run** (local page or public pages).
 
 **What G9BrowserAgent cannot remove:**
 
-- **Headless user agent.** `HeadlessChrome` appears in the user agent and in userAgentData. So
-  **headless is detectable**: run stealth-critical suites **headed**, on a dedicated desktop (a VM,
-  Windows Sandbox, or a QA machine with autologon), not on someone's desk.
+- **Headless.** (3.5) The user agent no longer says `HeadlessChrome` at stealth: headless stealth
+  starts with the headed user agent of the same browser (a launch switch; the brands were already the
+  real ones — [docs/STEALTH.md](STEALTH.md#headless-at-stealth-the-user-agent-35)). Headless is still
+  **detectable** by other signals (an outer size of 0×0 at the load event, headless rendering): run
+  stealth-critical suites **headed**, on a dedicated desktop (a VM, Windows Sandbox, or a QA machine
+  with autologon), not on someone's desk.
 - **Brands.** Edge does not present "Google Chrome" in userAgentData, and Chrome for Testing names
   itself.
 - **pixelscan on headed Edge.** It flagged headed Edge in every run, including raw probes where

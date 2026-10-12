@@ -2,7 +2,14 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v3.4.0, 2026-10-07. 3.4.0 makes long, unattended work reliable and cheap (§9, the
+**Status:** v3.5.0, 2026-10-12. 3.5.0 (§9, the 3.5.0 entry): one icon drawn in code for the
+extension, app, installer and tray; the desktop app starts at sign-in by default and says where it
+went when its window closes; and every general point of an agent's field report — a call log with
+idempotent `opId`s and pending answers, interaction by role/name/selector with safe retries,
+`set_value`, strict argument names, a quota-proof ref store, dialogs scoped to their tab, idle claims
+and a release that detaches, downloads that cannot be lost, files in and out over MCP, a headless
+stealth user agent that no longer says HeadlessChrome, and a handoff into a persistent profile with
+its proxy. 3.4.0 makes long, unattended work reliable and cheap (§9, the
 3.4.0 entry): every step before a CDP command is bounded, a watchdog recovers a tab whose call is
 stuck, close never waits behind a stuck call, and the state chain cannot hold a reply. A stateless
 MCP client keeps its tabs and session names across sessions. Snapshots take scopes, filters and diffs
@@ -316,9 +323,9 @@ and R4, and [Rules for changing this codebase](#rules-for-changing-this-codebase
 
 ```
 G9BrowserAgent/
-├── package.json                  the ONE version (3.4.0) for the whole product; no dependencies; node >=22
+├── package.json                  the ONE version (3.5.0) for the whole product; no dependencies; node >=22
 ├── extension/                    Engine 1 (MV3), and the HOME of the shared tool code
-│   ├── manifest.json             3.4.0; minimum_chrome_version 125; permissions in §5
+│   ├── manifest.json             3.5.0; minimum_chrome_version 125; permissions in §5
 │   ├── sw.js                     service worker: lifecycle, transport to g9d, panel commands; calls tools/index.js
 │   ├── lib/
 │   │   ├── platform.js           THE SEAM: exports platform-extension or platform-cdp (rule R2)
@@ -340,6 +347,7 @@ G9BrowserAgent/
 │   │   ├── flowsync.js           (3.2) a FlowSpec into a store with its sidecar (Pull, import_spec, the runner)
 │   │   ├── visual.js             fingerprint + structure map + diff image (through platform.image)
 │   │   ├── sites.js              (v3) pure URL helpers: siteOf (origin), parseDomain, hostMatches, displayUrl
+│   │   ├── leave.js              (3.5) "leave without asking": a tab armed to accept its own beforeunload prompt
 │   │   └── transport.js          WebSocket client to g9d (extension only)
 │   ├── humanize/                 PURE human-input library (no I/O, no timers, seeded): prng, profiles, profile,
 │   │                             plan, mouse, wheel, keys, calibrate, index
@@ -350,7 +358,8 @@ G9BrowserAgent/
 │   │   ├── snapshot.js  interact.js  inspect.js  observe.js  navigate.js  capture.js  diagnose.js
 │   │   ├── emulate.js   record.js    replay.js   qa.js       netpin.js   netrules.js  downloads.js
 │   │   ├── issues.js
-│   │   └── jobs.js  fetch.js  batch.js   (3.4) evaluate jobs, fetch as the page, step batches
+│   │   ├── jobs.js  fetch.js  batch.js   (3.4) evaluate jobs, fetch as the page, step batches
+│   │   └── target.js  setvalue.js         (3.5) interaction targets by role/name/selector; set_value and drag to a position
 │   └── panel/                    side panel (v3): Session (daemon, agents + their tabs, current tab and capture,
 │                                 auto-attach, keep working elsewhere, input level, Stop, activity), Automation
 │                                 (site → suite → flow), Issues (site → status), About; welcome.html/.js;
@@ -360,7 +369,8 @@ G9BrowserAgent/
 │                                 README.md
 ├── daemon/                       g9d: g9d.mjs (CLI), daemon.js (composition), ws-server.js, registry.js,
 │                                 router.js, handoff.js, storage.js, evidence.js, scheduler.js, settings.js,
-│                                 paths.js, home-lock.js, project.js, flows.js, extension-update.js
+│                                 paths.js, home-lock.js, project.js, flows.js, extension-update.js,
+│                                 calls.js (3.5: the call log — call ids, opId, pending answers, late outcomes)
 ├── mcp/                          shim.mjs (what an AI client launches), mcp.js (stdio MCP), tools.js (schemas + INSTRUCTIONS);
 │                                 (3.2) link.mjs (the daemon link), server.mjs (tools + resources on a link),
 │                                 http.mjs (MCP over HTTP, bearer token: agents on other machines)
@@ -387,7 +397,7 @@ G9BrowserAgent/
 │   ├── matrix.mjs  bench.mjs  endurance.mjs   P8 background-state matrix, parallelism, endurance
 │   ├── serve.mjs  testpage.html  crossframe.html  fixtures/
 │   ├── install.ps1               install from a clone: Node 22 check, unit/self/extension tests, MCP config → mcp/shim.mjs
-│   ├── make-icons.ps1            (3.0.1) extension/panel/icon16/32/48/128.png from the owner's artwork
+│   ├── make-icons.mjs            (3.5) extension/panel/icon16/32/48/128.png from desktop/lib/icon.mjs (the one design)
 │   └── mcp.example.json          committed template (mcp.json is generated, gitignored)
 ├── scripts/                      standalone MCP automations and their README
 ├── g9.project.example.json       project adapter template
@@ -711,6 +721,17 @@ press/release drift and no typos in password fields.
   The HTTP endpoint ends the idle older sessions of that identity at once. Session names were already
   the daemon's, not an agent's; the field report ("No session named n-bs" right after `open
   session:"n-bs"`) was `open` reading only `name`.
+- **(3.5) The call log** (`daemon/calls.js`). Every call except `browser_status` gets an id and its
+  outcome is kept an hour: `opId` (an idempotency key per identity — never acted on twice; an unknown
+  outcome refuses a resend), `replyWithinMs` (answer `pending` and go on), `browser_status callId` /
+  `calls:true`, and late outcomes of calls the daemon gave up on (relayed: the relay id is kept in
+  `lateRelays`; launched: the abandoned promise reports). An MCP client's own timeout is shorter than
+  real actions; this is what makes "did it happen?" answerable.
+- **(3.5) Idle claims.** `ensureOwnership` refuses only for an owner that is connected AND active (a
+  call running, or one within `G9_IDLE_CLAIM_MINUTES`, default 15); otherwise the next mutating call
+  takes the tab and says so (`tookOver`). Connections outlive their agents.
+- **(3.5) Strict argument names.** `Router.call` refuses an argument the tool's schema does not list
+  (`mcp/tools.js unknownArguments`, with a did-you-mean) — except routing keys. It used to be ignored.
 - **(3.4) close and focus never queue.** `browser_tabs close` first ends every call running or waiting
   on that tab (cancelled in its engine too), then closes it under its own 20 s; focus likewise goes
   straight to the engine. Closing is how anyone gets out of a stuck tab.
@@ -1343,7 +1364,7 @@ by being written down.
 
 | Gap | Evidence | Status |
 |---|---|---|
-| Headless is detected by its user agent (`HeadlessChrome` in the UA and `userAgentData`) | every headless stealth run; public pages round 3: sannysoft (User Agent (Old), HEADCHR_UA, CHR_MEMORY), creepjs headless 67 %, browserscan "Robot", pixelscan, Fingerprint bot 3/3 | inherent; G9BrowserAgent does not spoof the UA (consistency beats spoofing). Use headed stealth for strict cases |
+| Headless is detected by its user agent (`HeadlessChrome` in the UA string; userAgentData brands were already real on Edge 154 / Chrome 155) | every headless stealth run until 3.4; public pages round 3: sannysoft (User Agent (Old), HEADCHR_UA, CHR_MEMORY), creepjs headless 67 %, browserscan "Robot", pixelscan, Fingerprint bot 3/3 | **(3.5) fixed at stealth**: headless stealth starts with the headed user agent of the same browser (`launch.js headedUserAgent`, a switch; measured page/iframe/worker/headers on Edge 154 and Chrome 155, brands untouched). Public pages not re-run; headless still differs otherwise (outer size, rendering). Use headed stealth for strict cases |
 | Headed Edge stealth: pixelscan "Automated behavior detected" | round 3: 4/4 via the harness (with and without interaction); headed Chrome passes 2/2; no field attributable | unexplained. The final local self-test is UNDETECTED; public pages were not re-run after the round-3 fixes |
 | Brand checks: rebrowser flags Edge ("no Google Chrome brand", a warning) and CfT ("Chrome for Testing") | round 3 | inherent to the binary |
 | `outerWidth/outerHeight` 0×0 at the load event (a CDP-class signal) | live round 2: Edge headless stealth 8/8, headed 5/8, CfT headless 0/8; live round 3: 0/54 local runs | launch warning and STEALTH.md still mention it; not attributable to G9BrowserAgent code |
@@ -1412,7 +1433,10 @@ by being written down.
   checked: a screen reader, high-contrast or forced-colors mode, right-to-left page titles, and a
   real Windows desktop with the panel detached. **Project sites** depends on the connected agents'
   `g9.project.json` environments; with no agent connected it attaches nothing, which the panel says.
-- **The icon (3.0.1).** The extension's icons come from the owner's artwork through
+- **The icon (3.5).** One design, drawn in code by `desktop/lib/icon.mjs` for the extension
+  (`setup/make-icons.mjs` writes the PNGs; the panel suite checks them pixel for pixel), the app, the
+  installer and the tray; looked at in pictures at 16–128 px on light and dark backgrounds, not in a
+  real toolbar here (the harnesses are headless). Before 3.5: the extension's icons came from the owner's artwork through
   `setup/make-icons.ps1`; the source PNG is not in the repository (keep it to regenerate). The 16 px
   size is a crop, the browser window with "G9BrowserAgent", because the whole drawing is a blur at 16 px; not
   looked at in a real toolbar here (the harnesses are headless). The desktop app's icons (tray,
@@ -1889,6 +1913,176 @@ after every step of a forty-step flow doubles the run for evidence nobody reads.
 Entries below describe what was believed or tested at the time. Current capability claims and
 unresolved findings are in §§4, 7 and 8, which supersede historical assertions. Entries dated before
 2026-09-21 describe v1 (the bridge, the four control modes, the workspace allowlist).
+
+### 2026-10-12 — v3.5.0: one icon, a tray app that starts with you, and what weeks of real agent work asked for
+
+**Why.** Three things from the owner. The extension and the desktop app had two different icons, and
+neither read well at toolbar size. The desktop app had a tray but did not start at sign-in unless
+someone found the setting. And an agent that had driven G9BrowserAgent for weeks — in the owner's own
+browser and on a browser node on a server — wrote up everything that had cost it time. This release
+takes every general point of that report (no site-specific code) and the two product asks.
+
+**1. One icon, drawn in code (`desktop/lib/icon.mjs`).**
+- **The design:** "an agent at work inside a real browser". A frosted browser window on an aurora tile
+  (cyan → violet → pink), and a faceted pointer that reaches into the window from outside it. A click
+  ripple at 32 px and up, the window's dots at 48 px and up. At 24 px and below a pixel-tuned variant
+  (a larger window and pointer, no details) — checked at 16, 24, 32, 48 and 128 px on light and dark
+  toolbars. Chosen by the owner from three finalists.
+- **One source:** the same function draws the extension's toolbar icons (`setup/make-icons.mjs` writes
+  `extension/panel/icon16/32/48/128.png`), the app window, the installer, the .ico/.icns (scripts/
+  make-icons.mjs) and the tray. The panel suite decodes the committed PNGs and fails when they differ
+  from the design, so a change cannot reach half the product. `setup/make-icons.ps1` (the old artwork
+  pipeline) is gone.
+- **Rendering:** signed distance fields with analytic anti-aliasing, one evaluation per pixel and shape:
+  the 256 px window icon draws in about 0.4 s at start-up instead of seconds.
+- **The tray** recolours the tile by state: aurora (connected), red (stopped), slate (offline), amber
+  (port held). On macOS the menu bar gets a monochrome template image (`templatePng`) the system
+  recolours for a light or dark bar; stopped and port-taken keep their colour there.
+
+**2. A tray app that starts with you (desktop).**
+- **Start at sign-in is on by default** for an installed app (`lib/settings.mjs decideLoginDefault`):
+  applied once — a fresh install, and the first start after an update — and recorded. Once the person
+  switches it off or on (Settings, or the new **Start at sign-in** checkbox in the tray menu) their
+  choice stays; no later start overrides it. A development build never registers itself.
+- **The first close to the tray** shows one notification: G9BrowserAgent is still running, in the
+  notification area / menu bar / system tray, and Quit is in its menu. A window that vanished while
+  the app kept running read as "it quit".
+
+**3. Calls that outlive their client (`daemon/calls.js`, the call log).** An agent's MCP client gave
+up on a publish click after its own 20–90 s; the page had published; the agent logged a failure and
+risked publishing again (six times in a week).
+- Every call gets an id; its outcome is kept for an hour (the last 300).
+- **`opId`** on any tool: an idempotency key. The same agent and opId never act twice — a running call
+  is joined, a finished one returns its recorded result (`deduplicated:true`). One that failed before
+  acting may run again; one whose outcome is unknown is refused, with how to check.
+- **`replyWithinMs`**: answer `{pending:true, callId}` by then and go on (`G9_REPLY_WITHIN_MS` for a
+  whole daemon).
+- **`browser_status callId:"…"`** (`waitMs` waits for the end) and **`calls:true`** (this identity's
+  recent calls). A call the daemon answered "may still be running" that finished later in its engine
+  is recorded with its real outcome (`late:true`) — relayed calls through their relay id, launched
+  ones through the abandoned promise. Deadline errors name the call id.
+
+**4. Interaction without a snapshot, retries that are safe, values that are proven.**
+- **Targets** (`extension/tools/target.js`): `browser_interact` takes `role` + `name` (regex) or a CSS
+  `selector`, with `nth`; several matches without `nth` are refused with the list, never guessed.
+  `waitMs` (≤ 60 s) waits for a control that appears late. Selector matches get refs in the page's
+  table (`refs.adoptNodes`). Batch steps take `selector` too.
+- **Safe retries:** refusals made before anything was pressed — covered, moved, re-rendered (for a
+  role/selector target) — now carry `predispatch`, and are tried again until clickable or `waitMs`
+  (1.5 s without it) ends; the result says `retried`. R6 holds: nothing reached the element, and
+  `missed`/`partial`/post-dispatch errors are never retried.
+- **`set_value`** (`extension/tools/setvalue.js`): a range input by a click on its track then arrow
+  keys; an ARIA slider by dragging its thumb then arrow keys; fields by type-with-clear; checkbox,
+  radio, switch by a click when it differs; select by select. Every result proves it (`before`,
+  `after`, `verified`, `via`). Script assignment only as a last resort for a native range, never at
+  stealth, and said. A slider and a cover scrubber that ignored clicks and keys were the report.
+- **`drag`** to `toPercent` or `toX`/`toY` (interact.js drags to a point), with the value before and
+  after.
+- **`ifHidden:"focus"|"popout"`** (the person's browser): a background tab is brought forward or moved
+  into its own window and the call acts, instead of being refused. Two agents competing for one
+  window's focus was the report.
+
+**5. Strict arguments.** An argument a tool does not take is refused before anything runs, with the
+closest real one (`browser_snapshot does not take "selector" (did you mean "scope"?)`) — it used to be
+ignored, and a "scoped" snapshot quietly returned the whole page (`mcp/tools.js unknownArguments`,
+checked in `Router.call`). Routing keys pass everywhere; `G9_STRICT_ARGS=0` lets an old client through.
+
+**6. Session storage that cannot fill up with refs (`lib/refs.js`).** Snapshots on chat and media pages
+failed with "Session storage quota bytes exceeded" (8 times, even with maxNodes 40) while the same page
+in another tab was fine: ref entries kept the FULL accessible name (whole messages) in up to 16
+generations, against one 10 MB quota shared with every tab's capture. Names are now cut to 80
+characters, one tab's table stays under ~1 MB (oldest generations first), and `setWithRoom` turns a
+quota refusal into room: other tabs' older snapshots and diff bases go first, then this tab's own
+history; a final refusal names the cause and the fix.
+
+**7. Dialogs scoped to their tab.**
+- A dialog no longer blocks `browser_tabs` (open, list, wait, session…): the guard fell back to the
+  engine's current tab, so a "Leave site?" there stopped another agent from opening a tab.
+- **`leaveWithoutAsking:true`** on goto/reload/back/forward and on close accepts the page's own
+  beforeunload prompt for that call (`lib/leave.js`; close attaches first when it was not attached).
+- A recorded dialog older than 1.5 s is re-checked with a one-expression probe; a page that answers
+  had no dialog any more, and the stale record is cleared (state that "did not match reality").
+
+**8. Ownership that follows the agents.**
+- **Idle claims:** a connected owner with no call running and none for 15 minutes no longer blocks
+  others; the next state-changing call takes the tab (`registry.idleFor`, logged as a takeover, the
+  result says `tookOver`). `G9_IDLE_CLAIM_MINUTES` (0 = never).
+- **`release` detaches the debugger** in the person's browser (`detach:false` keeps it), and
+  `browser_tabs action:"detach"` does only that: a released tab used to keep the debugger, which
+  captcha and bot checks saw. A tab with a recording running stays attached.
+- Relayed error text names G9 handles, not Chrome tab ids (`handlesInText`).
+- **Closing a launched browser's last tab** opens a blank one first: Chromium quits with its last
+  window, and the engine — its profile session and leases — ended silently (`engineKept:true`).
+
+**9. Files.**
+- **Downloads in the person's browser:** an attribution that could not be written (the quota) or that
+  a restarted worker lost used to DROP the completion, and `wait_download` timed out on a finished file
+  still showing its in-progress name. Attributions are also kept in memory, and a download that ENDS
+  during a watch is attributed then — unless it began while nothing was watched (the person's own).
+  An end event without a tab updates the watched item it belongs to.
+- **A failed download ends the wait at once**, also one the browser could not tie to the tab, with the
+  browser's reason and the fix (`downloadErrorHelp`: a missing or unwritable download folder, disk,
+  network, server, blocked).
+- **The browser node** creates `/config/Downloads` on every start; without it Chromium dropped every
+  download without a word.
+- **`browser_network action:"read_file"`**: the bytes of a file G9BrowserAgent saved or saw downloaded,
+  base64, in chunks (≤ 8 MiB) with the whole file's sha256 — how a remote agent gets a file off a node
+  without docker exec. Only under `G9_HOME/files|downloads|runs` or a reported download, real paths
+  compared.
+- **Upload brings its files:** `fileData` (`[{name, base64}]`, ≤ 40 MiB) or `fileUrls` (fetched as the
+  page, through `fetch` on the same tab), written under `G9_HOME/files/uploads/` first; `waitMs` for a
+  late or rebuilt file input; `inputHolds` (names and sizes) proves what the input holds, and an input
+  the page emptied is an error.
+- **`fetch` of a blob: URL** falls back to the page's own world when G9's world cannot read it (`via:"page"`).
+
+**10. Launched browsers.**
+- **Headless stealth no longer says HeadlessChrome** (`engine/launch.js headedUserAgent`). Measured
+  2026-10-12 with a page, a cross-origin iframe, a dedicated worker and the request headers: on Edge 154
+  headless only the user-agent STRING gave headless away; userAgentData brands and Sec-CH-UA were
+  already real. A `--user-agent` switch with only HeadlessChrome → Chrome (learned from the browser's
+  first start, cached per executable) fixed page, iframe, worker, appVersion and headers on Edge 154
+  and Chrome 155, brands untouched. A CDP override was tried and rejected: it had to restate the brands
+  and got the GREASE brand wrong. Off/human tell the truth; a caller's own --user-agent is kept. The
+  first stealth headless start of a browser restarts once (1.9 s, then 0.7 s).
+- **Handoff that stays:** `profile:"name"` launches (or reuses) an engine on that profile and imports
+  into its persistent context, so the login stays (`persisted:true`); `proxy`, `headless`, `stealth`,
+  `locale`, `timezone` set up that launch; `proxy` alone gives the fresh context that proxy. A handoff
+  used to go into a temporary context with no proxy — the report finished the job in a headed window
+  set up by hand.
+
+**Found on the way.**
+- The first late-attribution rule claimed a download the person had started before any watch, when it
+  finished during a later one; the extension suite's existing test caught it, and downloads that began
+  unwatched are now remembered and never claimed.
+- The interaction suite's fake browser reported one URL through `chrome.tabs` and another through its
+  document after a navigation — no real browser does; the new lookup tests line them up.
+
+**Not done, and why.**
+- **Input without the debugger in the person's browser.** An extension can only send trusted input
+  through `chrome.debugger`; content-script events are untrusted, which captchas check first. What
+  this release does instead: release detaches, handoff into a stealth profile with its proxy keeps the
+  login, and headless stealth no longer announces itself.
+- **A live view of a server browser for an agent.** An agent sees a remote tab through
+  `browser_screenshot` (with `savePath` + `read_file` for the full image); the live view stays a
+  person's tool.
+- The public detector pages were not re-run with the headed user agent.
+
+**Tests.**
+- **New:** daemon 119 (+7: strict arguments, the call log and late outcomes, idle claims and handle
+  text, release/detach, uploads and read_file, handoff into a profile); interaction 82 (+4 through the
+  real runtime: selector and role lookup, waiting, ambiguity, the covered-target retry, set_value on a
+  range input, an ARIA slider and a checkbox, drag toPercent, the ifHidden hint); seam 24 (+1 quota,
+  and dialogs: a stale record, open past a dialog, an armed beforeunload); extension suite 112 (+1:
+  a lost download completion, a missing download folder, an unattributed failure); engine 56 (live:
+  the user agent at off and stealth; headedUserAgent); panel 85 (+1: the PNGs are the design); desktop
+  203 (+2: the default once, the person's choice, the template, the tray notice); docker 6 (+1 check).
+- **Offline:** `check.mjs` 18 of 18 checks in 150 s (14 unit suites with 721 tests, self-test 136,
+  extension suite 112, the panel render).
+- **Live** (2026-10-12, headless Edge 154): Engine 2 live 372/0 (353 s), Engine 1 live 213/0, and the
+  long-work live suite 65/0 (with the harness's checks).
+
+Version 3.5.0 in `package.json`, `extension/manifest.json`, `desktop/package.json` and
+`desktop/package-lock.json`.
 
 ### 2026-10-07 — v3.4.0: long, unattended work — hang-proof, stateless-client-proof, and far fewer tokens
 

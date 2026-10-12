@@ -16,6 +16,7 @@
 import { platform } from '../lib/platform.js';
 import { getState, setState, updateState, logActivity, broadcast, noteDialog, forgetDialog } from '../lib/state.js';
 import { sendOnLiveSession, forgetTab, forgetAttached } from '../lib/cdp.js';
+import { leaveArmed } from '../lib/leave.js';
 import { clearRefs } from '../lib/refs.js';
 import * as frames from '../lib/frames.js';
 import * as world from '../lib/world.js';
@@ -124,6 +125,13 @@ export function onCdpEvent(source, method, params = {}) {
 
   // Surface dialogs immediately — they block the page until handled.
   if (method === 'Page.javascriptDialogOpening' && !child) {
+    // (3.5) A beforeunload prompt raised by G9BrowserAgent's own navigation or close with
+    // leaveWithoutAsking:true is accepted at once (lib/leave.js) — it is never a dialog to handle.
+    if (params.type === 'beforeunload' && leaveArmed(tabId)) {
+      sendOnLiveSession(tabId, 'Page.handleJavaScriptDialog', { accept: true }).catch(report('accepting a beforeunload prompt'));
+      logActivity({ kind: 'system', tabId, ok: true, detail: 'Left the page without asking: its "Leave site?" prompt was accepted (leaveWithoutAsking).' }).catch(() => {});
+      return;
+    }
     const dialog = { tabId, type: params.type, message: params.message };
     noteDialog(dialog).catch(() => {});
     broadcast({ type: 'dialog', tabId, message: params.message, dialogType: params.type });

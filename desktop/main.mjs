@@ -122,6 +122,7 @@ async function startApp() {
   // Listened for at once: a second start while this one is still starting (the imports and
   // whenReady below) must still bring the window up, not be lost.
   let showWindowRef = null;
+  let refreshTrayRef = null;
   let showWindowLater = false;
   app.on('second-instance', () => {
     if (showWindowRef) showWindowRef();
@@ -145,13 +146,13 @@ async function startApp() {
   // Loaded after the lock so a second instance exits before touching anything.
   const { DaemonClient, normalizeHalt } = await import('./lib/daemon-client.mjs');
   const { DaemonLauncher, probeHealth, restartDaemonIfIdle, queryActivity, activityFromHealth, waitForPortFree, mismatchAction } = await import('./lib/daemon-launch.mjs');
-  const { DesktopSettings, pickUpdateConfig, detectUpdate } = await import('./lib/settings.mjs');
+  const { DesktopSettings, pickUpdateConfig, detectUpdate, decideLoginDefault, trayPlace } = await import('./lib/settings.mjs');
   const { createLogger, tailLog } = await import('./lib/log.mjs');
   const { UpdateController, installMode, manualReason, releasePageUrl } = await import('./lib/updater.mjs');
   const { Wizard } = await import('./lib/wizard.mjs');
   const { execReg, elevatedRegBatch } = await import('./lib/policies.mjs');
   const { readRunLocal, readFrame, saveVideo, runDir } = await import('./lib/runs-store.mjs');
-  const { iconPng } = await import('./lib/icon.mjs');
+  const { iconPng, templatePng } = await import('./lib/icon.mjs');
   const { readJson } = await import('./lib/jsonfile.mjs');
   const { approvalArgs, normalizeRun } = await import('./renderer/lib/runs.js');
   const { normalizeAgent, normalizeEngine, normalizeTab, pickList } = await import('./renderer/lib/engines.js');
@@ -748,6 +749,32 @@ async function startApp() {
   };
   migrateLoginItem();
 
+  // (3.5) Start at sign-in is on by default for an installed app, applied once and never over the
+  // person's own choice (lib/settings.mjs decideLoginDefault).
+  const applyLoginDefault = () => {
+    try {
+      const li = loginItem();
+      const decision = decideLoginDefault({ packaged: isPackaged, supported: li.supported, openAtLogin: li.openAtLogin, record: settings.get().loginItem });
+      if (!decision.change) return;
+      if (decision.enable) setLoginItem(true);
+      settings.patch({ loginItem: decision.record });
+      log.info(`Start at sign-in ${decision.enable ? 'turned on' : 'already on'} by default (the person can switch it off in Settings or the tray)`);
+    } catch (err) {
+      log.warn('Could not turn on "Start at sign-in" by default', String(err?.message ?? err));
+    }
+  };
+  applyLoginDefault();
+
+  /** The person's own choice (Settings or the tray): applied, and recorded so no default overrides it. */
+  const chooseLoginItem = (enabled, from) => {
+    if (!loginItem().supported) throw new Error(loginItem().reason);
+    setLoginItem(!!enabled);
+    settings.patch({ loginItem: { choice: !!enabled, at: new Date().toISOString() } });
+    log.info(`Start at sign-in ${enabled ? 'on' : 'off'} (${from})`);
+    refreshTrayRef?.();
+    return loginItem();
+  };
+
   const HANDLERS = {
     state: () => snapshot(),
     reconnect: () => {
@@ -868,12 +895,7 @@ async function startApp() {
     // a reboot nothing else starts it. Installed builds only: a development build would register
     // electron.exe without this app's folder, which starts an empty Electron at every sign-in.
     'desktop.loginItem.get': () => loginItem(),
-    'desktop.loginItem.set': ({ enabled }) => {
-      if (!loginItem().supported) throw new Error(loginItem().reason);
-      setLoginItem(!!enabled);
-      log.info(`Start at sign-in ${enabled ? 'on' : 'off'}`);
-      return loginItem();
-    },
+    'desktop.loginItem.set': ({ enabled }) => chooseLoginItem(enabled, 'Settings'),
     'desktop.patch': (patch) => {
       const allowed = {};
       if (typeof patch?.lastView === 'string') allowed.lastView = patch.lastView.slice(0, 40);
@@ -975,9 +997,14 @@ async function startApp() {
   const trayImage = (state) => {
     if (!trayImages[state]) {
       const img = nativeImage.createEmpty();
-      img.addRepresentation({ scaleFactor: 1, buffer: iconPng(16, state) });
-      img.addRepresentation({ scaleFactor: 1.5, buffer: iconPng(24, state) });
-      img.addRepresentation({ scaleFactor: 2, buffer: iconPng(32, state) });
+      // (3.5) The macOS menu bar takes a monochrome template, recoloured by the system for a light
+      // or dark bar; only a state that needs the person's attention (stopped, port taken) keeps colour.
+      const template = process.platform === 'darwin' && (state === 'connected' || state === 'offline');
+      const draw = template ? (s) => templatePng(s) : (s) => iconPng(s, state);
+      img.addRepresentation({ scaleFactor: 1, buffer: draw(16) });
+      img.addRepresentation({ scaleFactor: 1.5, buffer: draw(24) });
+      img.addRepresentation({ scaleFactor: 2, buffer: draw(32) });
+      if (template) img.setTemplateImage?.(true);
       trayImages[state] = img;
     }
     return trayImages[state];
@@ -1031,6 +1058,7 @@ async function startApp() {
       const [width, height] = win.getSize();
       settings.patch({ window: { width, height } });
       win.hide();
+      trayNotice();
     });
     // Frames nobody can see still cost the browser a screencast: pause watches while the window is
     // hidden or minimized, and ask for them again when it comes back.
@@ -1094,6 +1122,27 @@ async function startApp() {
     push('watch', { resumed: tabs });
   }
 
+  /**
+   * (3.5) The first time the window closes to the tray, say once where G9BrowserAgent went: a
+   * window that vanishes while the app keeps running reads as "it quit", or as "it is stuck".
+   */
+  function trayNotice() {
+    if (CHECKING || settings.get().trayNoticeAt) return;
+    settings.patch({ trayNoticeAt: new Date().toISOString() });
+    try {
+      if (!Notification?.isSupported?.()) return;
+      const n = new Notification({
+        title: 'G9BrowserAgent is still running',
+        body: `It waits in ${trayPlace(process.platform)}, so agents, schedules and updates keep working. Click its icon to open it; Quit is in its menu.`,
+        silent: true,
+      });
+      n.on('click', () => showWindow());
+      n.show();
+    } catch {
+      /* notifications are a courtesy */
+    }
+  }
+
   function trayState() {
     const s = client.state;
     if (s.status === 'foreign') return 'attention';
@@ -1118,7 +1167,8 @@ async function startApp() {
     const state = trayState();
     const connected = client.state.status === 'connected';
     const halted = !!ctx.store.halted?.global;
-    const key = `${state}|${statusText()}|${connected}|${halted}`;
+    const li = loginItem();
+    const key = `${state}|${statusText()}|${connected}|${halted}|${li.supported}|${li.openAtLogin}`;
     if (key === lastTrayKey) return;
     lastTrayKey = key;
     ctx.tray.setImage(trayImage(state));
@@ -1132,6 +1182,10 @@ async function startApp() {
       { label: 'Stop all agents', enabled: connected && !halted, click: () => client.admin('halt', {}).then(() => log.info('Global halt from the tray', { by: user })).catch((e) => log.warn('halt failed', e.message)) },
       { label: 'Resume', enabled: connected && halted, click: () => client.admin('resume', {}).then(() => log.info('Resume from the tray', { by: user })).catch((e) => log.warn('resume failed', e.message)) },
       { type: 'separator' },
+      ...(li.supported ? [{
+        label: 'Start at sign-in', type: 'checkbox', checked: !!li.openAtLogin,
+        click: (item) => { try { chooseLoginItem(!!item.checked, 'tray'); } catch (err) { log.warn('Start at sign-in failed', String(err?.message ?? err)); } },
+      }] : []),
       { label: 'Quit G9BrowserAgent', click: () => quitApp() },
     ]));
   }
@@ -1167,6 +1221,7 @@ async function startApp() {
   }
 
   showWindowRef = showWindow;
+  refreshTrayRef = () => { lastTrayKey = ''; refreshTray(); };
   app.on('before-quit', () => {
     ctx.quitting = true;
   });

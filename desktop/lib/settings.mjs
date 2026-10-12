@@ -19,7 +19,35 @@ export const DESKTOP_DEFAULTS = Object.freeze({
   update: { url: '', channel: 'stable' },
   wizard: { completedAt: null, steps: {} },
   startDaemon: true,
+  // (3.5) Start at sign-in: `choice` is the person's own (true/false, from Settings or the tray),
+  // null until they make one; `defaultAppliedAt` when the default (on) was applied for them.
+  loginItem: { choice: null, at: null, defaultAppliedAt: null },
+  // (3.5) When the "still running in the tray" notification was shown (once per install).
+  trayNoticeAt: null,
 });
+
+/**
+ * (3.5) Start at sign-in is ON by default for an installed app. G9BrowserAgent is a tray app: the
+ * daemon, schedules and the updater live while it runs, and until 3.5.0 people had to find the
+ * setting to get any of that after a restart. The default is applied ONCE — on a fresh install and
+ * on the first start after an update from an older version alike — and never over the person's own
+ * choice: once they switch it off (or on) in Settings or the tray, that is what stays.
+ *
+ * → { change: false } or { change: true, enable, record } (record goes to settings.loginItem).
+ */
+export function decideLoginDefault({ packaged, supported, openAtLogin, record, now = new Date().toISOString() }) {
+  if (!packaged || !supported) return { change: false };
+  if (record?.choice === true || record?.choice === false) return { change: false };
+  if (record?.defaultAppliedAt) return { change: false };
+  return { change: true, enable: !openAtLogin, record: { choice: null, at: null, defaultAppliedAt: now } };
+}
+
+/** (3.5) Where the tray lives, in each system's own words. */
+export function trayPlace(platform) {
+  if (platform === 'darwin') return 'the menu bar';
+  if (platform === 'win32') return 'the notification area (system tray)';
+  return 'the system tray';
+}
 
 export class DesktopSettings {
   constructor(file) {

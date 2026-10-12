@@ -359,6 +359,11 @@ export function createFakeBrowser({ viewport = { width: 1280, height: 800 } } = 
       // `isConnected` is what tells a re-rendered element from one that merely moved.
       get isConnected() { return node.removed !== true; },
       get checked() { return !!node.checked; },
+      // (3.5) range inputs and text, for set_value.
+      get min() { return node.attrs?.min ?? ''; },
+      get max() { return node.attrs?.max ?? ''; },
+      get step() { return node.attrs?.step ?? ''; },
+      get innerText() { return node.text ?? ''; },
       get files() { return node.files ?? null; },
       get textContent() { return node.text ?? ''; },
       get ownerDocument() { return documentFor(node.frame, ctx); },
@@ -672,8 +677,15 @@ export function createFakeBrowser({ viewport = { width: 1280, height: 800 } } = 
         return remote(obj.ctx, value, params.returnByValue);
       }
       case 'DOM.describeNode': {
+        // (3.5) by nodeId too (DOM.querySelectorAll's nodeIds are the fake's backend ids).
+        if (params.nodeId != null && !params.objectId) return { node: { backendNodeId: params.nodeId } };
         const obj = objects.get(params.objectId);
-        return { node: { backendNodeId: obj?.value?.__fakeNode ?? null } };
+        return { node: { backendNodeId: obj?.value?.__fakeNode ?? params.backendNodeId ?? null } };
+      }
+      case 'DOM.querySelectorAll': {
+        // (3.5) `tab.selectors`: { selector: [backendNodeId, …] } — what the page's CSS would match.
+        if (/^!/.test(params.selector)) fail(`'${params.selector}' is not a valid selector.`);
+        return { nodeIds: [...(tab.selectors?.[params.selector] ?? [])].filter((id) => tab.nodes.has(id)) };
       }
       case 'DOM.getBoxModel': {
         const node = tab.nodes.get(params.backendNodeId);
@@ -725,6 +737,11 @@ export function createFakeBrowser({ viewport = { width: 1280, height: 800 } } = 
           return {};
         }
         if (params.type === 'mousePressed' && target) tab.focused = target;
+        // (3.5) Controls that react to the pointer: `onPress(x, y)` on a press, `onRelease(x, y)` on the
+        // node the button went down on (a slider thumb dragged and let go).
+        if (params.type === 'mousePressed' && target?.onPress) target.onPress(params.x, params.y);
+        if (params.type === 'mousePressed') tab.pressedNode = target;
+        if (params.type === 'mouseReleased' && tab.pressedNode?.onRelease) tab.pressedNode.onRelease(params.x, params.y);
         if (params.type === 'mouseWheel' && tab.wheelScrolls) {
           // `scrollLag`: the scroll lands that long AFTER the dispatch returned, as a real
           // compositor applies it a frame or more later (~100 ms on CfT's 10 Hz renderer).
@@ -751,6 +768,8 @@ export function createFakeBrowser({ viewport = { width: 1280, height: 800 } } = 
         if (params.type === 'keyDown' || params.type === 'rawKeyDown') {
           deliver(tab, frame, 'keydown', { node: tab.focused, fields });
           const n = tab.focused;
+          // (3.5) A control with its own keyboard (a slider's arrows): `onKey(key)`.
+          if (n?.onKey) { n.onKey(params.key); return {}; }
           if (n && params.type === 'keyDown' && typeof params.text === 'string' && params.text.length && params.text !== '\r' && !(n.rejects && n.rejects.test(params.text))) {
             n.value = (n.selectedAll ? '' : n.value) + params.text;
             n.selectedAll = false;

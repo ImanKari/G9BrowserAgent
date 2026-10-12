@@ -329,6 +329,12 @@ so once.
 The top bar always shows the daemon's status and **Stop all**; the tray icon has **Stop all** and
 **Resume** too. The sidebar footer shows the update status.
 
+G9BrowserAgent lives in the tray (the menu bar on macOS): closing the window keeps it running, so
+agents, schedules and updates keep working, and the first time a notification says where it went.
+**Start at sign-in is on by default** for an installed app; switch it off in Settings or in the tray
+menu, and it stays off. The icon is one design everywhere — the extension, the app, the installer and
+the tray, where its colour shows the state (stopped in red, offline in grey).
+
 ![Agents](docs/assets/desktop-agents.png)
 
 | View | What it is for |
@@ -339,7 +345,7 @@ The top bar always shows the daemon's status and **Stop all**; the tray icon has
 | **Runs** | Every replay: verdict, each step and which locator matched, warnings, "surprises" compared with the approved run, and a frame-by-frame replay you can export as a video. |
 | **Approvals** | Runs that found something new. Approve it as the new normal, or leave it for a person. |
 | **Schedule** | Run a suite daily or every N minutes, unattended. |
-| **Settings** | Defaults for new runs, evidence limits, the daemon, updates, and "Start G9BrowserAgent when I sign in". |
+| **Settings** | Defaults for new runs, evidence limits, the daemon, updates, and "Start G9BrowserAgent when I sign in" (on by default). |
 | **Setup** | The first-time setup, any time. |
 
 ![Engines](docs/assets/desktop-engines.png)
@@ -358,12 +364,12 @@ Agents get **15 tools**. The ones they use most:
 
 | Tool | What it does |
 |---|---|
-| `browser_status` | Where am I? The current tab and its health, engines, agents, and whether Stop is pressed. Agents call it first. |
-| `browser_tabs` | List, open, close, focus, attach or claim tabs; pop out; hand off to a background browser; keep a background tab awake for long work. |
+| `browser_status` | Where am I? The current tab and its health, engines, agents, and whether Stop is pressed. Agents call it first. It also says how an earlier call ended, even one the agent's client gave up on. |
+| `browser_tabs` | List, open, close, focus, attach or claim tabs; release (which also detaches the debugger in your browser); pop out; hand off to a background browser — into a named profile with its proxy, so the login stays; keep a background tab awake for long work. |
 | `browser_snapshot` | Read the page as an accessibility tree, with a `ref` for each element to act on — or only part of it (a scope, roles, a name, only controls), or only what changed since last time. |
-| `browser_interact` | Click, double-click, right-click, hover, type, press keys, scroll, drag, select, upload — on a `ref`. |
+| `browser_interact` | Click, double-click, right-click, hover, type, press keys, scroll, drag, select, upload — on a `ref`, or found by role and name or a CSS selector, waiting for it to appear. `set_value` sets a slider, checkbox, field or select and proves it; uploads can bring their files along. |
 | `browser_navigate` | Go to a URL, reload, back, forward, wait for a load state — or for a condition in the page, for up to two hours. |
-| `browser_console`, `browser_network` | Read console messages and requests; run JavaScript, also as a long background job; record HAR; pin or intercept responses; fetch a file with the browser's cookies and save it. |
+| `browser_console`, `browser_network` | Read console messages and requests; run JavaScript, also as a long background job; record HAR; pin or intercept responses; fetch a file with the browser's cookies and save it; read a saved or downloaded file back, in chunks. |
 | `browser_screenshot`, `browser_inspect`, `browser_diagnose` | Pictures (also saved to a file), DOM / styles / storage / cookies, finding one control by role and name, and health, performance and memory checks. |
 | `browser_recording`, `browser_issue` | Record, replay and approve flows; run a list of steps in one call; file issues with evidence. |
 | `browser_engine`, `browser_emulate`, `browser_dialog` | Start background browsers; emulate devices, networks and color schemes; answer dialogs. |
@@ -379,8 +385,20 @@ replays the same motion. Details: [docs/HUMANIZE.md](docs/HUMANIZE.md).
 
 **Hidden tabs.** A browser does not deliver mouse input to a tab you cannot see (a background tab or
 a minimized window). G9BrowserAgent notices, refuses the action instead of pretending, and the side panel offers
-**Pop out** or **Send to background**. Background browsers (Engine 2) are headless and never have
-this problem — use them for anything unattended.
+**Pop out** or **Send to background**. An agent may also ask for the tab to be brought forward or
+moved into a window of its own for that call. Background browsers (Engine 2) are headless and never
+have this problem — use them for anything unattended.
+
+**Finding things without reading everything.** An agent can click "the button named Share" or "the
+second `.item`" without a snapshot of the whole page, and wait for a control that appears late. A
+target that is covered for a moment (a toast, an animation) is tried again until it is clickable;
+nothing is pressed meanwhile, so nothing happens twice. An argument a tool does not know is refused
+with the closest real one, instead of being ignored.
+
+**When the agent's client gives up first.** Some actions take longer than an AI client waits. Every
+call has an id, the daemon remembers how it ended, and an agent can give an action a key of its own:
+sent again with the same key, it is not done again — the first outcome comes back. So a slow publish
+is never published twice.
 
 **Sharing.** Each tab has one owner; changes on a tab run one at a time; other agents get a clear
 "owned by" message. **Stop** blocks everything, and only a person can resume.
@@ -465,7 +483,9 @@ then takes care of the rename itself:
 | The panel warns the daemon and extension versions differ | Press **Reload** on the G9BrowserAgent extension, or **Engines → Update and reload** in the desktop app. |
 | Everything fails with *"The user pressed Stop"* | Press **Resume** in the side panel or the desktop app. Agents cannot resume on their own. |
 | *"not delivered; tab hidden"* | The tab is in the background or minimized. Bring it forward, **Pop out** it, or **Send to background**. |
-| *"Tab N is owned by another agent"* | Another agent is using it. Ask that agent to release it, or tell your agent it may take it over. |
+| *"Tab N is owned by another agent"* | Another agent is using it. Ask that agent to release it, or tell your agent it may take it over. A claim whose agent has been idle for 15 minutes lapses by itself. |
+| *"… does not take "x" (did you mean "y"?)"* | The agent passed an argument the tool does not have; the message names the right one. |
+| A download never arrives | The result now names the browser's reason. On a server, the browser's download folder must exist (the browser node creates it). |
 | No requests in `browser_network` | Capture starts when the tab is attached. Use **Record from now** with **reload to capture page load**. |
 | Windows Firewall asks about Chrome for Testing | Either answer is fine: G9BrowserAgent talks to the browser over a pipe, not the network. |
 | macOS: *"cannot be opened"* or *"damaged"* | See [Install → macOS](#macos). |
@@ -481,7 +501,7 @@ Undo what G9BrowserAgent changed outside its own folders first, while G9BrowserA
 
 1. **Setup → Background policies → Undo** (Windows, only if you applied them).
 2. **Setup → AI clients → Remove** for each client.
-3. **Settings** → turn off **Start G9BrowserAgent when I sign in**.
+3. **Settings** → turn off **Start G9BrowserAgent when I sign in** (it is on by default).
 4. Remove the G9BrowserAgent extension on your browser's extensions page.
 5. **Engines → Stop** any running browser, then **Settings → Shut down daemon**.
 
@@ -577,7 +597,8 @@ browser. Treat it like an SSH key, and use it on machines whose users and softwa
   driven over a pipe (no debugging port is open).
 - **Stop is always there**, and agents cannot undo it.
 - While the extension controls a tab, the browser shows *"started debugging this browser"*. That bar
-  is the browser's own warning and cannot be hidden.
+  is the browser's own warning and cannot be hidden. When an agent releases a tab, the debugger is
+  detached from it; the bar goes once no tab is attached.
 - The packages are not code-signed yet. Check the SHA-256 in the release notes if in doubt.
 
 Details: [technical reference → Security and trust model](docs/REFERENCE.md#security-and-trust-model).
@@ -594,8 +615,12 @@ Details: [technical reference → Security and trust model](docs/REFERENCE.md#se
   use a background browser (headless) for unattended work.
 - **x64 only** on Windows and Linux (no ARM builds there); macOS has both Apple silicon and Intel.
 - **Edge and Chrome only.** No Firefox or Safari. Device emulation is not a real device.
-- **Headless can be detected** by determined bot detectors; stealth reduces what G9BrowserAgent adds, but a
-  headless browser still differs from a visible one.
+- **Headless can be detected** by determined bot detectors. At stealth a headless browser now sends the
+  same user agent as a visible one, but it still differs in other ways; use a visible (headed)
+  browser for sites with strict bot checks.
+- **Your own browser is driven through its debugger.** Some captcha and bot checks notice an attached
+  debugger. For such sites, hand the work to a background browser with its own profile (and proxy),
+  or release the tab so the debugger detaches.
 - **Browser pages you cannot control:** `chrome://` / `edge://` pages, the web stores, and native
   dialogs (print, the file picker — use `upload` instead).
 - **Updating while an AI client is using G9BrowserAgent** may end that client's G9BrowserAgent tools until its next call.

@@ -80,8 +80,14 @@ one anyway: a page that re-renders replaces the elements you saw.
 
 ## Acting
 \`browser_interact\` sends real, trusted browser input (isTrusted === true) —
-by default with human-like pointer paths, timing and typing. Always pass a ref;
-coordinates are a fallback for canvas widgets. **A dispatched action is not a
+by default with human-like pointer paths, timing and typing. Name the target with a ref,
+or without a snapshot by \`role\`+\`name\` (a regex) or a \`selector\` (\`nth\` when several match;
+several without nth are refused, never guessed); \`waitMs\` waits for a control that appears
+late, and a covered or moving target is tried again until clickable (nothing is pressed
+meanwhile). Coordinates are a fallback for canvas widgets. \`action:"set_value"\` sets a
+slider, checkbox, switch, field or select and proves the value; \`drag toPercent\` moves a
+thumb or scrubber. In the user's browser \`ifHidden:"popout"\` (or "focus") lets the call
+bring a background tab forward instead of being refused. **A dispatched action is not a
 delivered action**: every result carries \`delivery\` —
 "delivered" or "indeterminate". "not-delivered" (nothing reached the page),
 "missed" (it reached the page but a different element — the error names which)
@@ -174,6 +180,13 @@ position (a replay homes the pointer and reports \`pointerStart\`).
   waits behind a stuck call.
 - Stateless clients: over HTTP a new MCP session with the same client name (or X-G9-Agent header)
   takes over the previous session's tabs, current tab and session names keep working.
+- Your client gave up but the page may not have: every tool takes \`opId\` (your idempotency key,
+  e.g. "publish-post-42" — the same opId is never acted on twice; a resend returns the first outcome)
+  and \`replyWithinMs\` (answer \`{pending:true, callId}\` by then; the call goes on). Set
+  replyWithinMs below your client's own timeout for slow actions. \`browser_status callId:"…"\`
+  (waitMs to wait) says how a call ended — also one G9 answered "may still be running" that finished
+  later — and \`browser_status calls:true\` lists your recent calls. Check before you repeat an action.
+- An argument a tool does not take is refused with the closest real one ("did you mean scope?").
 
 ## Debugging
 \`browser_diagnose\` answers "what is wrong with this page" in one call. Capture
@@ -217,6 +230,10 @@ export const TOOLS = [
       type: 'object',
       properties: {
         tabId: num('Report on this tab instead of your current one.'),
+        callId: str('How did this call end? A callId from a pending answer or an error. Returns only that call: state (running/done/failed), its result or error, and late:true when it ended after its deadline.'),
+        waitMs: num('With callId: wait up to this long (max 600000) for the call to end.'),
+        calls: bool('Only your recent calls (newest first): tool, action, state, outcome. Use it after your client timed out on a call.', false),
+        limit: num('With calls:true — how many (default 20).'),
       },
     },
     annotations: { readOnlyHint: true },
@@ -260,12 +277,12 @@ export const TOOLS = [
   {
     name: 'browser_tabs',
     description:
-      'Tabs across ALL engines, with full titles and URLs. "close" and "focus" never wait behind a stuck call (close ends the calls running on that tab). "keep_awake" keeps a background tab working for long in-page work. "list" every tab (engine, owner, session); "open" a URL (in the user\'s browser when the extension is connected, else a launched browser — or choose with engine) and make it your current tab (in the user\'s browser it opens in the BACKGROUND: readable, not clickable, unless focus:true; a launched engine gives it its own window); "close"/"focus" a tab; "attach" the tab the user is on (extension) and make it current; "claim"/"release" ownership (force:true takes over — only when the user asks); "popout" an extension tab into its own window without reloading it (never minimise that window); "handoff" an extension tab into a launched browser (cookies + local/session storage travel, the page reloads, in-memory state/IndexedDB/service workers do not); "session" names a tab (with url: opens or re-points it); "sessions"/"end_session" list or forget names (the tab stays open); "wait" for a popup/new tab by url/title/opener; "watch" opens a LIVE VIEW of a tab for the user (frames and your cursor, view only) — the way to let them see a headless launched tab, which has no window: the watch window opens in their browser without taking the keyboard (focus:true brings it to the front), on:false closes it. NOTE (the user\'s browser): a browser only delivers input to the tab it is SHOWING, so a background tab or session can be read (snapshot, console, network, screenshot) but not clicked or typed into — "focus" it first, or "popout"/"handoff" it.',
+      'Tabs across ALL engines, with full titles and URLs. "close" and "focus" never wait behind a stuck call (close ends the calls running on that tab). "keep_awake" keeps a background tab working for long in-page work. "list" every tab (engine, owner, session); "open" a URL (in the user\'s browser when the extension is connected, else a launched browser — or choose with engine) and make it your current tab (in the user\'s browser it opens in the BACKGROUND: readable, not clickable, unless focus:true; a launched engine gives it its own window); "close"/"focus" a tab; "attach" the tab the user is on (extension) and make it current; "claim"/"release" ownership (force:true takes over — only when the user asks; in the user’s browser release also DETACHES the debugger, "detach" does only that); a claim whose owner sent nothing for 15 min lapses for the next agent; "popout" an extension tab into its own window without reloading it (never minimise that window); "handoff" an extension tab into a launched browser (cookies + local/session storage travel, the page reloads, in-memory state/IndexedDB/service workers do not; with profile they are kept in that profile, and proxy/headless/stealth set up the receiving browser); "session" names a tab (with url: opens or re-points it); "sessions"/"end_session" list or forget names (the tab stays open); "wait" for a popup/new tab by url/title/opener; "watch" opens a LIVE VIEW of a tab for the user (frames and your cursor, view only) — the way to let them see a headless launched tab, which has no window: the watch window opens in their browser without taking the keyboard (focus:true brings it to the front), on:false closes it. NOTE (the user\'s browser): a browser only delivers input to the tab it is SHOWING, so a background tab or session can be read (snapshot, console, network, screenshot) but not clicked or typed into — "focus" it first, or "popout"/"handoff" it.',
     inputSchema: {
       type: 'object',
       properties: {
         action: str('What to do.', {
-          enum: ['list', 'open', 'close', 'focus', 'attach', 'claim', 'release', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch', 'keep_awake'],
+          enum: ['list', 'open', 'close', 'focus', 'attach', 'detach', 'claim', 'release', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch', 'keep_awake'],
           default: 'list',
         }),
         on: bool('For watch: false closes the live view again. For keep_awake: false ends it.', true),
@@ -278,7 +295,16 @@ export const TOOLS = [
         context: str('For open/handoff: a contextId from browser_engine action:"context" (launched engines only). Handoff defaults to a fresh isolated context.'),
         focus: bool('For open/session: bring the tab to the front in its window. For popout/watch: create the new window in front and focused (default: unfocused, so the user keeps the keyboard).', false),
         force: bool('For claim: take the tab over from another agent. Only when the user asked for it; it is logged.', false),
+        detach: bool('For release (the user’s browser): also end G9’s debugger session on the released tabs, so the page no longer has a debugger attached (captcha and bot checks look for one). false keeps it attached.', true),
+        leaveWithoutAsking: bool('For close: accept the page’s "Leave site?" (beforeunload) prompt instead of stopping at it.', false),
         includeStorage: bool('For handoff: also carry localStorage/sessionStorage of the page\'s origin.', true),
+        profile: str('For handoff: hand the tab into this G9BrowserAgent profile (launched, or reused when it already runs). The cookies are written INTO the profile, so the login stays for later runs. Without it a handoff uses a fresh, temporary context.'),
+        proxy: str('For handoff: the proxy the receiving browser uses (with profile: launched with it; without: a fresh context with it), e.g. "http://proxy:8080".'),
+        proxyBypass: str('For handoff with proxy: hosts that skip the proxy, e.g. "localhost;*.internal".'),
+        headless: bool('For handoff with profile: false launches it headed (a window a person can see; never minimise it).'),
+        stealth: str('For handoff: the receiving browser\'s stealth level.', { enum: ['off', 'human', 'stealth'] }),
+        locale: str('For handoff with profile: the persona\'s locale, e.g. "fa-IR".'),
+        timezone: str('For handoff with profile: the persona\'s IANA time zone.'),
         launch: bool('For handoff: launch the default engine if none runs.', true),
         matchViewport: bool('For handoff: give the new tab the same viewport size as the original.', false),
         width: num('For popout: window width.'),
@@ -316,15 +342,21 @@ export const TOOLS = [
   {
     name: 'browser_interact',
     description:
-      'Real user input: trusted browser events (isTrusted === true), human-like by default (curved pointer paths, human timing, wheel notches, per-key typing with rare corrected typos; never in password fields). Pass a ref from browser_snapshot. The result reports delivery ("delivered" | "indeterminate"; "not-delivered", "missed" — the input reached a different element than the ref — and "partial" — the tab became hidden part-way — are errors whose text starts with a [delivery: …] tag and names the cause) and the pointer position — anything but "delivered" is unproven: verify the effect before relying on it, and never blindly repeat a state-changing action.',
+      'Real user input: trusted browser events (isTrusted === true), human-like by default (curved pointer paths, human timing, wheel notches, per-key typing with rare corrected typos; never in password fields). Pass a ref from browser_snapshot — or skip the snapshot: role+name ("button", /^share$/) or a selector, with waitMs for a control that appears late. "set_value" sets a slider, checkbox, switch, field or select to a value and verifies it; "drag" with toPercent moves a slider or scrubber. A covered or moving target is tried again until it is clickable (nothing is pressed meanwhile). The result reports delivery ("delivered" | "indeterminate"; "not-delivered", "missed" — the input reached a different element than the ref — and "partial" — the tab became hidden part-way — are errors whose text starts with a [delivery: …] tag and names the cause) and the pointer position — anything but "delivered" is unproven: verify the effect before relying on it, and never blindly repeat a state-changing action.',
     inputSchema: {
       type: 'object',
       required: ['action'],
       properties: {
         action: str('What to do.', {
-          enum: ['click', 'double_click', 'right_click', 'hover', 'type', 'key', 'scroll', 'drag', 'select', 'upload'],
+          enum: ['click', 'double_click', 'right_click', 'hover', 'type', 'key', 'scroll', 'drag', 'select', 'upload', 'set_value'],
         }),
-        ref: str('Element handle from browser_snapshot, e.g. "e12". Required for most actions.'),
+        ref: str('Element handle from browser_snapshot, e.g. "e12". Or name the target without a snapshot: role (+ name), or selector.'),
+        role: str('Instead of ref: the element’s role ("button", "link", "textbox", "slider", "checkbox"…), with name to narrow it. Several matches are refused with the list unless nth picks one.'),
+        name: str('Instead of ref: a regular expression the accessible name must match (case-insensitive), with or without role.'),
+        nth: num('With role/name or selector: which match (1-based) when several match.'),
+        waitMs: num('Wait up to this long (max 60000) for the target to appear, and for a covered or moving target to become clickable (tried again; nothing is pressed until it is). Without it, a covered or moving target gets 1.5 s.'),
+        ifHidden: str('The user’s browser only: when the tab is in the background, "focus" brings it to the front of its window and "popout" moves it into a window of its own, then acts (instead of refusing).', { enum: ['refuse', 'focus', 'popout'], default: 'refuse' }),
+        value: { description: 'For action:"set_value" — the value: a number for a slider or range input, true/false for a checkbox/switch/radio, text for a field, an option (or several) for a select. The result proves it (before, after, verified).', anyOf: [{ type: 'string' }, { type: 'number' }, { type: 'boolean' }, { type: 'array', items: { type: 'string' } }] },
         text: str('For action:"type" — the text to enter.'),
         clear: bool('For action:"type" — empty the field first (verified).', false),
         fast: bool('For action:"type" — insert the whole string at once. Not human; masked or key-filtered inputs may need the default per-character typing.', false),
@@ -339,15 +371,27 @@ export const TOOLS = [
         repeat: num('For action:"key" — press this many times.', { default: 1 }),
         direction: str('For action:"scroll".', { enum: ['up', 'down', 'left', 'right'], default: 'down' }),
         amount: num('For action:"scroll" — pixels (humanized scrolling rounds to wheel notches).', { default: 400 }),
-        from: str('For action:"drag" — source ref.'),
+        from: str('For action:"drag" — source ref (or the role/name/selector target).'),
         to: str('For action:"drag" — target ref.'),
+        toPercent: num('For action:"drag" instead of to — a position 0..100 along the control’s track (a slider thumb, a scrubber). The result has the value before and after.'),
+        toX: num('For action:"drag" instead of to — a viewport x (CSS pixels) to drop at, with toY.'),
+        toY: num('For action:"drag" — the viewport y to drop at.'),
         values: {
           description: 'For action:"select" — option value(s), label(s), or visible text.',
           anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
         },
-        selector: str('CSS selector, for action:"upload" when the file input is hidden and has no ref — the usual case. Try "input[type=file]".'),
+        selector: str('Instead of ref: a CSS selector (visible matches only; nth picks one). For action:"upload" it names the file input, hidden or not — try "input[type=file]".'),
         files: {
-          description: 'For action:"upload" — absolute local file path(s). No native picker opens.',
+          description: 'For action:"upload" — absolute file path(s) on the BROWSER’s machine. No native picker opens. Or hand the bytes over with fileData / fileUrls.',
+          anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
+        },
+        fileData: {
+          description: 'For action:"upload" — files to upload, as bytes: [{ name, base64 }] (up to 40 MiB per call). They are written on the browser’s machine first; the result lists them (path, size, sha256) and what the input then holds.',
+          type: 'array',
+          items: { type: 'object', properties: { name: { type: 'string' }, base64: { type: 'string' } } },
+        },
+        fileUrls: {
+          description: 'For action:"upload" — files to upload from URLs, fetched as the page would (the browser’s cookies), then set on the input.',
           anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
         },
         x: num('Fallback X coordinate when no ref exists (canvas, custom widgets).'),
@@ -380,6 +424,7 @@ export const TOOLS = [
         state: str('For action:"wait" with ref.', { enum: ['visible', 'hidden', 'enabled', 'disabled', 'checked', 'unchecked', 'gone', 'present'], default: 'visible' }),
         pollMs: num('For action:"wait" — how often to look (default: 250 ms, slowing to 1-2 s on long waits).'),
         waitUntil: str('Load condition for goto/reload.', { enum: ['load', 'domcontentloaded', 'idle'], default: 'load' }),
+        leaveWithoutAsking: bool('For goto/reload/back/forward — accept the page’s own "Leave site?" (beforeunload) prompt for this navigation instead of stopping at it.', false),
         timeoutMs: num('Deadline in milliseconds. Defaults to 30000 for goto/reload and 15000 for wait; a wait may take up to 7200000 (2 h).'),
         tabId: TAB_ID,
       },
@@ -439,13 +484,13 @@ export const TOOLS = [
   {
     name: 'browser_network',
     description:
-      'Network: list requests, or pass a requestId for one in full (headers, timing, POST body, response body). Capture begins when the tab is attached — if an already-open page shows 0 requests, reload it (browser_navigate action:"reload") and read again. RECORD AND FREEZE: "record_har", then "pin" serves matching requests from that HAR (strict:true fails the rest) so a remaining difference is the client\'s; "unpin"; "pin_status". BREAK IT ON PURPOSE: "intercept" with rules makes chosen requests fail, stall or return your body (test the UI on a 500/429/timeout); "intercept_status"; "clear_intercept". Rules apply before a pinned HAR. DOWNLOADS: "watch_downloads" BEFORE the click that starts one (each watch starts a fresh list), then "wait_download" returns the finished file (name, bytes; in launched engines also sha256 and the type sniffed from its content), "downloads" lists them, "stop_downloads" ends the watch — proof an export produced a real file, which a 200 response cannot give; in the user\'s browser the result gives the final path and, when the daemon can read it, the sha256. FETCH: "fetch" gets a URL with the browser\'s cookies (method, headers, body) and returns a bounded body — or, with savePath, writes it on the browser\'s machine and returns path, size, sha256 and content type (up to 40 MiB).',
+      'Network: list requests, or pass a requestId for one in full (headers, timing, POST body, response body). Capture begins when the tab is attached — if an already-open page shows 0 requests, reload it (browser_navigate action:"reload") and read again. RECORD AND FREEZE: "record_har", then "pin" serves matching requests from that HAR (strict:true fails the rest) so a remaining difference is the client\'s; "unpin"; "pin_status". BREAK IT ON PURPOSE: "intercept" with rules makes chosen requests fail, stall or return your body (test the UI on a 500/429/timeout); "intercept_status"; "clear_intercept". Rules apply before a pinned HAR. DOWNLOADS: "watch_downloads" BEFORE the click that starts one (each watch starts a fresh list), then "wait_download" returns the finished file (name, bytes; in launched engines also sha256 and the type sniffed from its content), "downloads" lists them, "stop_downloads" ends the watch — proof an export produced a real file, which a 200 response cannot give; in the user\'s browser the result gives the final path and, when the daemon can read it, the sha256. FETCH: "fetch" gets a URL with the browser\'s cookies (method, headers, body) and returns a bounded body — or, with savePath, writes it on the browser\'s machine and returns path, size, sha256 and content type (up to 40 MiB). READ_FILE: the bytes of a file G9BrowserAgent saved or downloaded on the browser’s machine, base64, in chunks (path, offset, length) — how to get a download or a saved fetch off a remote browser node. A download that fails (a missing download folder, a network or server error) ends wait_download at once with the reason and the fix.',
     inputSchema: {
       type: 'object',
       properties: {
         action: str('Default "list".', {
           enum: ['list', 'record_har', 'pin', 'unpin', 'pin_status', 'intercept', 'intercept_status', 'clear_intercept',
-            'watch_downloads', 'downloads', 'wait_download', 'stop_downloads', 'fetch'],
+            'watch_downloads', 'downloads', 'wait_download', 'stop_downloads', 'fetch', 'read_file'],
           default: 'list',
         }),
         url: str('For action:"fetch" — the URL (relative to the page is fine).'),
@@ -454,6 +499,9 @@ export const TOOLS = [
         bodyBase64: str('For action:"fetch" — a binary request body, base64.'),
         savePath: str('For action:"fetch" — write the response body to this path on the BROWSER\'s machine (relative = under the G9BrowserAgent data folder\'s files/); the result gives path, size, sha256, content type and no body.'),
         maxBytes: num('For action:"fetch" without savePath — how much of the body to return (default 262144).'),
+        path: str('For action:"read_file" — a file G9BrowserAgent wrote or saw on the browser’s machine: a download’s path, a fetch or screenshot savePath (relative = under its files/ folder). Other files are refused.'),
+        offset: num('For action:"read_file" — where to start, in bytes (default 0; the result gives next.offset while there is more).'),
+        length: num('For action:"read_file" — how many bytes (default 4 MiB, at most 8 MiB).'),
         har: { type: 'object', description: 'For action:"pin" — a HAR from action:"record_har" or format:"har".' },
         rules: {
           type: 'array',
@@ -542,7 +590,7 @@ export const TOOLS = [
   {
     name: 'browser_dialog',
     description:
-      'Accept or dismiss a JavaScript dialog (alert, confirm, prompt, beforeunload). An open dialog freezes the page; every other call on that tab fails fast, naming the dialog, until this is called.',
+      'Accept or dismiss a JavaScript dialog (alert, confirm, prompt, beforeunload). An open dialog freezes ITS tab: calls on that tab fail fast, naming the dialog, until this is called — other tabs and tab management (open, list, close) are not affected. A dialog record that is no longer real (the page answers again) clears itself. To leave a page without its "Leave site?" prompt, navigate or close with leaveWithoutAsking:true.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -682,3 +730,90 @@ for (const tool of TOOLS) {
 }
 
 export const TOOL_NAMES = TOOLS.map((t) => t.name);
+
+// ------------------------------------------------------------------ argument names (3.5)
+
+/**
+ * Keys every tool accepts whatever its schema says: where a call goes (the daemon's routing —
+ * `engine` is how the runner's --engine extension reaches a page tool) and what the transports add.
+ */
+export const ROUTING_KEYS = new Set(['tabId', 'session', 'engine', 'context', 'opId', 'replyWithinMs']);
+
+/** Names agents reach for that mean something else here. */
+const ALIASES = {
+  selector: { browser_snapshot: 'scope' },
+  css: 'selector',
+  query: 'name',
+  timeout: 'timeoutMs',
+  wait: 'waitMs',
+  waitFor: 'waitMs',
+  tab: 'tabId',
+  tab_id: 'tabId',
+  id: 'tabId',
+  js: 'expression',
+  script: 'expression',
+  code: 'expression',
+  value: 'text',
+  path: 'savePath',
+  file: 'files',
+  max: 'maxNodes',
+  limitNodes: 'maxNodes',
+  element: 'ref',
+};
+
+function editDistance(a, b) {
+  const s = a.toLowerCase();
+  const t = b.toLowerCase();
+  const d = Array.from({ length: s.length + 1 }, (_, i) => [i, ...Array(t.length).fill(0)]);
+  for (let j = 1; j <= t.length; j++) d[0][j] = j;
+  for (let i = 1; i <= s.length; i++) {
+    for (let j = 1; j <= t.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (s[i - 1] === t[j - 1] ? 0 : 1));
+  }
+  return d[s.length][t.length];
+}
+
+/** The closest known argument for an unknown one, or null. */
+export function suggestArgument(tool, key, known) {
+  const alias = ALIASES[key];
+  const aliased = typeof alias === 'string' ? alias : alias?.[tool];
+  if (aliased && known.includes(aliased)) return aliased;
+  let best = null;
+  let bestD = Infinity;
+  for (const k of known) {
+    const dist = editDistance(key, k);
+    const near = dist <= Math.max(1, Math.floor(k.length / 4)) || k.toLowerCase().includes(key.toLowerCase()) || key.toLowerCase().includes(k.toLowerCase());
+    if (near && dist < bestD) {
+      best = k;
+      bestD = dist;
+    }
+  }
+  return best;
+}
+
+/**
+ * Argument names a call passes that its tool does not take. → [{ key, suggestion }] (empty = fine).
+ *
+ * Unknown names used to be ignored without a word: `browser_snapshot selector:"#chat"` returned the
+ * whole page — the agent read that as "the selector matched everything" and spent its context on it
+ * (field report). An argument the tool does not read is now refused, with the closest real one.
+ */
+export function unknownArguments(tool, args) {
+  const definition = TOOLS.find((t) => t.name === tool);
+  const properties = definition?.inputSchema?.properties;
+  if (!properties || !args || typeof args !== 'object') return [];
+  const known = Object.keys(properties);
+  const out = [];
+  for (const key of Object.keys(args)) {
+    if (key in properties || ROUTING_KEYS.has(key)) continue;
+    out.push({ key, suggestion: suggestArgument(tool, key, known) });
+  }
+  return out;
+}
+
+/** The refusal for unknownArguments(), naming every unknown key, its suggestion and the tool's real ones. */
+export function unknownArgumentsMessage(tool, unknown) {
+  const definition = TOOLS.find((t) => t.name === tool);
+  const known = Object.keys(definition?.inputSchema?.properties ?? {});
+  const parts = unknown.map(({ key, suggestion }) => `"${key}"${suggestion ? ` (did you mean "${suggestion}"?)` : ''}`);
+  return `${tool} does not take ${parts.join(', ')}; nothing was done. Its arguments are: ${known.join(', ')}.`;
+}

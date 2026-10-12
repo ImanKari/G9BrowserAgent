@@ -141,10 +141,46 @@ export async function handoff({ router, engines, registry, engineClient, sourceH
     throw new Error(`Only http(s) pages can be handed off; this tab is on ${exported.url}.`);
   }
 
-  const engineArg = args.engine && args.engine !== 'launched' ? args.engine : null;
+  let engineArg = args.engine && args.engine !== 'launched' ? args.engine : null;
+  let contextId = args.context ?? null;
+  // (3.5) A handoff that STAYS: into a named profile's own (persistent) context, launched with the
+  // proxy, persona, stealth level and window it should have — or reused when it already runs. Until
+  // 3.5 a handoff always went into a fresh in-memory context: the login lived only as long as that
+  // context, and no proxy was applied (field report: a site that needed both was finished in a
+  // separate headed window set up by hand).
+  let profile = null;
+  if (args.profile) {
+    if (engineArg) throw new Error('handoff takes engine or profile, not both: profile launches (or reuses) the engine on that profile.');
+    const info = await engines.launch({
+      profile: String(args.profile), reuse: true,
+      ...(args.headless != null ? { headless: args.headless } : {}),
+      ...(args.stealth ? { stealth: args.stealth } : {}),
+      ...(args.proxy ? { proxy: args.proxy } : {}),
+      ...(args.proxyBypass ? { proxyBypass: args.proxyBypass } : {}),
+      ...(args.locale ? { locale: args.locale } : {}),
+      ...(args.timezone ? { timezone: args.timezone } : {}),
+    });
+    engineArg = info.engineId;
+    contextId = 'default';
+    const differs = (want, have) => want != null && String(want) !== String(have ?? '');
+    const own = (info.contexts ?? []).find((c) => c.isDefault) ?? {};
+    profile = {
+      name: String(args.profile), engineId: info.engineId,
+      ...((differs(args.proxy, own.proxy) || differs(args.headless, info.headless) || differs(args.stealth, own.stealth ?? info.stealth))
+        ? { note: `Profile "${args.profile}" was already open in ${info.engineId}; it kept the proxy, window and stealth it was launched with. Stop that engine to change them.` }
+        : {}),
+    };
+  } else if (args.proxy && !contextId) {
+    // A proxy without a profile: a fresh context of its own with that proxy.
+    contextId = (await engines.createContext(engineArg ?? (await engines.defaultEngineId({ launch: args.launch !== false })), {
+      proxy: args.proxy, ...(args.proxyBypass ? { proxyBypass: args.proxyBypass } : {}),
+      ...(args.locale ? { locale: args.locale } : {}), ...(args.timezone ? { timezone: args.timezone } : {}),
+      ...(args.stealth ? { stealth: args.stealth } : {}),
+    })).contextId;
+  }
   const result = await engines.handoffImport(exported, {
     engineId: engineArg,
-    contextId: args.context ?? null,
+    contextId,
     launch: args.launch !== false,
     includeStorage: args.includeStorage !== false,
     matchViewport: args.matchViewport === true,
@@ -152,8 +188,9 @@ export async function handoff({ router, engines, registry, engineClient, sourceH
   });
   return {
     ...result,
+    ...(profile ? { profile, persisted: true } : {}),
     from: { tabId: sourceHandle, engine: engineClient.id, url: exported.url, title: exported.title ?? null },
-    note: handoffNote(result, { includeStorage: args.includeStorage !== false }),
+    note: handoffNote(result, { includeStorage: args.includeStorage !== false, persisted: !!profile }),
   };
 }
 
@@ -163,8 +200,9 @@ export async function handoff({ router, engines, registry, engineClient, sourceH
  * "reloaded with its session", and saying so is the difference between an
  * agent that checks and one that carries on against a login page.
  */
-export function handoffNote(result, { includeStorage = true } = {}) {
-  const what = `the cookies${includeStorage ? ' and local/session storage' : ''} of the original tab`;
+export function handoffNote(result, { includeStorage = true, persisted = false } = {}) {
+  const what = `the cookies${includeStorage ? ' and local/session storage' : ''} of the original tab` +
+    (persisted ? ' (written into the profile, so they stay for later runs)' : '');
   const tail =
     ' In-memory page state, IndexedDB and service-worker state did not transfer. ' +
     `Act on the new tab with tabId:${result.tabId}; the original tab is untouched in the person's browser.`;

@@ -24,6 +24,7 @@ import { callSignalFor } from '../lib/humanize.js';
 import * as interact from './interact.js';
 import * as nav from './navigate.js';
 import { snapshot, find } from './snapshot.js';
+import { lookupRef } from './target.js';
 
 export const MAX_STEPS = 200;
 const INTERACT = new Set(['click', 'double_click', 'right_click', 'hover', 'type', 'key', 'select', 'scroll']);
@@ -57,8 +58,8 @@ export function validateSteps(steps) {
     if (step.action === 'type' && step.text == null) throw new Error(`${at}: type needs text.`);
     if (step.action === 'key' && !step.key) throw new Error(`${at}: key needs a key.`);
     if (step.action === 'extract' && !step.ref && !step.selector && !step.role) throw new Error(`${at}: extract needs ref, selector or role (+ name).`);
-    if (['click', 'double_click', 'right_click', 'hover', 'type', 'select'].includes(step.action) && !step.ref && !step.role && step.x == null) {
-      throw new Error(`${at}: ${step.action} needs a ref, or role (+ name).`);
+    if (['click', 'double_click', 'right_click', 'hover', 'type', 'select'].includes(step.action) && !step.ref && !step.role && !step.selector && step.x == null) {
+      throw new Error(`${at}: ${step.action} needs a ref, role (+ name), or selector.`);
     }
     if (step.saveAs != null && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(String(step.saveAs))) throw new Error(`${at}: saveAs must be an identifier.`);
   });
@@ -155,10 +156,12 @@ async function runOne(tabId, step, ctx) {
     default: {
       // Input: browser_interact, by ref or by role+name.
       const url = await pageUrl(tabId);
-      const ref = step.ref ?? (step.role ? await refByRole(tabId, step, caller) : undefined);
+      // (3.5) a CSS selector too, through browser_interact's own lookup (tools/target.js).
+      const ref = step.ref ?? (step.role ? await refByRole(tabId, step, caller)
+        : step.selector ? (await lookupRef(tabId, { selector: step.selector, nth: step.nth, waitMs: step.waitMs }, caller, { url })).ref : undefined);
       if (ref) out.ref = ref;
       const a = { ...step, ...(ref ? { ref } : {}), url, humanize: step.humanize ?? ctx.humanize };
-      delete a.action; delete a.role; delete a.name; delete a.nth; delete a.saveAs;
+      delete a.action; delete a.role; delete a.name; delete a.nth; delete a.saveAs; delete a.selector; delete a.waitMs;
       if (Array.isArray(step.modifiers)) a.modifiers = interact.modifierMask(step.modifiers);
       let r;
       switch (step.action) {

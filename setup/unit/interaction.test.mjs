@@ -2063,7 +2063,7 @@ await test('main-world cleanliness: nothing G9BrowserAgent ran touched the page\
 });
 
 await test('source scan: interaction tools never evaluate in the page\'s main world', () => {
-  const files = ['interact.js', 'record.js', 'snapshot.js', 'qa.js', 'replay.js', 'issues.js'];
+  const files = ['interact.js', 'record.js', 'snapshot.js', 'qa.js', 'replay.js', 'issues.js', 'target.js', 'setvalue.js'];
   for (const name of files) {
     const src = readFileSync(join(EXT, 'tools', name), 'utf8');
     const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
@@ -2072,6 +2072,148 @@ await test('source scan: interaction tools never evaluate in the page\'s main wo
     assert.ok(!/'Runtime\.(evaluate|callFunctionOn)'/.test(code), `${name} sends Runtime.evaluate/callFunctionOn directly`);
     assert.ok(!/addScriptToEvaluateOnNewDocument', \{ source \}\)/.test(code), `${name} registers a main-world script`);
     assert.ok(!/'Runtime\.addBinding', \{ name: BINDING \}\)/.test(code), `${name} adds a bare binding`);
+  }
+});
+
+
+// ---------------------------------------------------------------- (3.5) targets, retries, values
+
+await test('(3.5) browser_interact finds its target by selector or role+name, waits for it, and never guesses between several', async () => {
+  const runtime = await import(extUrl('tools/index.js'));
+  const saved = await refs.getRefs(TAB);
+  // The fake's document went to /page2 in an earlier test while chrome.tabs still says URL0; a real
+  // browser reports one URL. Line them up for the lookups, which read the document's.
+  const docUrl = tab.frames.get(MAIN).url;
+  tab.frames.get(MAIN).url = URL0;
+  const SHARE = fake.addNode(TAB, { backendNodeId: 140, tag: 'button', text: 'Share', attrs: { 'aria-label': 'Share' }, box: { x: 500, y: 300, width: 90, height: 36 } });
+  const OTHER = fake.addNode(TAB, { backendNodeId: 141, tag: 'button', text: 'Share later', box: { x: 600, y: 300, width: 90, height: 36 } });
+  try {
+    // A selector: only visible matches; one → clicked, and the result names the ref it got.
+    tab.selectors = { 'button.share': [140], 'button': [140, 141], '.late': [] };
+    const mark = since();
+    const out = await runtime.runTool('browser_interact', { action: 'click', selector: 'button.share', tabId: TAB, humanize: 'off' });
+    assert.equal(out.delivery, 'delivered');
+    assert.match(out.ref, /^e\d+$/);
+    assert.match(out.matched, /selector "button\.share"/);
+    assert.equal(mouseOf(slice(mark)).filter((c) => c.params.type === 'mousePressed').length, 1);
+    // Several matches: refused with the list, nothing pressed; nth picks one.
+    const m2 = since();
+    await assert.rejects(runtime.runTool('browser_interact', { action: 'click', selector: 'button', tabId: TAB, humanize: 'off' }), /matched 2 elements.*Pass nth/s);
+    assert.equal(mouseOf(slice(m2)).length, 0, 'nothing was sent for an ambiguous target');
+    const second = await runtime.runTool('browser_interact', { action: 'click', selector: 'button', nth: 2, tabId: TAB, humanize: 'off' });
+    assert.match(second.matched, /#2 of 2/);
+    // waitMs: an element rendered late (a file input rebuilt after a while) is waited for.
+    setTimeout(() => { tab.selectors['.late'] = [140]; }, 400);
+    const late = await runtime.runTool('browser_interact', { action: 'hover', selector: '.late', waitMs: 3000, tabId: TAB, humanize: 'off' });
+    assert.equal(late.delivery, 'delivered');
+    await assert.rejects(runtime.runTool('browser_interact', { action: 'click', selector: '.never', waitMs: 300, tabId: TAB, humanize: 'off' }), /No element with selector "\.never".*after waiting/s);
+    await assert.rejects(runtime.runTool('browser_interact', { action: 'click', selector: '!bad', tabId: TAB }), /not a valid CSS selector/);
+    // role + name, through the accessibility tree.
+    tab.axNodes = [
+      { nodeId: 'r', role: { value: 'RootWebArea' }, name: { value: 'Page' }, childIds: ['b1', 'b2'] },
+      { nodeId: 'b1', parentId: 'r', role: { value: 'button' }, name: { value: 'Share' }, backendDOMNodeId: 140, childIds: [] },
+      { nodeId: 'b2', parentId: 'r', role: { value: 'button' }, name: { value: 'Share later' }, backendDOMNodeId: 141, childIds: [] },
+    ];
+    const byRole = await runtime.runTool('browser_interact', { action: 'click', role: 'button', name: '^share$', tabId: TAB, humanize: 'off' });
+    assert.equal(byRole.delivery, 'delivered');
+    assert.match(byRole.matched, /role "button" name \/\^share\$\/i/);
+    await assert.rejects(runtime.runTool('browser_interact', { action: 'click', role: 'button', name: 'share', tabId: TAB, humanize: 'off' }), /matched 2/);
+  } finally {
+    tab.nodes.delete(SHARE.backendNodeId);
+    tab.nodes.delete(OTHER.backendNodeId);
+    tab.selectors = undefined;
+    tab.axNodes = undefined;
+    tab.frames.get(MAIN).url = docUrl;
+    await refs.saveRefs(TAB, { url: URL0, entries: Object.entries(saved.map) });
+  }
+});
+
+await test('(3.5) a covered target is tried again until it is clickable, with nothing pressed meanwhile', async () => {
+  const runtime = await import(extUrl('tools/index.js'));
+  const COVER = fake.addNode(TAB, { backendNodeId: 150, tag: 'div', attrs: { id: 'toast' }, box: { x: 90, y: 90, width: 200, height: 70 }, z: 9 });
+  const mark = since();
+  setTimeout(() => tab.nodes.delete(COVER.backendNodeId), 700);
+  const out = await runtime.runTool('browser_interact', { action: 'click', ref: 'e1', tabId: TAB, humanize: 'off', waitMs: 4000 });
+  assert.equal(out.delivery, 'delivered');
+  assert.ok(out.retried >= 1, `retried ${out.retried}`);
+  assert.equal(mouseOf(slice(mark)).filter((c) => c.params.type === 'mousePressed').length, 1, 'one press, after the cover went');
+  // Without waitMs a cover that stays is reported after the default 1.5 s, with how often it was tried.
+  const STAY = fake.addNode(TAB, { backendNodeId: 151, tag: 'div', attrs: { id: 'veil' }, box: { x: 90, y: 90, width: 200, height: 70 }, z: 9 });
+  try {
+    const t0 = Date.now();
+    await assert.rejects(runtime.runTool('browser_interact', { action: 'click', ref: 'e1', tabId: TAB, humanize: 'off' }),
+      (err) => /^\[delivery: not-delivered\]/.test(err.message) && /covered by <div#veil>/.test(err.message) && /tried \d+ times/.test(err.message));
+    assert.ok(Date.now() - t0 >= 1000 && Date.now() - t0 < 6000);
+  } finally {
+    tab.nodes.delete(STAY.backendNodeId);
+  }
+});
+
+await test('(3.5) set_value: a range input by a click on its track (+ arrow keys), an ARIA slider by a drag, verified', async () => {
+  const runtime = await import(extUrl('tools/index.js'));
+  const saved = await refs.getRefs(TAB);
+  // A native range 0..100 on a 200 px track; this one lands 2 short of where it was clicked (rounding).
+  const RANGE = fake.addNode(TAB, { backendNodeId: 160, tag: 'input', type: 'range', value: '10', attrs: { min: '0', max: '100', step: '1' }, box: { x: 100, y: 640, width: 200, height: 20 } });
+  RANGE.onPress = (x) => { RANGE.value = String(Math.max(0, Math.min(100, Math.round(((x - 108) / 184) * 100) - 2))); };
+  RANGE.onKey = (key) => {
+    const v = Number(RANGE.value);
+    if (key === 'ArrowRight') RANGE.value = String(Math.min(100, v + 1));
+    if (key === 'ArrowLeft') RANGE.value = String(Math.max(0, v - 1));
+  };
+  // An ARIA slider whose value follows where its thumb is let go.
+  const SLIDER = fake.addNode(TAB, { backendNodeId: 161, tag: 'div', attrs: { role: 'slider', 'aria-valuenow': '20', 'aria-valuemin': '0', 'aria-valuemax': '50' }, box: { x: 400, y: 700, width: 250, height: 14 } });
+  const follow = (x) => { SLIDER.attrs['aria-valuenow'] = String(Math.round(Math.max(0, Math.min(1, (x - 400) / 250)) * 50)); };
+  SLIDER.onRelease = follow;
+  const CHECK = fake.addNode(TAB, { backendNodeId: 162, tag: 'input', type: 'checkbox', box: { x: 100, y: 690, width: 16, height: 16 } });
+  CHECK.onPress = () => { CHECK.checked = !CHECK.checked; };
+  await refs.saveRefs(TAB, {
+    url: URL0,
+    entries: [...Object.entries(saved.map),
+      ['e60', { backendNodeId: 160, role: 'slider', name: 'Volume', sessionId: null }],
+      ['e61', { backendNodeId: 161, role: 'slider', name: 'Influence', sessionId: null }],
+      ['e62', { backendNodeId: 162, role: 'checkbox', name: 'Agree', sessionId: null }]],
+  });
+  try {
+    const r = await runtime.runTool('browser_interact', { action: 'set_value', ref: 'e60', value: 37, tabId: TAB, humanize: 'off' });
+    assert.equal(r.set, true);
+    assert.equal(r.verified, true);
+    assert.equal(r.before, 10);
+    assert.equal(r.after, 37);
+    assert.deepEqual(r.via, ['click on the track', 'arrow keys'], 'the click got close, the arrows made it exact');
+    const s = await runtime.runTool('browser_interact', { action: 'set_value', ref: 'e61', value: 40, tabId: TAB, humanize: 'off' });
+    assert.equal(s.kind, 'slider');
+    assert.equal(s.after, 40);
+    assert.deepEqual(s.via, ['drag']);
+    const c = await runtime.runTool('browser_interact', { action: 'set_value', ref: 'e62', value: true, tabId: TAB, humanize: 'off' });
+    assert.equal(c.after, true);
+    const same = await runtime.runTool('browser_interact', { action: 'set_value', ref: 'e62', value: true, tabId: TAB, humanize: 'off' });
+    assert.deepEqual(same.via, [], 'already checked: nothing is clicked');
+    await assert.rejects(runtime.runTool('browser_interact', { action: 'set_value', ref: 'e61', value: 80, tabId: TAB, humanize: 'off' }), /outside this slider.s range \(0\.\.50\)/);
+    // A slider that ignores the input: refused as unverified, saying what happened.
+    SLIDER.onRelease = () => {};
+    await assert.rejects(runtime.runTool('browser_interact', { action: 'set_value', ref: 'e61', value: 10, tabId: TAB, humanize: 'off' }), /did not take the value: wanted 10, it is 40/);
+    // drag toPercent: before and after.
+    SLIDER.onRelease = follow;
+    const d = await runtime.runTool('browser_interact', { action: 'drag', from: 'e61', toPercent: 20, tabId: TAB, humanize: 'off' });
+    assert.equal(d.before, 40);
+    assert.equal(d.after, 10);
+    assert.equal(d.changed, true);
+    assert.equal(d.to.percent, 20);
+  } finally {
+    for (const n of [RANGE, SLIDER, CHECK]) tab.nodes.delete(n.backendNodeId);
+    await refs.saveRefs(TAB, { url: URL0, entries: Object.entries(saved.map) });
+  }
+});
+
+await test('(3.5) a hidden tab: the refusal names ifHidden, and nothing was sent', async () => {
+  const runtime = await import(extUrl('tools/index.js'));
+  tab.hidden = true;
+  try {
+    const mark = since();
+    await assert.rejects(runtime.runTool('browser_interact', { action: 'click', ref: 'e1', tabId: TAB, humanize: 'off' }), /ifHidden:"popout"/);
+    assert.equal(mouseOf(slice(mark)).length, 0);
+  } finally {
+    tab.hidden = false;
   }
 });
 

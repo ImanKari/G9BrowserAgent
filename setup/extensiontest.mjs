@@ -2180,6 +2180,63 @@ await test('a download can only be observed if the watch started first', async (
   await runtime.runTool('browser_network', { action: 'stop_downloads', tabId: 7 });
 });
 
+await test('(3.5) downloads: an end the worker had no record of is not dropped; a failure ends the wait with the reason and the fix', async () => {
+  resetBrowser();
+  await stateModule.setState({ halted: false, currentTabId: null });
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 60));
+  const item = (id, patch = {}) => ({
+    id,
+    url: `http://example.test/song-${id}.mp3`,
+    referrer: 'http://example.test/',
+    startTime: new Date().toISOString(),
+    state: 'in_progress',
+    filename: `C:\\Users\\qa\\Downloads\\song-${id}.mp3`,
+    bytesReceived: 10,
+    totalBytes: 10,
+    fileSize: 10,
+    exists: true,
+    mime: 'audio/mpeg',
+    ...patch,
+  });
+  await runtime.runTool('browser_network', { action: 'watch_downloads', tabId: 7 });
+
+  // 1. A download whose start this worker never saw (a restart, a lost record): its COMPLETION used
+  //    to be dropped, and wait_download timed out on a finished file. Now it is attributed at its end.
+  downloadItems.set(52, item(52, { state: 'complete', endTime: new Date().toISOString() }));
+  chrome.downloads.onChanged.fire({ id: 52, state: { current: 'complete' } });
+  const done = await runtime.runTool('browser_network', { action: 'wait_download', tabId: 7, contains: 'song-52', timeoutMs: 3000 });
+  assert.equal(done.state, 'complete');
+  assert.equal(done.filename, 'song-52.mp3');
+
+  // 2. The browser could not write the file (a download folder that does not exist on a browser
+  //    node): the wait ends at once, naming the reason and the fix.
+  downloadItems.set(53, item(53));
+  chrome.downloads.onCreated.fire(item(53));
+  await settle();
+  downloadItems.set(53, item(53, { state: 'interrupted', error: 'FILE_FAILED', filename: '/config/Downloads/song-53.mp3' }));
+  chrome.downloads.onChanged.fire({ id: 53, state: { current: 'interrupted' }, error: { current: 'FILE_FAILED' } });
+  const t0 = Date.now();
+  await assert.rejects(
+    () => runtime.runTool('browser_network', { action: 'wait_download', tabId: 7, contains: 'song-53', timeoutMs: 5000 }),
+    (err) => /was interrupted \(FILE_FAILED\)/.test(err.message) && /the folder \/config\/Downloads may not exist or not be writable/.test(err.message),
+  );
+  assert.ok(Date.now() - t0 < 2000, 'the failure ends the wait, not its timeout');
+
+  // 3. A failed download the browser could not tie to the watched tab still ends a wait that matches it.
+  const foreign = item(54, { url: 'http://elsewhere.test/song-54.mp3', referrer: 'http://elsewhere.test/' });
+  downloadItems.set(54, foreign);
+  chrome.downloads.onCreated.fire(foreign);
+  await settle();
+  downloadItems.set(54, { ...foreign, state: 'interrupted', error: 'NETWORK_FAILED' });
+  chrome.downloads.onChanged.fire({ id: 54, state: { current: 'interrupted' }, error: { current: 'NETWORK_FAILED' } });
+  await settle();
+  await assert.rejects(
+    () => runtime.runTool('browser_network', { action: 'wait_download', tabId: 7, contains: 'song-54', timeoutMs: 3000 }),
+    /NETWORK_FAILED.*connection failed.*could not tie this download to this tab/s,
+  );
+  await runtime.runTool('browser_network', { action: 'stop_downloads', tabId: 7 });
+});
+
 await test('every extension source parses as a real ES module', async () => {
   const { readdir, readFile, writeFile, mkdtemp } = await import('node:fs/promises');
   const { execFile } = await import('node:child_process');

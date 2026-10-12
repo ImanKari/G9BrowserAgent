@@ -207,6 +207,40 @@ bounded by `maxBytes`), `browser_screenshot savePath` (written there; `thumbnail
 viewport JPEG instead of the image), and the extension's downloads (`wait_download`, `downloads`: the
 final `path` and, when the daemon can read the file, `sha256` and `file` with `source:'disk (daemon)'`).
 
+***(3.5)*** **Argument names are checked.** An argument the tool's schema (`mcp/tools.js`) does not
+list is refused before anything runs — `"<tool> does not take "x" (did you mean "y"?); nothing was
+done. Its arguments are: …"` — except the routing keys every tool accepts (`tabId`, `session`,
+`engine`, `context`, `opId`, `replyWithinMs`). `G9_STRICT_ARGS=0` lets unknown arguments through.
+
+***(3.5)*** **The call log** (`daemon/calls.js`). Every call except `browser_status` gets a call id
+(`c<n>`), and its outcome is kept for an hour (the last 300 ended calls):
+
+* `opId` (any tool): the caller's idempotency key, scoped to its identity (`client.identity`, else its
+  name). A second call with the same `opId` does not run: one still running is joined, a finished one
+  answers its recorded result with `deduplicated:true` and `callId`; one that failed before it acted may
+  run again; one whose outcome is unknown (a deadline error that says the call may still be running, a
+  `[recovered]`, `missed` or `partial`) is refused until a late outcome is known.
+* `replyWithinMs` (any tool; `G9_REPLY_WITHIN_MS` as a daemon-wide default): a call still running after
+  this long is answered `{pending:true, callId, tool, action?, opId?, note}` and goes on; its outcome is
+  recorded when it ends.
+* `browser_status {callId, waitMs?}` → `{call:{callId, tool, action, tabId?, state:'running'|'done'|
+  'failed', result?, error?, delivery?, late?, startedAt, endedAt, ms|runningMs, opId?}}` (`waitMs` ≤ 10 min
+  waits for the end); `browser_status {calls:true, limit?}` → `{calls:[…]}`, this identity's recent calls,
+  newest first. Results are kept bounded (16 KiB; images and file bytes omitted).
+* **Late outcomes.** A relayed call answered "may STILL be running" keeps its relay id; when the
+  extension's answer arrives after all, the log records it (`late:true`). The same holds for a launched
+  engine's call that ends after its grace. A deadline error names the call id: `[callId c12: …]`.
+
+Neither key is forwarded to an engine.
+
+***(3.5)*** **Uploads and file reads.** `browser_interact upload` with `fileData` (`[{name, base64}]`, up to
+40 MiB per call) or `fileUrls` (each fetched AS THE PAGE through `browser_network fetch` on the same tab):
+the daemon writes them under `<G9_HOME>/files/uploads/<id>/` and forwards `files` with those paths; the
+result gains `written:[{path, size, sha256, from}]`. `browser_network {action:"read_file", path, offset?,
+length?}` is answered by the daemon without a tab: `{path, size, sha256 (whole file), offset, length, eof,
+next?, bytesBase64}`, chunks up to 8 MiB (4 MiB by default), and only for files under `<G9_HOME>/files`,
+`downloads` or `runs`, or a download path the daemon reported (real paths compared).
+
 ### 3.1 What the daemon answers itself
 
 * `browser_status` — the daemon's view (`daemon`, `you`, `owned`, `halted{global,by?,mine}`,
@@ -252,8 +286,16 @@ final `path` and, when the daemon can read the file, `sha256` and `file` with `s
     clicked or typed into, because a browser delivers input only to the tab it shows (2026-09-22).
   * `close`/`focus` need an explicit `tabId` or `session`; ownership-checked and queued. ***(as built)***
     Results `{closed: tabId}` / `{…engine result, focused: tabId}`; `focus` also makes it the caller's current tab.
+    ***(3.5)*** `close {leaveWithoutAsking:true}` accepts the page's beforeunload prompt (the extension
+    attaches first when it was not attached); closing a launched engine's last tab opens `about:blank`
+    first and answers `engineKept:true` with a `note`.
   * `attach` — the extension's current/active tab (or `tabId`), claimed and made current.
-  * `claim {force?}` / `release` (no tabId: all of the caller's claims).
+  * `claim {force?}` / `release` (no tabId: all of the caller's claims). ***(3.5)*** `release {detach?=true}`:
+    released Engine 1 tabs that nobody owns now are detached (relay `browser_tabs {action:"detach"}`);
+    the result adds `detached:[handles]`.
+  * ***(3.5)*** `detach {tabId|session}` — Engine 1: the extension detaches its debugger from that tab
+    (`{tabId, detached, …}`; a tab with a recording running stays attached; a launched tab answers
+    `detached:false` with a note). Ownership-checked and queued.
   * `popout {tabId|session, focus?, width?, height?, left?, top?}` — extension tabs only (a launched tab is
     refused: "launched engines have no windows"); ownership-checked and queued, then relayed as
     `browser_tabs {action:"popout", tabId, …}`. ***(as built, 2.0.3)*** An agent's popout window is created
@@ -310,6 +352,13 @@ entries that hold their value; a page that ended on another origin (a sign-in re
 is named in `warnings` and in `note`, which states what happened rather than what was intended. The
 new tab is claimed by and current for the caller; the caller's claim on the source tab is released. The
 user agent is never overridden.
+
+***(3.5)*** `profile` (with optional `proxy`, `proxyBypass`, `headless`, `stealth`, `locale`, `timezone`):
+the daemon launches — or reuses — an engine on that profile (`EngineManager.launch {profile, reuse:true,
+…}`) and imports into its DEFAULT context (`contextId:"default"`), so the cookies persist in the profile;
+the result adds `profile:{name, engineId, note?}` (the note says when a running engine kept other
+settings) and `persisted:true`. `profile` and `engine` together are refused. `proxy` without a profile:
+a fresh context with that proxy (`browser_engine context` semantics).
 
 ## 4. Relay (daemon → extension engine)
 
@@ -429,6 +478,13 @@ entry takes that entry's id as `entryId` (or `args.id`) — never `id`.
   claims it for the calling client. On another client's tab it fails: `Tab 7 is owned by agent-2
   (cursor). Ask that agent to release it, or call browser_tabs action:"claim" tabId:7 force:true to take
   it over.` A forced takeover is logged and reported to UIs as `takeover` activity.
+* ***(3.5)*** **Idle claims.** The ownership gate refuses only for an owner that is connected AND
+  active: one with a call running, or one that sent a call within `G9_IDLE_CLAIM_MINUTES` (default 15;
+  0 = never). Otherwise the next mutating call takes the tab (logged; UIs get `takeover` activity with
+  the idle time; the caller's result adds `tookOver:{from, idleMinutes, note}`). `Registry.beginCall` /
+  `endCall` around every routed call keep the activity current.
+* ***(3.5)*** A relayed error's text that names a Chrome tab id of that extension (`Tab 1849302 …`,
+  `No tab with id: 1849302`) is rewritten to the daemon handle; unknown numbers are left as they are.
 * ***(as built, 2026-09-22)*** `browser_screenshot` is a read only for `area:"viewport"`. An element
   capture scrolls the element into view (trusted wheel notches at the human levels, `scrollIntoView`
   at `off`) and a full-page capture resizes the viewport, so both are mutating: they claim the tab,

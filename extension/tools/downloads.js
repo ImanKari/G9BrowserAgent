@@ -199,12 +199,25 @@ export async function waitFor(tabId, { contains = null, timeoutMs = 30_000 } = {
       };
     }
 
-    const failed = state.items.find((d) => (d.state === 'canceled' || d.state === 'interrupted') && matches(d));
+    // (3.5) A failure ends the wait at once — also one the browser could not tie to this tab (it is
+    // listed aside, but a wait that sits out its timeout on a download that already failed hides why).
+    const ended = (d) => (d.state === 'canceled' || d.state === 'interrupted') && matches(d);
+    let failed = state.items.find(ended);
+    let aside = false;
+    if (!failed) {
+      const unattributed = (await session().get(UNATTRIBUTED))[UNATTRIBUTED] ?? [];
+      failed = unattributed.find((d) => ended(d) && (d.startedAt ?? Date.now()) >= (state.since ?? 0) - 1000);
+      aside = !!failed;
+    }
     if (failed) {
-      throw new Error(
+      const err = new Error(
         `The download of "${failed.filename ?? failed.url}" ${failed.state === 'canceled' ? 'was canceled' : 'was interrupted'}` +
-          `${failed.error ? ` (${failed.error})` : ''}. Nothing was saved.`,
+          `${failed.error ? ` (${failed.error})` : ''}. Nothing was saved.` +
+          `${failed.error ? ` ${downloadErrorHelp(failed.error, failed.path)}` : ''}` +
+          `${aside ? ' (The browser could not tie this download to this tab; it began while the tab was watched.)' : ''}`,
       );
+      err.download = present(failed, null);
+      throw err;
     }
 
     await new Promise((resolve) => setTimeout(resolve, 150));
@@ -215,6 +228,27 @@ export async function waitFor(tabId, { contains = null, timeoutMs = 30_000 } = {
       ? `No completed download matching "${contains}" within ${budget}ms. ${lastSeen} download(s) were seen on this tab.`
       : `No download completed within ${budget}ms. ${lastSeen} download(s) were seen on this tab.`,
   );
+}
+
+/**
+ * (3.5) What a browser's download error means, and what to do. The codes are chrome.downloads'
+ * InterruptReason (Engine 1) and the same names in Engine 2's progress events.
+ */
+export function downloadErrorHelp(code, path = null) {
+  const where = path ? String(path).replace(/[\\/][^\\/]*$/, '') : null;
+  const folder = where ? `the folder ${where}` : "the browser's download folder";
+  const c = String(code ?? '').toUpperCase();
+  if (c === 'FILE_FAILED' || c === 'FILE_ACCESS_DENIED') return `The browser could not write the file: ${folder} may not exist or not be writable (on a browser node, create it). The browser drops such a download without telling the page.`;
+  if (c === 'FILE_NO_SPACE') return 'The disk is full.';
+  if (c === 'FILE_NAME_TOO_LONG') return 'The file name or path is too long for this system.';
+  if (c === 'FILE_TOO_LARGE') return 'The file is too large for this file system.';
+  if (c === 'FILE_VIRUS_INFECTED' || c === 'FILE_BLOCKED' || c === 'FILE_SECURITY_CHECK_FAILED') return 'The browser or security software blocked the file.';
+  if (c === 'FILE_TRANSIENT_ERROR') return 'A temporary file error; retrying the download usually works.';
+  if (c.startsWith('NETWORK_')) return 'The connection failed or timed out while downloading; the page may be offline or the server dropped it.';
+  if (c.startsWith('SERVER_')) return 'The server refused or broke off the download (e.g. an expired link, missing authorization, or a wrong range).';
+  if (c === 'USER_CANCELED' || c === 'USER_SHUTDOWN') return 'It was canceled (by a person, or because the browser shut down).';
+  if (c === 'CRASH') return 'The browser crashed during the download.';
+  return '';
 }
 
 /**
@@ -248,6 +282,19 @@ export async function ingest(evt) {
       await session().set({ [KEY(evt.tabId)]: state });
       return;
     }
+    // (3.5) An event without a tab for an item a watched tab already lists (its END arriving after
+    // the worker lost the attribution) updates that item: otherwise the list kept it in progress
+    // forever and wait_download timed out on a finished file.
+    if (evt.tabId == null) {
+      for (const key of await watchKeys()) {
+        const other = (await session().get(key))[key];
+        const at = other?.items?.findIndex((d) => d.id === evt.id) ?? -1;
+        if (at < 0) continue;
+        other.items[at] = { ...other.items[at], ...evt, tabId: other.items[at].tabId ?? Number(key.split(':')[1]), attribution: other.items[at].attribution };
+        await session().set({ [key]: other });
+        return;
+      }
+    }
     // No tab, or a tab nobody watches (a popup the watched page opened, say):
     // kept aside while anything is watched, with its tabId, never claimed.
     const watched = await anyWatched();
@@ -260,11 +307,15 @@ export async function ingest(evt) {
   });
 }
 
-async function anyWatched() {
+async function watchKeys() {
   const keys = typeof session().getKeys === 'function'
     ? await session().getKeys()
     : Object.keys(await session().get(null));
-  return keys.some((k) => /^downloads:\d+$/.test(k));
+  return keys.filter((k) => /^downloads:\d+$/.test(k));
+}
+
+async function anyWatched() {
+  return (await watchKeys()).length > 0;
 }
 
 /**

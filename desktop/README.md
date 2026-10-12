@@ -74,7 +74,7 @@ Flags of `main.mjs`:
 | Runs | Every run the daemon recorded (replays, calibrations, scheduled suites, watch sessions): verdict, steps (a scheduled run lists each flow of the runner's report, with Open report for its `report.html`, opened by Windows in your default browser), surprises, and a replay of the frames with the cursor. Export video records that replay into `runs/<runId>/video.webm`. |
 | Approvals | Flows whose last run has surprises, with what differed. Approve calls `browser_recording action:"approve"` with `by` = your sign-in user name, supplied by the main process. Nothing approves on its own; every approval asks once more. |
 | Schedule | Suites the daemon runs by itself: daily at a time or every N minutes, with engine options. Every option the form shows becomes an explicit runner flag, so a later change of the defaults never changes a scheduled suite — except a browser left at "auto", which passes no `--browser` and so follows the daemon's `defaultBrowser`. Run now, Remove (addressed by `entryId`). The last result is the suite's worst verdict. In an installed app, a warning appears while there is an entry and G9BrowserAgent does not start at sign-in, because after a restart nothing else starts the daemon. |
-| Settings | The daemon's settings (`settings.get` / `settings.set`), the raw JSON for everything else, the updater, the daemon connection, "Start G9BrowserAgent when I sign in" (installed builds: a login item with `--hidden`), and this app's folders. **Shut down daemon** stops it and the app does not start it again by itself: **Reconnect** brings it back (an agent's next call also starts it). |
+| Settings | The daemon's settings (`settings.get` / `settings.set`), the raw JSON for everything else, the updater, the daemon connection, "Start G9BrowserAgent when I sign in" (installed builds: a login item with `--hidden`; (3.5) **on by default**, see [In the tray](#in-the-tray)), and this app's folders. **Shut down daemon** stops it and the app does not start it again by itself: **Reconnect** brings it back (an agent's next call also starts it). |
 | Setup | The first-run wizard, runnable again at any time. |
 
 Human input (Settings, the launch form, the schedule form) takes a level (`off`, `human`, `stealth`)
@@ -87,6 +87,24 @@ panel (which only the engine knows about) is kept.
 The top bar always shows the connection and the **Stop all** control. When the agents are
 stopped the bar turns red, with **Resume**. The same two actions are in the tray menu.
 The version of the app is in the window title, the tray tooltip and the badge next to the name.
+
+## In the tray
+
+G9BrowserAgent is a tray app (the notification area on Windows, the menu bar on macOS, the system
+tray on Linux): the daemon connection, schedules and the updater live while it runs, window or not.
+
+- **Closing the window** keeps it running in the tray. (3.5) The first time, one notification says
+  where it went; **Quit G9BrowserAgent** is in the tray menu.
+- **Start at sign-in** (3.5) is **on by default** for an installed app: the first start of 3.5 —
+  a fresh install, or the first start after an update — turns it on once and records that it did.
+  Switching it off (Settings, or the tray menu's **Start at sign-in** checkbox) is the person's
+  choice, and no later start turns it back on. A development build never registers itself.
+  Started at sign-in, G9BrowserAgent opens no window (`--hidden`; macOS's own login flag).
+- **The icon** (3.5) is the same design as the extension's: a frosted browser window on an aurora
+  tile, with a pointer reaching in. The tray recolours the tile by state: aurora (connected), red
+  (agents stopped), slate (daemon offline), amber (the port is held by something else). On macOS
+  the menu-bar image is a monochrome template, so the system draws it for a light or dark bar;
+  stopped and port-taken keep their colour there.
 
 ## Setup (the wizard)
 
@@ -240,7 +258,8 @@ lib/daemon-launch.mjs   start g9d when absent, name a foreign listener, restart 
 lib/policies.mjs    HKCU policy apply/undo with a record, elevation batch, read-back verification
 lib/mcp-register.mjs    client detection, entry, plan/diff, backup, atomic write, verify
 lib/extension-install.mjs, lib/wizard.mjs, lib/updater.mjs, lib/settings.mjs, lib/paths.mjs,
-lib/runs-store.mjs (frames and cursor track from disk), lib/icon.mjs (tray/app icon, drawn in code)
+lib/runs-store.mjs (frames and cursor track from disk), lib/icon.mjs (THE icon, drawn in code: the app,
+                    installer and tray here, and the extension's PNGs via setup/make-icons.mjs)
 scripts/            start.mjs, build.mjs (win/mac/linux), verify-artifacts.mjs (latest*.yml and app.asar checks),
                     make-icons.mjs
 test/               *.test.mjs + run.mjs; fake-daemon.mjs is a fake g9d, fake-dom.mjs a fake DOM for the

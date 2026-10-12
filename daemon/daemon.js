@@ -144,6 +144,14 @@ export class Daemon {
       if (role === 'agent') this.#scheduleProjects();
     });
     this.registry.on('engines', () => this.broadcastUi('engines', { engines: this.router.engineRows() }));
+    // (3.5) A claim that lapsed because its owner sat idle (registry IDLE_CLAIM_MS) is a takeover too.
+    this.registry.on('takeover', (d) => {
+      if (!d?.idleMs) return;
+      this.broadcastUi('activity', {
+        kind: 'takeover', tabId: d.tabId, by: d.to, from: d.from, at: Date.now(),
+        detail: `${this.registry.describe(d.to)} took tab ${d.tabId} from ${this.registry.describe(d.from)}, idle ${Math.round(d.idleMs / 60_000)} min`,
+      });
+    });
     this.registry.on('halt', (data) => this.broadcastUi('halt', { global: this.registry.global, ...data }));
     // A per-agent Stop stops that agent's calls already running too (the global Stop reaches every
     // engine's state, which perform() checks between input steps).

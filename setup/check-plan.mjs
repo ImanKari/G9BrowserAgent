@@ -133,7 +133,7 @@ export const LIVE_TRIGGERS = [
 /** Files no automated check covers, and why. A change to one of them runs only the syntax check. */
 export const NO_CHECK = [
   ['scripts/**', 'standalone example automations, documented against v1.7.21; run them by hand'],
-  ['setup/*.ps1', 'PowerShell: install.ps1 and make-icons.ps1 are run by hand'],
+  ['setup/*.ps1', 'PowerShell: install.ps1 is run by hand'],
   ['setup/bench.mjs', 'a measurement harness; run it by hand'],
   ['setup/endurance.mjs', 'a measurement harness; run it by hand'],
   ['setup/matrix.mjs', 'the background-state matrix; run it by hand'],

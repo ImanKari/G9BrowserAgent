@@ -496,6 +496,27 @@ function tailBuffer(limit = 32 * 1024) {
   };
 }
 
+/**
+ * (3.5) Headless at stealth: the user agent a headed window of the same browser sends.
+ *
+ * Measured 2026-10-12 on Edge 154 headless at stealth (a page, a cross-origin iframe, a dedicated
+ * worker, and the request headers the server received): only the user-agent STRING gave headless
+ * away ("… HeadlessChrome/154.0.0.0 … Edg/154.0.0.0"), everywhere. navigator.userAgentData's
+ * brands and the Sec-CH-UA header were already the real ones ("Chromium", "Microsoft Edge",
+ * "Not A(Brand"). A `--user-agent` switch with only HeadlessChrome → Chrome fixed the page, the
+ * iframe, the worker and every header, and left the brands untouched. A CDP override had to restate
+ * the brand list and got its GREASE brand wrong — one tell swapped for another — so it is not used.
+ * This removes the one headless-only mismatch; it invents nothing (decision D-a's rule).
+ *
+ * The browser's own user agent is learned from a first start (Browser.getVersion) and cached per
+ * executable and version, so only the first stealth headless launch of a browser pays a restart.
+ */
+const HEADLESS_UA = new Map(); // `${path}|${version}` → user agent
+
+export function headedUserAgent(userAgent) {
+  return /HeadlessChrome\//.test(String(userAgent ?? '')) ? String(userAgent).replace(/HeadlessChrome\//g, 'Chrome/') : null;
+}
+
 /** Parse Browser.getVersion's product ("HeadlessChrome/153.0.8010.52", "Chrome/…", "Edg/…"). */
 export function parseProduct(product) {
   const m = /\/(\d+\.\d+\.\d+\.\d+)/.exec(product ?? '');
@@ -534,8 +555,9 @@ export function parseProduct(product) {
 export async function launchBrowser({
   browser = 'auto', headless = true, profileDir, windowSize = DEFAULT_WINDOW, proxy, proxyBypass, lang,
   extraArgs = [], stealth = 'off', startUrl = 'about:blank', timeoutMs = 30_000, env, home, name,
-  componentUpdate = null,
+  componentUpdate = null, headlessUserAgent = null,
 } = {}) {
+  const original = arguments[0] ?? {};
   // JSON callers send null for "not set"; null must mean the default (see buildArgs).
   headless = headless ?? true;
   windowSize = windowSize ?? DEFAULT_WINDOW;
@@ -567,8 +589,13 @@ export async function launchBrowser({
 
   // Build (and validate) before spawning anything.
   let args;
+  // (3.5) headedUserAgent: at stealth, headless, unless the caller set a user agent itself.
+  const uaKey = `${target.path}|${target.version ?? ''}`;
+  const ownUserAgent = (extraArgs ?? []).some((a) => /^--user-agent=/i.test(String(a)));
+  const fixUserAgent = level === 'stealth' && !!headless && !ownUserAgent;
+  const knownUserAgent = fixUserAgent ? (headlessUserAgent ?? HEADLESS_UA.get(uaKey) ?? null) : null;
   try {
-    args = buildArgs({ profileDir: dir, headless, windowSize, proxy, proxyBypass, lang, extraArgs, stealth: level, startUrl, kind: target.kind, componentUpdate, noSandbox: noSandboxWanted() });
+    args = buildArgs({ profileDir: dir, headless, windowSize, proxy, proxyBypass, lang, extraArgs: knownUserAgent ? [...(extraArgs ?? []), `--user-agent=${knownUserAgent}`] : extraArgs, stealth: level, startUrl, kind: target.kind, componentUpdate, noSandbox: noSandboxWanted() });
   } catch (err) {
     if (tempProfile) await rm(dir, { recursive: true, force: true }).catch(() => {});
     throw err;
@@ -746,5 +773,17 @@ export async function launchBrowser({
   live.add(handle);
   installExitHook();
   exited.then(() => live.delete(handle));
+
+  // (3.5) The first stealth headless start of this browser: it said HeadlessChrome. Learn its
+  // user agent, and start it again with the headed one (see headedUserAgent).
+  if (fixUserAgent && !knownUserAgent) {
+    const ua = headedUserAgent(info.userAgent);
+    if (ua) {
+      HEADLESS_UA.set(uaKey, ua);
+      await handle.close().catch(() => {});
+      return launchBrowser({ ...original, headlessUserAgent: ua });
+    }
+  }
+  if (knownUserAgent) handle.browser.headedUserAgent = knownUserAgent;
   return handle;
 }

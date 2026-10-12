@@ -4,7 +4,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { suite, tmpDir, rmrf } from './harness.mjs';
 import { readRunLocal, readFrame, saveVideo, runDir, normalizeFrames, readJsonl } from '../lib/runs-store.mjs';
-import { iconPng, drawIcon, crc32, ICON_COLORS } from '../lib/icon.mjs';
+import { iconPng, drawIcon, crc32, ICON_COLORS, templatePng } from '../lib/icon.mjs';
 
 const t = suite('desktop: run evidence on disk, and the drawn icon');
 const runs = tmpDir();
@@ -97,10 +97,26 @@ t.test('the icon is a valid PNG: signature, IHDR, CRCs, inflated size, transpare
   assert.equal(rgba[3], 0, 'top-left corner is transparent (rounded)');
   const centre = (16 * 32 + 16) * 4;
   assert.equal(rgba[centre + 3], 255);
+  // The tile takes the state's colour: the right edge, beside the window, is reddish when halted
+  // and close to the state's representative (middle) colour.
+  const px = (16 * 32 + 30) * 4;
   const [r, g, b] = ICON_COLORS.halted;
-  const px = (4 * 32 + 28) * 4; // right edge, background colour
-  assert.deepEqual([rgba[px], rgba[px + 1], rgba[px + 2]], [r, g, b]);
+  assert.ok(rgba[px] > rgba[px + 1] + 80 && rgba[px] > rgba[px + 2] + 40, `halted tile is red: ${[...rgba.subarray(px, px + 3)]}`);
+  assert.ok(Math.abs(rgba[px] - r) + Math.abs(rgba[px + 1] - g) + Math.abs(rgba[px + 2] - b) < 90, 'near the halted colour');
+  const on = drawIcon(32, 'connected').rgba;
+  assert.ok(on[px + 2] > on[px + 1], 'connected tile is the violet aurora, not red');
   assert.ok(iconPng(256).length > 1000);
+});
+
+t.test('(3.5) the macOS menu-bar template is black on transparent, with the pointer cut out of the window', () => {
+  const png = templatePng(32);
+  assert.deepEqual([...png.subarray(1, 4)], [0x50, 0x4e, 0x47]);
+  const raw = zlib.inflateSync(png.subarray(41, 41 + png.readUInt32BE(33)));
+  const at = (x, y) => raw.subarray(y * (32 * 4 + 1) + 1 + x * 4, y * (32 * 4 + 1) + 1 + x * 4 + 4);
+  for (let y = 0; y < 32; y++) for (let x = 0; x < 32; x++) assert.deepEqual([...at(x, y).subarray(0, 3)], [0, 0, 0]);
+  assert.equal(at(0, 31)[3], 0, 'corner transparent');
+  assert.ok(at(10, 4)[3] > 200, 'title bar opaque');
+  assert.ok(at(8, 16)[3] > 60 && at(8, 16)[3] < 220, 'window body translucent');
 });
 
 t.run();

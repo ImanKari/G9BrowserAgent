@@ -107,6 +107,14 @@ action:"open"` opens in the desktop's Chromium, where you can watch.
 
 ## Operating it
 
+- **Downloads** (3.5). The browser saves to `/config/Downloads`; `g9-chromium` creates it on every
+  start. Without it, Chromium dropped every download without a word to the page or the extension.
+  A download that still fails ends `wait_download` at once, naming the browser's reason and the fix.
+- **Files out, files in** (3.5). An agent on another machine pulls a download, a saved fetch or a
+  screenshot off the node with `browser_network action:"read_file"` (base64 chunks; only files
+  G9BrowserAgent saved or saw downloaded), and uploads with `browser_interact action:"upload"
+  fileData` or `fileUrls` — no `docker cp`.
+
 | Task | How |
 |---|---|
 | Logs | `docker logs g9-browser-1` (the daemon and the MCP endpoint log there) |

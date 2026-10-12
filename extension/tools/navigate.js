@@ -9,6 +9,7 @@
 import { send, COMMAND_TIMEOUT_MS, evaluate as evaluateInPage } from '../lib/cdp.js';
 import { clearRefs, resolveRef } from '../lib/refs.js';
 import { inWorld, callInWorld } from '../lib/world.js';
+import { withLeave } from '../lib/leave.js';
 import { levelFor, perform, callSignalFor } from '../lib/humanize.js';
 import { createRng, planGap } from '../humanize/index.js';
 import { clearBuffers, network } from './observe.js';
@@ -102,6 +103,10 @@ export function navigationBudget(timeoutMs) {
 const remainingOf = (started, timeoutMs) => Math.max(1_000, timeoutMs - (Date.now() - started));
 
 export async function navigate(tabId, opts = {}) {
+  return withLeave(tabId, opts.leaveWithoutAsking === true, () => goto(tabId, opts));
+}
+
+async function goto(tabId, opts) {
   const { url, waitUntil = 'load', timeoutMs = 30_000 } = opts;
   await resetPageState(tabId);
   const started = Date.now();
@@ -113,6 +118,10 @@ export async function navigate(tabId, opts = {}) {
 }
 
 export async function reload(tabId, opts = {}) {
+  return withLeave(tabId, opts.leaveWithoutAsking === true, () => reloadOnce(tabId, opts));
+}
+
+async function reloadOnce(tabId, opts) {
   const { hard = false, waitUntil = 'load', timeoutMs = 30_000 } = opts;
   await resetPageState(tabId);
   const started = Date.now();
@@ -122,7 +131,11 @@ export async function reload(tabId, opts = {}) {
   return { url: await currentUrl(tabId), hard, ...settled, ...idle };
 }
 
-export async function history(tabId, { delta = -1, ...opts } = {}) {
+export async function history(tabId, args = {}) {
+  return withLeave(tabId, args.leaveWithoutAsking === true, () => historyOnce(tabId, args));
+}
+
+async function historyOnce(tabId, { delta = -1, ...opts } = {}) {
   const { currentIndex, entries } = await send(tabId, 'Page.getNavigationHistory');
   const target = currentIndex + delta;
   if (target < 0 || target >= entries.length) {

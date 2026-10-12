@@ -79,13 +79,95 @@ function refNumber(ref) {
   return m ? Number(m[1]) : 0;
 }
 
+/**
+ * (3.5) How much of the shared session storage one tab's ref table may take. chrome.storage.session
+ * has ONE 10 MB quota for the whole extension — refs, console and network buffers, diff bases, every
+ * tab. Before 3.5 an entry kept the element's FULL accessible name (a chat message, an article: tens
+ * of kilobytes each) in every one of up to 16 generations, and nothing bounded the table in bytes:
+ * on chat and media apps snapshots began to fail with "Session storage quota bytes exceeded" even
+ * with maxNodes:40, while the same page in another tab was fine (field report, 8 times on three
+ * sites). Now a name is cut to NAME_MAX characters (it is only used in messages), the oldest kept
+ * generations go first when a table outgrows TABLE_BUDGET, and a quota refusal makes room
+ * (setWithRoom) instead of failing the snapshot.
+ */
+export const NAME_MAX = 80;
+export const TABLE_BUDGET = 1_000_000;
+
+/** A ref entry as stored: the node's ids, its role, and a short name. */
+function compactNode(node) {
+  const name = String(node?.name ?? '');
+  return { ...node, name: name.length > NAME_MAX ? `${name.slice(0, NAME_MAX - 1)}…` : name };
+}
+
+/** Rough JSON size of a value, in bytes (UTF-16 units; good enough for a budget). */
+function sizeOf(value) {
+  try {
+    return JSON.stringify(value)?.length ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+const QUOTA = /quota/i;
+
+/**
+ * storage.session.set that makes room when the quota refuses it: first other tabs' snapshot
+ * history and diff bases (they cost those agents at most a re-snapshot), then — for this tab's own
+ * table — its own history. Never console/network evidence, never anything else's state.
+ * `shrink()` returns a smaller version of `items` or null when nothing more can go.
+ */
+export async function setWithRoom(items, { tabId = null, shrink = null } = {}) {
+  try {
+    await session().set(items);
+    return { freed: 0 };
+  } catch (err) {
+    if (!QUOTA.test(String(err?.message ?? err))) throw err;
+  }
+  let freed = 0;
+  const all = await session().get(null).catch(() => ({}));
+  const mine = new Set(Object.keys(items));
+  const trimmed = {};
+  const dropped = [];
+  for (const [key, value] of Object.entries(all ?? {})) {
+    if (mine.has(key)) continue;
+    if (/^snapdiff:/.test(key)) {
+      dropped.push(key);
+      freed += sizeOf(value);
+    } else if (/^refs:/.test(key) && value?.history?.length) {
+      freed += sizeOf(value.history);
+      trimmed[key] = { ...value, history: [] };
+    }
+  }
+  if (dropped.length) await session().remove(dropped).catch(() => {});
+  if (Object.keys(trimmed).length) await session().set(trimmed).catch(() => {});
+  let attempt = items;
+  for (let i = 0; i < 6; i++) {
+    try {
+      await session().set(attempt);
+      return { freed, ...(attempt !== items ? { shrunk: true } : {}) };
+    } catch (err) {
+      if (!QUOTA.test(String(err?.message ?? err))) throw err;
+      const smaller = typeof shrink === 'function' ? shrink(attempt) : null;
+      if (!smaller) {
+        throw new Error(
+          `The browser's session storage for G9BrowserAgent is full (its 10 MB quota is shared by every tab's console and ` +
+            `network capture and snapshot refs), even after dropping other tabs' older snapshots${tabId != null ? ` (tab ${tabId})` : ''}. ` +
+            'Close tabs you no longer need, or clear capture with browser_console clear:true / browser_network clear:true, then retry.',
+        );
+      }
+      attempt = smaller;
+    }
+  }
+  throw new Error('The browser\'s session storage for G9BrowserAgent is full; close unused tabs and retry.');
+}
+
 export async function saveRefs(tabId, { url, entries, by = null }) {
   const previous = await getRefs(tabId);
   const generation = Math.max(Date.now(), (previous?.generation ?? 0) + 1);
   const map = {};
   let highest = 0;
   for (const [ref, node] of entries) {
-    map[ref] = node;
+    map[ref] = compactNode(node);
     highest = Math.max(highest, refNumber(ref));
   }
   const owner = by == null || by === '' ? null : String(by);
@@ -104,10 +186,52 @@ export async function saveRefs(tabId, { url, entries, by = null }) {
     if (n <= KEEP_GENERATIONS) history.push(gen);
   }
   const next = Math.max(highest, samePage ? (previous.next ?? 0) : 0);
-  await session().set({
-    [KEY(tabId)]: { generation, url, map, next, history, by: owner },
+  // (3.5) The table's byte budget: the oldest kept generations go first (the newest is always kept).
+  let size = sizeOf(map);
+  const kept = [];
+  for (const gen of history) {
+    const s = sizeOf(gen.map);
+    if (size + s > TABLE_BUDGET) break;
+    size += s;
+    kept.push(gen);
+  }
+  const table = { generation, url, map, next, history: kept, by: owner };
+  await setWithRoom({ [KEY(tabId)]: table }, {
+    tabId,
+    // Under a full quota this tab gives up its own history last, then nothing more: the newest
+    // snapshot's refs are what the agent is about to use.
+    shrink: (items) => (items[KEY(tabId)].history.length ? { [KEY(tabId)]: { ...items[KEY(tabId)], history: items[KEY(tabId)].history.slice(0, -1) } } : null),
   });
   return generation;
+}
+
+/**
+ * (3.5) Give elements found WITHOUT a snapshot (a CSS selector in browser_interact) refs in the
+ * page's table, so every action keeps working through refs: an element a kept snapshot already
+ * named keeps that ref; a new one gets the next number. Added to the newest generation (or a new
+ * table when the page changed). → the refs, in the order of `nodes` ({ backendNodeId, role, name, sessionId }).
+ */
+export async function adoptNodes(tabId, url, nodes, by = null) {
+  const table = await getRefs(tabId);
+  const samePage = !!table && stripHash(table.url ?? '') === stripHash(url ?? '');
+  const known = await knownRefs(tabId, url);
+  const numbering = await refNumbering(tabId, url);
+  const map = samePage ? { ...table.map } : {};
+  const refs = [];
+  let highest = 0;
+  for (const node of nodes) {
+    let ref = known.get(nodeKey(node.sessionId ?? null, node.backendNodeId));
+    if (!ref) ref = numbering.next();
+    map[ref] = compactNode({ backendNodeId: node.backendNodeId, role: node.role ?? 'element', name: node.name ?? '', sessionId: node.sessionId ?? null });
+    highest = Math.max(highest, refNumber(ref));
+    refs.push(ref);
+  }
+  const next = Math.max(highest, samePage ? (table.next ?? 0) : 0);
+  const out = samePage
+    ? { ...table, map, next }
+    : { generation: Math.max(Date.now(), (table?.generation ?? 0) + 1), url, map, next, history: [], by: by == null || by === '' ? null : String(by) };
+  await setWithRoom({ [KEY(tabId)]: out }, { tabId });
+  return refs;
 }
 
 /** The tab's newest snapshot table: `{ generation, url, map, next, history, by }`, or null. */

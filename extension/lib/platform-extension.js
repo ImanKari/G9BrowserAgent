@@ -498,6 +498,16 @@ const downloadListeners = new Set();
 const pendingMeta = new Map();
 
 /**
+ * (3.5) The same attribution in worker memory. The storage.session write can fail (its quota is
+ * shared with every tab's capture and refs) — and then the completion was DROPPED: onChanged found
+ * no record, so wait_download timed out on a file that had finished, still showing the in-progress
+ * name it had when it began (field report: a ".crdownload" on Edge).
+ */
+const memoryMeta = new Map();
+/** Downloads this worker saw BEGIN while nothing was watched: the person's own, never claimed later. */
+const beganUnwatched = new Set();
+
+/**
  * The watch list is one storage key, read-modify-written by begin() and end().
  * Two tabs starting a watch at the same moment must not lose one of them.
  */
@@ -669,9 +679,15 @@ async function onDownloadCreated(item) {
   if (!downloadListeners.size) return;
   const pending = (async () => {
     const attributed = await attribute(item);
-    if (!attributed) return null;
+    if (!attributed) {
+      beganUnwatched.add(item.id);
+      return null;
+    }
     const meta = { ...attributed, startedAt: Date.parse(item.startTime ?? '') || Date.now() };
-    await api().storage.session.set({ [ITEM_KEY(item.id)]: meta });
+    memoryMeta.set(item.id, meta);
+    await api().storage.session.set({ [ITEM_KEY(item.id)]: meta }).catch((err) => {
+      console.warn('[G9BrowserAgent] could not persist a download’s attribution; it is kept in memory', err);
+    });
     return meta;
   })();
   pendingMeta.set(item.id, pending);
@@ -690,16 +706,35 @@ async function onDownloadChanged(delta) {
   // promise AFTER onCreated did keeps the order: "began" is emitted first.
   let meta = pendingMeta.has(delta.id) ? await pendingMeta.get(delta.id).catch(() => null) : undefined;
   if (meta === undefined) {
-    const stored = await api().storage.session.get(ITEM_KEY(delta.id));
-    meta = stored[ITEM_KEY(delta.id)];
+    const stored = await api().storage.session.get(ITEM_KEY(delta.id)).catch(() => ({}));
+    meta = stored[ITEM_KEY(delta.id)] ?? memoryMeta.get(delta.id);
   }
-  if (!meta) return; // began while nothing was watched, or before this worker saw it
+  if (!meta) {
+    // (3.5) No record (a worker that restarted, a write that failed): while a tab is watched, a
+    // download that ENDS is attributed now rather than dropped — its end is what a wait is for.
+    const ending = delta.state?.current === 'complete' || delta.state?.current === 'interrupted' || !!delta.error;
+    if (!ending || beganUnwatched.has(delta.id)) {
+      if (ending) beganUnwatched.delete(delta.id);
+      return;
+    }
+    const watched = await watchedTabs().catch(() => ({}));
+    const since = Math.min(...Object.values(watched).map((w) => w?.since ?? Infinity));
+    if (!Number.isFinite(since)) return;
+    const [found] = await api().downloads.search({ id: delta.id });
+    // Only a download that BEGAN while a tab was watched: one that began before is the person's own.
+    if (!found || (Date.parse(found.startTime ?? '') || 0) < since - 1000) return;
+    const attributed = await attribute(found).catch(() => null);
+    if (!attributed) return;
+    meta = { ...attributed, startedAt: Date.parse(found.startTime ?? '') || Date.now(), late: true };
+  }
   // onChanged carries only the changed fields and never bytesReceived; the
   // full item is one search away and is the truth the event is built from.
   const [item] = await api().downloads.search({ id: delta.id });
   if (!item) return;
   emitDownload(toEvent(item, meta));
   if (item.state !== 'in_progress') {
+    memoryMeta.delete(delta.id);
+    beganUnwatched.delete(delta.id);
     await api().storage.session.remove(ITEM_KEY(delta.id)).catch(() => {});
   }
 }

@@ -40,6 +40,16 @@ import { EventEmitter } from 'node:events';
 export const ENGINE_RESUME_MS = 10 * 60_000;
 
 /**
+ * (3.5) An owner that is still CONNECTED but has sent nothing for this long, with no call running,
+ * loses the right to block others: the next agent's state-changing call takes the tab (logged as a
+ * takeover, and said in that agent's result). Connections outlive their agents — an HTTP session
+ * stays open 30 idle minutes, a crashed client's socket lingers, a service restart makes a new agent
+ * — and their tabs stayed locked (field report). `G9_IDLE_CLAIM_MINUTES` (0 = never).
+ */
+export const IDLE_CLAIM_MS = (Number.isFinite(Number(process.env.G9_IDLE_CLAIM_MINUTES)) && process.env.G9_IDLE_CLAIM_MINUTES !== ''
+  ? Number(process.env.G9_IDLE_CLAIM_MINUTES) : 15) * 60_000;
+
+/**
  * (3.4) How long the tabs a departed agent IDENTITY owned are remembered for its successor. A
  * stateless MCP client (a panel gate, a script) may open a fresh MCP session — so a fresh daemon
  * connection, a new agent-N — for every request. Its tabs and current tab used to stay with the
@@ -58,9 +68,11 @@ function samePage(a, b) {
 }
 
 export class Registry extends EventEmitter {
-  constructor({ log = () => {}, resumeMs = ENGINE_RESUME_MS } = {}) {
+  constructor({ log = () => {}, resumeMs = ENGINE_RESUME_MS, idleClaimMs = IDLE_CLAIM_MS } = {}) {
     super();
     this.log = log;
+    /** (3.5) A connected owner with no call for this long no longer blocks others (0 disables). */
+    this.idleClaimMs = Number.isFinite(Number(idleClaimMs)) && Number(idleClaimMs) >= 0 ? Number(idleClaimMs) : IDLE_CLAIM_MS;
     /** 0 disables parking: a disconnected extension drops its tabs at once (the v2.0 behaviour). */
     this.resumeMs = Number.isFinite(Number(resumeMs)) && Number(resumeMs) >= 0 ? Number(resumeMs) : ENGINE_RESUME_MS;
     /** instanceId → { id, instanceId, loadId, parkedAt, timer } — extension engines waiting to reconnect. */
@@ -124,6 +136,8 @@ export class Registry extends EventEmitter {
       origin,
       send,
       connectedAt: Date.now(),
+      lastCallAt: Date.now(),
+      inflight: 0,
       halted: false,
       haltedBy: null,
       current: null,
@@ -573,10 +587,43 @@ export class Registry extends EventEmitter {
   ensureOwnership(handle, agentId) {
     const owner = this.owners.get(handle);
     if (owner === agentId) return { tabId: handle, owner: agentId, claimed: false };
-    if (owner && this.clients.has(owner)) throw new Error(this.ownershipMessage(handle, owner));
+    if (owner && this.clients.has(owner)) {
+      const idle = this.idleFor(owner);
+      if (idle == null) throw new Error(this.ownershipMessage(handle, owner));
+      // (3.5) The owner is connected but has done nothing for idleClaimMs (and has nothing running):
+      // an abandoned session, a stateless client's old one, a crashed agent's socket kept open.
+      this.log(`[ownership] ${this.describe(agentId)} took tab ${handle} from ${this.describe(owner)}, idle ${Math.round(idle / 60_000)} min`);
+      this.emit('takeover', { tabId: handle, from: owner, to: agentId, idleMs: idle });
+      this.owners.set(handle, agentId);
+      this.emit('agents');
+      return { tabId: handle, owner: agentId, claimed: true, fromIdle: owner, idleMs: idle };
+    }
     this.owners.set(handle, agentId);
     this.emit('agents');
     return { tabId: handle, owner: agentId, claimed: true };
+  }
+
+  /** (3.5) A call of this client starts / ends: its claims count as live while any runs. */
+  beginCall(clientId) {
+    const c = this.clients.get(clientId);
+    if (!c) return;
+    c.inflight = (c.inflight ?? 0) + 1;
+    c.lastCallAt = Date.now();
+  }
+
+  endCall(clientId) {
+    const c = this.clients.get(clientId);
+    if (!c) return;
+    c.inflight = Math.max(0, (c.inflight ?? 1) - 1);
+    c.lastCallAt = Date.now();
+  }
+
+  /** How long a connected client's claims have been idle, when that is past idleClaimMs; else null. */
+  idleFor(clientId) {
+    const c = this.clients.get(clientId);
+    if (!c || !this.idleClaimMs || (c.inflight ?? 0) > 0) return null;
+    const idle = Date.now() - (c.lastCallAt ?? c.connectedAt ?? Date.now());
+    return idle >= this.idleClaimMs ? idle : null;
   }
 
   claim(handle, agentId, { force = false } = {}) {

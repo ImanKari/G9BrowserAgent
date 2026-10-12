@@ -301,6 +301,35 @@ await test('manifest: version equals package.json, Chrome 125+, downloads permis
   assert.ok(await exists(`extension/${manifest.side_panel.default_path}`));
 });
 
+await test('(3.5) the extension icons are the one design: each PNG decodes to what desktop/lib/icon.mjs draws', async () => {
+  // setup/make-icons.mjs writes them from the code that also draws the app, installer and tray, so the
+  // browser and the desktop show one mark. Compared as pixels, not bytes (zlib versions may differ).
+  const { inflateSync } = await import('node:zlib');
+  const { drawIcon } = await import(pathToFileURL(path.join(ROOT, 'desktop/lib/icon.mjs')).href);
+  const { EXTENSION_ICON_SIZES } = await import(pathToFileURL(path.join(ROOT, 'setup/make-icons.mjs')).href);
+  const manifest = JSON.parse(await read('extension/manifest.json'));
+  assert.deepEqual(Object.keys(manifest.icons).map(Number), EXTENSION_ICON_SIZES);
+  for (const size of EXTENSION_ICON_SIZES) {
+    const png = await readFile(path.join(ROOT, 'extension', manifest.icons[size]));
+    let off = 8;
+    const idat = [];
+    while (off < png.length) {
+      const len = png.readUInt32BE(off);
+      const type = png.subarray(off + 4, off + 8).toString('ascii');
+      if (type === 'IHDR') assert.deepEqual([png.readUInt32BE(off + 8), png.readUInt32BE(off + 12), png[off + 16], png[off + 17]], [size, size, 8, 6], `icon${size} is ${size}×${size} RGBA`);
+      if (type === 'IDAT') idat.push(png.subarray(off + 8, off + 8 + len));
+      off += 12 + len;
+    }
+    const raw = inflateSync(Buffer.concat(idat));
+    const { rgba } = drawIcon(size, 'connected');
+    for (let y = 0; y < size; y++) {
+      assert.equal(raw[y * (size * 4 + 1)], 0, 'unfiltered rows, as make-icons writes them');
+      const row = raw.subarray(y * (size * 4 + 1) + 1, (y + 1) * (size * 4 + 1));
+      assert.ok(row.equals(Buffer.from(rgba.buffer, y * size * 4, size * 4)), `icon${size}.png row ${y} differs from the design — run node setup/make-icons.mjs`);
+    }
+  }
+});
+
 await test('no trace of the four modes, the workspace allowlist or bridge discovery in the panel', () => {
   // Markup: the segmented mode control, its warning line, the allowlist box, the
   // discovery list and the token field.

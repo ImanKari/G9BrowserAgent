@@ -24,6 +24,11 @@ if [ -n "$BUILD" ] && [ "$(cat "$STAMP" 2>/dev/null)" != "$BUILD" ]; then
   echo "[g9] the extension in the image changed: its cached service worker was cleared"
 fi
 
+# (3.5) Chromium saves downloads to ~/Downloads and, when that folder does not exist, drops every
+# download without telling the page or the extension (field report: /config/Downloads was missing on
+# a node, and every export vanished). The base image does not create it; this does, on every start.
+mkdir -p "${HOME:-/config}/Downloads"
+
 PREFS="$PROFILE/Preferences"
 if [ -f "$PREFS" ]; then
   sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/; s/"exited_cleanly":false/"exited_cleanly":true/' "$PREFS" 2>/dev/null || true

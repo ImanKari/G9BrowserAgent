@@ -82,8 +82,11 @@ export const WEBDRIVER_SWITCH = '--disable-blink-features=AutomationControlled';
  *   mismatch between what the browser claims and what it is (JS engine features, fonts, GPU,
  *   TLS/HTTP2 fingerprints are not changed by a switch). Detectors look for exactly those
  *   contradictions. A stock binary telling the truth has none.
- * * `--headless` identifies automation (the UA and userAgentData say HeadlessChrome — measured).
- *   It is chosen by the caller, not by this level; launchWarnings() says so. The headless screen
+ * * `--headless` identifies automation: its user-agent STRING says HeadlessChrome (measured; the
+ *   userAgentData brands and Sec-CH-UA were already the real ones on Edge 154 and Chrome 155). Since
+ *   3.5 launch.js starts headless stealth with the headed user agent (launch.js headedUserAgent): the
+ *   one headless-only mismatch removed, nothing invented. Headless itself is the caller's choice,
+ *   not this level's; launchWarnings() names what still differs. The headless screen
  *   (800×600 whatever --window-size says — measured) is fixed at EVERY level by launch.js, which
  *   gives every headless launch `--screen-info={W×H workAreaBottom=48}` and a window that fills
  *   that work area (decision D-a, and live round 2: a screen without a taskbar is itself a tell).
@@ -120,8 +123,9 @@ export function launchWarnings({ level = 'off', headless = true, kind = null } =
   }
   if (headless) {
     out.push(
-      'stealth with headless=true: headless leaves signals no level can remove — the user agent and ' +
-      'userAgentData say HeadlessChrome, and the window\'s outer size can read 0×0 at the load event. ' +
+      'stealth with headless=true: headless leaves signals no level can remove — the window\'s outer size ' +
+      'can read 0×0 at the load event, and headless rendering is not a window\'s. (Since 3.5 the user agent ' +
+      'no longer says HeadlessChrome: headless stealth starts with the headed user agent, launch.js.) ' +
       'Public detectors flagged every headless stealth run in G9BrowserAgent\'s own test (docs/STEALTH.md). On a ' +
       'machine without a GPU, a software GL renderer string is a further tell. Run stealth-critical ' +
       'suites headed on a dedicated desktop (docs/STEALTH.md).',

@@ -1839,10 +1839,21 @@ async function aimedPlan(tabId, node, reach, { force, label, makePlan, pressOf }
     last = v;
   }
   if (last?.moved) throw movedError(label);
-  throw new Error(
+  throw coveredError(new Error(
     `"${label}" is not clickable at the points G9BrowserAgent aimed at inside it — ${last?.reason ?? 'something covers it'}. ` +
       `Close the overlay first, or pass force:true to click through it.`,
-  );
+  ));
+}
+
+/**
+ * (3.5) A refusal BEFORE anything was pressed: the target is covered (`predispatch:'covered'`),
+ * moved ('moved') or gone ('gone'). Nothing reached the page's element, so trying again once it is
+ * clickable cannot repeat an action (rule R6) — browser_interact does, within the call's waitMs.
+ */
+function coveredError(error) {
+  error.predispatch = 'covered';
+  error.delivery = 'not-delivered';
+  return error;
 }
 
 /** The target left the document (checkObscured `gone`): re-rendered or removed. Never "covered". */
@@ -1852,6 +1863,7 @@ function goneError(label) {
       'Take a fresh browser_snapshot and use the new ref.',
   );
   error.delivery = 'not-delivered';
+  error.predispatch = 'gone';
   return error;
 }
 
@@ -1860,11 +1872,13 @@ function goneError(label) {
  * so no "close the overlay / force:true" advice: forcing would press whatever took its place.
  */
 function movedError(label) {
-  return new Error(
+  const error = new Error(
     `"${label}" is no longer where G9BrowserAgent measured it: it moved (an animation, or a script reacting to the pointer) ` +
       'between the measurement and the press, so nothing was pressed. Take a fresh browser_snapshot and try again ' +
       '— if it keeps moving away from the pointer, the page is doing that on purpose.',
   );
+  error.predispatch = 'moved';
+  return error;
 }
 
 /**
@@ -1935,10 +1949,10 @@ async function directClick(tabId, opts = {}) {
       if (!v.ok) {
         if (v.gone) throw goneError(node.name || ref);
         if (v.moved) throw movedError(node.name || ref);
-        throw new Error(
+        throw coveredError(new Error(
           `"${node.name || ref}" is not clickable at its centre — ${v.reason}. ` +
             `Close the overlay first, or pass force:true to click through it.`,
-        );
+        ));
       }
     }
   } else if (x != null && y != null) {
@@ -2835,8 +2849,9 @@ export async function drag(tabId, opts = {}) {
   return directDrag(tabId, opts);
 }
 
-async function directDrag(tabId, { from, to, url, steps = 12 } = {}) {
+async function directDrag(tabId, { from, to, toPoint = null, url, steps = 12 } = {}) {
   const a = await resolveRef(tabId, from, url);
+  if (toPoint) return directDragToPoint(tabId, a, from, toPoint, steps);
   const b = await resolveRef(tabId, to, url);
   // Both ends must be on screen AT THE SAME TIME, measured after the last scroll. v1 centred the
   // grip, then centred the drop target — which on a wide page scrolled the grip away (Engine 2
@@ -2875,16 +2890,21 @@ async function directDrag(tabId, { from, to, url, steps = 12 } = {}) {
   return { dragged: `${a.name || from} -> ${b.name || to}`, ...deliveryOf(w), ...(at ? { pointer: at } : {}), humanize: { level: 'off' } };
 }
 
-async function humanDrag(tabId, { from, to, url, force = false } = {}, hz) {
+async function humanDrag(tabId, { from, to, toPoint = null, url, force = false } = {}, hz) {
   const a = await resolveRef(tabId, from, url);
-  const b = await resolveRef(tabId, to, url);
+  const b = toPoint ? null : await resolveRef(tabId, to, url);
   const rng = createRng(hz.seed);
   const reach = await reachByWheel(tabId, hz, rng, a, describeNode(a, from));
-  const toSeen = await visibleBox(tabId, b, reach.viewport);
+  // (3.5) A drop POINT (a slider position, a scrubber), in top-level CSS pixels, measured by the
+  // caller after the reach above: a one-pixel box there.
+  const toSeen = toPoint
+    ? { box: { x: toPoint.x - 0.5, y: toPoint.y - 0.5, width: 1, height: 1, origin: { x: 0, y: 0 } }, region: { x: 0, y: 0, width: reach.viewport.width, height: reach.viewport.height } }
+    : await visibleBox(tabId, b, reach.viewport);
+  if (toPoint) requireOnScreen(toPoint.x, toPoint.y, reach.viewport, 'drag');
   if (!toSeen) throw new Error(`The drop target "${describeNode(b, to)}" has zero size or is not rendered.`);
   if (toSeen.unmapped) throw new UnmappedFrame(describeNode(b, to));
   const toBox = toSeen.aim ?? toSeen.box;
-  if (!mostlyVisible(toSeen.box, toSeen.region)) {
+  if (!toPoint && !mostlyVisible(toSeen.box, toSeen.region)) {
     throw new Error(
       `The drop target "${describeNode(b, to)}" is not on screen while the source "${describeNode(a, from)}" is. ` +
         `A person could not drag between them without the page auto-scrolling. Scroll so both are visible, ` +
@@ -2903,12 +2923,31 @@ async function humanDrag(tabId, { from, to, url, force = false } = {}, hz) {
     node: a, extraMs: plan.durationMs, target: a, label: describeNode(a, from),
   });
   return {
-    dragged: `${a.name || from} -> ${b.name || to}`,
+    dragged: `${a.name || from} -> ${b ? (b.name || to) : `(${Math.round(toPoint.x)}, ${Math.round(toPoint.y)})`}`,
     ...deliveryOf(w),
     pointer: await pointerNow(tabId),
     ...(reach.scroll.via !== 'none' ? { scrolled: reach.scroll } : {}),
     humanize: hzInfo(hz),
   };
+}
+
+/** (3.5) Direct drag of `a` to a point in top-level CSS pixels (a slider position). */
+async function directDragToPoint(tabId, a, from, toPoint, steps) {
+  const pa = await pointFor(tabId, a.backendNodeId, a.sessionId, { align: 'nearest' });
+  if (pa.sessionId) throw new Error(`"${describeNode(a, from)}" is inside a cross-origin frame; a drag to a page point is not supported there.`);
+  const origin = await directOrigin(tabId, null);
+  const w = await witnessed(tabId, PRESS_KINDS, 'drag', async () => {
+    await mouse(tabId, 'mouseMoved', pa.x, pa.y, { button: 'none', origin });
+    await mouse(tabId, 'mousePressed', pa.x, pa.y, { origin });
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      await mouse(tabId, 'mouseMoved', pa.x + (toPoint.x - pa.x) * t, pa.y + (toPoint.y - pa.y) * t, { origin });
+      await sleep(16);
+    }
+    await mouse(tabId, 'mouseReleased', toPoint.x, toPoint.y, { origin });
+  }, { sessions: [null], target: a, label: describeNode(a, from) });
+  const at = await settlePointer(tabId, toPoint.x, toPoint.y, origin);
+  return { dragged: `${a.name || from} -> (${Math.round(toPoint.x)}, ${Math.round(toPoint.y)})`, ...deliveryOf(w), ...(at ? { pointer: at } : {}), humanize: { level: 'off' } };
 }
 
 // ------------------------------------------------------------------- select
@@ -3211,7 +3250,7 @@ export async function select(tabId, opts = {}) {
  * picker, which is outside the browser and outside anything CDP can reach.
  * Setting the input directly is the whole reason this tool exists.
  */
-export async function upload(tabId, { ref, selector, files, url } = {}) {
+export async function upload(tabId, { ref, selector, files, url, waitMs = 0 } = {}) {
   let backendNodeId;
   let sessionId = null;
 
@@ -3220,12 +3259,20 @@ export async function upload(tabId, { ref, selector, files, url } = {}) {
     backendNodeId = node.backendNodeId;
     sessionId = node.sessionId ?? null;
   } else if (selector) {
-    const { root } = await send(tabId, 'DOM.getDocument', { depth: 0 });
-    const { nodeId } = await send(tabId, 'DOM.querySelector', { nodeId: root.nodeId, selector });
+    // (3.5) waitMs: a page that builds its file input late — or rebuilds it — is waited for, looking
+    // again every 250 ms (field report: four "No element matches" on one site in one run).
+    const deadline = Date.now() + Math.max(0, Math.min(60_000, Number(waitMs) || 0));
+    let nodeId = 0;
+    for (;;) {
+      const { root } = await send(tabId, 'DOM.getDocument', { depth: 0 });
+      ({ nodeId } = await send(tabId, 'DOM.querySelector', { nodeId: root.nodeId, selector }));
+      if (nodeId || Date.now() >= deadline) break;
+      await sleep(250);
+    }
     if (!nodeId) {
       throw new Error(
-        `No element matches ${JSON.stringify(selector)}. For a hidden upload control, ` +
-          `'input[type=file]' usually finds it — check with browser_console action:"evaluate".`,
+        `No element matches ${JSON.stringify(selector)}${waitMs ? ` after waiting ${Math.round(Number(waitMs) / 100) / 10} s` : ''}. For a hidden upload control, ` +
+          `'input[type=file]' usually finds it; a page that builds it late needs waitMs.`,
       );
     }
     ({ node: { backendNodeId } } = await send(tabId, 'DOM.describeNode', { nodeId }));
@@ -3237,19 +3284,30 @@ export async function upload(tabId, { ref, selector, files, url } = {}) {
   }
 
   const list = Array.isArray(files) ? files : [files];
+  if (!list.length || list.some((f) => typeof f !== 'string' || !f)) {
+    throw new Error('upload needs files (paths on the browser’s machine), or fileData / fileUrls to have them written there first.');
+  }
   await send(tabId, 'DOM.setFileInputFiles', { backendNodeId, files: list }, { sessionId });
-  // The outcome is readable: the input now holds that many files, or not.
+  // (3.5) The outcome is readable: what the input now holds, by name and size — a page that swaps
+  // its input in its change handler, or refuses the type, leaves it empty.
   const held = await callInWorld(
     tabId,
     backendNodeId,
-    `function () { return this.files ? this.files.length : null; }`,
+    `function () { return this.files ? Array.from(this.files).map((f) => ({ name: f.name, size: f.size, type: f.type })) : null; }`,
     [],
     sessionId,
   ).catch(() => null);
+  if (Array.isArray(held) && held.length === 0) {
+    throw new Error(
+      `The file input holds no file after setting ${list.length}: the page cleared it, replaced the input, or it does not accept this file type. ` +
+        'Take a browser_snapshot to see what the page did.',
+    );
+  }
   return {
     uploaded: list,
+    ...(Array.isArray(held) ? { inputHolds: held } : {}),
     via: ref ? `ref ${ref}` : `selector ${selector}`,
-    delivery: held === list.length ? 'delivered' : 'indeterminate',
-    ...(held != null && held !== list.length ? { deliveryNote: `The input reports ${held} file(s) after setting ${list.length}.` } : {}),
+    delivery: Array.isArray(held) && held.length === list.length ? 'delivered' : 'indeterminate',
+    ...(Array.isArray(held) && held.length !== list.length ? { deliveryNote: `The input reports ${held.length} file(s) after setting ${list.length}.` } : {}),
   };
 }

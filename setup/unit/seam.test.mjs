@@ -928,6 +928,31 @@ await test('Node: paused requests are answered while Stop is on; rules, pins, fr
     }, 'every dialog cleared');
     assert.match(JSON.stringify(await runtime.runTool('browser_snapshot', { tabId: t1.id })), /Buy now/);
 
+    // (3.5) A dialog record its "closed" event never cleared: the page answers, so the record goes.
+    await state.noteDialog({ tabId: t1.id, type: 'beforeunload', message: '', at: Date.now() - 10_000 });
+    assert.match(JSON.stringify(await runtime.runTool('browser_snapshot', { tabId: t1.id })), /Buy now/, 'a stale dialog does not block');
+    assert.equal((await state.getState()).dialogs[t1.id], undefined, 'and its record was cleared');
+
+    // (3.5) A dialog on the current tab never stops tab management: opening a new tab works.
+    await state.setState({ currentTabId: t1.id });
+    await state.noteDialog({ tabId: t1.id, type: 'beforeunload', message: 'Leave site?' });
+    const opened = await runtime.runTool('browser_tabs', { action: 'open', url: 'https://shop.example.test/new' });
+    assert.ok(Number.isInteger(opened.tabId), 'open is not refused by another tab\'s dialog');
+    await state.forgetDialog(t1.id);
+
+    // (3.5) leaveWithoutAsking: a beforeunload prompt on an armed tab is accepted at once, never recorded.
+    const leave = await import(pathToFileURL(join(EXT, 'lib', 'leave.js')).href);
+    leave.armLeave(t2.id);
+    engine.sent.length = 0;
+    engine.emit('Page.javascriptDialogOpening', { type: 'beforeunload', message: '' }, cdpPlatform.tabInfo(t2.id).sessionId);
+    await until(() => engine.sent.some((s) => s.method === 'Page.handleJavaScriptDialog' && s.params.accept === true), 'prompt accepted');
+    leave.disarmLeave(t2.id);
+    assert.equal((await state.getState()).dialogs[t2.id], undefined, 'an accepted prompt is not a dialog to handle');
+    // Not armed: a beforeunload prompt is a dialog like any other.
+    engine.emit('Page.javascriptDialogOpening', { type: 'beforeunload', message: '' }, cdpPlatform.tabInfo(t2.id).sessionId);
+    await until(async () => (await state.getState()).dialogs[t2.id]?.type === 'beforeunload', 'unarmed prompt recorded');
+    await state.forgetDialog(t2.id);
+
     // A detach forgets the frames and what ensureDomain enabled; the next use re-enables.
     const enables = () => engine.sent.filter((s) => s.method === 'Accessibility.enable' && s.sessionId === cdpPlatform.tabInfo(tab.id).sessionId).length;
     await cdp.ensureDomain(tab.id, 'Accessibility');
@@ -1005,6 +1030,57 @@ await test('Node: the ref table is capped, so a crowd of agents cannot grow it w
   const perOwner = new Map();
   for (const g of [{ by: table.by }, ...table.history]) perOwner.set(g.by, (perOwner.get(g.by) ?? 0) + 1);
   for (const [who, n] of perOwner) assert.ok(n <= refs.KEEP_GENERATIONS, `${who} keeps at most KEEP_GENERATIONS (${n})`);
+  return undefined;
+});
+
+await test('Node: (3.5) a full session quota never fails a snapshot — names are short, tables have a byte budget, room is made', async () => {
+  if (needsSmoke()) return needsSmoke();
+  const refs = await import(pathToFileURL(join(EXT, 'lib', 'refs.js')).href);
+  const { platform } = await import(pathToFileURL(join(EXT, 'lib', 'platform.js')).href);
+  const area = platform.storage.session;
+  const long = 'A chat message that goes on and on. '.repeat(400);
+  const entries = (n, base) => Array.from({ length: n }, (_, i) => [`e${base + i}`, { backendNodeId: base + i, role: 'article', name: long, sessionId: null }]);
+
+  // 1. Names are cut: 14 kB names were stored whole in every generation.
+  await refs.saveRefs(7001, { url: 'https://chat.example.test/c/1', entries: entries(3, 1), by: 'agent-A' });
+  const t1 = await refs.getRefs(7001);
+  assert.ok(t1.map.e1.name.length <= refs.NAME_MAX, 'a stored name is at most NAME_MAX characters');
+  assert.equal(t1.map.e1.backendNodeId, 1, 'the ids are kept whole');
+
+  // 2. The byte budget: big generations push the oldest kept ones out; the newest always stays.
+  const wide = (n, base) => Array.from({ length: n }, (_, i) => [`e${base + i}`, { backendNodeId: base + i, role: 'button', name: 'x'.repeat(70), sessionId: null }]);
+  for (let g = 0; g < 6; g++) await refs.saveRefs(7002, { url: 'https://chat.example.test/c/2', entries: wide(2500, 1 + g * 2500), by: 'agent-A' });
+  const t2 = await refs.getRefs(7002);
+  const bytes = JSON.stringify(t2.map).length + t2.history.reduce((s, h) => s + JSON.stringify(h.map).length, 0);
+  assert.ok(bytes <= refs.TABLE_BUDGET, `the table fits its budget (${bytes} bytes)`);
+  assert.ok(t2.history.length < 3, 'older generations went first');
+
+  // 3. The quota itself: a store that refuses writes past a limit (chrome's message), with other tabs'
+  // history and a diff base filling it. The snapshot's save makes room instead of failing.
+  await refs.saveRefs(7003, { url: 'https://other.example.test/', entries: wide(800, 1), by: 'agent-B' });
+  await refs.saveRefs(7003, { url: 'https://other.example.test/', entries: wide(800, 801), by: 'agent-B' });
+  await area.set({ 'snapdiff:7003': { 'agent-B': { lines: { a: 'x'.repeat(200_000) } } } });
+  const realSet = area.set.bind(area);
+  const LIMIT = JSON.stringify(await area.get(null)).length + 20_000;
+  area.set = async (items) => {
+    const all = { ...(await area.get(null)), ...items };
+    if (JSON.stringify(all).length > LIMIT) throw new Error('Session storage quota bytes exceeded. Values were not stored.');
+    return realSet(items);
+  };
+  try {
+    await refs.saveRefs(7004, { url: 'https://chat.example.test/c/4', entries: wide(400, 1), by: 'agent-A' });
+    const t4 = await refs.getRefs(7004);
+    assert.ok(t4?.map?.e1, 'the new snapshot was saved');
+    assert.equal((await area.get('snapdiff:7003'))['snapdiff:7003'], undefined, "another tab's diff base made room");
+    assert.equal((await refs.getRefs(7003)).history.length, 0, "another tab's older snapshot made room; its newest is kept");
+    assert.ok((await refs.getRefs(7003)).map.e801, 'the other tab keeps its newest refs');
+    // Nothing left to drop: the error names the cause and the fix instead of the browser's bare message.
+    area.set = async () => { throw new Error('Session storage quota bytes exceeded. Values were not stored.'); };
+    await assert.rejects(() => refs.saveRefs(7005, { url: 'https://chat.example.test/c/5', entries: wide(5, 1) }), /session storage for G9BrowserAgent is full.*Close tabs/s);
+  } finally {
+    area.set = realSet;
+    await area.remove(['refs:7001', 'refs:7002', 'refs:7003', 'refs:7004', 'snapdiff:7003']);
+  }
   return undefined;
 });
 

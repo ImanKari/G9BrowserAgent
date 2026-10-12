@@ -240,7 +240,7 @@ function renderApp(s) {
   api.invoke('desktop.loginItem.get').then((li) => {
     atLogin.checked = !!li.openAtLogin;
     atLogin.disabled = !li.supported;
-    atLoginWhy.textContent = li.supported ? 'Scheduled suites need the daemon; after a restart this is what starts it.' : li.reason;
+    atLoginWhy.textContent = li.supported ? 'On by default: G9BrowserAgent then waits in the tray, so the daemon, schedules and updates are there after a restart. Closing the window keeps it there too.' : li.reason;
   }).catch(() => {});
   atLogin.addEventListener('change', () => api.invoke('desktop.loginItem.set', { enabled: atLogin.checked })
     .then((li) => toast(li.openAtLogin ? 'G9BrowserAgent starts in the tray when you sign in.' : 'G9BrowserAgent no longer starts at sign-in.'))

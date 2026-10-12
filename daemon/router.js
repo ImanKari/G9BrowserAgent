@@ -21,12 +21,14 @@
  */
 
 import fsp from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-import { TOOL_NAMES } from '../mcp/tools.js';
+import { TOOL_NAMES, unknownArguments, unknownArgumentsMessage } from '../mcp/tools.js';
 import { handoff as runHandoff } from './handoff.js';
 import { fileInfo } from './evidence.js';
+import { CallLog, callContext } from './calls.js';
 
 // ------------------------------------------------------------------ pure helpers
 
@@ -42,7 +44,7 @@ const MAX_DEPTH = 64;
  * failed the call ("Tab 3 does not exist" for a variable named tabId) or
  * silently changed the number and minted a handle for a tab that never existed.
  */
-export const OPAQUE_KEYS = new Set(['variables', 'bundle', 'spec', 'har', 'rules', 'expected', 'environment', 'parameters', 'value', 'json', 'dataBase64']);
+export const OPAQUE_KEYS = new Set(['variables', 'bundle', 'spec', 'har', 'rules', 'expected', 'environment', 'parameters', 'value', 'json', 'dataBase64', 'fileData', 'bytesBase64']);
 
 /**
  * Rewrite tab ids in a JSON value. `map(n, key)` returns the replacement for a
@@ -158,7 +160,8 @@ export function timeoutFor(tool, args = {}, base = 120_000) {
   const asked = (fallback, cap = Infinity) => Math.min(cap, Number.isFinite(Number(args.timeoutMs)) && Number(args.timeoutMs) > 0 ? Number(args.timeoutMs) : fallback);
   switch (tool) {
     case 'browser_interact':
-      return base + interactInputMs(args);
+      // (3.5) + the time the call may wait for its target (waitMs, ≤ 60 s).
+      return base + interactInputMs(args) + Math.min(60_000, Math.max(0, Number(args.waitMs) || 0));
     case 'browser_recording':
       if (args.action === 'replay' || args.action === 'calibrate') return t(30 * 60_000);
       // (3.4) A batch's own deadline is the whole list's, asked or 30 minutes.
@@ -203,7 +206,7 @@ const NOT_FOUND = /\bNo (recording|issue|attachment|flow)\b|not found in this br
 /** What a store learns about a flow by running it; never part of a FlowSpec (daemon/flows.js LOCAL_ONLY). */
 const LOCAL_TRUTH = ['runHistory', 'lastRun', 'flaky', 'knownWorld', 'knownWorlds', 'surpriseHistory', 'lastSignature'];
 
-const TABS_ACTIONS = ['list', 'open', 'close', 'focus', 'attach', 'claim', 'release', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch', 'keep_awake'];
+const TABS_ACTIONS = ['list', 'open', 'close', 'focus', 'attach', 'detach', 'claim', 'release', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch', 'keep_awake'];
 
 /**
  * An input error's delivery state ("not-delivered" | "missed" | "partial"), carried as fields from
@@ -257,6 +260,48 @@ export async function writeFileAtomic(file, bytes) {
   return { path: file, size: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') };
 }
 
+// ------------------------------------------------------------------ uploads and file reads (3.5)
+
+/** The most bytes one upload call may hand over (base64 in a 64 MiB frame, with room to spare). */
+export const UPLOAD_MAX_BYTES = 40 * 1024 * 1024;
+/** read_file: the default and the largest chunk. */
+export const READ_CHUNK_DEFAULT = 4 * 1024 * 1024;
+export const READ_CHUNK_MAX = 8 * 1024 * 1024;
+
+/** A file name safe on every system: no folders, no reserved characters, never empty. */
+export function safeFileName(name, fallback = 'file') {
+  const base = String(name ?? '').split(/[\\/]/).pop().replace(/[<>:"|?*\u0000-\u001f]/g, '_').replace(/^\.+/, '').trim().slice(0, 120);
+  return base || fallback;
+}
+
+/** A name for a file fetched from `url`: its last path segment, else "download". */
+export function nameFromUrl(url) {
+  try {
+    const u = new URL(url);
+    return safeFileName(decodeURIComponent(u.pathname.split('/').pop() || ''), 'download');
+  } catch {
+    return 'download';
+  }
+}
+
+/**
+ * Is `file` one read_file may return? Only what G9BrowserAgent produced or tracked: its files/,
+ * downloads/ and runs/ folders under G9_HOME, and the exact paths of downloads the daemon saw.
+ * The HTTP MCP endpoint lets agents on other machines in with a token: read_file must not become a
+ * way to read the browser machine's disk. Real paths are compared, so ".." and links cannot escape.
+ */
+export async function readableFile(file, { home, seen = new Set() } = {}) {
+  const real = await fsp.realpath(file);
+  if (seen.has(real)) return real;
+  for (const sub of ['files', 'downloads', 'runs']) {
+    const root = await fsp.realpath(path.join(home, sub)).catch(() => null);
+    if (!root) continue;
+    const rel = path.relative(root, real);
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return real;
+  }
+  return null;
+}
+
 /** Header names worth showing an agent from a fetch (the rest cost tokens and say little). */
 const FETCH_HEADERS = ['content-type', 'content-length', 'content-disposition', 'last-modified', 'etag', 'location', 'cache-control'];
 
@@ -289,6 +334,10 @@ export class Router {
     this.local = new Map(); // local call id → { reject, tool, handle, engineId }
     this.nextLocalId = 1;
     this.extTabs = new Map(); // engineId → last `tabs` rows (handles)
+    // (3.5) Every call's id and outcome, opId deduplication, pending answers (daemon/calls.js).
+    this.callLog = new CallLog();
+    this.lateRelays = new Map(); // relay id → { callId, engineId }: answered at the deadline, may still end
+    this.seenFiles = new Set(); // (3.5) real paths of downloads the daemon reported: read_file may return them
   }
 
   // ------------------------------------------------------------ helpers
@@ -413,6 +462,7 @@ export class Router {
       return Promise.reject(err);
     }
     const ms = timeoutMs ?? timeoutFor(tool, args, this.timeoutMs);
+    const callId = callContext.getStore()?.callId ?? null;
     return new Promise((resolve, reject) => {
       if (!engineClient.send || this.registry.getClient(engineId) == null) {
         reject(new Error('The browser extension disconnected. Ask the user to check that the browser is still open.'));
@@ -431,6 +481,11 @@ export class Router {
         try { engineClient.send?.({ type: 'cancel', id }); } catch { /* the socket is going */ }
         entry.graceTimer = setTimeout(() => {
           if (!this.pending.delete(id)) return;
+          // (3.5) Its answer may still come: kept, so the call log can record how it really ended.
+          if (callId) {
+            this.lateRelays.set(id, { callId, engineId });
+            setTimeout(() => this.lateRelays.delete(id), 60 * 60_000).unref?.();
+          }
           reject(new Error(
             `"${tool}" did not respond within ${secs}s. G9BrowserAgent asked the extension to stop it and recover the tab, but the ` +
               'extension has not answered, so the call may STILL be running there: take a browser_snapshot before sending this tab ' +
@@ -465,13 +520,24 @@ export class Router {
   /** `{type:'result'}` from an extension engine. */
   onRelayResult(engineClient, msg) {
     const entry = this.pending.get(msg.id);
-    if (!entry || entry.engineId !== engineClient.id) return;
+    if (!entry) {
+      // (3.5) A late answer to a call the daemon already gave up on: record its real outcome.
+      const late = this.lateRelays.get(msg.id);
+      if (late && late.engineId === engineClient.id) {
+        this.lateRelays.delete(msg.id);
+        this.callLog.late(late.callId, msg.ok
+          ? { result: rewriteTabIds(msg.result, (n) => this.registry.handleForChrome(late.engineId, n)) }
+          : { error: String(msg.error ?? 'failed') });
+      }
+      return;
+    }
+    if (entry.engineId !== engineClient.id) return;
     clearTimeout(entry.timer);
     clearTimeout(entry.graceTimer);
     this.pending.delete(msg.id);
     if (msg.ok) entry.resolve(msg.result);
     else {
-      const text = String(msg.error ?? 'The extension reported an error with no message.');
+      const text = handlesInText(String(msg.error ?? 'The extension reported an error with no message.'), (n) => this.registry.handleForChrome(entry.engineId, n, { create: false }));
       const error = withDelivery(new Error(entry.overdue != null ? overdueMessage(entry.tool, entry.overdue, text) : text), msg);
       if (msg.recovered) error.recovered = msg.recovered;
       entry.reject(error);
@@ -587,6 +653,8 @@ export class Router {
    */
   #local(engineId, handle, tool, fn, timeoutMs, { agentId = null } = {}) {
     const id = this.nextLocalId++;
+    const callId = callContext.getStore()?.callId ?? null;
+    let gaveUp = false; // answered "may still be running": a later outcome goes to the call log
     const controller = new AbortController();
     const secs = Math.round(timeoutMs / 1000);
     return new Promise((resolve, reject) => {
@@ -635,6 +703,7 @@ export class Router {
         graceTimer = setTimeout(() => {
           if (settled) return;
           done();
+          gaveUp = true;
           reject(new Error(
             `"${tool}" did not finish within ${secs}s. G9BrowserAgent asked it to stop, but it has not stopped yet, so it may STILL be ` +
               'running on this tab: take a browser_snapshot before sending this tab more input. Likely causes: the page is ' +
@@ -666,12 +735,18 @@ export class Router {
         .then(() => fn(ctl))
         .then(
           (value) => {
-            if (settled) return;
+            if (settled) {
+              if (gaveUp && callId) this.callLog.late(callId, { result: value });
+              return;
+            }
             done();
             resolve(value);
           },
           (err) => {
-            if (settled) return;
+            if (settled) {
+              if (gaveUp && callId) this.callLog.late(callId, { error: err });
+              return;
+            }
             done();
             if (entry.overdue) {
               const wrapped = new Error(overdueMessage(tool, secs, String(err?.message ?? err)));
@@ -695,15 +770,37 @@ export class Router {
       throw new Error(`Unknown tool "${tool}". Known: ${TOOL_NAMES.join(', ')}.`);
     }
     args = args && typeof args === 'object' && !Array.isArray(args) ? { ...args } : {};
+    // (3.5) An argument the tool does not take is refused, never ignored (mcp/tools.js unknownArguments).
+    // G9_STRICT_ARGS=0 turns the refusal into a pass-through for an old client that sends extras.
+    if (process.env.G9_STRICT_ARGS !== '0') {
+      const unknown = unknownArguments(tool, args);
+      if (unknown.length) throw new Error(unknownArgumentsMessage(tool, unknown));
+    }
 
     if (tool !== 'browser_status') {
       const halted = this.registry.haltError(client.id);
       if (halted) throw new Error(halted);
     }
+    if (tool === 'browser_status') return this.#status(client, args);
 
+    // (3.5) The call log (daemon/calls.js): an id per call, opId deduplication, a pending answer
+    // within replyWithinMs. Neither key reaches an engine.
+    const { opId = null, replyWithinMs = null, ...rest } = args;
+    return this.callLog.run(client, tool, rest, { opId, replyWithinMs }, async () => {
+      // (3.5) While a call runs, its agent's claims are live (registry idleFor).
+      this.registry.beginCall?.(client.id);
+      try {
+        return await this.#dispatch(client, tool, rest);
+      } finally {
+        this.registry.endCall?.(client.id);
+      }
+    });
+  }
+
+  #dispatch(client, tool, args) {
+    // (3.5) Bytes out of the browser's machine: answered by the daemon, no tab needed.
+    if (tool === 'browser_network' && args.action === 'read_file') return this.#readFile(args);
     switch (tool) {
-      case 'browser_status':
-        return this.#status(client, args);
       case 'browser_engine':
         return this.#engineTool(client, args);
       case 'browser_tabs':
@@ -820,8 +917,13 @@ export class Router {
     const handle = forced ?? (await this.#resolveFor(client, args));
     const target = this.#targetOf(handle);
     const readOnly = this.isReadOnly(tool, args);
-    if (!readOnly) this.registry.ensureOwnership(handle, client.id);
+    const claim = readOnly ? null : this.registry.ensureOwnership(handle, client.id);
 
+    // (3.5) upload with fileData/fileUrls: the files are written on the browser's machine first.
+    let written = null;
+    if (tool === 'browser_interact' && args.action === 'upload' && (args.fileData != null || args.fileUrls != null)) {
+      ({ args, written } = await this.#materializeUploads(client, handle, args));
+    }
     const forward = { ...stripRouting(args), tabId: handle };
     const timeoutMs = timeoutFor(tool, args, this.timeoutMs);
 
@@ -850,6 +952,10 @@ export class Router {
     // stuck behind a dialog, so it must not wait in that queue itself.
     let result = readOnly || tool === 'browser_dialog' ? await execute() : await this.registry.enqueue(handle, execute);
     result = await this.#finishFiles(tool, args, result, target.kind);
+    if (written && result && typeof result === 'object' && !Array.isArray(result)) result = { ...result, written };
+    if (claim?.fromIdle && result && typeof result === 'object' && !Array.isArray(result)) {
+      result = { ...result, tookOver: { from: this.registry.describe(claim.fromIdle), idleMinutes: Math.round(claim.idleMs / 60_000), note: 'Its owner is connected but sent nothing for that long, so its claim lapsed.' } };
+    }
     if (forcedHere && result && typeof result === 'object' && !Array.isArray(result)) {
       // The replay opened this tab itself; say which, so the agent can read it,
       // act on it or close it rather than leave one tab behind per replay.
@@ -913,6 +1019,7 @@ export class Router {
         if (!where || !path.isAbsolute(String(where))) return item;
         const info = await fileInfo(String(where)).catch(() => null);
         if (!info?.exists) return { ...item, path: String(where), diskNote: 'The daemon could not read the file at this path (moved, still being written, or on another machine).' };
+        await fsp.realpath(String(where)).then((r) => this.seenFiles.add(r), () => {});
         return { ...item, path: String(where), sha256: info.sha256, file: { ...(item.file ?? {}), ...info, source: 'disk (daemon)' } };
       };
       if (args.action === 'wait_download') return addDisk(result);
@@ -1171,9 +1278,12 @@ export class Router {
         this.registry.ensureOwnership(handle, client.id);
         const target = this.#targetOf(handle);
         const ended = this.abandonCallsOn(handle, `Tab ${handle} was closed by ${this.registry.describe(client.id)} while this call was running on it.`);
-        const result = await this.#tabControl(client, target, handle, 'close', caller);
+        const result = await this.#tabControl(client, target, handle, 'close', caller, { leaveWithoutAsking: args.leaveWithoutAsking === true });
         this.registry.dropHandle(handle, 'closed by an agent');
-        return { closed: handle, ...(ended ? { endedCalls: ended } : {}), ...(result?.abandoned ? { abandoned: result.abandoned } : {}) };
+        return {
+          closed: handle, ...(ended ? { endedCalls: ended } : {}), ...(result?.abandoned ? { abandoned: result.abandoned } : {}),
+          ...(result?.engineKept ? { engineKept: true, note: result.note } : {}),
+        };
       }
 
       case 'focus': {
@@ -1208,11 +1318,25 @@ export class Router {
       }
 
       case 'release': {
-        if (args.tabId != null || args.session) {
-          const handle = await this.#resolve(client, args);
-          return { released: this.registry.release(handle, client.id) ? [handle] : [] };
+        const released = args.tabId != null || args.session
+          ? (await (async () => { const h = await this.#resolve(client, args); return this.registry.release(h, client.id) ? [h] : []; })())
+          : this.registry.releaseAll(client.id);
+        // (3.5) In the person's browser, releasing also ends the debugger session (detach:false keeps
+        // it): a released tab is the person's page again, and bot checks see an attached debugger.
+        if (args.detach === false) return { released };
+        const detached = [];
+        for (const h of released) {
+          if (this.#kindOf(h) !== 'extension' || this.registry.ownerOf(h)) continue;
+          const r = await this.#detach(client, h, caller).catch((err) => ({ detached: false, error: err.message }));
+          if (r?.detached) detached.push(h);
         }
-        return { released: this.registry.releaseAll(client.id) };
+        return { released, ...(detached.length ? { detached } : {}) };
+      }
+
+      case 'detach': {
+        const handle = await this.#explicit(client, args, 'detach');
+        this.registry.ensureOwnership(handle, client.id);
+        return this.#detach(client, handle, caller);
       }
 
       case 'popout': {
@@ -1292,6 +1416,95 @@ export class Router {
     }
   }
 
+  /**
+   * (3.5) upload's fileData ([{ name, base64 }]) and fileUrls ([url]) become files under
+   * <G9_HOME>/files/uploads/<id>/: bytes are decoded and written; a URL is fetched AS THE PAGE (the
+   * browser's cookies, through browser_network fetch on this tab) so a signed-in download works.
+   * Before 3.5 a file had to be on the browser node's disk already — docker cp for every upload.
+   * → { args (with files), written:[{ path, size, sha256, from }] }
+   */
+  async #materializeUploads(client, handle, args) {
+    const list = (v) => (v == null ? [] : Array.isArray(v) ? v : [v]);
+    const data = list(args.fileData);
+    const urls = list(args.fileUrls);
+    const home = this.info?.()?.home ?? process.cwd();
+    const dir = path.join(home, 'files', 'uploads', `${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`);
+    const written = [];
+    const used = new Set();
+    const unique = (name) => {
+      let n = name;
+      for (let i = 2; used.has(n.toLowerCase()); i++) n = name.replace(/(\.[^.]*)?$/, (ext) => ` (${i})${ext ?? ''}`);
+      used.add(n.toLowerCase());
+      return n;
+    };
+    let total = 0;
+    for (const [i, f] of data.entries()) {
+      const b64 = typeof f === 'string' ? f : (f?.base64 ?? f?.dataBase64 ?? '');
+      if (!b64) throw new Error(`fileData[${i}] has no base64 bytes; nothing was uploaded.`);
+      const bytes = Buffer.from(String(b64), 'base64');
+      total += bytes.length;
+      if (total > UPLOAD_MAX_BYTES) throw new Error(`fileData is over ${UPLOAD_MAX_BYTES / 1024 / 1024} MiB in one call; nothing was uploaded. Use fileUrls, or a path already on the browser's machine.`);
+      const out = await writeFileAtomic(path.join(dir, unique(safeFileName(f?.name, `file-${i + 1}`))), bytes);
+      written.push({ path: out.path, size: out.size, sha256: out.sha256, from: 'fileData' });
+    }
+    for (const url of urls) {
+      const target = path.join(dir, unique(nameFromUrl(url)));
+      const fetched = await this.#pageTool(client, 'browser_network', { action: 'fetch', url: String(url), tabId: handle, savePath: target });
+      if (!fetched?.path) throw new Error(`Could not fetch ${url} for the upload${fetched?.status ? ` (HTTP ${fetched.status})` : ''}; nothing was uploaded.`);
+      if (fetched.status >= 400) throw new Error(`Fetching ${url} for the upload answered HTTP ${fetched.status}; nothing was uploaded.`);
+      written.push({ path: fetched.path, size: fetched.size, sha256: fetched.sha256, from: String(url) });
+    }
+    const { fileData: _d, fileUrls: _u, ...rest } = args;
+    return { args: { ...rest, files: [...list(args.files), ...written.map((w) => w.path)] }, written };
+  }
+
+  /**
+   * (3.5) browser_network action:"read_file": a chunk of a file G9BrowserAgent produced or tracked
+   * (readableFile), base64 — how an agent on another machine gets a download, a saved fetch or a
+   * screenshot off a browser node without docker exec. Walk a big file with offset.
+   */
+  async #readFile(args) {
+    if (!args.path) throw new Error('action:"read_file" needs a path (from a download, a fetch with savePath, or a screenshot with savePath).');
+    const home = this.info?.()?.home ?? process.cwd();
+    const asked = resolveSavePath(args.path, home);
+    let real;
+    try {
+      real = await readableFile(asked, { home, seen: this.seenFiles });
+    } catch {
+      throw new Error(`No file at ${asked}.`);
+    }
+    if (!real) {
+      throw new Error(`read_file returns only files G9BrowserAgent produced or tracked (under ${path.join(home, 'files')}, downloads, runs, or a download it reported); ${asked} is not one.`);
+    }
+    const stat = await fsp.stat(real);
+    if (!stat.isFile()) throw new Error(`${real} is not a file.`);
+    const offset = Math.max(0, Math.floor(Number(args.offset) || 0));
+    const length = Math.max(1, Math.min(READ_CHUNK_MAX, Math.floor(Number(args.length) || READ_CHUNK_DEFAULT)));
+    const fh = await fsp.open(real, 'r');
+    try {
+      const n = Math.max(0, Math.min(length, stat.size - offset));
+      const buf = Buffer.alloc(n);
+      if (n) await fh.read(buf, 0, n, offset);
+      const hash = crypto.createHash('sha256');
+      for await (const chunk of createReadStream(real)) hash.update(chunk);
+      return {
+        path: real, size: stat.size, sha256: hash.digest('hex'), offset, length: n, eof: offset + n >= stat.size,
+        bytesBase64: buf.toString('base64'),
+        ...(offset + n < stat.size ? { next: { offset: offset + n } } : {}),
+      };
+    } finally {
+      await fh.close();
+    }
+  }
+
+  /** (3.5) End the debugger session on an extension tab (tools/index.js detachTab). */
+  async #detach(client, handle, caller) {
+    const target = this.#targetOf(handle);
+    if (target.kind !== 'extension') return { tabId: handle, detached: false, note: 'A launched browser’s tabs are always attached; nothing to detach.' };
+    return this.registry.enqueue(handle, () => (this.#atTurn(client, handle, { mutating: false }),
+      this.relay(target.client, 'browser_tabs', { action: 'detach', tabId: handle }, caller, { handle, timeoutMs: TAB_CONTROL_TIMEOUT_MS })));
+  }
+
   /** (3.4) keepAwake on a tab just opened; a failure is reported in the result, never thrown. */
   async #keepAwake(client, handle) {
     try {
@@ -1302,14 +1515,15 @@ export class Router {
   }
 
   /** (3.4) close/focus straight to the tab's engine, outside its queue, under TAB_CONTROL_TIMEOUT_MS. */
-  #tabControl(client, target, handle, action, caller) {
+  #tabControl(client, target, handle, action, caller, extra = {}) {
     this.#atTurn(client, handle);
+    const args = { action, tabId: handle, ...(extra.leaveWithoutAsking ? { leaveWithoutAsking: true } : {}) };
     if (target.kind === 'extension') {
       const live = this.#extensionClient(target.engineId);
       if (!live) throw new Error('The browser extension disconnected. Ask the user to check that the browser is still open.');
-      return this.relay(live, 'browser_tabs', { action, tabId: handle }, caller, { handle: null, timeoutMs: TAB_CONTROL_TIMEOUT_MS });
+      return this.relay(live, 'browser_tabs', args, caller, { handle: null, timeoutMs: TAB_CONTROL_TIMEOUT_MS });
     }
-    return this.#local(target.engineId, null, 'browser_tabs', () => this.engines.runTool('browser_tabs', { action, tabId: handle }, caller), TAB_CONTROL_TIMEOUT_MS);
+    return this.#local(target.engineId, null, 'browser_tabs', () => this.engines.runTool('browser_tabs', args, caller), TAB_CONTROL_TIMEOUT_MS);
   }
 
   /** A tab named by tabId or session — never an implicit default, for actions that destroy or move. */
@@ -1644,6 +1858,13 @@ export class Router {
    * while halted — an agent that cannot ask why everything fails will guess.
    */
   async #status(client, args) {
+    // (3.5) How did a call end? One call (waitMs: wait for its end), or this agent's recent calls.
+    if (args.callId != null && args.callId !== '') {
+      const view = await this.callLog.wait(String(args.callId), Number(args.waitMs) || 0);
+      if (!view) throw new Error(`No call "${args.callId}" in the call log (calls are kept for an hour, the last ${300}). browser_status calls:true lists yours.`);
+      return { call: view };
+    }
+    if (args.calls === true) return { calls: this.callLog.recent(client, Math.max(1, Math.min(100, Number(args.limit) || 20))) };
     const caller = this.#caller(client);
     let handle = null;
     let targetError = null;
@@ -1820,6 +2041,19 @@ export class Router {
       }
     }
   }
+}
+
+/**
+ * (3.5) An engine's error text names tabs by its OWN ids ("Tab 1849302 is gone"); an agent only knows
+ * G9 handles, and was sent to look for a tab that, to it, never existed (field report). Rewrite the
+ * ids this engine's tabs are known by — only those: an unknown number is left as it is, never given
+ * a new handle from prose.
+ */
+export function handlesInText(text, toHandle) {
+  return String(text).replace(/\b(tabId|tab id|tab|with id)(\s*[:=]?\s*)(\d+)\b/gi, (all, word, sep, digits) => {
+    const handle = toHandle(Number(digits));
+    return handle != null && handle !== Number(digits) ? `${word}${sep}${handle}` : all;
+  });
 }
 
 /** The answer for a call that ran past its deadline and was stopped (it settled within STOP_GRACE_MS). */

@@ -361,6 +361,276 @@ test('router: ownership refusal between agents, reads always allowed, unknown ta
   await router.call(b, 'browser_interact', { action: 'click', ref: 'e1', tabId: h });
 });
 
+test('router: (3.5) an argument the tool does not take is refused with the closest real one, never ignored', async () => {
+  const reg = new Registry();
+  const router = makeRouter(reg);
+  const a = agent(reg, 'a');
+  const { sent } = fakeExtension(reg, router, (msg) => (msg.tool === 'browser_tabs' ? { tabs: [{ tabId: 5 }] } : { ok: true }));
+  const { tabs } = await router.call(a, 'browser_tabs', { action: 'list' });
+  const h = tabs[0].tabId;
+  const before = sent.length;
+  await assert.rejects(router.call(a, 'browser_snapshot', { tabId: h, selector: '#chat' }),
+    /browser_snapshot does not take "selector" \(did you mean "scope"\?\); nothing was done\. Its arguments are: .*scope/);
+  await assert.rejects(router.call(a, 'browser_navigate', { action: 'wait', timeout: 5000, tabId: h }), /"timeout" \(did you mean "timeoutMs"\?\)/);
+  await assert.rejects(router.call(a, 'browser_interact', { action: 'click', refs: 'e1', tabId: h }), /"refs" \(did you mean "ref"\?\)/);
+  await assert.rejects(router.call(a, 'browser_console', { action: 'evaluate', js: '1', tabId: h }), /"js" \(did you mean "expression"\?\)/);
+  await assert.rejects(router.call(a, 'browser_status', { zzqq: 1 }), /does not take "zzqq"; nothing/);
+  assert.equal(sent.length, before, 'nothing reached the engine');
+  // Routing keys pass on every tool (the runner's engine:"extension" on a page tool).
+  assert.ok(await router.call(a, 'browser_snapshot', { tabId: h, engine: 'extension', session: undefined }));
+  const prior = process.env.G9_STRICT_ARGS;
+  process.env.G9_STRICT_ARGS = '0';
+  try {
+    assert.ok(await router.call(a, 'browser_snapshot', { tabId: h, selector: '#chat' }), 'G9_STRICT_ARGS=0 lets an old client through');
+  } finally {
+    if (prior === undefined) delete process.env.G9_STRICT_ARGS; else process.env.G9_STRICT_ARGS = prior;
+  }
+});
+
+test('router: (3.5) the call log — opId never acts twice, replyWithinMs answers pending, status says how it ended', async () => {
+  const reg = new Registry();
+  const router = makeRouter(reg);
+  const a = agent(reg, 'gate');
+  let clicks = 0;
+  const { sent } = fakeExtension(reg, router, async (msg) => {
+    if (msg.tool === 'browser_tabs') return { tabs: [{ tabId: 5 }] };
+    if (msg.tool === 'browser_interact') {
+      clicks += 1;
+      await sleep(msg.args.ref === 'slow' ? 400 : 5);
+      return { delivery: 'delivered', clicked: msg.args.ref };
+    }
+    return { ok: true };
+  });
+  const { tabs } = await router.call(a, 'browser_tabs', { action: 'list' });
+  const h = tabs[0].tabId;
+
+  // opId: a resend returns the first outcome and does not click again.
+  const first = await router.call(a, 'browser_interact', { action: 'click', ref: 'e1', tabId: h, opId: 'share-42' });
+  assert.equal(first.clicked, 'e1');
+  const again = await router.call(a, 'browser_interact', { action: 'click', ref: 'e1', tabId: h, opId: 'share-42' });
+  assert.equal(again.deduplicated, true);
+  assert.equal(clicks, 1, 'the second send did not reach the page');
+  assert.ok(!sent.some((m) => m.type === 'call' && ('opId' in m.args || 'replyWithinMs' in m.args)), 'neither key reaches an engine');
+
+  // replyWithinMs: a slow click answers pending at once and goes on; status waits for its end.
+  const pending = await router.call(a, 'browser_interact', { action: 'click', ref: 'slow', tabId: h, replyWithinMs: 100, opId: 'slow-1' });
+  assert.equal(pending.pending, true);
+  assert.match(pending.callId, /^c\d+$/);
+  const joined = await router.call(a, 'browser_interact', { action: 'click', ref: 'slow', tabId: h, replyWithinMs: 100, opId: 'slow-1' });
+  assert.equal(joined.callId, pending.callId, 'a resend while it runs joins it');
+  assert.equal(joined.deduplicated, true);
+  const ended = await router.call(a, 'browser_status', { callId: pending.callId, waitMs: 3000 });
+  assert.equal(ended.call.state, 'done');
+  assert.equal(ended.call.result.clicked, 'slow');
+  assert.equal(clicks, 2, 'the slow click ran once');
+  const mine = await router.call(a, 'browser_status', { calls: true });
+  assert.ok(mine.calls.length >= 3);
+  assert.equal(mine.calls[0].callId, pending.callId, 'newest first');
+  await assert.rejects(router.call(a, 'browser_status', { callId: 'c999999' }), /No call "c999999"/);
+
+  // The same identity in a NEW connection (a stateless client's next session) sees those calls.
+  const next = agent(reg, 'gate');
+  assert.ok((await router.call(next, 'browser_status', { calls: true })).calls.some((c) => c.callId === pending.callId));
+});
+
+test('router: (3.5) a call answered "may still be running" records its real, late outcome; its opId is not run again', async () => {
+  const reg = new Registry();
+  const router = makeRouter(reg);
+  const a = agent(reg, 'a');
+  let lateId = null;
+  const { client: ext } = fakeExtension(reg, router, (msg) => {
+    if (msg.tool === 'browser_tabs') return { tabs: [{ tabId: 5 }] };
+    lateId = msg.id;
+    return new Promise(() => {}); // never answers in time
+  });
+  const { tabs } = await router.call(a, 'browser_tabs', { action: 'list' });
+  const h = tabs[0].tabId;
+  const prevGrace = 8_000;
+  // The router's deadline timers are unref'd (a daemon's sockets keep it alive): keep this test alive.
+  const alive = setInterval(() => {}, 1000);
+  const err = await router.call(a, 'browser_interact', { action: 'click', ref: 'e1', tabId: h, opId: 'post-7' }).then(() => null, (e) => e).finally(() => clearInterval(alive));
+  assert.ok(err, 'the call failed at its deadline');
+  assert.match(err.message, /may STILL be running/);
+  const callId = /callId (c\d+)/.exec(err.message)?.[1];
+  assert.ok(callId, `the error names the call id: ${err.message}`);
+  // Resending the same opId while the outcome is unknown is refused, with the way to check.
+  await assert.rejects(router.call(a, 'browser_interact', { action: 'click', ref: 'e1', tabId: h, opId: 'post-7' }), /outcome is unknown.*did not run it again/s);
+  // The extension answers after all: the log learns how it really ended.
+  router.onRelayResult(ext, { type: 'result', id: lateId, ok: true, result: { delivery: 'delivered', clicked: 'e1' } });
+  const st = await router.call(a, 'browser_status', { callId });
+  assert.equal(st.call.state, 'done');
+  assert.equal(st.call.late, true);
+  assert.equal(st.call.result.clicked, 'e1');
+  // Now its outcome is known: a resend returns it instead of clicking again.
+  const dedup = await router.call(a, 'browser_interact', { action: 'click', ref: 'e1', tabId: h, opId: 'post-7' });
+  assert.equal(dedup.deduplicated, true);
+  assert.ok(prevGrace);
+});
+
+test('router: (3.5) a connected owner idle past idleClaimMs no longer blocks; a running call keeps it; chrome ids in errors become handles', async () => {
+  const reg = new Registry({ idleClaimMs: 60_000 });
+  const router = makeRouter(reg);
+  const a = agent(reg, 'old-session');
+  const b = agent(reg, 'new-session');
+  fakeExtension(reg, router, (msg) => {
+    if (msg.tool === 'browser_tabs') return { tabs: [{ tabId: 1849302 }] };
+    if (msg.args.ref === 'gone') throw new Error('No tab with id: 1849302.');
+    return { delivery: 'delivered' };
+  });
+  const { tabs } = await router.call(a, 'browser_tabs', { action: 'list' });
+  const h = tabs[0].tabId;
+  await router.call(a, 'browser_interact', { action: 'click', ref: 'e1', tabId: h });
+  await assert.rejects(router.call(b, 'browser_interact', { action: 'click', ref: 'e1', tabId: h }), /owned by/, 'an active owner still blocks');
+  // a is idle for longer than idleClaimMs: its claim lapses for b's next state-changing call.
+  reg.getClient(a.id).lastCallAt = Date.now() - 61_000;
+  const took = await router.call(b, 'browser_interact', { action: 'click', ref: 'e1', tabId: h });
+  assert.equal(reg.ownerOf(h), b.id);
+  assert.equal(took.tookOver.idleMinutes, 1);
+  // ... but never while the owner has a call running.
+  reg.getClient(b.id).lastCallAt = Date.now() - 61_000;
+  reg.beginCall(b.id);
+  await assert.rejects(router.call(a, 'browser_interact', { action: 'click', ref: 'e1', tabId: h }), /owned by/);
+  reg.endCall(b.id);
+  // A Chrome tab id in the engine's error text comes back as the G9 handle.
+  await assert.rejects(router.call(b, 'browser_interact', { action: 'click', ref: 'gone', tabId: h }), (err) => err.message.includes(`No tab with id: ${h}`) && !err.message.includes('1849302'));
+});
+
+test('router: (3.5) release in the person’s browser detaches the debugger; detach:false keeps it', async () => {
+  const reg = new Registry();
+  const router = makeRouter(reg);
+  const a = agent(reg, 'a');
+  const { sent } = fakeExtension(reg, router, (msg) => {
+    if (msg.tool === 'browser_tabs' && msg.args.action === 'list') return { tabs: [{ tabId: 5 }, { tabId: 6 }] };
+    if (msg.tool === 'browser_tabs' && msg.args.action === 'detach') return { tabId: msg.args.tabId, detached: true };
+    return { ok: true };
+  });
+  const { tabs } = await router.call(a, 'browser_tabs', { action: 'list' });
+  const [h5, h6] = tabs.map((t) => t.tabId);
+  await router.call(a, 'browser_interact', { action: 'click', ref: 'e1', tabId: h5 });
+  await router.call(a, 'browser_interact', { action: 'click', ref: 'e1', tabId: h6 });
+  const out = await router.call(a, 'browser_tabs', { action: 'release', tabId: h5 });
+  assert.deepEqual(out, { released: [h5], detached: [h5] });
+  const detach = sent.filter((m) => m.type === 'call' && m.args.action === 'detach');
+  assert.deepEqual(detach.map((m) => m.args.tabId), [5], 'the extension was asked to detach that tab, by its Chrome id');
+  const kept = await router.call(a, 'browser_tabs', { action: 'release', tabId: h6, detach: false });
+  assert.deepEqual(kept, { released: [h6] });
+  assert.equal(sent.filter((m) => m.type === 'call' && m.args.action === 'detach').length, 1);
+  await assert.rejects(router.call(a, 'browser_tabs', { action: 'detach' }), /needs a tabId/);
+});
+
+test('router: (3.5) upload takes fileData (written on the browser machine first); read_file returns only what G9 produced', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'g9-files-'));
+  try {
+    const reg = new Registry();
+    const router = new Router({
+      registry: reg, engines: stubEngines(), settings: { get: () => ({ ...DEFAULTS }) }, version: '2.0.0',
+      info: () => ({ pid: 1, port: 18001, home, startedAt: Date.now() }), timeoutMs: 2_000,
+    });
+    const a = agent(reg, 'a');
+    const { sent } = fakeExtension(reg, router, (msg) => {
+      if (msg.tool === 'browser_tabs') return { tabs: [{ tabId: 5 }] };
+      if (msg.tool === 'browser_interact') return { uploaded: msg.args.files, delivery: 'delivered' };
+      return { ok: true };
+    });
+    const { tabs } = await router.call(a, 'browser_tabs', { action: 'list' });
+    const h = tabs[0].tabId;
+    const bytes = Buffer.from('cover art bytes');
+    const out = await router.call(a, 'browser_interact', {
+      action: 'upload', selector: 'input[type=file]', tabId: h,
+      fileData: [{ name: '../cover:1.png', base64: bytes.toString('base64') }, { name: 'cover:1.png', base64: bytes.toString('base64') }],
+    });
+    const call = sent.filter((m) => m.type === 'call' && m.tool === 'browser_interact').at(-1);
+    assert.equal(call.args.fileData, undefined, 'the bytes never travel to the engine');
+    assert.equal(call.args.files.length, 2);
+    for (const f of call.args.files) {
+      assert.ok(f.startsWith(path.join(home, 'files', 'uploads')), `written under files/uploads: ${f}`);
+      assert.deepEqual(fs.readFileSync(f), bytes);
+    }
+    assert.notEqual(path.basename(call.args.files[0]), path.basename(call.args.files[1]), 'two files with one name do not overwrite each other');
+    assert.match(path.basename(call.args.files[0]), /^cover_1\.png$/);
+    assert.equal(out.written.length, 2);
+    assert.equal(out.written[0].sha256, crypto.createHash('sha256').update(bytes).digest('hex'));
+    await assert.rejects(router.call(a, 'browser_interact', { action: 'upload', selector: 'input', tabId: h, fileData: [{ name: 'x' }] }), /no base64 bytes/);
+
+    // read_file: a file G9 wrote comes back in chunks; anything else is refused.
+    const big = Buffer.alloc(10_000, 7);
+    fs.mkdirSync(path.join(home, 'files'), { recursive: true });
+    fs.writeFileSync(path.join(home, 'files', 'song.mp3'), big);
+    const first = await router.call(a, 'browser_network', { action: 'read_file', path: 'song.mp3', length: 4096 });
+    assert.equal(first.size, 10_000);
+    assert.equal(first.length, 4096);
+    assert.equal(first.eof, false);
+    assert.equal(first.next.offset, 4096);
+    assert.equal(Buffer.from(first.bytesBase64, 'base64').length, 4096);
+    const last = await router.call(a, 'browser_network', { action: 'read_file', path: 'song.mp3', offset: 8192, length: 4096 });
+    assert.equal(last.length, 10_000 - 8192);
+    assert.equal(last.eof, true);
+    assert.equal(last.sha256, crypto.createHash('sha256').update(big).digest('hex'), 'the sha256 is the whole file\'s');
+    const outside = path.join(os.tmpdir(), `g9-secret-${process.pid}.txt`);
+    fs.writeFileSync(outside, 'secret');
+    try {
+      await assert.rejects(router.call(a, 'browser_network', { action: 'read_file', path: outside }), /only files G9BrowserAgent produced or tracked/);
+      await assert.rejects(router.call(a, 'browser_network', { action: 'read_file', path: '../../secret.txt' }), /No file at|only files G9BrowserAgent/);
+    } finally {
+      fs.rmSync(outside, { force: true });
+    }
+    await assert.rejects(router.call(a, 'browser_network', { action: 'read_file' }), /needs a path/);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('router: (3.5) handoff into a profile launches (or reuses) it and imports into its persistent context; proxy alone gets a context of its own', async () => {
+  const reg = new Registry();
+  const calls = { launch: [], context: [], import: [] };
+  const engines = {
+    ...stubEngines(),
+    available: () => true,
+    list: () => [],
+    launch: async (opts) => { calls.launch.push(opts); return { engineId: 'launched-1', headless: opts.headless ?? true, contexts: [{ contextId: 'D', isDefault: true, proxy: opts.proxy ?? null, stealth: opts.stealth ?? 'off' }] }; },
+    defaultEngineId: async () => 'launched-1',
+    createContext: async (engineId, opts) => { calls.context.push({ engineId, ...opts }); return { contextId: 'C-proxy' }; },
+    handoffImport: async (payload, opts) => {
+      calls.import.push(opts);
+      const tabId = reg.allocHandle();
+      reg.bindHandle(tabId, opts.engineId ?? 'launched-1');
+      return { tabId, engineId: opts.engineId ?? 'launched-1', contextId: opts.contextId, url: payload.url, transferred: { cookies: 2, localStorage: 0, sessionStorage: 0 } };
+    },
+  };
+  const router = new Router({ registry: reg, engines, settings: { get: () => ({ ...DEFAULTS }) }, version: '2.0.0', info: () => ({ pid: 1, port: 18001, home: os.tmpdir(), startedAt: Date.now() }), timeoutMs: 2_000 });
+  const a = agent(reg, 'a');
+  fakeExtension(reg, router, (msg) => {
+    if (msg.tool === 'browser_tabs' && msg.args.action === 'list') return { tabs: [{ tabId: 5, url: 'https://app.example.test/studio' }] };
+    if (msg.tool === 'browser_tabs' && msg.args.action === 'handoff_export') return { url: 'https://app.example.test/studio', cookies: [{ name: 's', value: '1', domain: 'app.example.test', hostOnly: true, path: '/', secure: true }] };
+    return { ok: true };
+  });
+  const { tabs } = await router.call(a, 'browser_tabs', { action: 'list' });
+  const h = tabs[0].tabId;
+
+  const r = await router.call(a, 'browser_tabs', { action: 'handoff', tabId: h, profile: 'studio', proxy: 'http://proxy.test:8080', headless: false, stealth: 'stealth' });
+  assert.deepEqual(calls.launch[0], { profile: 'studio', reuse: true, headless: false, stealth: 'stealth', proxy: 'http://proxy.test:8080' }, 'the profile is launched with the proxy, window and level asked for');
+  assert.equal(calls.import[0].engineId, 'launched-1');
+  assert.equal(calls.import[0].contextId, 'default', 'imported into the profile’s own context');
+  assert.equal(r.persisted, true);
+  assert.equal(r.profile.name, 'studio');
+  assert.match(r.note, /written into the profile/);
+  assert.equal(reg.current(a.id), r.tabId, 'the new tab is the agent’s current tab');
+
+  // An engine already running that profile with other settings: reused, and the result says so.
+  engines.launch = async (opts) => { calls.launch.push(opts); return { engineId: 'launched-1', headless: true, contexts: [{ contextId: 'D', isDefault: true, proxy: null, stealth: 'off' }] }; };
+  const again = await router.call(a, 'browser_tabs', { action: 'handoff', tabId: h, profile: 'studio', proxy: 'http://proxy.test:8080' });
+  assert.match(again.profile.note, /kept the proxy, window and stealth it was launched with/);
+
+  // A proxy without a profile: a fresh context with that proxy.
+  await router.call(a, 'browser_tabs', { action: 'handoff', tabId: h, proxy: 'http://proxy.test:8080' });
+  assert.equal(calls.context.at(-1).proxy, 'http://proxy.test:8080');
+  assert.equal(calls.import.at(-1).contextId, 'C-proxy');
+  // Plain handoff is unchanged: a fresh context chosen by the engine.
+  await router.call(a, 'browser_tabs', { action: 'handoff', tabId: h });
+  assert.equal(calls.import.at(-1).contextId, null);
+  await assert.rejects(router.call(a, 'browser_tabs', { action: 'handoff', tabId: h, profile: 'x', engine: 'launched-1' }), /engine or profile, not both/);
+});
+
 test('router: halts block every tool but browser_status; status composes daemon and engine views', async () => {
   const reg = new Registry();
   const router = makeRouter(reg);
@@ -1270,7 +1540,7 @@ test('mcp tools: fifteen tools, valid schemas, session on every tab tool, v2 ins
   }
   const tabs = TOOLS.find((t) => t.name === 'browser_tabs');
   assert.deepEqual(tabs.inputSchema.properties.action.enum,
-    ['list', 'open', 'close', 'focus', 'attach', 'claim', 'release', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch', 'keep_awake']);
+    ['list', 'open', 'close', 'focus', 'attach', 'detach', 'claim', 'release', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch', 'keep_awake']);
   const engine = TOOLS.find((t) => t.name === 'browser_engine');
   // acquire/release: a run HOLDS a launched engine across its tabs (engine leases, 2026-09-22).
   assert.deepEqual(engine.inputSchema.properties.action.enum, ['launch', 'list', 'stop', 'context', 'versions', 'warm', 'acquire', 'release']);

@@ -1099,8 +1099,16 @@ const tabs = {
   async remove(tabId) {
     const tab = requireTabRecord(tabId);
     const engine = engineOf(tab);
+    // (3.5) Closing a launched browser's LAST tab closes the browser itself (Chromium quits with its
+    // last window) — an agent closing "its" tab silently ended the engine, its profile session and
+    // every lease on it (field report). A blank tab is opened first so the engine stays up; stopping
+    // an engine is browser_engine action:"stop".
+    const others = [...tabsById.values()].filter((t) => !t.removed && t.engineId === tab.engineId && t.tabId !== tab.tabId);
+    let kept = null;
+    if (!others.length) kept = await createTabIn(engine, engine.defaultContextId, 'about:blank', { active: false }).catch(() => null);
     await engine.conn.send('Target.closeTarget', { targetId: tab.targetId });
     removeTab(engine, tab, 'target_closed');
+    return kept ? { engineKept: true, keptTabId: kept.tabId ?? kept.id ?? null } : undefined;
   },
 
   /**
