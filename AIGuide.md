@@ -2,7 +2,7 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v3.6.0, 2026-10-13. 3.6.0 (§9, the 3.6.0 entry): the "Human Wave" icon everywhere; the
+**Status:** v3.6.1, 2026-10-13. 3.6.1 (§9): the macOS self-update moves the new bundle into place (a copy was stopped by macOS on a real Mac). 3.6.0 (§9, the 3.6.0 entry): the "Human Wave" icon everywhere; the
 desktop updater clears the way before it installs (the agents' MCP servers no longer make every
 install fail), installs on demand with **Force install**, and a Mac updates itself instead of opening
 the release page; and the next agent field report — case-sensitive and literal name matching, an
@@ -1923,6 +1923,36 @@ after every step of a forty-step flow doubles the run for evidence nobody reads.
 Entries below describe what was believed or tested at the time. Current capability claims and
 unresolved findings are in §§4, 7 and 8, which supersede historical assertions. Entries dated before
 2026-09-21 describe v1 (the bridge, the four control modes, the workspace allowlist).
+
+### 2026-10-13 — v3.6.1: the macOS self-update, measured on a real Mac
+
+**Why.** 3.6.0's macOS self-update was tested on a hosted runner and in code on Windows; the owner
+offered a real Mac (Apple M4 Pro, macOS 26.6, G9BrowserAgent 3.4.0 installed and running with two MCP
+servers and its daemon). Run there in a sandbox — a copy of the installed app in a temporary folder,
+nothing started with a window, the installed app, its data and port 8765 untouched — it found a defect.
+
+**The defect.** The swap script copied the new bundle into the app's place with `ditto`, and macOS
+(App Management) stopped the copy half-way: `Operation not permitted` on the frameworks, the helpers
+and `Info.plist`. The script did what it promises on failure — the previous version went back in place
+with a valid signature — but the update never installed. Renaming a whole bundle is allowed.
+
+**The fix (`desktop/lib/mac-update.mjs`).** When the staged bundle and the app are on one volume (they
+are: `~/Library/Caches` and `/Applications` are both on the data volume — measured), the script now
+MOVES the new bundle into place; a copy is used only across volumes. Measured on the same Mac after the
+fix, 15 of 15: the real 3.5.0 zip from the GitHub release downloaded (117 MB), SHA-512 verified, a wrong
+SHA-512 refused, unpacked with `ditto`, no quarantine flag, the swap waited for the app to exit, moved
+the bundle (3.4.0 → 3.5.0), removed the previous version and the staged copy, logged it, and the
+replaced app's code signature is valid and its executable runs.
+
+**Safer update tests on a real machine.** `G9_DESKTOP_USER_DATA` gives the app its own Electron
+profile (`main.mjs`, before the single-instance lock): on macOS `userData` ignores HOME, so an update
+test on a machine where G9BrowserAgent is installed and running shared the person's profile and its
+lock, and would only have brought their window forward. The update end-to-end test sets it, and seeds
+"Start at sign-in" off, so a test install never becomes a login item of the machine it runs on.
+
+**Tests.** `desktop/test/install-update.test.mjs`: the swap script moves on one volume and copies
+across volumes, and a failed move or copy puts the old bundle back. On the real Mac: the sandboxed
+self-update test above, 15/15. Here: `check.mjs --keep-going`, desktop 16 files.
 
 ### 2026-10-13 — v3.6.0: updates that always install, a Mac that updates itself, and the next field report
 

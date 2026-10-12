@@ -148,7 +148,7 @@ t.test('MacSelfUpdate.prepare: downloads the zip over the feed, checks its SHA-5
 
 const hasSh = spawnSync('sh', ['-c', 'exit 0']).status === 0;
 
-t.test('the swap script: waits for the app to quit, replaces the bundle, and puts the old one back when the copy fails', async () => {
+t.test('the swap script: waits for the app to quit, moves the new bundle in (copies across volumes), and puts the old one back when that fails', async () => {
   if (!hasSh) {
     console.log('    (no sh on this machine: the script is not run here)');
     return;
@@ -168,17 +168,27 @@ t.test('the swap script: waits for the app to quit, replaces the bundle, and put
     // A process standing in for the app: the script must wait until it has exited.
     const app0 = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 1200)'], { stdio: 'ignore' });
     const started = Date.now();
-    const r = spawnSync('sh', [shPath(script), String(app0.pid), shPath(staged), shPath(app), '0', shPath(log), 'G9BrowserAgent'], { encoding: 'utf8', timeout: 60_000 });
+    // '1': one volume, so the bundle is moved (macOS refuses writes into an app's place; a rename is allowed).
+    const r = spawnSync('sh', [shPath(script), String(app0.pid), shPath(staged), shPath(app), '0', shPath(log), 'G9BrowserAgent', '1'], { encoding: 'utf8', timeout: 60_000 });
     assert.equal(r.status, 0, r.stderr);
     if (process.platform !== 'win32') assert.ok(Date.now() - started >= 1000, 'it waited for the app to quit');
     assert.equal(JSON.parse(fs.readFileSync(path.join(app, 'Contents', 'Resources', 'package.json'), 'utf8')).version, '3.6.0');
     assert.equal(fs.existsSync(`${app}.g9-previous`), false, 'the previous version is removed');
     assert.equal(fs.existsSync(staged), false, 'the staged copy is removed');
     assert.match(fs.readFileSync(log, 'utf8'), /installed/);
-    // A copy that fails (nothing staged): the old bundle is back in place.
-    const r2 = spawnSync('sh', [shPath(script), '999999', shPath(path.join(dir, 'missing.app')), shPath(app), '0', shPath(log), 'G9BrowserAgent'], { encoding: 'utf8', timeout: 60_000 });
-    assert.equal(r2.status, 0, r2.stderr);
-    assert.equal(JSON.parse(fs.readFileSync(path.join(app, 'Contents', 'Resources', 'package.json'), 'utf8')).version, '3.6.0', 'still the installed version');
+    // Across volumes ('0'): copied, the staged copy removed after.
+    fs.mkdirSync(path.join(staged, 'Contents', 'Resources'), { recursive: true });
+    fs.writeFileSync(path.join(staged, 'Contents', 'Resources', 'package.json'), JSON.stringify({ version: '3.6.1' }));
+    const rc = spawnSync('sh', [shPath(script), '999999', shPath(staged), shPath(app), '0', shPath(log), 'G9BrowserAgent', '0'], { encoding: 'utf8', timeout: 60_000 });
+    assert.equal(rc.status, 0, rc.stderr);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(app, 'Contents', 'Resources', 'package.json'), 'utf8')).version, '3.6.1');
+    assert.equal(fs.existsSync(staged), false);
+    // A move or copy that fails (nothing staged): the old bundle is back in place.
+    for (const same of ['1', '0']) {
+      const r2 = spawnSync('sh', [shPath(script), '999999', shPath(path.join(dir, 'missing.app')), shPath(app), '0', shPath(log), 'G9BrowserAgent', same], { encoding: 'utf8', timeout: 60_000 });
+      assert.equal(r2.status, 0, r2.stderr);
+      assert.equal(JSON.parse(fs.readFileSync(path.join(app, 'Contents', 'Resources', 'package.json'), 'utf8')).version, '3.6.1', `still the installed version (${same === '1' ? 'move' : 'copy'})`);
+    }
     assert.match(fs.readFileSync(log, 'utf8'), /previous version is back/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

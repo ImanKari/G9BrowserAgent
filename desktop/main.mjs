@@ -114,6 +114,10 @@ if (!IN_ELECTRON) {
 async function startApp() {
   const { app, BrowserWindow, Tray, Menu, nativeImage, nativeTheme, ipcMain, dialog, shell, clipboard, protocol, session, Notification, screen } = electron;
 
+  // (3.6.1) A test's own Electron profile: the single-instance lock and the window's data live in
+  // userData, which on macOS ignores HOME — so an update test on a machine where G9BrowserAgent is
+  // installed and running would have shared the person's (and only shown their window).
+  if (process.env.G9_DESKTOP_USER_DATA) app.setPath('userData', path.resolve(process.env.G9_DESKTOP_USER_DATA));
   // One G9BrowserAgent per user session. A second start (Start menu, autostart) just shows the first one.
   if (!CHECKING && !app.requestSingleInstanceLock()) {
     app.quit();

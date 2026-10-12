@@ -475,6 +475,9 @@ async function main() {
     : { HOME: profile, XDG_CONFIG_HOME: path.join(profile, '.config'), XDG_CACHE_HOME: path.join(profile, '.cache') };
   for (const d of [profile, ...Object.values(profileEnv)]) fs.mkdirSync(d, { recursive: true });
   Object.assign(env, profileEnv);
+  // (3.6.1) The app's Electron profile too (an app built before 3.6.1 ignores it): on macOS userData
+  // ignores HOME, and a G9BrowserAgent installed and running on this machine holds the lock there.
+  env.G9_DESKTOP_USER_DATA = path.join(tmp, 'electron-user-data');
   const claudeJson = path.join(profile, '.claude.json');
   const fwd = (s) => String(s).replace(/\\/g, '/');
   const inst = new Install(tmp);
@@ -502,7 +505,9 @@ async function main() {
     // when the download happens. They are turned on the way a person does it — Settings, which saves
     // the daemon's settings through the app (main.mjs) and checks at once. With --feed official,
     // nothing is written: a fresh install with no update settings at all.
-    const desktop = { wizard: { completedAt: now, steps: {} }, ...(feed ? { update: { mode: 'off', url: feed.url, channel: 'stable' } } : {}) };
+    // Start at sign-in stays off (3.5 turns it on by default): a test install must never become a
+    // login item of the machine it runs on.
+    const desktop = { wizard: { completedAt: now, steps: {} }, loginItem: { choice: false, at: now }, ...(feed ? { update: { mode: 'off', url: feed.url, channel: 'stable' } } : {}) };
     fs.writeFileSync(path.join(home, 'desktop.json'), JSON.stringify(desktop, null, 2));
     if (feed) fs.writeFileSync(path.join(home, 'settings.json'), JSON.stringify({ updateMode: 'off', updateUrl: feed.url }, null, 2));
 

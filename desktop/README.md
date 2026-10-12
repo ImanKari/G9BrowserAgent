@@ -205,8 +205,9 @@ another folder: the "older build" the update test installs first.
   G9BrowserAgent, not now, or skip this version (a skipped version is never downloaded again). `self`
   on macOS (3.6, `lib/mac-update.mjs`): Squirrel.Mac installs only into a Developer-ID-signed app, so
   the app downloads the release's zip for its architecture itself, checks its SHA-512 against
-  `latest-mac.yml`, unpacks it, and after it quits a small script swaps the app bundle (the old one is
-  put back if the copy fails) and starts the new version — the same four choices as `auto`. `manual`
+  `latest-mac.yml`, unpacks it, and after it quits a small script swaps the app bundle — moved into
+  place, since macOS refuses writes into an installed app's place (3.6.1, measured on macOS 26); the old
+  one is put back if that fails — and starts the new version — the same four choices as `auto`. `manual`
   only for a Mac that cannot write its own bundle (opened from Downloads, or installed by another user:
   move it to Applications) and a .deb (needs root): the same check, no download, a notification once
   per version, and **Open the release page**.

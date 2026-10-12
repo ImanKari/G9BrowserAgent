@@ -10,8 +10,9 @@
  *   2. it unpacks the zip (ditto) into a staging folder and checks that it holds G9BrowserAgent at
  *      the version announced;
  *   3. to install, a small shell script waits for the app to quit, moves the old bundle aside,
- *      copies the new one into its place (putting the old one back if the copy fails), and starts
- *      it again unless the person was quitting. A download made by the app itself carries no
+ *      MOVES the new one into its place (a copy only across volumes: macOS 26 refused writes into
+ *      the app's place half-way through a copy, measured on a real Mac, but allows a rename),
+ *      puts the old one back if that fails, and starts it again unless the person was quitting. A download made by the app itself carries no
  *      quarantine flag, so Gatekeeper does not ask again.
  * Possible only when the app can write where it is installed (it was dragged to Applications by
  * the person who runs it) and macOS is not running it from a randomized read-only copy ("app
@@ -79,7 +80,7 @@ export function releaseFileUrl({ feed, file, tag = null, version = null }) {
 /** The script that swaps the bundle after the app has quit. Plain sh; `ditto` where it exists. */
 export const SWAP_SCRIPT = `#!/bin/sh
 # G9BrowserAgent (macOS): replace the app bundle once the app has quit (desktop/lib/mac-update.mjs).
-pid="$1"; new="$2"; app="$3"; relaunch="$4"; log="$5"; exe="$6"
+pid="$1"; new="$2"; app="$3"; relaunch="$4"; log="$5"; exe="$6"; same="$7"
 n=0
 while kill -0 "$pid" 2>/dev/null; do
   n=$((n+1))
@@ -87,10 +88,14 @@ while kill -0 "$pid" 2>/dev/null; do
   sleep 0.2
 done
 copy() { if command -v ditto >/dev/null 2>&1; then ditto "$1" "$2"; else cp -R "$1" "$2"; fi; }
+# On one volume the new bundle is MOVED into place: macOS (App Management, measured on macOS 26)
+# refuses writes into an app bundle where an app was installed — a copy stopped half-way with
+# "Operation not permitted" — but lets a whole bundle be renamed.
+put() { if [ "$same" = "1" ]; then mv "$1" "$2"; else copy "$1" "$2"; fi; }
 old="$app.g9-previous"
 rm -rf "$old"
 if mv "$app" "$old"; then
-  if copy "$new" "$app" 2>>"$log"; then
+  if put "$new" "$app" 2>>"$log"; then
     xattr -dr com.apple.quarantine "$app" >/dev/null 2>&1
     rm -rf "$old" "$new"
     echo "installed $new into $app" >>"$log"
@@ -225,8 +230,11 @@ export class MacSelfUpdate {
     const script = path.join(this.cacheDir, 'g9-swap.sh');
     fs.writeFileSync(script, SWAP_SCRIPT, { mode: 0o755 });
     const logFile = path.join(this.cacheDir, 'install.log');
-    this.log?.info?.('Installing the update after quitting', { from: this.staged.app, to: bundle, relaunch });
-    this.spawnDetached('/bin/sh', [script, String(this.pid), this.staged.app, bundle, relaunch ? '1' : '0', logFile, path.basename(this.execPath)]);
+    // Moved, not copied, when the staged bundle and the app are on one volume (SWAP_SCRIPT `put`).
+    let same = false;
+    try { same = fs.statSync(path.dirname(this.staged.app)).dev === fs.statSync(path.dirname(bundle)).dev; } catch { /* copied */ }
+    this.log?.info?.('Installing the update after quitting', { from: this.staged.app, to: bundle, relaunch, move: same });
+    this.spawnDetached('/bin/sh', [script, String(this.pid), this.staged.app, bundle, relaunch ? '1' : '0', logFile, path.basename(this.execPath), same ? '1' : '0']);
     setTimeout(() => this.quit(), 100);
   }
 }
