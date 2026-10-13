@@ -2,7 +2,7 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v3.6.2, 2026-10-13 — the published 3.6 release (3.6.0 and 3.6.1 never passed the pipeline; §9, the 3.6.2 entry). 3.6.1 (§9): the macOS self-update moves the new bundle into place (a copy was stopped by macOS on a real Mac). 3.6.0 (§9, the 3.6.0 entry): the "Human Wave" icon everywhere; the
+**Status:** v3.6.3, 2026-10-13 — the published 3.6 release (3.6.0–3.6.2 never passed the pipeline; §9, the 3.6.3 entry). 3.6.1 (§9): the macOS self-update moves the new bundle into place (a copy was stopped by macOS on a real Mac). 3.6.0 (§9, the 3.6.0 entry): the "Human Wave" icon everywhere; the
 desktop updater clears the way before it installs (the agents' MCP servers no longer make every
 install fail), installs on demand with **Force install**, and a Mac updates itself instead of opening
 the release page; and the next agent field report — case-sensitive and literal name matching, an
@@ -1924,11 +1924,14 @@ Entries below describe what was believed or tested at the time. Current capabili
 unresolved findings are in §§4, 7 and 8, which supersede historical assertions. Entries dated before
 2026-09-21 describe v1 (the bridge, the four control modes, the workspace allowlist).
 
-### 2026-10-13 — v3.6.2: the 3.6 release — updates that always install, a Mac that updates itself, and the next field report
+### 2026-10-13 — v3.6.3: the 3.6 release — updates that always install, a Mac that updates itself, and the next field report
 
-**Why this version.** 3.6.0 and 3.6.1 were never published: the pipeline's Linux and macOS portable
-suites failed on a test of the new macOS swap script (below), so neither reached the Package stage.
-This release carries both; their full entries follow this one. Coming from 3.5.0, everything here is new.
+**Why this version.** 3.6.0, 3.6.1 and 3.6.2 were never published: the pipeline stopped each of them
+(3.6.2's fix and 3.6.3's below). This release carries all of 3.6; the entries of those versions follow
+this one. Coming from 3.5.0, everything here is new. Measured by the pipeline on 3.6.2: the update
+end-to-end test on macOS, now with the app updating itself, 14/14 — corrupt and interrupted downloads,
+skip, a busy daemon, and the install (3.6.1 → 3.6.2, the app started again on the new version and its
+new daemon); on Windows, all of it too.
 
 **What 3.6 brings (details in the 3.6.0 and 3.6.1 entries):**
 - **One icon, "Human Wave"**, on the extension, the app, the installer and the tray.
@@ -1947,6 +1950,20 @@ This release carries both; their full entries follow this one. Coming from 3.5.0
   relaunch, so sign-ins kept partly in them (Google, YouTube) stay.
 - **Temporary in 3.6:** a suggestions box — the MCP instructions ask agents to send what they miss
   with `browser_issue action:"feedback"`.
+
+**The fix in 3.6.3 (`desktop/lib/install-stop.mjs`).** Before installing, the app stops every other
+process running its program — the agents' MCP servers and a leftover daemon — and kept its own
+Chromium helpers only when their parent was the app itself. On Linux the helpers are forked from the
+zygote, so the app's own GPU process was stopped, three times, and Electron aborted ("GPU process isn't
+usable. Goodbye") before it could install: the pipeline's AppImage update test timed out waiting for
+the new version. A process whose command line carries `--type=` (renderer, GPU, utility, zygote) is now
+never stopped, whoever its parent; a new test case lists Linux's zygote-forked helpers.
+
+### 2026-10-13 — v3.6.2: the swap-script test on Linux and macOS (not published)
+
+**Why.** 3.6.0 and 3.6.1 never passed the pipeline: its Linux and macOS portable suites failed on the
+test of the new macOS swap script. 3.6.2 passed them, then failed the Linux update end-to-end test
+(fixed in 3.6.3), so it was not published either; the 3.6.3 entry sums up the whole 3.6 release.
 
 **The fix in 3.6.2 (`desktop/lib/mac-update.mjs`, its test).** The swap script waits for the app to
 exit with `kill -0`, which also succeeds for a process that exited but was not yet reaped by its parent

@@ -33,6 +33,18 @@ t.test('pickInstallProcesses: every other process running this program (MCP serv
     '  14     1 /usr/bin/node shim.mjs',
   ].join('\n'));
   assert.deepEqual(pickInstallProcesses(ps, { execPath: mac, selfPid: 10, platform: 'darwin' }).map((r) => r.pid), [12]);
+  // Linux: helpers are forked from the zygote, so their parent is not this process. Stopping this
+  // app's GPU process made Electron abort before it installed (the pipeline's AppImage test, 3.6.2).
+  const appimage = '/tmp/appimage_extracted_b3c4/g9browseragent';
+  const linux = parsePs([
+    `  20     1 ${appimage}`,
+    `  21    20 ${appimage} --type=zygote --no-zygote-sandbox`,
+    `  22    21 ${appimage} --type=gpu-process --enable-crash-reporter`,
+    `  23    21 ${appimage} --type=renderer`,
+    `  24   900 ${appimage} /tmp/appimage_extracted_b3c4/resources/mcp/shim.mjs`,
+    `  25    24 ${appimage} /tmp/appimage_extracted_b3c4/resources/daemon/g9d.mjs`,
+  ].join('\n'));
+  assert.deepEqual(pickInstallProcesses(linux, { execPath: appimage, selfPid: 20, platform: 'linux' }).map((r) => r.pid), [24, 25], 'the MCP server and the daemon; never a helper, whoever its parent');
   assert.deepEqual(pickInstallProcesses(ps, { execPath: '', selfPid: 10 }), [], 'no executable, nothing to stop');
 });
 

@@ -35,8 +35,8 @@ const norm = (p, platform) => {
 /**
  * Of the processes listed, the ones to stop. Pure.
  * @param {{pid:number, ppid?:number, exe?:string, cmd?:string}[]} rows
- * @returns the rows running `execPath` that are neither this process nor one of its Electron helpers
- *   (a helper's command line carries `--type=`: renderer, GPU, utility).
+ * @returns the rows running `execPath` that are neither this process nor a Chromium/Electron helper
+ *   of any parent (a helper's command line carries `--type=`: renderer, GPU, utility, zygote).
  */
 export function pickInstallProcesses(rows, { execPath, selfPid = process.pid, platform = process.platform } = {}) {
   const want = norm(execPath, platform);
@@ -48,7 +48,11 @@ export function pickInstallProcesses(rows, { execPath, selfPid = process.pid, pl
     // Without an executable path (ps), the command line starts with it — quoted or not.
     const runsIt = exe ? exe === want : cmd.replace(/^"/, '').startsWith(want);
     if (!runsIt) return false;
-    if (r.ppid === selfPid && /\s--type=/.test(` ${cmd}`)) return false;
+    // Never a Chromium/Electron helper (renderer, GPU, utility, zygote — `--type=`), whoever its
+    // parent: on Linux they are forked from the zygote, not from this process, and stopping this
+    // app's GPU process made Electron abort ("GPU process isn't usable. Goodbye") before it could
+    // install (the pipeline's AppImage update test, 3.6.2).
+    if (/\s--type=/.test(` ${cmd}`)) return false;
     return true;
   });
 }
