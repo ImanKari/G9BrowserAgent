@@ -82,7 +82,9 @@ export const SWAP_SCRIPT = `#!/bin/sh
 # G9BrowserAgent (macOS): replace the app bundle once the app has quit (desktop/lib/mac-update.mjs).
 pid="$1"; new="$2"; app="$3"; relaunch="$4"; log="$5"; exe="$6"; same="$7"
 n=0
-while kill -0 "$pid" 2>/dev/null; do
+# Gone, or a zombie (exited, not yet reaped by its parent: it holds nothing).
+running() { kill -0 "$pid" 2>/dev/null && [ "$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ' | cut -c1)" != "Z" ]; }
+while running; do
   n=$((n+1))
   if [ "$n" -gt 900 ]; then echo "G9BrowserAgent did not quit; the update was not installed" >>"$log"; exit 1; fi
   sleep 0.2

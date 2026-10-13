@@ -169,7 +169,15 @@ t.test('the swap script: waits for the app to quit, moves the new bundle in (cop
     const app0 = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 1200)'], { stdio: 'ignore' });
     const started = Date.now();
     // '1': one volume, so the bundle is moved (macOS refuses writes into an app's place; a rename is allowed).
-    const r = spawnSync('sh', [shPath(script), String(app0.pid), shPath(staged), shPath(app), '0', shPath(log), 'G9BrowserAgent', '1'], { encoding: 'utf8', timeout: 60_000 });
+    // Run without blocking this process: a spawnSync would leave the stand-in an unreaped zombie,
+    // which `kill -0` still finds (the pipeline's Linux and macOS runs waited out the timeout).
+    const r = await new Promise((resolve) => {
+      const p = spawn('sh', [shPath(script), String(app0.pid), shPath(staged), shPath(app), '0', shPath(log), 'G9BrowserAgent', '1'], { stdio: ['ignore', 'ignore', 'pipe'] });
+      let stderr = '';
+      p.stderr.on('data', (d) => { stderr += d; });
+      const timer = setTimeout(() => p.kill(), 60_000);
+      p.on('exit', (status) => { clearTimeout(timer); resolve({ status, stderr }); });
+    });
     assert.equal(r.status, 0, r.stderr);
     if (process.platform !== 'win32') assert.ok(Date.now() - started >= 1000, 'it waited for the app to quit');
     assert.equal(JSON.parse(fs.readFileSync(path.join(app, 'Contents', 'Resources', 'package.json'), 'utf8')).version, '3.6.0');
@@ -183,6 +191,14 @@ t.test('the swap script: waits for the app to quit, moves the new bundle in (cop
     assert.equal(rc.status, 0, rc.stderr);
     assert.equal(JSON.parse(fs.readFileSync(path.join(app, 'Contents', 'Resources', 'package.json'), 'utf8')).version, '3.6.1');
     assert.equal(fs.existsSync(staged), false);
+    // An app that exited but was not reaped yet (a zombie) holds nothing: the script does not wait on it.
+    const quick = spawn(process.execPath, ['-e', '0'], { stdio: 'ignore' });
+    const until = Date.now() + 1500;
+    while (Date.now() < until) { /* block, so this process does not reap it */ }
+    const zt = Date.now();
+    const rzombie = spawnSync('sh', [shPath(script), String(quick.pid), shPath(path.join(dir, 'missing.app')), shPath(app), '0', shPath(log), 'G9BrowserAgent', '1'], { encoding: 'utf8', timeout: 60_000 });
+    assert.equal(rzombie.status, 0, rzombie.stderr);
+    assert.ok(Date.now() - zt < 20_000, `an exited, unreaped app is not waited on (${Date.now() - zt} ms)`);
     // A move or copy that fails (nothing staged): the old bundle is back in place.
     for (const same of ['1', '0']) {
       const r2 = spawnSync('sh', [shPath(script), '999999', shPath(path.join(dir, 'missing.app')), shPath(app), '0', shPath(log), 'G9BrowserAgent', same], { encoding: 'utf8', timeout: 60_000 });

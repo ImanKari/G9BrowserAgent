@@ -2,7 +2,7 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v3.6.1, 2026-10-13. 3.6.1 (§9): the macOS self-update moves the new bundle into place (a copy was stopped by macOS on a real Mac). 3.6.0 (§9, the 3.6.0 entry): the "Human Wave" icon everywhere; the
+**Status:** v3.6.2, 2026-10-13 — the published 3.6 release (3.6.0 and 3.6.1 never passed the pipeline; §9, the 3.6.2 entry). 3.6.1 (§9): the macOS self-update moves the new bundle into place (a copy was stopped by macOS on a real Mac). 3.6.0 (§9, the 3.6.0 entry): the "Human Wave" icon everywhere; the
 desktop updater clears the way before it installs (the agents' MCP servers no longer make every
 install fail), installs on demand with **Force install**, and a Mac updates itself instead of opening
 the release page; and the next agent field report — case-sensitive and literal name matching, an
@@ -1923,6 +1923,38 @@ after every step of a forty-step flow doubles the run for evidence nobody reads.
 Entries below describe what was believed or tested at the time. Current capability claims and
 unresolved findings are in §§4, 7 and 8, which supersede historical assertions. Entries dated before
 2026-09-21 describe v1 (the bridge, the four control modes, the workspace allowlist).
+
+### 2026-10-13 — v3.6.2: the 3.6 release — updates that always install, a Mac that updates itself, and the next field report
+
+**Why this version.** 3.6.0 and 3.6.1 were never published: the pipeline's Linux and macOS portable
+suites failed on a test of the new macOS swap script (below), so neither reached the Package stage.
+This release carries both; their full entries follow this one. Coming from 3.5.0, everything here is new.
+
+**What 3.6 brings (details in the 3.6.0 and 3.6.1 entries):**
+- **One icon, "Human Wave"**, on the extension, the app, the installer and the tray.
+- **Updates that install while agents are connected.** Every install first stops what holds the
+  program open — the AI clients' G9BrowserAgent MCP servers and the daemon — and keeps the MCP servers
+  from starting the daemon again meanwhile. **Force install** (Settings, the question after a busy
+  **Install now**, or when quitting) installs at once after a confirmation.
+- **macOS updates itself** when the app is in Applications: it downloads the zip, checks its SHA-512,
+  and moves the new app into place after it quits (measured on a real Mac with macOS 26). Moving from
+  3.5.0 or earlier is one manual install of this version; later ones arrive by themselves.
+- **For agents:** `matchCase` / `exact` name matching; a `[code: …]` on every error an agent acts on
+  (`not_found`, `ambiguous`, `missed`, `navigated`, `timeout` …); `navigated` in a result when an
+  action leaves the page, and `expectSamePage:true` to make that an error; `set_value` that focuses a
+  custom slider before its keys and says where focus was when it fails; an upload whose input the
+  page emptied again is `indeterminate`, not an error; session cookies of a launched profile survive a
+  relaunch, so sign-ins kept partly in them (Google, YouTube) stay.
+- **Temporary in 3.6:** a suggestions box — the MCP instructions ask agents to send what they miss
+  with `browser_issue action:"feedback"`.
+
+**The fix in 3.6.2 (`desktop/lib/mac-update.mjs`, its test).** The swap script waits for the app to
+exit with `kill -0`, which also succeeds for a process that exited but was not yet reaped by its parent
+(a zombie). The test ran the script with `spawnSync`, which blocks Node's event loop, so the stand-in
+"app" stayed a zombie and the script waited out the test's 60 s — on Linux and macOS; Git Bash on
+Windows has no such pid, so it passed here. The test now runs the script without blocking, the script
+counts a zombie as gone (`ps -o stat=`), and a new case checks that an exited, unreaped app is not
+waited on. Run on the real Mac: 6/6 in that suite.
 
 ### 2026-10-13 — v3.6.1: the macOS self-update, measured on a real Mac
 
