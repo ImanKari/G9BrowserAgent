@@ -7,7 +7,9 @@
  * before the agent has done anything (AIGuide §4.4).
  *
  * Descriptions are written for the agent, not for a human reading docs: when to
- * reach for a tool and what the common mistake is. Every sentence must describe
+ * reach for a tool and what the common mistake is. (3.8) They are the FIRST layer only — what the tool is for,
+ * its one pitfall, and which guide (mcp/guides.js) has the rest; clients cut long descriptions and send
+ * them with every request, and the long tail lives in the guides and the per-tool reference. Every sentence must describe
  * behaviour that exists (EXT-17) — a description that promises an argument
  * nobody implements is a bug that reads like documentation.
  *
@@ -21,221 +23,38 @@ const str = (description, extra = {}) => ({ type: 'string', description, ...extr
 const num = (description, extra = {}) => ({ type: 'number', description, ...extra });
 const bool = (description, def) => ({ type: 'boolean', description, ...(def !== undefined ? { default: def } : {}) });
 
-const TAB_ID = num('Which tab: a G9BrowserAgent tab handle from browser_tabs action:"list" (shared by every engine). Default: your current tab.');
+const TAB_ID = num('A tab handle from browser_tabs action:"list" (shared by every engine). Default: your current tab.');
 const HUMANIZE = str(
-  'Input style for this call: "off" (direct, instant events — v1 behaviour), "human" (curved pointer paths, ' +
-    'human timing, wheel notches, per-key rhythm), "stealth" (human, plus nothing that needs the page\'s JS runtime), ' +
-    'or the name of a calibrated profile. Default: the tab\'s engine/context setting (in the user\'s own browser, the ' +
-    'side panel\'s Input). The tab\'s stealth level is a floor: you can ask for stricter input, never looser (a ' +
-    'stealth tab always gets stealth input; the result then reports humanize.raisedFrom). On a launched engine that ' +
-    'is the context\'s stealth setting; in the user\'s own browser only the panel\'s Stealth is one, and its Human ' +
-    'and Direct are just defaults.',
+  'Input style for this call: "off" (direct, instant), "human" (curved paths, human timing), "stealth" (human, and nothing ' +
+    'that needs the page’s JS runtime), or a calibrated profile name. Default: the tab’s setting. A tab’s stealth level is a ' +
+    'floor: stricter only (the result then reports humanize.raisedFrom). Guide: stealth.',
 );
 const SEED = {
   description:
-    'Seed for the humanize random generator. The same seed reproduces the same motion FROM THE SAME POINTER POSITION and ' +
-    'viewport: every path starts where the last action left the pointer on that tab. A replay homes the pointer first and ' +
-    'reports it as pointerStart, so replaying with the reported humanizeSeed does reproduce the run.',
+    'Seed for the humanize random generator: the same seed reproduces the same motion from the same pointer position and ' +
+    'viewport (a replay homes the pointer and reports pointerStart). Guide: stealth.',
   anyOf: [{ type: 'number' }, { type: 'string' }],
 };
 
-export const INSTRUCTIONS = `You are connected to G9BrowserAgent: real browsers you can drive, through a local daemon.
+export const INSTRUCTIONS = `G9BrowserAgent drives real Chrome/Edge browsers: the user's own browser (Engine 1, their logins) and browsers it launches (Engine 2, headless). Use it to open, read and operate web pages, debug them (console, network, DOM, performance) and record flows as regression tests.
 
-## IMPORTANT — send us what G9BrowserAgent is missing (this version)
-G9BrowserAgent is being built from what agents like you need while you work. **Whenever a tool
-gets in your way, is missing, behaves unexpectedly, or a workaround costs you time, send a
-suggestion right away** with \`browser_issue action:"feedback" title:"…" body:"…"\` (optional
-\`category\`: feature, bug, improvement, docs, other; \`tool\`: the tool it is about). Say what you
-were doing, what you needed, what happened, and what would have helped — no site names, secrets or
-personal data. Do not wait to be asked and do not batch them up for the end: one suggestion per
-point, as it happens. (Without the tool: POST JSON {title, text, category} to
-https://feedback.g9tm.com/v1/suggestions.) At most 5000 characters each; 100 an hour in all.
+Start: browser_status. Open: browser_tabs action:"open" url:"…" (in the user's browser pass focus:true before clicking) or action:"attach" (the tab the user is on). Read: browser_snapshot — refs [ref=eN], cheaper than screenshots. Act: browser_interact with a ref, or role+name.
 
-## Two engines, one set of tools
-- **Engine 1 — the extension** runs inside the user's OWN browser (their real
-  cookies, sessions and logins). Use it to explore, author and debug with them.
-- **Engine 2 — launched browsers** are real Chrome/Edge processes G9BrowserAgent starts
-  itself, headless by default, with their own profiles. Use them for long or
-  unattended runs, parallel work, and work that must keep going while the user
-  minimises or covers their windows — a HEADLESS one has no window of its own
-  (a locked screen has not been measured). \`browser_engine\` manages them.
+Rules:
+1. Results carry \`delivery\`; anything but "delivered" is unproven — verify before relying on it; never blindly repeat a state-changing action.
+2. Your first state-changing call on a tab claims it; a tab another agent owns is refused. Take one over only when the user asks.
+3. If the user pressed Stop, every tool but browser_status fails: stop and tell them.
+4. Never approve on your own initiative (browser_recording action:"approve" is the user's call).
+5. When your task is done: browser_tabs action:"finish" — releases your tabs; the last working agent's finish detaches the debugger from the user's browser.
+6. A tool missing or misbehaving? browser_issue action:"feedback" (this version).
 
-Every tool works the same on both. Tabs are addressed by a **G9BrowserAgent tab handle**
-(\`tabId\` from \`browser_tabs action:"list"\`), shared by all engines, or by a
-**session** name. Without either, a call acts on YOUR current tab.
-
-## Start here
-Call \`browser_status\` first: your current tab, its page health, which engines
-exist, which agents are connected, what you own, whether Stop is pressed.
-No tab yet? \`browser_tabs action:"open" url:"…"\` (opens in the user's browser if
-the extension is connected, otherwise launches a headless browser), or
-\`browser_tabs action:"attach"\` to take the tab the user is looking at.
-In the user's own browser \`open\` creates a BACKGROUND tab: readable (snapshot,
-console, network, viewport screenshot) but not clickable, because a browser
-delivers input only to the tab it is showing. Pass \`focus:true\` when you will
-act on it, or \`action:"focus"\` before the first click. A launched engine gives
-every tab its own window, so nothing is needed there.
-
-## Seeing the page
-\`browser_snapshot\` returns the accessibility tree with a [ref=eN] handle on every
-interactive element — your primary sense: cheap, semantic, stable. Use
-\`browser_screenshot\` only when the tree cannot answer (canvas, layout, visual
-judgement). Refs belong to the TAB, not to you, and a ref keeps naming the
-element the snapshot that returned it showed: numbering continues across
-snapshots of a page (e1…e30, then e31…), and each caller's last four snapshots of
-that page stay usable, so another agent's snapshot never renumbers yours. A ref from an
-older snapshot, from another page, or for an element the page has since removed
-is refused — take a fresh snapshot. After navigation or a big DOM change, take
-one anyway: a page that re-renders replaces the elements you saw.
-
-## Acting
-\`browser_interact\` sends real, trusted browser input (isTrusted === true) —
-by default with human-like pointer paths, timing and typing. Name the target with a ref,
-or without a snapshot by \`role\`+\`name\` (a regex) or a \`selector\` (\`nth\` when several match;
-several without nth are refused, never guessed); \`waitMs\` waits for a control that appears
-late, and a covered or moving target is tried again until clickable (nothing is pressed
-meanwhile). Coordinates are a fallback for canvas widgets. \`action:"set_value"\` sets a
-slider, checkbox, switch, field or select and proves the value; \`drag toPercent\` moves a
-thumb or scrubber. In the user's browser \`ifHidden:"popout"\` (or "focus") lets the call
-bring a background tab forward instead of being refused. **A dispatched action is not a
-delivered action**: every result carries \`delivery\` —
-"delivered" or "indeterminate". "not-delivered" (nothing reached the page),
-"missed" (it reached the page but a different element — the error names which)
-and "partial" (the tab became hidden part-way: some of the input arrived) are
-errors whose text starts with a tag such as \`[delivery: missed; hit <div#x>]\`.
-Treat anything but
-"delivered" as unproven, and verify the effect (snapshot, \`browser_navigate
-action:"wait"\`, console) before relying on it. Never blindly repeat a
-state-changing action whose outcome is unknown — check first.
-
-## Sharing: ownership, not modes
-There are no modes and no allowlists: attach means full access, and every tab's
-title and URL is visible. Other agents may be connected to the same browsers.
-- Your first state-changing call on a tab CLAIMS it. A state-changing call on a
-  tab another agent owns is refused with that agent's name. Reads (snapshot,
-  console/network reads, inspect, \`browser_screenshot area:"viewport"\`) are
-  always allowed. \`area:"element"\` and \`area:"fullpage"\` are NOT reads: they
-  scroll the page to the element (with the wheel, at the human levels) or resize
-  the viewport, so they claim the tab and queue like any action.
-- \`browser_tabs action:"release"\` when you are done with a tab. Take one over
-  only when the user asks: \`action:"claim" force:true\`.
-- State-changing calls on one tab run one at a time, yours included; reads run
-  at once. A call that hits its deadline is asked to stop and the tab's queue is
-  held until it has — but if it does not stop in time, the error says so: it may
-  still be running, and the next thing you send that tab could land in the middle
-  of it. Take a \`browser_snapshot\` first when you see that message.
-
-## Stop
-The user can press Stop (side panel or desktop app), for everyone or just for
-you. Every tool except \`browser_status\` then fails with that reason. You cannot
-lift it — only the user can. Stop working and tell them.
-
-## Background work: handoff and popout
-- \`browser_tabs action:"handoff"\` moves a tab from the user's browser into a
-  launched browser: cookies and local/session storage travel, the PAGE RELOADS
-  there, and in-memory page state, IndexedDB and service-worker state do not
-  travel. The result is a new tab handle; continue there. The user's own tab is
-  untouched.
-- \`browser_tabs action:"popout"\` (extension only) moves a tab into its own
-  window without reloading it, so the user can keep working elsewhere. It is
-  created unfocused (pass \`focus:true\` to bring it to the front) and the result
-  says whether the page is \`visible\`. That window must not be minimised, and on
-  Windows a window that is COMPLETELY covered also stops rendering unless the
-  WindowOcclusionEnabled policy is off; when \`visible\` is false, "focus" it.
-- A HEADLESS launched engine has no window, so minimising or covering the user's
-  windows does not affect it (a locked session has not been measured). A HEADED
-  one (\`launch headless:false\`, \`warm\`, or the headless:false setting) must not
-  be minimised: measured, a click then takes about 28 s and a screenshot 33–46 s.
-  \`browser_status\` warns when that is the case.
-
-## Humanize and stealth
-Input defaults to "human". \`humanize:"off"\` gives instant direct events (fast
-but obviously scripted). \`stealth\` has two halves. The ENVIRONMENT half belongs
-to the browser and comes from \`browser_engine action:"launch" stealth:"stealth"\`:
-only that clears \`navigator.webdriver\` (the debugging pipe turns Chromium's
-automation flag on) and leaves Widevine in place. A CONTEXT's stealth adds the
-rest — the page's JS runtime domain is never enabled, so \`browser_console\`
-cannot read page console output there and says so, and input keeps the stealth
-floor; in an engine launched below stealth such a context still reports
-\`navigator.webdriver\` true, and its result says so. A tab's stealth level is a floor for
-input: \`humanize\` can make a call stricter, never looser — on a stealth tab
-every action uses stealth input, and the result's \`humanize.raisedFrom\` says
-when it was raised. In the user's own browser the side panel's Input setting
-is the default level; only its Stealth setting is also a floor, so with the
-panel at Human \`humanize:"off"\` still gives direct input. G9BrowserAgent never overrides the
-user agent on its own — \`browser_emulate\` device presets do, and at stealth they
-are refused. Pass a \`seed\` to reproduce a run's motion from the same pointer
-position (a replay homes the pointer and reports \`pointerStart\`).
-
-## Long, unattended work (and fewer tokens)
-- Read less: \`browser_snapshot\` takes \`scope\` (a ref or CSS selector), \`roles\`/\`name\`
-  (a regex) filters, \`interactiveOnly\`, \`includeText:false\`, \`maxNodes\`, and \`diff:true\` —
-  only what changed since YOUR previous diff snapshot of that page (refs are stable per element).
-  \`browser_inspect what:"find" role:"button" name:"save"\` returns just the matching lines with refs.
-- Wait on the server, not in a loop: \`browser_navigate action:"wait"\` with \`predicate\` (a page
-  expression, until truthy) or \`ref\`+\`state\` (visible/hidden/enabled/disabled/gone…), up to 2 h.
-- Long page work: \`browser_console action:"evaluate" job:true\` answers at once with a jobId; the
-  job runs on in the page (page code may call \`__g9job.progress(fraction, note)\`) and survives your
-  session ending — read it with \`action:"job_status"\` (waitMs waits for the end), stop it with
-  \`job_cancel\`. Without job, \`timeoutMs\` (up to 4 h) bounds an awaited evaluate.
-- Many steps, one call: \`browser_recording action:"batch" steps:[…]\` (navigate, click/type by ref
-  or role+name, wait, evaluate, extract) stops at the first failure with an excerpt of that area.
-- Files: \`browser_network action:"fetch"\` fetches a URL with the browser's cookies; \`savePath\`
-  writes it on the BROWSER's machine (path, size, sha256). \`browser_screenshot savePath\` does the
-  same for a screenshot (thumbnail:true shows a small one instead).
-- A background tab in the user's browser can be read and evaluated; for long in-page work open it
-  with \`keepAwake:true\` (or \`browser_tabs action:"keep_awake"\`).
-- A call stuck past its deadline is ended and its tab RECOVERED (the error starts with
-  [recovered]): take a snapshot before acting on it again. \`browser_tabs action:"close"\` never
-  waits behind a stuck call.
-- Stateless clients: over HTTP a new MCP session with the same client name (or X-G9-Agent header)
-  takes over the previous session's tabs, current tab and session names keep working.
-- Your client gave up but the page may not have: every tool takes \`opId\` (your idempotency key,
-  e.g. "publish-post-42" — the same opId is never acted on twice; a resend returns the first outcome)
-  and \`replyWithinMs\` (answer \`{pending:true, callId}\` by then; the call goes on). Set
-  replyWithinMs below your client's own timeout for slow actions. \`browser_status callId:"…"\`
-  (waitMs to wait) says how a call ended — also one G9 answered "may still be running" that finished
-  later — and \`browser_status calls:true\` lists your recent calls. Check before you repeat an action.
-- An argument a tool does not take is refused with the closest real one ("did you mean scope?").
-
-## Debugging
-\`browser_diagnose\` answers "what is wrong with this page" in one call. Capture
-starts when a tab is attached, not when it loaded: if \`browser_network\` shows
-nothing on a page that was already open, \`browser_navigate action:"reload"\`
-and read again — say so first, a reload surprises people.
-
-## Regression memory — the part that is not obvious
-A recording does not only replay steps; it remembers what the flow NORMALLY
-does. Every replay builds a signature (requests, console, the semantic tree,
-step timings) and compares it with the flow's approved **known world**.
-Anything outside it comes back as a *surprise*, in both directions: **new**
-(an error, request, dialog or control never seen before) and **missing**
-(something that happened on every previous run and not now — the quiet failures).
-1. Record and assert as normal.
-2. Right after stopping, \`action:"suggest"\` proposes assertions from what was
-   observed. It adds NOTHING; you and the user choose, then \`action:"assert"\`.
-   A flow with no assertion is a macro, not a test.
-3. \`action:"calibrate"\` once per flow: two runs on one build, differences marked volatile.
-4. Replay with \`seedKnownWorld:true\` the first time.
-5. After a run whose surprises are all legitimate, the USER decides and calls
-   \`action:"approve"\`. **Never approve on your own initiative** — that is how a
-   real regression becomes the baseline.
-Verdicts: PASS, PASS_WITH_WARNING, SURPRISE, FAIL_PRODUCT, FAIL_AUTOMATION.
-FAIL_AUTOMATION means the test broke, not the product — say which you report.
-\`browser_recording action:"replay" engine:"launched"\` runs a flow in a launched
-browser (the recording is copied there if it only exists in the user's browser).
-
-## Boundaries that remain
-Browser-internal pages (chrome://, edge://, the web stores, other extensions)
-cannot be controlled — a browser rule, not a setting. Native OS dialogs (print,
-basic auth, file picker) are outside the page; upload files with
-\`browser_interact action:"upload"\`.`;
+Guides — read the one for your task first: browser_status guide:"<topic>" (or resource g9://guide/<topic>). Topics: start, perceive, act, console, network, debug, sharing, background, stealth, recording, issues, limits. Every argument of a tool: guide:"tool:<name>".`;
 
 export const TOOLS = [
   {
     name: 'browser_status',
     description:
-      'Orientation — CALL THIS FIRST. Your current tab (URL, title, console-error and failed-request counts), the daemon, every engine (the extension in the user\'s browser, launched browsers), connected agents and what each owns, your own claims, sessions, whether Stop is pressed (globally or for you), and capabilities. The one tool that still answers while Stop is pressed — use it to learn why everything else fails.',
+      'Orientation — CALL THIS FIRST: your current tab (URL, title, console-error and failed-request counts), the engines, connected agents (who is working) and what each owns, your claims and sessions, whether Stop is pressed. The one tool that still answers under Stop. guide:"<topic>" returns a guide instead (topics: start, perceive, act, console, network, debug, sharing, background, stealth, recording, issues, limits; "tool:<name>" for one tool\'s every argument) — no browser needed.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -244,6 +63,7 @@ export const TOOLS = [
         waitMs: num('With callId: wait up to this long (max 600000) for the call to end.'),
         calls: bool('Only your recent calls (newest first): tool, action, state, outcome. Use it after your client timed out on a call.', false),
         limit: num('With calls:true — how many (default 20).'),
+        guide: str('Return a guide instead of the status: "index", a topic (start, perceive, act, console, network, debug, sharing, background, stealth, recording, issues, limits) or "tool:<name>" for every action and argument of one tool. Answered without a browser.'),
       },
     },
     annotations: { readOnlyHint: true },
@@ -252,7 +72,7 @@ export const TOOLS = [
   {
     name: 'browser_engine',
     description:
-      'Launched browsers (Engine 2): real Chrome, Edge or Chrome for Testing started and driven by G9BrowserAgent, headless by default — a headless one is unaffected by the user minimising or covering their windows (a locked screen has not been measured); a headed one must never be minimised. "launch" starts one with a named profile; "list" shows every engine; "stop" closes a launched one (refused while another agent owns a tab in it, or holds it with "acquire", unless force:true); "context" creates an isolated context (own cookies, optional proxy/locale/timezone/stealth — note that navigator.webdriver follows the ENGINE\'s launch level, not the context\'s); "acquire"/"release" hold an engine across your tabs so a long run is not stopped by another agent finishing first (the daemon stops an engine launched with lease+stopWhenReleased once the last holder releases it); "versions" lists installed browsers and the pinned Chrome for Testing (download:true fetches it); "warm" opens a profile HEADED so the user can sign in once. You rarely need launch: browser_tabs action:"open" launches the default engine on demand.',
+      'Launched browsers (Engine 2): real Chrome, Edge or Chrome for Testing that G9BrowserAgent starts, headless by default (unaffected by the user minimising windows; a headed one must never be minimised). launch, list, stop, context (isolated cookies, proxy, locale, timezone, stealth), acquire/release (hold an engine for a long run), versions, warm (a headed profile for a one-time sign-in). You rarely need launch: browser_tabs action:"open" launches on demand. Guide: background.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -288,12 +108,12 @@ export const TOOLS = [
   {
     name: 'browser_tabs',
     description:
-      'Tabs across ALL engines, with full titles and URLs. "close" and "focus" never wait behind a stuck call (close ends the calls running on that tab). "keep_awake" keeps a background tab working for long in-page work. "list" every tab (engine, owner, session); "open" a URL (in the user\'s browser when the extension is connected, else a launched browser — or choose with engine) and make it your current tab (in the user\'s browser it opens in the BACKGROUND: readable, not clickable, unless focus:true; a launched engine gives it its own window); "close"/"focus" a tab; "attach" the tab the user is on (extension) and make it current; "claim"/"release" ownership (force:true takes over — only when the user asks; in the user’s browser release also DETACHES the debugger, "detach" does only that); a claim whose owner sent nothing for 15 min lapses for the next agent; "popout" an extension tab into its own window without reloading it (never minimise that window); "handoff" an extension tab into a launched browser (cookies + local/session storage travel, the page reloads, in-memory state/IndexedDB/service workers do not; with profile they are kept in that profile, and proxy/headless/stealth set up the receiving browser); "session" names a tab (with url: opens or re-points it); "sessions"/"end_session" list or forget names (the tab stays open); "wait" for a popup/new tab by url/title/opener; "watch" opens a LIVE VIEW of a tab for the user (frames and your cursor, view only) — the way to let them see a headless launched tab, which has no window: the watch window opens in their browser without taking the keyboard (focus:true brings it to the front), on:false closes it. NOTE (the user\'s browser): a browser only delivers input to the tab it is SHOWING, so a background tab or session can be read (snapshot, console, network, screenshot) but not clicked or typed into — "focus" it first, or "popout"/"handoff" it.',
+      'Tabs across ALL engines: list, open (makes it your current tab), close, focus, attach (the tab the user is on), claim/release ownership, finish (your task is done: releases your tabs; the last working agent detaches the debugger from the user\'s browser), detach, popout, handoff (to a launched browser), session names, wait for a popup, watch (a live view for the user), keep_awake. In the user\'s browser a tab opens in the BACKGROUND: the browser only delivers input to the tab it is SHOWING, so a background tab can be read but not clicked — focus it first, or popout/handoff it. Guides: start, sharing, background.',
     inputSchema: {
       type: 'object',
       properties: {
         action: str('What to do.', {
-          enum: ['list', 'open', 'close', 'focus', 'attach', 'detach', 'claim', 'release', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch', 'keep_awake'],
+          enum: ['list', 'open', 'close', 'focus', 'attach', 'detach', 'claim', 'release', 'finish', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch', 'keep_awake'],
           default: 'list',
         }),
         on: bool('For watch: false closes the live view again. For keep_awake: false ends it.', true),
@@ -332,7 +152,7 @@ export const TOOLS = [
   {
     name: 'browser_snapshot',
     description:
-      'PRIMARY PERCEPTION TOOL. The accessibility tree of the tab, with a [ref=eN] handle on every interactive element; pass those refs to browser_interact. Take a fresh snapshot after navigation or any significant DOM change. Save tokens on big pages and long jobs: scope, roles/name filters, interactiveOnly, maxNodes, and diff:true (only the changes since your previous diff snapshot). Works on background tabs.',
+      'PRIMARY PERCEPTION TOOL: the accessibility tree with a [ref=eN] on every interactive element, for browser_interact. Take a fresh one after navigation or a big DOM change. Read less: scope, roles/name filters, interactiveOnly, maxNodes, diff:true (only changes since your previous diff snapshot). Works on background tabs. Guide: perceive.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -355,7 +175,7 @@ export const TOOLS = [
   {
     name: 'browser_interact',
     description:
-      'Real user input: trusted browser events (isTrusted === true), human-like by default (curved pointer paths, human timing, wheel notches, per-key typing with rare corrected typos; never in password fields). Pass a ref from browser_snapshot — or skip the snapshot: role+name ("button", /^share$/) or a selector, with waitMs for a control that appears late. "set_value" sets a slider, checkbox, switch, field or select to a value and verifies it; "drag" with toPercent moves a slider or scrubber. A covered or moving target is tried again until it is clickable (nothing is pressed meanwhile). The result reports delivery ("delivered" | "indeterminate"; "not-delivered", "missed" — the input reached a different element than the ref — and "partial" — the tab became hidden part-way — are errors whose text starts with a [delivery: …] tag and names the cause) and the pointer position — anything but "delivered" is unproven: verify the effect before relying on it, and never blindly repeat a state-changing action.',
+      'Real user input (trusted events, human-like by default): click, type, key, scroll, drag, select, upload, set_value (proves the value). Target a ref from browser_snapshot, or role+name / selector (nth when several match), waitMs for a late control. The result carries delivery: anything but "delivered" is unproven — verify the effect, and never blindly repeat a state-changing action. Guide: act.',
     inputSchema: {
       type: 'object',
       required: ['action'],
@@ -423,7 +243,7 @@ export const TOOLS = [
   {
     name: 'browser_navigate',
     description:
-      'Navigate, reload, move through history, or wait for a condition. Waiting is condition-based with a deadline — never sleep and hope.',
+      'Navigate (goto, reload, back, forward) or WAIT for a condition — text, selector, page predicate, a ref\'s state, network idle, or something to disappear. Waiting is condition-based with a deadline: never sleep and hope. Guide: act.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -450,7 +270,7 @@ export const TOOLS = [
   {
     name: 'browser_inspect',
     description:
-      'DevTools-panel inspection. what:"dom" = Elements, "styles" = Computed styles, "box" = layout geometry and visibility, "storage" = Application storage, "cookies" = cookies of any site in that browser (HttpOnly included), "frames" = the iframe tree, "find" = only the elements with a role and/or a name (regex), as lines with refs — the cheapest way to get the ref of one control on a big page.',
+      'DevTools-panel inspection: what:"dom", "styles" (computed), "box" (geometry, visibility), "storage", "cookies" (any site, HttpOnly included), "frames", and "find" — only the elements with a role and/or name (regex), with refs: the cheapest way to the ref of one control on a big page. Guides: perceive, debug.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -479,7 +299,7 @@ export const TOOLS = [
   {
     name: 'browser_console',
     description:
-      'Read buffered console output (log, warn, error, uncaught exceptions with stack frames), or evaluate JavaScript. "evaluate" runs in the PAGE\'s own main world — you are asking about the page\'s JavaScript, and the page can see what you run. Long work: timeoutMs (up to 4 h), or job:true — answers at once with a jobId while the work runs on in the page (it survives your session ending; not across a navigation); "job_status" reads state, progress and the bounded result (waitMs waits for the end), "job_cancel" aborts __g9job.signal, "jobs" lists them. Page code reports progress with __g9job.progress(fraction, note). In a stealth context the page runtime is never enabled, so "read" reports page console capture as unavailable instead of pretending the page was silent.',
+      'Console: read buffered output (log, warn, error, uncaught exceptions with stack frames; filter by level/contains, poll with since), clear it before a repro, or evaluate JavaScript in the PAGE\'s main world (the page can see it). Long work: job:true runs on in the page (job_status, job_cancel, jobs). In a stealth context page console capture is unavailable and says so. Guides: console, debug.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -502,7 +322,7 @@ export const TOOLS = [
   {
     name: 'browser_network',
     description:
-      'Network: list requests, or pass a requestId for one in full (headers, timing, POST body, response body). Capture begins when the tab is attached — if an already-open page shows 0 requests, reload it (browser_navigate action:"reload") and read again. RECORD AND FREEZE: "record_har", then "pin" serves matching requests from that HAR (strict:true fails the rest) so a remaining difference is the client\'s; "unpin"; "pin_status". BREAK IT ON PURPOSE: "intercept" with rules makes chosen requests fail, stall or return your body (test the UI on a 500/429/timeout); "intercept_status"; "clear_intercept". Rules apply before a pinned HAR. DOWNLOADS: "watch_downloads" BEFORE the click that starts one (each watch starts a fresh list), then "wait_download" returns the finished file (name, bytes; in launched engines also sha256 and the type sniffed from its content), "downloads" lists them, "stop_downloads" ends the watch — proof an export produced a real file, which a 200 response cannot give; in the user\'s browser the result gives the final path and, when the daemon can read it, the sha256. FETCH: "fetch" gets a URL with the browser\'s cookies (method, headers, body) and returns a bounded body — or, with savePath, writes it on the browser\'s machine and returns path, size, sha256 and content type (up to 40 MiB). READ_FILE: the bytes of a file G9BrowserAgent saved or downloaded on the browser’s machine, base64, in chunks (path, offset, length) — how to get a download or a saved fetch off a remote browser node. A download that fails (a missing download folder, a network or server error) ends wait_download at once with the reason and the fix.',
+      'Network: list requests (filter by URL, method, status:"failed") or one in full by requestId (headers, timing, bodies). Capture starts when the tab is attached — reload an already-open page. Also: intercept (make requests fail, stall or return your body), record_har + pin (serve from a HAR), downloads (watch_downloads BEFORE the click, then wait_download), fetch with the browser\'s cookies, read_file. Guide: network.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -549,7 +369,7 @@ export const TOOLS = [
   {
     name: 'browser_diagnose',
     description:
-      'FASTEST PATH TO "what is wrong with this page". health correlates actionable defects (console errors, failed requests, broken assets, unlabeled controls, overflow, duplicate ids); performance records a trace and may reload; vitals measures Core Web Vitals and long tasks; memory samples heap, DOM nodes, documents and listeners for leak signals.',
+      'FASTEST PATH TO "what is wrong with this page": health correlates actionable defects (console errors, failed requests, broken assets, unlabeled controls, overflow, duplicate ids); performance records a trace (may reload); vitals measures Core Web Vitals and long tasks; memory samples heap, DOM nodes and listeners for leaks. Guide: debug.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -566,7 +386,7 @@ export const TOOLS = [
   {
     name: 'browser_screenshot',
     description:
-      'Capture an image. Use SPARINGLY — browser_snapshot is cheaper and more precise for anything structural. For visual questions only: rendering, spacing, canvas content. Oversized FULL-PAGE captures are scaled down, never cropped; the result reports the scale applied. area:"element" and area:"fullpage" are ACTIONS, not reads: the first scrolls the element into view (with the wheel at the human and stealth levels, a programmatic scroll at "off") and captures it as far as it shows on screen (the result\'s `cropped` gives the element\'s full size — take several viewport shots for the whole of it); the second resizes the viewport when the page is taller (the page can see that), so at stealth it is refused. Both therefore claim the tab and queue behind its other actions, and are refused on a tab another agent owns. area:"viewport" is a plain read and always allowed.',
+      'Capture an image — SPARINGLY: browser_snapshot is cheaper and more precise for anything structural; use this for rendering, spacing, canvas. area:"viewport" (default) is a plain read. area:"element" and area:"fullpage" are ACTIONS, not reads: they scroll or resize the page, so they claim the tab and queue (fullpage is refused at stealth). savePath writes the file on the browser\'s machine. Guide: perceive.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -586,7 +406,7 @@ export const TOOLS = [
   {
     name: 'browser_emulate',
     description:
-      'Emulate a device, viewport, network condition, CPU throttle, colour scheme, locale or timezone. Lasts until reset or until the tab is detached. For responsive and slow-network testing. NOT stealth-safe: a device preset overrides the user agent (and its Client Hints), and a locale here changes Intl only while navigator.languages and Accept-Language stay the profile\'s — the contradiction detectors look for. Both are refused on a stealth tab; use a launched engine with that locale instead. reset:true gives the browser its own user agent and Client Hints back.',
+      'Emulate a device, viewport, network condition, CPU throttle, colour scheme, locale or timezone until reset:true or the tab is detached — for responsive and slow-network testing. NOT stealth-safe: device presets override the user agent, and both they and locale are refused on a stealth tab. Guides: debug, stealth.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -608,7 +428,7 @@ export const TOOLS = [
   {
     name: 'browser_dialog',
     description:
-      'Accept or dismiss a JavaScript dialog (alert, confirm, prompt, beforeunload). An open dialog freezes ITS tab: calls on that tab fail fast, naming the dialog, until this is called — other tabs and tab management (open, list, close) are not affected. A dialog record that is no longer real (the page answers again) clears itself. To leave a page without its "Leave site?" prompt, navigate or close with leaveWithoutAsking:true.',
+      'Accept or dismiss a JavaScript dialog (alert, confirm, prompt, beforeunload). An open dialog freezes ITS tab — calls on it fail fast, naming the dialog — until this is called; other tabs are unaffected. To leave a page without its "Leave site?" prompt, navigate or close with leaveWithoutAsking:true. Guide: act.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -622,7 +442,7 @@ export const TOOLS = [
   {
     name: 'browser_recording',
     description:
-      'Recorded user flows, replayable as tests WITH MEMORY — and "batch": a list of steps (navigate, click/type by ref or role+name, wait, evaluate, extract) in ONE call with a compact result per step, stopping at the first failure with an excerpt of the page there. A QA records in the side panel (or you call start/stop); each element is stored with several independent locators so a step survives a redeploy, and replay reports WHICH locator matched (a step that matched only by xpath passes with a warning). A failing step says what it looked for, what it tried and the closest thing on the page. Every replay also compares what the flow did against its approved known world and reports surprises — see Regression memory in the instructions. replay engine:"launched" runs in a launched browser (copying the recording there if needed); humanize/seed control input style and reproduce motion. "calibrate_humanize" fits a humanize profile from the raw pointer/keyboard events a recording captured and saves it under name (then use humanize:"<name>"). "export_spec"/"import_spec" move a flow in and out as a Git-diffable FlowSpec, with what a person approved beside it (approved: the known world and the screenshot/aria baselines). approve also writes that approval next to the flow in the project repository when the flow is there. Without a tab, list shows the recordings of every engine\'s store (engine field), and id-based actions use the store that has the id.',
+      'Recorded flows replayable as tests WITH MEMORY, and batch: many steps (navigate, click/type by ref or role+name, wait, evaluate, extract) in ONE call, stopping at the first failure. start/stop, suggest/assert, calibrate, replay (compares with the approved known world and reports surprises), approve (the USER\'s decision, never yours), export_spec/import_spec (Git-diffable FlowSpec). Guide: recording.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -700,7 +520,7 @@ export const TOOLS = [
   {
     name: 'browser_issue',
     description:
-      'Defects captured in the browser with the context a developer always asks for afterwards — URL, previous page, console tail, failed requests, viewport — recorded at the moment the bug was visible. Attachments (screenshots, tab video, files) travel with the issue. Read these to file tickets: write the ticket from them instead of asking the user to repeat what is here. Without a tab, list shows the issues of every engine\'s store (engine field). "feedback" (no tab) sends a suggestion for G9BrowserAgent itself — what a tool lacked or got wrong — to the team\'s suggestions box: title, body, category, tool.',
+      'Defects captured with the context a developer asks for afterwards — URL, previous page, console tail, failed requests, viewport — plus screenshots, files and tab video; write the ticket from them instead of asking the user to repeat it. feedback (no tab) sends a suggestion for G9BrowserAgent itself. Guide: issues.',
     inputSchema: {
       type: 'object',
       properties: {

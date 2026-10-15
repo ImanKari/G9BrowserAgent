@@ -99,6 +99,8 @@ export class Daemon {
     this.router.emitUi = (topic, data) => this.broadcastUi(topic, data);
     this.router.onHaltFromEngine = (engineId, halted, by) => this.setGlobalHalt(halted, by, { except: engineId });
     this.router.onWatchData = (handle, kind, data) => this.#watchData(handle, kind, data);
+    // (3.8) A tab a person watches live is never detached by an agent's "finish".
+    this.router.isWatched = (handle) => (this.watchers.get(handle)?.size ?? 0) > 0;
     this.router.onWatchRequest = (req) => this.requestWatch(req);
     // (3.2) An approval in the launched-engine store goes beside the flow in the repository.
     this.engines.onApproved = async (id) => {
@@ -428,6 +430,8 @@ export class Daemon {
     if (client.role === 'engine') {
       this.router.failEngine(client.id, 'The browser extension disconnected mid-call. Check that the browser is still open.');
     }
+    // (3.8) The last working agent left without "finish": let the person's browser go after a grace.
+    if (client.role === 'agent') this.router.agentGone(client);
     if (client.role === 'ui' || client.role === 'viewer') {
       for (const [handle, set] of this.watchers) {
         if (set.delete(client.id) && set.size === 0) this.#stopWatching(handle).catch(() => {});

@@ -759,6 +759,9 @@ export class Registry extends EventEmitter {
       current: this.current(a.id),
       halted: a.halted,
       connectedAt: a.connectedAt,
+      // (3.8) Working = it has sent calls since it connected or last said browser_tabs action:"finish".
+      working: !!a.working,
+      lastCallAt: a.lastCallAt ?? null,
     }));
   }
 }

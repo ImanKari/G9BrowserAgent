@@ -26,6 +26,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 import { TOOL_NAMES, unknownArguments, unknownArgumentsMessage } from '../mcp/tools.js';
+import { readGuide } from '../mcp/guides.js';
 import { handoff as runHandoff } from './handoff.js';
 import { fileInfo } from './evidence.js';
 import { CallLog, callContext } from './calls.js';
@@ -207,7 +208,15 @@ const NOT_FOUND = /\bNo (recording|issue|attachment|flow)\b|not found in this br
 /** What a store learns about a flow by running it; never part of a FlowSpec (daemon/flows.js LOCAL_ONLY). */
 const LOCAL_TRUTH = ['runHistory', 'lastRun', 'flaky', 'knownWorld', 'knownWorlds', 'surpriseHistory', 'lastSignature'];
 
-const TABS_ACTIONS = ['list', 'open', 'close', 'focus', 'attach', 'detach', 'claim', 'release', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch', 'keep_awake'];
+const TABS_ACTIONS = ['list', 'open', 'close', 'focus', 'attach', 'detach', 'claim', 'release', 'finish', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch', 'keep_awake'];
+
+/**
+ * (3.8) How long after the last working agent LEFT without saying "finish" the person's browser is let go
+ * (its debugger detached). A grace, not zero: a stateless HTTP client opens a new session for its next call
+ * and is the same agent; a call within the grace cancels the detach. G9_AUTO_DETACH_MS overrides it; 0 = never.
+ */
+export const AUTO_DETACH_MS = Number.isFinite(Number(process.env.G9_AUTO_DETACH_MS)) && process.env.G9_AUTO_DETACH_MS !== ''
+  ? Number(process.env.G9_AUTO_DETACH_MS) : 60_000;
 
 /**
  * An input error's delivery state ("not-delivered" | "missed" | "partial"), carried as fields from
@@ -345,6 +354,9 @@ export class Router {
     this.callLog = new CallLog();
     this.lateRelays = new Map(); // relay id → { callId, engineId }: answered at the deadline, may still end
     this.seenFiles = new Set(); // (3.5) real paths of downloads the daemon reported: read_file may return them
+    this.autoDetachTimer = null; // (3.8) the pending "let the person's browser go" after the last working agent left
+    this.autoDetachMs = AUTO_DETACH_MS;
+    this.isWatched = () => false; // (3.8) set by the daemon: is a person watching this tab's live view?
   }
 
   // ------------------------------------------------------------ helpers
@@ -802,6 +814,12 @@ export class Router {
       if (halted) throw Object.assign(new Error(halted), { errorCode: 'halted' });
     }
     if (tool === 'browser_status') return this.#status(client, args);
+    // (3.8) An agent that sends anything but status is WORKING until it says browser_tabs action:"finish".
+    // While any agent works, the person's browser keeps its debugger sessions; the last one to finish lets go.
+    if (client.role === 'agent' && !(tool === 'browser_tabs' && args.action === 'finish')) {
+      client.working = true;
+      this.#cancelAutoDetach();
+    }
 
     // (3.5) The call log (daemon/calls.js): an id per call, opId deduplication, a pending answer
     // within replyWithinMs. Neither key reaches an engine.
@@ -1361,6 +1379,9 @@ export class Router {
         return this.#detach(client, handle, caller);
       }
 
+      case 'finish':
+        return this.#finish(client, caller);
+
       case 'popout': {
         const handle = await this.#resolve(client, args);
         const target = this.#targetOf(handle);
@@ -1550,6 +1571,94 @@ export class Router {
     if (res.status === 429) throw new Error(`The suggestions box is full for this hour (100 an hour in all); try again in ${answer.retryAfterSeconds ?? 'a few'} seconds.`);
     if (!res.ok) throw new Error(`The suggestions box refused it (HTTP ${res.status}): ${answer.error ?? 'no reason given'}.`);
     return { sent: true, ...(answer.id ? { id: answer.id } : {}), ...(answer.duplicate ? { duplicate: true } : {}), to: url };
+  }
+
+  /**
+   * (3.8) The agent's task is done. Its claims are released (every tab it owned is free), and it stops
+   * counting as working. When no OTHER agent is working, the person's browser is let go: every tab of every
+   * connected extension engine is detached, so its "started debugging this browser" bar goes. While another
+   * agent still works the debugger stays for it, and the result names who — the last one to finish lets go.
+   * A tab a person is watching live, one a working agent owns and one with a recording running stay attached.
+   * Nothing is closed, and the next call of any agent attaches again where it needs to.
+   */
+  async #finish(client, caller) {
+    const released = this.registry.releaseAll(client.id);
+    client.working = false;
+    const others = this.workingAgents(client.id);
+    if (others.length) {
+      return {
+        finished: true,
+        released,
+        debugger: 'kept',
+        note: `Other agents are still working (${others.map((a) => this.registry.describe(a.id)).join(', ')}): the person's browser keeps its debugger sessions for them; the last agent to finish detaches it.`,
+      };
+    }
+    const outcome = await this.detachEverywhere(caller);
+    return { finished: true, released, debugger: 'detached', ...outcome };
+  }
+
+  /** (3.8) The other agents still working: they sent a call since they connected or last finished, and not long ago. */
+  workingAgents(exceptId = null) {
+    const staleMs = this.registry.idleClaimMs || 15 * 60_000;
+    const now = Date.now();
+    return this.registry.agents().filter((a) => a.id !== exceptId && a.working
+      && ((a.inflight ?? 0) > 0 || now - (a.lastCallAt ?? a.connectedAt ?? now) < staleMs));
+  }
+
+  /**
+   * (3.8) Detach the debugger from every tab of every connected extension engine, except tabs still in use
+   * (watched live by a person, or owned by a connected agent). Launched engines are always attached and
+   * have no bar; they are left alone.
+   */
+  async detachEverywhere(caller = 'daemon') {
+    const detached = [];
+    const kept = [];
+    for (const engine of this.registry.extensionEngines()) {
+      if (this.registry.isParked?.(engine.id)) continue;
+      const keep = [];
+      for (const handle of this.registry.handlesOf(engine.id)) {
+        if (!this.isWatched(handle) && !this.registry.ownerOf(handle)) continue;
+        const chrome = this.registry.chromeTabOf(handle, engine.id);
+        if (chrome != null) keep.push(chrome);
+      }
+      try {
+        const r = await this.relay(engine, 'browser_tabs', { action: 'detach_all', keep }, caller, { timeoutMs: TAB_CONTROL_TIMEOUT_MS });
+        const toHandle = (id) => this.registry.handleForChrome(engine.id, id, { create: false }) ?? id;
+        for (const id of r?.detached ?? []) detached.push(toHandle(id));
+        for (const k of r?.kept ?? []) kept.push({ ...k, tabId: toHandle(k.tabId) });
+      } catch (err) {
+        kept.push({ engine: engine.id, reason: String(err?.message ?? err) });
+      }
+    }
+    if (detached.length) {
+      this.emitUi?.('activity', { kind: 'detach', at: Date.now(), detail: `no agent is working any more: the debugger is detached from ${detached.length} tab(s)` });
+    }
+    return { detached, ...(kept.length ? { kept } : {}) };
+  }
+
+  /**
+   * (3.8) An agent left (its client disconnected). If it was still working and no other agent is, the
+   * person's browser is let go after AUTO_DETACH_MS — the safety net for an agent that never said "finish".
+   */
+  agentGone(client) {
+    if (client?.role !== 'agent' || !client.working || !(this.autoDetachMs > 0)) return;
+    if (this.workingAgents(client.id).length) return;
+    this.#cancelAutoDetach();
+    this.autoDetachTimer = setTimeout(() => {
+      this.autoDetachTimer = null;
+      if (this.workingAgents().length) return;
+      this.detachEverywhere('daemon').then(
+        (r) => this.log(`[g9d] the last working agent left without "finish": detached the debugger from ${r.detached.length} tab(s)`),
+        (err) => this.log(`[g9d] automatic detach failed: ${err?.message ?? err}`),
+      );
+    }, this.autoDetachMs);
+    this.autoDetachTimer.unref?.();
+  }
+
+  #cancelAutoDetach() {
+    if (!this.autoDetachTimer) return;
+    clearTimeout(this.autoDetachTimer);
+    this.autoDetachTimer = null;
   }
 
   /** (3.5) End the debugger session on an extension tab (tools/index.js detachTab). */
@@ -1913,6 +2022,8 @@ export class Router {
    * while halted — an agent that cannot ask why everything fails will guess.
    */
   async #status(client, args) {
+    // (3.8) A guide, as the MCP server answers it (mcp/server.mjs): for a client that reaches the daemon directly.
+    if (typeof args.guide === 'string') return readGuide(args.guide);
     // (3.5) How did a call end? One call (waitMs: wait for its end), or this agent's recent calls.
     if (args.callId != null && args.callId !== '') {
       const view = await this.callLog.wait(String(args.callId), Number(args.waitMs) || 0);

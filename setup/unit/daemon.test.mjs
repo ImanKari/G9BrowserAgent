@@ -27,6 +27,7 @@ import { FlowLibrary } from '../../daemon/flows.js';
 import { encodeFrame, decodeFrame, FrameReader, OP, closeBody, parseCloseBody } from '../../lib/ws-codec.mjs';
 import { resolveHome, parsePort, layout } from '../../daemon/paths.js';
 import { TOOLS, TOOL_NAMES, INSTRUCTIONS } from '../../mcp/tools.js';
+import { GUIDES } from '../../mcp/guides.js';
 import { adminArgs, summarize, Daemon } from '../../daemon/daemon.js';
 import { EventEmitter } from 'node:events';
 import { EngineManager } from '../../engine/manager.js';
@@ -516,6 +517,101 @@ test('router: (3.5) release in the person’s browser detaches the debugger; det
   assert.deepEqual(kept, { released: [h6] });
   assert.equal(sent.filter((m) => m.type === 'call' && m.args.action === 'detach').length, 1);
   await assert.rejects(router.call(a, 'browser_tabs', { action: 'detach' }), /needs a tabId/);
+});
+
+/** (3.8) A fake extension that answers list with these Chrome tab ids and detach_all with everything not kept. */
+function finishRig(chromeIds = [5, 6, 7]) {
+  const reg = new Registry();
+  const router = makeRouter(reg);
+  const { sent } = fakeExtension(reg, router, (msg) => {
+    if (msg.tool === 'browser_tabs' && msg.args.action === 'list') return { tabs: chromeIds.map((tabId) => ({ tabId })) };
+    if (msg.tool === 'browser_tabs' && msg.args.action === 'detach_all') {
+      const keep = new Set(msg.args.keep ?? []);
+      return { detached: chromeIds.filter((id) => !keep.has(id)), kept: [...keep].map((tabId) => ({ tabId, reason: 'in use' })) };
+    }
+    if (msg.tool === 'browser_tabs' && msg.args.action === 'detach') return { tabId: msg.args.tabId, detached: true };
+    return { ok: true };
+  });
+  const detachAlls = () => sent.filter((m) => m.type === 'call' && m.args.action === 'detach_all');
+  return { reg, router, sent, detachAlls };
+}
+
+test('router: (3.8) finish — the last working agent detaches the person’s browser; an earlier one leaves it for the others', async () => {
+  const { reg, router, detachAlls } = finishRig();
+  const a = agent(reg, 'a');
+  const b = agent(reg, 'b');
+  const { tabs } = await router.call(a, 'browser_tabs', { action: 'list' });
+  const [h5, h6, h7] = tabs.map((t) => t.tabId);
+  await router.call(a, 'browser_interact', { action: 'click', ref: 'e1', tabId: h5 });
+  await router.call(b, 'browser_snapshot', { tabId: h6 });
+  assert.equal(reg.getClient(a.id).working, true, 'any call but status makes an agent working');
+  assert.equal(reg.agentRows().find((r) => r.id === b.id).working, true, 'browser_status shows who is working');
+
+  const first = await router.call(a, 'browser_tabs', { action: 'finish' });
+  assert.equal(first.finished, true);
+  assert.deepEqual(first.released, [h5]);
+  assert.equal(first.debugger, 'kept');
+  assert.match(first.note, /still working \(.*\bb\b/);
+  assert.equal(detachAlls().length, 0, 'another agent still works: nothing is detached');
+  assert.equal(reg.getClient(a.id).working, false);
+
+  const last = await router.call(b, 'browser_tabs', { action: 'finish' });
+  assert.equal(last.debugger, 'detached');
+  assert.equal(detachAlls().length, 1);
+  assert.deepEqual(detachAlls()[0].args.keep, [], 'nothing is in use any more');
+  assert.deepEqual(last.detached.sort(), [h5, h6, h7].sort(), 'the engine’s Chrome ids come back as G9 handles');
+  assert.equal(reg.ownerOf(h5), null);
+});
+
+test('router: (3.8) finish keeps a tab a person watches and a tab another (idle) agent still owns; status alone is not work', async () => {
+  const { reg, router, detachAlls } = finishRig();
+  const a = agent(reg, 'a');
+  const b = agent(reg, 'b');
+  const watcher = agent(reg, 'only-status');
+  const { tabs } = await router.call(a, 'browser_tabs', { action: 'list' });
+  const [h5, h6, h7] = tabs.map((t) => t.tabId);
+  await router.call(watcher, 'browser_status', {});
+  assert.ok(!reg.getClient(watcher.id).working, 'browser_status does not make an agent working');
+  await router.call(b, 'browser_interact', { action: 'click', ref: 'e1', tabId: h6 });
+  reg.getClient(b.id).lastCallAt = Date.now() - 16 * 60_000; // idle past the claim lapse: not working any more
+  router.isWatched = (handle) => handle === h7;
+  await router.call(a, 'browser_interact', { action: 'click', ref: 'e1', tabId: h5 });
+  const out = await router.call(a, 'browser_tabs', { action: 'finish' });
+  assert.equal(out.debugger, 'detached', 'an agent idle for 15 minutes is not working');
+  assert.deepEqual(detachAlls()[0].args.keep.sort(), [6, 7], 'b’s tab and the watched tab, by Chrome id');
+  assert.deepEqual(out.detached, [h5]);
+  assert.deepEqual(out.kept.map((k) => k.tabId).sort(), [h6, h7].sort());
+});
+
+test('router: (3.8) the last working agent leaving without finish detaches after the grace; a new call cancels it', async () => {
+  const { reg, router, detachAlls } = finishRig();
+  router.autoDetachMs = 60;
+  const a = agent(reg, 'a');
+  const { tabs } = await router.call(a, 'browser_tabs', { action: 'list' });
+  await router.call(a, 'browser_interact', { action: 'click', ref: 'e1', tabId: tabs[0].tabId });
+  // a leaves; b arrives and works within the grace: no detach.
+  let gone = reg.getClient(a.id);
+  reg.removeClient(a.id);
+  router.agentGone(gone);
+  const b = agent(reg, 'b');
+  await router.call(b, 'browser_snapshot', { tabId: tabs[0].tabId });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(detachAlls().length, 0, 'a call within the grace cancels the detach');
+  // b leaves too, still working: after the grace the browser is let go.
+  gone = reg.getClient(b.id);
+  reg.removeClient(b.id);
+  router.agentGone(gone);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(detachAlls().length, 1);
+  // An agent that had finished (or never worked) leaving changes nothing.
+  const c = agent(reg, 'c');
+  await router.call(c, 'browser_tabs', { action: 'finish' });
+  const sentBefore = detachAlls().length;
+  gone = reg.getClient(c.id);
+  reg.removeClient(c.id);
+  router.agentGone(gone);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(detachAlls().length, sentBefore);
 });
 
 test('router: (3.5) upload takes fileData (written on the browser machine first); read_file returns only what G9 produced', async () => {
@@ -1575,7 +1671,7 @@ test('mcp tools: fifteen tools, valid schemas, session on every tab tool, v2 ins
   }
   const tabs = TOOLS.find((t) => t.name === 'browser_tabs');
   assert.deepEqual(tabs.inputSchema.properties.action.enum,
-    ['list', 'open', 'close', 'focus', 'attach', 'detach', 'claim', 'release', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch', 'keep_awake']);
+    ['list', 'open', 'close', 'focus', 'attach', 'detach', 'claim', 'release', 'finish', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch', 'keep_awake']);
   const engine = TOOLS.find((t) => t.name === 'browser_engine');
   // acquire/release: a run HOLDS a launched engine across its tabs (engine leases, 2026-09-22).
   assert.deepEqual(engine.inputSchema.properties.action.enum, ['launch', 'list', 'stop', 'context', 'versions', 'warm', 'acquire', 'release']);
@@ -1589,8 +1685,13 @@ test('mcp tools: fifteen tools, valid schemas, session on every tab tool, v2 ins
   const recording = TOOLS.find((t) => t.name === 'browser_recording').inputSchema.properties;
   assert.ok(recording.action.enum.includes('calibrate_humanize'));
   for (const key of ['engine', 'humanize', 'seed']) assert.ok(key in recording, `browser_recording.${key}`);
-  for (const phrase of ['Two engines', 'owns', 'Stop', 'handoff', 'popout', 'delivered', 'known world', 'Never approve']) {
+  // (3.8) The core carries the rules an agent must never miss; the rest is in the guides it reads per task.
+  for (const phrase of ['Engine 1', 'claims', 'Stop', 'delivered', 'Never approve on your own initiative', 'action:"finish"', 'guide:"<topic>"']) {
     assert.ok(INSTRUCTIONS.includes(phrase), `instructions mention "${phrase}"`);
+  }
+  const guideText = Object.values(GUIDES).map((g) => g.text).join(' ');
+  for (const phrase of ['Two engines', 'owns', 'handoff', 'popout', 'known world', 'Never approve on your own initiative']) {
+    assert.ok(guideText.includes(phrase), `the guides cover "${phrase}"`);
   }
   for (const gone of ['pinned mode', 'workspace mode', 'multi mode', '"pin"']) {
     assert.ok(!INSTRUCTIONS.toLowerCase().includes(gone.toLowerCase()), `instructions no longer mention ${gone}`);

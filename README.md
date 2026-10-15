@@ -365,7 +365,7 @@ Agents get **15 tools**. The ones they use most:
 | Tool | What it does |
 |---|---|
 | `browser_status` | Where am I? The current tab and its health, engines, agents, and whether Stop is pressed. Agents call it first. It also says how an earlier call ended, even one the agent's client gave up on. |
-| `browser_tabs` | List, open, close, focus, attach or claim tabs; release (which also detaches the debugger in your browser); pop out; hand off to a background browser — into a named profile with its proxy, so the login stays; keep a background tab awake for long work. |
+| `browser_tabs` | List, open, close, focus, attach or claim tabs; release (which also detaches the debugger in your browser); finish (the agent's task is done: the last working agent detaches the debugger from your browser); pop out; hand off to a background browser — into a named profile with its proxy, so the login stays; keep a background tab awake for long work. |
 | `browser_snapshot` | Read the page as an accessibility tree, with a `ref` for each element to act on — or only part of it (a scope, roles, a name, only controls), or only what changed since last time. |
 | `browser_interact` | Click, double-click, right-click, hover, type, press keys, scroll, drag, select, upload — on a `ref`, or found by role and name or a CSS selector, waiting for it to appear. `set_value` sets a slider, checkbox, field or select and proves it; uploads can bring their files along. |
 | `browser_navigate` | Go to a URL, reload, back, forward, wait for a load state — or for a condition in the page, for up to two hours. |

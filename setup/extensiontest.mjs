@@ -206,6 +206,7 @@ const { platform } = await import('../extension/lib/platform.js');
 const runtime = await import('../extension/tools/index.js');
 // v2: the MCP schemas moved from bridge/src/tools.js to mcp/tools.js.
 const toolsModule = await import('../mcp/tools.js');
+const guidesModule = await import('../mcp/guides.js');
 
 assert.equal(platform.name, 'extension', 'the stub must put these modules on platform-extension, as in the worker');
 
@@ -1227,7 +1228,8 @@ await test('the new assertion and network actions are declared in the MCP schema
   for (const action of ['pin', 'unpin', 'record_har', 'pin_status']) {
     assert.ok(network.inputSchema.properties.action.enum.includes(action), `browser_network is missing action "${action}"`);
   }
-  assert.match(toolsModule.INSTRUCTIONS, /known world/i);
+  // (3.8) The known world is explained in the recording guide; the core keeps the rule that must never be missed.
+  assert.match(guidesModule.GUIDES.recording.text, /known world/i);
   assert.match(toolsModule.INSTRUCTIONS, /Never approve on your own initiative/);
 });
 

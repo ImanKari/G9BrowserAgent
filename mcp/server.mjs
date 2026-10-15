@@ -1,11 +1,13 @@
 /**
- * The G9BrowserAgent MCP server over one DaemonLink (moved out of mcp/shim.mjs in 3.2, unchanged): the fifteen
- * tool schemas and the instructions (mcp/tools.js), every call forwarded verbatim, plus the two
- * resources. The stdio shim builds one; the HTTP transport (mcp/http.mjs) builds one per session.
+ * The G9BrowserAgent MCP server over one DaemonLink (moved out of mcp/shim.mjs in 3.2): the fifteen
+ * tool schemas and the instructions (mcp/tools.js), every call forwarded verbatim, plus the resources:
+ * the guides (3.8, mcp/guides.js — g9://guide, g9://guide/<topic>, g9://tool/<name>) and the live status.
+ * `browser_status guide:"…"` is answered HERE, from the same guides: it needs no daemon and no browser. The stdio shim builds one; the HTTP transport (mcp/http.mjs) builds one per session.
  */
 
 import { McpServer } from './mcp.js';
 import { TOOLS, INSTRUCTIONS } from './tools.js';
+import { GUIDES, GUIDE_TOPICS, guideIndex, toolReference, readGuide } from './guides.js';
 import { VERSION } from '../lib/version.mjs';
 
 /**
@@ -22,6 +24,8 @@ export function createMcpServer(link, { transport = 'stdio' } = {}) {
   for (const definition of TOOLS) {
     const { name, ...rest } = definition;
     mcp.tool(name, rest, async (args) => {
+      // (3.8) A guide is text this server holds; reading it must work before any browser is connected.
+      if (name === 'browser_status' && args && typeof args.guide === 'string') return readGuide(args.guide);
       const result = await link.call(name, args);
       if (name !== 'browser_status' || !result || typeof result !== 'object' || Array.isArray(result)) return result;
       // The shim serves the schemas and the daemon serves the behaviour; when
@@ -43,13 +47,29 @@ export function createMcpServer(link, { transport = 'stdio' } = {}) {
     });
   }
 
+  // (3.8) The guides: the index, one resource per topic, one per tool (generated from its schema).
   mcp.resource(
     'g9://guide',
-    {
-      name: 'G9BrowserAgent guide',
-      description: 'How to drive the browsers: two engines, perception, refs, ownership, halts, handoff, regression memory.',
-      mimeType: 'text/markdown',
-    },
+    { name: 'G9BrowserAgent guides — index', description: 'Which guide to read for which work, and the per-tool references.', mimeType: 'text/markdown' },
+    () => guideIndex(),
+  );
+  for (const topic of GUIDE_TOPICS) {
+    mcp.resource(
+      `g9://guide/${topic}`,
+      { name: `G9BrowserAgent guide: ${GUIDES[topic].title}`, description: GUIDES[topic].summary, mimeType: 'text/markdown' },
+      () => GUIDES[topic].text,
+    );
+  }
+  for (const definition of TOOLS) {
+    mcp.resource(
+      `g9://tool/${definition.name}`,
+      { name: `G9BrowserAgent reference: ${definition.name}`, description: `Every action and argument of ${definition.name}.`, mimeType: 'text/markdown' },
+      () => toolReference(definition.name),
+    );
+  }
+  mcp.resource(
+    'g9://instructions',
+    { name: 'G9BrowserAgent core instructions', description: 'The short core every client receives at connection.', mimeType: 'text/markdown' },
     () => INSTRUCTIONS,
   );
 

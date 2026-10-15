@@ -303,6 +303,17 @@ next?, bytesBase64}`, chunks up to 8 MiB (4 MiB by default), and only for files 
   * ***(3.5)*** `detach {tabId|session}` — Engine 1: the extension detaches its debugger from that tab
     (`{tabId, detached, …}`; a tab with a recording running stays attached; a launched tab answers
     `detached:false` with a note). Ownership-checked and queued.
+  * ***(3.8)*** `finish` — the caller's task is done: all its claims are released and it stops counting as
+    working (an agent works from its first call other than `browser_status` until `finish`, or 15 min idle).
+    When no other agent works, the daemon relays `browser_tabs {action:"detach_all", keep:[chromeTabId…]}` to
+    every connected extension (`keep` = tabs a UI watches live or a connected agent owns); the extension
+    detaches every other tab it debugs through the same path as `detach` (recordings stay attached) and answers
+    `{detached:[chromeTabId…], kept:[{tabId, reason}]}`. Result: `{finished, released, debugger:"detached",
+    detached:[handles], kept?}`, or `{finished, released, debugger:"kept", note}` naming the agents still working.
+    When the last working agent disconnects without `finish`, the daemon relays the same after `G9_AUTO_DETACH_MS`
+    (default 60 000; 0 = never) unless an agent calls first. `detach_all` is daemon-internal (not in the agent schema).
+  * ***(3.8)*** `browser_status {guide}` returns a guide (mcp/guides.js) instead of the status — answered by the
+    MCP server, and by the daemon for a client that reaches it directly.
   * `popout {tabId|session, focus?, width?, height?, left?, top?}` — extension tabs only (a launched tab is
     refused: "launched engines have no windows"); ownership-checked and queued, then relayed as
     `browser_tabs {action:"popout", tabId, …}`. ***(as built, 2.0.3)*** An agent's popout window is created

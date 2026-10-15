@@ -396,7 +396,9 @@ try {
   shimB = new Mcp(SHIM, shimEnv, 'agent-beta');
   const [initA, initB] = await Promise.all([shimA.init(), shimB.init()]);
   check(initA.result?.serverInfo?.name === 'G9BrowserAgent' && initA.result.serverInfo.version === VERSION, 'initialize', initA.result?.protocolVersion);
-  check(initB.result?.instructions?.includes('Two engines, one set of tools'), 'v2 instructions delivered', `${initB.result?.instructions?.length} chars`);
+  // (3.8) The core instructions: whole within the strictest client limit, and pointing at the guides.
+  check(initB.result?.instructions?.includes('Engine 1') && initB.result.instructions.includes('guide:"<topic>"') && initB.result.instructions.length < 2048,
+    'core instructions delivered (under 2,048 characters, with the guide index)', `${initB.result?.instructions?.length} chars`);
   const list = await shimA.request('tools/list');
   const tools = list.result?.tools ?? [];
   check(tools.length === 15, 'tools/list: 15 tools', tools.map((t) => t.name).join(' ').slice(0, 80));
@@ -405,9 +407,13 @@ try {
   check(!schemaProblems.length, 'every schema is an object schema with a description', schemaProblems.map((t) => t.name).join(','));
   check(tools.some((t) => t.name === 'browser_engine'), 'browser_engine is listed');
   const resources = await shimA.request('resources/list');
-  check((resources.result?.resources ?? []).length === 2, 'resources/list: guide + status');
-  const guide = await shimA.request('resources/read', { uri: 'g9://guide' });
-  check(guide.result?.contents?.[0]?.text?.includes('ownership'), 'g9://guide readable');
+  const uris = (resources.result?.resources ?? []).map((r) => r.uri);
+  check(['g9://guide', 'g9://guide/console', 'g9://guide/sharing', 'g9://tool/browser_tabs', 'g9://status'].every((u) => uris.includes(u)),
+    'resources/list: the guide index, topic guides, tool references and status', `${uris.length} resources`);
+  const guide = await shimA.request('resources/read', { uri: 'g9://guide/sharing' });
+  check(guide.result?.contents?.[0]?.text?.includes('Ownership'), 'g9://guide/sharing readable');
+  const viaStatus = await shimA.request('tools/call', { name: 'browser_status', arguments: { guide: 'console' } });
+  check(!viaStatus.result?.isError && /# The console/.test(viaStatus.result?.content?.[0]?.text ?? ''), 'browser_status guide:"console" answered by the shim');
 
   // -- 5. status composition --------------------------------------------------------
   section('5. browser_status composition');

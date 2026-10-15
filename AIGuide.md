@@ -2,7 +2,7 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v3.7.0, 2026-10-15 — device apps are the project's data: `g9.project.json` `devices` declares them, one generic driver (`runner/drivers/device.mjs`) drives any app that speaks the QA bridge protocol ([docs/DEVICE_BRIDGE.md](docs/DEVICE_BRIDGE.md)), and the device steps `tapFeature`, `zoomToFeature`, `longPressFeature`, `selectItem`, `setValue`, `popupButton` and the `onScreen` oracle join the vocabulary (§9, the 3.7.0 entry). Before it, v3.6.3, 2026-10-13 — the published 3.6 release (3.6.0–3.6.2 never passed the pipeline; §9, the 3.6.3 entry). 3.6.1 (§9): the macOS self-update moves the new bundle into place (a copy was stopped by macOS on a real Mac). 3.6.0 (§9, the 3.6.0 entry): the "Human Wave" icon everywhere; the
+**Status:** v3.8.0, 2026-10-15 — the agent-facing text is layered: a core under 2,048 characters (clients cut server instructions at 4,096, older ones at 2,048 — the 13,300-character instructions lost everything after "Acting"), twelve topic guides and a per-tool reference generated from the schemas (`mcp/guides.js`; resources `g9://guide/<topic>`, `g9://tool/<name>`, and `browser_status guide:"…"` answered without a browser); and `browser_tabs action:"finish"` — the last working agent detaches the debugger from the person's browser (§9, the 3.8.0 entry). Before it, v3.7.0, 2026-10-15 — device apps are the project's data: `g9.project.json` `devices` declares them, one generic driver (`runner/drivers/device.mjs`) drives any app that speaks the QA bridge protocol ([docs/DEVICE_BRIDGE.md](docs/DEVICE_BRIDGE.md)), and the device steps `tapFeature`, `zoomToFeature`, `longPressFeature`, `selectItem`, `setValue`, `popupButton` and the `onScreen` oracle join the vocabulary (§9, the 3.7.0 entry). Before it, v3.6.3, 2026-10-13 — the published 3.6 release (3.6.0–3.6.2 never passed the pipeline; §9, the 3.6.3 entry). 3.6.1 (§9): the macOS self-update moves the new bundle into place (a copy was stopped by macOS on a real Mac). 3.6.0 (§9, the 3.6.0 entry): the "Human Wave" icon everywhere; the
 desktop updater clears the way before it installs (the agents' MCP servers no longer make every
 install fail), installs on demand with **Force install**, and a Mac updates itself instead of opening
 the release page; and the next agent field report — case-sensitive and literal name matching, an
@@ -1926,6 +1926,46 @@ after every step of a forty-step flow doubles the run for evidence nobody reads.
 Entries below describe what was believed or tested at the time. Current capability claims and
 unresolved findings are in §§4, 7 and 8, which supersede historical assertions. Entries dated before
 2026-09-21 describe v1 (the bridge, the four control modes, the workspace allowlist).
+
+### 2026-10-15 — v3.8.0: the agent-facing text in layers, and "finish" lets the person's browser go
+
+**Why — the instructions were being cut.** Clients cut an MCP server's instructions and send them with every
+request: Claude Code at 4,096 characters (2,048 before v2.1.296; its MCP docs, "Tool search for MCP server
+authors"). Ours were 13,300 characters, so an agent saw them up to "Acting" — ownership, Stop, background
+work, stealth, long work, debugging and regression memory never arrived — while every request still paid for
+them in clients that send everything (~3,300 tokens, plus ~14,600 for the tool schemas). And there was no
+deeper layer: an agent debugging through the console had four lines and the tool's own description.
+
+- **Three layers (`mcp/guides.js`).** (1) The core (`INSTRUCTIONS`, 1,524 characters, under the 2,048 of older
+  clients): what the server is for (tool search matches on it), how to start, the six rules that must never be
+  missed — delivery, ownership, Stop, never approve, **finish**, feedback — and the guide index. (2) Twelve topic
+  guides, one per kind of work: start, perceive, act, console, network, debug, sharing, background, stealth,
+  recording, issues, limits — workflow, recipes and pitfalls, 0.5–3 KB each, read when the work starts.
+  (3) A per-tool reference generated from the schema (every action and argument), so it cannot drift.
+- **Reachable everywhere**: resources `g9://guide`, `g9://guide/<topic>`, `g9://tool/<name>`,
+  `g9://instructions` (Claude Code lists and reads them), and `browser_status guide:"<topic>"` /
+  `guide:"tool:<name>"` for clients that do not let the model read resources — answered by the MCP server itself
+  (and by the daemon for a direct client): no browser, no daemon needed.
+- **Tool descriptions are the first layer only**: what the tool is for, its one pitfall, its guide — at most 700
+  characters, keywords first (tool search reads the start). The repeated humanize / seed / tab-id argument texts
+  are short and point at the stealth guide. Upfront text: ~71,800 → ~52,000 characters; the always-sent core
+  13,300 → 1,524. The detail the descriptions lost is in the guides (nothing was dropped, only moved).
+- **`browser_tabs action:"finish"`** — the agent's task is done. It releases the agent's claims and marks it as no
+  longer working; when no OTHER agent is working, the daemon sends each connected extension a `detach_all`
+  (daemon-internal) and every tab of the person's browser is detached, so its "started debugging this browser" bar
+  goes. Kept attached: a tab a person watches live (`router.isWatched`), a tab another connected agent owns, a tab
+  with a recording running. While another agent works the debugger stays and the result names who; the last
+  one to finish lets go. Any later call attaches again where it needs to. **Working** = an agent's calls other
+  than `browser_status` since it connected or last finished, within the 15-minute claim lapse; `browser_status`
+  shows `working` per agent. **Safety net**: when the last working agent disconnects without finish, the daemon
+  detaches after `AUTO_DETACH_MS` (60 s; `G9_AUTO_DETACH_MS`, 0 = never) unless a call arrives first — a
+  stateless HTTP client's next session is the same agent.
+- Rules item 10: the layering is a rule; item 9 names where the temporary feedback text now lives.
+
+Tests: `setup/unit/guides.test.mjs` (5: the core under 2,048 and naming exactly the existing topics; every
+description ≤ 700 with a real guide; every `tool action:"x"` a guide names exists; every argument in the
+reference; the MCP server serving resources and `browser_status guide` with no daemon). `daemon.test.mjs` +3
+(finish with two agents; what is kept; the disconnect grace and its cancellation).
 
 ### 2026-10-15 — v3.7.0: device apps are the project's data, and the device vocabulary grows
 
@@ -6275,12 +6315,18 @@ When you change anything:
    developers' and QA's needs are collected (owner's decision, 2026-10-12). **At every release after
    3.6.0, remind the owner and, once they agree, remove all of it:** `browser_issue action:"feedback"`
    (`daemon/router.js #feedback` and its dispatch line; the `feedback` enum value and the `category`
-   and `tool` properties of `browser_issue` in `mcp/tools.js`); the **"IMPORTANT — send us what
-   G9BrowserAgent is missing"** section at the top of the MCP instructions (`mcp/tools.js`
-   INSTRUCTIONS); the `feedbackUrl` setting and its validation (`daemon/settings.js`); the
+   and `tool` properties of `browser_issue` in `mcp/tools.js`); rule 6 of the core instructions
+   (`mcp/tools.js` INSTRUCTIONS, "A tool missing or misbehaving?") and the "Feedback about G9BrowserAgent
+   itself" section of the issues guide (`mcp/guides.js`); the `feedbackUrl` setting and its validation (`daemon/settings.js`); the
    `G9_FEEDBACK_URL` override; the daemon test "(3.6) browser_issue feedback …"
    (`setup/unit/daemon.test.mjs`); and the mentions in README, REFERENCE and this file. The box itself
    is a small service on the company's server (a POST endpoint, 5000 characters per suggestion, 100
    suggestions an hour in all); retiring it there is the server owner's step, not this repository's.
+10. **Agent-facing text is layered (3.8, `mcp/guides.js`).** The core (`INSTRUCTIONS`) stays under 2,048
+   characters and holds only what an agent must never miss plus the guide index; a tool description stays
+   under 700 characters (what it is for, its one pitfall, its guide); everything else goes into the topic
+   guide for that work, and per-argument detail into the schema (the per-tool reference is generated from
+   it). `setup/unit/guides.test.mjs` enforces the sizes and that every tool, action and topic a guide names
+   exists. A new capability is not finished until the guide that covers its work explains it.
 
 **Do not simplify past the constraints in §4** without recording why. Each one exists because the obvious approach fails in a specific, non-obvious way.

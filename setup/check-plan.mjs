@@ -29,6 +29,7 @@ export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
  */
 export const CHECKS = [
   unit('device', 3, []),
+  unit('guides', 0.5, []),
   unit('daemon', 6, []),
   unit('desktop', 22, ['desktop/**']),
   unit('engine', 35, []),

@@ -168,6 +168,9 @@ export const TOOLS = {
           return { tabId: requireTabId(args), ...(await keepAwake(requireTabId(args), args.on !== false)) };
         case 'detach':
           return detachTab(requireTabId(args));
+        case 'detach_all':
+          // (3.8) Daemon-internal: the last working agent said "finish" (router #finish). Not in the agent schema.
+          return detachEveryTab(args.keep);
 
         // --- named sessions ----------------------------------------------
         // Several tabs at once was always possible at the CDP layer; these
@@ -618,6 +621,29 @@ async function detachTab(tabId) {
   if (!held.includes(tabId)) return { tabId, detached: false, wasAttached: false };
   const result = await detachDebugger(tabId);
   return { ...result, tabId, note: 'The debugger is detached from this tab: console and network capture stop, and the debugging bar goes once no tab is attached. The next agent call on it attaches again.' };
+}
+
+/**
+ * (3.8) End the debugger session on EVERY tab this extension debugs, except `keep` (Chrome tab ids the
+ * daemon still needs: a live view a person is watching, a tab a working agent owns). Each tab goes through
+ * detachTab, so a tab with a recording running stays attached. Sent by the daemon when the last working
+ * agent finished (browser_tabs action:"finish") or left without finishing: nobody is using the person's
+ * browser any more, and its "started debugging this browser" bar should go. The next agent call attaches again.
+ */
+async function detachEveryTab(keep = []) {
+  if (platform.name !== 'extension') return { detached: [], kept: [], note: 'A launched browser’s tabs are always attached; nothing to detach.' };
+  const keepSet = new Set((Array.isArray(keep) ? keep : []).map(Number));
+  const state = await getState();
+  const held = new Set([...(state.attachedTabs ?? []), ...(await attachedTabIds().catch(() => []))]);
+  const detached = [];
+  const kept = [];
+  for (const tabId of held) {
+    if (keepSet.has(tabId)) { kept.push({ tabId, reason: 'in use' }); continue; }
+    const r = await detachTab(tabId).catch((err) => ({ tabId, detached: false, error: String(err?.message ?? err) }));
+    if (r.detached) detached.push(tabId);
+    else if (r.wasAttached !== false) kept.push({ tabId, reason: r.note ?? r.error ?? 'still attached' });
+  }
+  return { detached, kept };
 }
 
 // ------------------------------------------------------------------ status

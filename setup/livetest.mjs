@@ -1622,6 +1622,24 @@ try {
     const s = row ? await call('browser_snapshot', { tabId: row.tabId }).catch((e) => ({ error: e.message })) : { error: 'tab not listed' };
     check(!!s.tree, 'tools work on the tab after the extension reloaded', s.error ?? `handle ${row?.tabId}`);
   });
+
+  await section('24. (3.8) finish: the last working agent lets the person’s browser go', async () => {
+    await activateMain();
+    const list = async () => (await call('browser_tabs', { action: 'list' })).tabs ?? [];
+    const row = rowFor(await list(), mainUrl);
+    if (!row) return bad('the main tab is listed', 'not listed');
+    await call('browser_snapshot', { tabId: row.tabId });
+    check(rowFor(await list(), mainUrl)?.attached === true, 'the tab is attached after a read');
+    const st = await call('browser_status', {});
+    const me = (st.agents ?? []).find((a) => a.id === st.you?.agentId);
+    check(me?.working === true, 'browser_status shows this agent as working', short(me));
+    const fin = await call('browser_tabs', { action: 'finish' });
+    check(fin.finished === true && fin.debugger === 'detached' && (fin.detached ?? []).includes(row.tabId),
+      'finish, with no other agent working, detaches the person’s tabs', short(fin));
+    check(rowFor(await list(), mainUrl)?.attached === false, 'the browser no longer debugs the tab after finish');
+    const again = await call('browser_snapshot', { tabId: row.tabId });
+    check(!!again.tree && rowFor(await list(), mainUrl)?.attached === true, 'a later call attaches again where it needs to');
+  });
 } catch (err) {
   if (!/no extension|no test page|cannot continue/.test(String(err.message))) {
     bad('unexpected exception', short(String(err?.stack ?? err), 400));
