@@ -301,7 +301,7 @@ export const TOOLS = {
         case 'unpin': return netpin.unpin(tabId);
         case 'pin_status': return netpin.status(tabId);
 
-        // --- deliberate failure injection (GAP-0002) ---------------------
+        // --- deliberate failure injection --------------------------------
         case 'intercept': {
           // Rules and a pinned HAR share one Fetch session, so only enable it
           // here when pinning has not already done so — a second Fetch.enable
@@ -322,7 +322,7 @@ export const TOOLS = {
         // --- fetch as the page (3.4) ---------------------------------------
         case 'fetch': return fetchResource(tabId, { ...args, pageUrl: (await platform.tabs.get(tabId).catch(() => null))?.url });
 
-        // --- downloads (GAP-0001, EXT-02) ---------------------------------
+        // --- downloads (EXT-02) -------------------------------------------
         case 'watch_downloads': return downloads.watch(tabId, args);
         case 'downloads': return downloads.list(tabId);
         case 'wait_download': return downloads.waitFor(tabId, args);

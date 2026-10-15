@@ -122,7 +122,7 @@ export class Daemon {
     });
 
     this.project = loadProject(cwd);
-    this.flows = new FlowLibrary(this.project.flowsDir);
+    this.flows = new FlowLibrary(this.project.flowsDir, this.project.flowFolders);
     this.libraries = new Map(); // flowsDir → FlowLibrary, for connected agents' projects (3.2)
     this.projectCache = new Map();
 
@@ -649,7 +649,7 @@ export class Daemon {
     }
     if (row.project === this.project) return this.flows;
     const key = row.project.flowsDir;
-    if (!this.libraries.has(key)) this.libraries.set(key, new FlowLibrary(key));
+    if (!this.libraries.has(key)) this.libraries.set(key, new FlowLibrary(key, row.project.flowFolders));
     return this.libraries.get(key);
   }
 

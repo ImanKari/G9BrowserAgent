@@ -53,6 +53,7 @@ import { writeReports } from './report.mjs';
 // growing a second implementation that drifts.
 import { calibrateVolatile } from '../extension/lib/signature.js';
 import { validateFlowSpec, KNOWN_ACTIONS } from '../extension/lib/flowspec.js';
+import { normalizeDevicePlatforms, DEFAULT_BRIDGE_PORT } from '../lib/devices.mjs';
 
 const EXIT = { OK: 0, PRODUCT: 1, AUTOMATION: 2, SURPRISE: 3, RUNNER: 4, ERROR: 5 };
 
@@ -87,7 +88,7 @@ g9 — run recorded G9BrowserAgent flows without an agent
   g9 approve <flowId>                  fold the last run into the approved known world
   g9 spec <flowId> [--out file.json]   export a canonical, Git-diffable FlowSpec
   g9 ab <flowId> --a <url> --b <url>   run the same flow against two builds and diff them
-  g9 harvest --platform agripad        pull recorded flow candidates off a device
+  g9 harvest --platform <device>       pull recorded flow candidates off a device
                                        [--device <serial>] [--out <dir>]
 
 Targets for "run":
@@ -124,10 +125,17 @@ Run options:
   --seed                seed the known world when a flow has none yet
   --no-compare          skip the known-world comparison (produces a reference run)
   --project <file>      project adapter (default: nearest g9.project.json upwards)
-  --platform <name>     web (default) or agripad — agripad drives a real device over adb
-  --device <serial>     which device, when adb sees more than one (agripad only)
-  --device-port <n>     the device automation port (agripad only; default 8799)
-  --token <t>           the device automation token, when the device requires one (agripad only)
+  --platform <name>     web (default), or a device platform the project declares in
+                        g9.project.json "devices" — it drives a real device over adb through the
+                        app's QA bridge (docs/DEVICE_BRIDGE.md); flows come from
+                        <flowsDir>/<the platform's flowsFolder>/**
+  --device <serial>     which device, when adb sees more than one (device platforms only)
+  --device-port <n>     the device automation port (device platforms only; default: the
+                        platform's "port", else 8799)
+  --package <id>        the Android package that must own the device port; the run refuses a
+                        device whose port another app holds, and launches the app when nothing
+                        listens (default: the platform's "package", else none)
+  --token <t>           the device automation token, when the device requires one (device only)
   --fail-on <verdict>   lowest verdict that makes the exit code non-zero
                         (warning | surprise | failure — default: surprise)
   --quiet               only the summary line
@@ -148,7 +156,7 @@ Options for "ab":
  * there reliably — QA runs it from the tool folder, CI from a job directory, an
  * editor from wherever the file being edited lives. A cwd-only lookup silently
  * returned `null` in every one of those cases, the flows directory then fell
- * back to a cwd-relative default, and the run failed with "No AgriPad flows
+ * back to a cwd-relative default, and the run failed with "No device flows
  * found under <a path that never existed>". So: walk up to the filesystem root,
  * the way git finds `.git`. Callers get `dir` back too, because every relative
  * path in the file must resolve against the file's own location.
@@ -387,11 +395,11 @@ function orderFlows(flows, order) {
  * suite (`suite:<name>` or a bare suite name). `{}` for everything else: a tag
  * or an id has no file to carry rules.
  */
-async function suiteRules(project, target) {
+async function suiteRules(project, target, platform = null) {
   if (!project || !target) return {};
   const name = target.startsWith('suite:') ? target.slice(6) : (target.startsWith('tag:') ? null : target);
   if (!name) return {};
-  const suite = await readSuite(flowsRoot(project), name);
+  const suite = await readSuite(flowsRoot(project), name, platform);
   if (!suite) return {};
   if (suite.stopOn != null && suite.stopOn !== 'failure') {
     throw new Error(`Suite "${name}" has stopOn "${suite.stopOn}", which this runner does not implement. Supported: "failure". Refusing rather than guessing.`);
@@ -605,15 +613,16 @@ function humanizeFor(options) {
 
 // ------------------------------------------------------------- flows on disk
 
-/** Every web FlowSpec file under the flow library (agripad/ and suites/ excluded). */
+/** Every web FlowSpec file under the flow library (the device folders and suites/ excluded). */
 async function loadDiskFlows(project) {
   if (!project) return [];
   const root = flowsRoot(project);
   const files = await collectJson(root);
+  const deviceFolders = Object.values(devicePlatformsOf(project).platforms).map((p) => p.flowsFolder);
   const flows = [];
   for (const file of files) {
     const rel = path.relative(root, file).replace(/\\/g, '/');
-    if (rel.startsWith('agripad/') || rel.startsWith('suites/')) continue;
+    if (deviceFolders.some((folder) => rel.startsWith(`${folder}/`)) || rel.startsWith('suites/')) continue;
     let spec;
     try {
       spec = JSON.parse(await readFile(file, 'utf8'));
@@ -669,12 +678,16 @@ async function commandRun({ options }) {
   const variables = options.data ? JSON.parse(await readFile(options.data, 'utf8')) : {};
   const reportDir = path.resolve(options.report === true || !options.report ? './g9-artifacts' : options.report);
 
-  // Two platforms, one report. The browser path talks to the daemon through the
-  // shim; the AgriPad path talks to a device over `adb forward` and never
+  // Two kinds of platform, one report. The browser path talks to the daemon through the
+  // shim; a device path talks to an app's QA bridge over `adb forward` and never
   // touches a browser at all. They share the flow format, the verdicts and the
   // artefacts — which is why FlowSpec carries `target.kind`.
-  if ((options.platform ?? 'web') === 'agripad') {
-    return commandRunAgriPad({ options, project, reportDir, target, variables });
+  const platformName = options.platform === true ? null : (options.platform ?? 'web');
+  if (platformName !== 'web') {
+    // Refused, not defaulted: an unknown --platform used to fall through to the WEB path, so a typo
+    // in a device name ran the browser suite and reported it under the device's name.
+    const device = devicePlatformFor(project, platformName);
+    return commandRunDevice({ options, project, reportDir, target, variables, device });
   }
 
   // An explicit --env must name a declared environment: a typo that silently
@@ -1019,26 +1032,37 @@ function pushNotRun(run, remaining, stopper, options) {
   log(options, `  stopOn: failure — ${remaining.length} flow(s) not run (stopped after "${stopper.name}")\n`);
 }
 
-// -------------------------------------------------------------- AgriPad
+// -------------------------------------------------------------- devices
 
 /**
- * Run a suite against a real AgriPad device over the cable.
- *
- * ## Why this is a separate function and not a branch inside the browser path
- *
- * They share almost nothing operationally. There is no daemon, no extension, no tab, no HAR to
- * pin, no console to read. What they DO share is the flow format, the five verdicts and the report
- * — and those are shared through data, not through a common code path. Threading a device through
- * the browser runner's plumbing would have meant `if (device)` in a dozen places, which is how a
- * second platform quietly degrades the first.
- *
- * ## Flows come from disk here, not from a browser profile
- *
- * A device flow has no browser to live in, so `QA/Flows/agripad/**` IS the library.
+ * The device platforms the project declares (g9.project.json "devices", lib/devices.mjs). This tool knows
+ * no app by name: which package, port, flow folder and error screen belong to which app is the project's
+ * data. The web loader reads the folders from here too, to skip them.
  */
-async function commandRunAgriPad({ options, project, reportDir, target, variables = {} }) {
-  const { AgriPadDriver, listDevices } = await import('./drivers/agripad.mjs');
+function devicePlatformsOf(project) {
+  return normalizeDevicePlatforms(project?.devices);
+}
 
+/** `--platform` -> the device platform profile, or an error naming the declared ones. */
+function devicePlatformFor(project, name) {
+  const { platforms, problems } = devicePlatformsOf(project);
+  const device = Object.hasOwn(platforms, name ?? '') ? platforms[name] : null;
+  if (!device) {
+    const known = Object.keys(platforms);
+    throw new Error(
+      `--platform "${name ?? ''}" is not a known platform. Known: web${known.length ? `, ${known.join(', ')}` : ''}. ` +
+        'A device platform is declared by the project under test, in g9.project.json "devices" (docs/DEVICE_BRIDGE.md)' +
+        `${problems.length ? `; its entries have problems:\n- ${problems.join('\n- ')}` : '.'}`,
+    );
+  }
+  return device;
+}
+
+/**
+ * The one device a device command talks to: `--device`, or the only ready one adb sees.
+ * Shared by `run` and `harvest`, which used to carry two copies of these messages.
+ */
+async function pickDevice(options, listDevices) {
   const devices = await listDevices();
   const usable = devices.filter((d) => d.state === 'device');
   if (!usable.length) {
@@ -1058,29 +1082,69 @@ async function commandRunAgriPad({ options, project, reportDir, target, variable
         '. Name one with --device <serial>.',
     );
   }
+  return serial;
+}
 
-  const driver = new AgriPadDriver({
+/** `--package`, else the platform's own package; `--package` with no value is a mistake, not "none". */
+function packageFor(options, device) {
+  if (options.package === true) throw new Error('--package needs a value, e.g. --package com.example.app');
+  return options.package ?? device.package ?? null;
+}
+
+/** `--device-port` (`--port`, its v1 name on this path), else the platform's port. */
+function devicePortFor(options, device) {
+  return Number(options['device-port'] ?? options.port) || device.port || DEFAULT_BRIDGE_PORT;
+}
+
+/**
+ * Run a suite against an app on a real device (or emulator) over the cable, through its QA bridge.
+ *
+ * ## Why this is a separate function and not a branch inside the browser path
+ *
+ * They share almost nothing operationally. There is no daemon, no extension, no tab, no HAR to
+ * pin, no console to read. What they DO share is the flow format, the five verdicts and the report
+ * — and those are shared through data, not through a common code path. Threading a device through
+ * the browser runner's plumbing would have meant `if (device)` in a dozen places, which is how a
+ * second platform quietly degrades the first.
+ *
+ * ## Flows come from disk here, not from a browser profile
+ *
+ * A device flow has no browser to live in, so `<flowsDir>/<the platform's flowsFolder>/**` IS the library.
+ */
+async function commandRunDevice({ options, project, reportDir, target, variables = {}, device }) {
+  const { DeviceDriver, listDevices, tapFidelity } = await import('./drivers/device.mjs');
+
+  // The flows first: a misplaced or invalid flow file is reported before anything talks to adb, so a
+  // broken library is never mistaken for a missing device (and the check runs on a machine without one).
+  let flows = await loadDeviceFlows(project, target, device);
+  const rules = await suiteRules(project, target, device.id);
+  flows = orderFlows(flows, rules.order);
+
+  const packageName = packageFor(options, device);
+  const serial = await pickDevice(options, listDevices);
+
+  const driver = new DeviceDriver({
     serial,
-    // `--device-port` is the v2 name; `--port` is still honoured here because in
-    // v1 it meant the device port on this path.
-    port: Number(options['device-port'] ?? options.port) || 8799,
+    port: devicePortFor(options, device),
     token: options.token === true ? '' : (options.token ?? ''),
+    packageName,
+    profile: device,
     log: (message) => log(options, `  ${message}`),
   });
 
-  let flows = await loadDeviceFlows(project, target);
-  const rules = await suiteRules(project, target);
-  flows = orderFlows(flows, rules.order);
-  log(options, `${flows.length} flow(s) to run on ${serial}\n`);
+  log(options, `${flows.length} ${device.id} flow(s) to run on ${serial}${packageName ? ` (${packageName})` : ''}\n`);
 
   const envName = options.env && options.env !== true ? options.env : (project?.defaultEnvironment ?? null);
   const run = {
     format: 'g9/run',
     version: 1,
-    platform: 'maui',
+    // The app that was driven, not a constant: the platform's `label` (its name unless the project
+    // keeps an older label for continuity). `app` says which build answered.
+    platform: device.label,
+    app: { framework: device.framework, package: packageName },
     // Labelled honestly. Actuating a control's own command proves the command works; it does not
     // prove a finger could have reached the control, and a report that does not say so invites
-    // exactly that reading.
+    // exactly that reading. Raised to `real-touch` below when the device declares it (tapFidelity).
     fidelity: 'gray-box',
     device: serial,
     startedAt: Date.now(),
@@ -1092,6 +1156,7 @@ async function commandRunAgriPad({ options, project, reportDir, target, variable
 
   const ready = await driver.connect();
   run.deviceInfo = ready.hello;
+  run.app.package ??= DeviceDriver.helloPackage(ready.hello);
   await driver.acquire();
 
   // What this DEVICE declares, asked once per run and cached: qa.ping for the
@@ -1107,7 +1172,7 @@ async function commandRunAgriPad({ options, project, reportDir, target, variable
       ? [...(capabilities.result?.features ?? []), ...(capabilities.result?.commands ?? [])].filter((f) => typeof f === 'string')
       : null;
     deviceFactsCache = {
-      build: ping?.ok ? (ping.result?.build ?? null) : null,
+      build: ping?.ok ? DeviceDriver.pingBuild(ping.result) : null,
       features,
       subject: `device ${serial}`,
       hint: 'the app build does not answer qa.ping/qa.capabilities — update the app on the device',
@@ -1115,6 +1180,7 @@ async function commandRunAgriPad({ options, project, reportDir, target, variable
     return deviceFactsCache;
   };
   run.provenance = await collectProvenance(project?.dir ?? process.cwd(), (await deviceFacts()).build);
+  run.fidelity = tapFidelity((await deviceFacts()).features);
 
   try {
     for (const [flowIndex, flow] of flows.entries()) {
@@ -1132,18 +1198,28 @@ async function commandRunAgriPad({ options, project, reportDir, target, variable
         pushSkipped(run, flow, `missing ${secrets.missing.join('; ')}`, options);
         continue;
       }
-      const flowVariables = { ...variables, ...secrets.values };
+      // A flow's own non-secret parameter defaults are its data when --data says nothing. Without
+      // this a device flow that names `{{featureId}}` with a `default` failed on its first map step with
+      // "Missing data parameter" — the default was documented and never read. --data still wins.
+      const parameterDefaults = Object.fromEntries(
+        Object.entries(flow.parameters ?? {})
+          .filter(([, param]) => param && param.type !== 'secretRef' && 'default' in param)
+          .map(([name, param]) => [name, param.default]),
+      );
+      const flowVariables = { ...parameterDefaults, ...variables, ...secrets.values };
 
       const steps = [];
       let failed = 0;
 
+      let derailed = null;
       for (const [index, step] of (flow.steps ?? []).entries()) {
         let outcome;
         try {
-          outcome = await driver.step(substituteDeviceStep(step, flowVariables));
+          outcome = await driver.step(substituteDeviceStep(step, flowVariables), { first: index === 0 });
         } catch (err) {
           outcome = { ok: false, error: String(err.message ?? err) };
         }
+        if (outcome.derailed) derailed = { step: index + 1, id: step.id, action: step.action, reason: outcome.error, evidence: outcome.evidence ?? null };
         outcome = maskSecretsDeep(outcome, secrets.values);
         steps.push({ step: index + 1, id: step.id, action: step.action, ...outcome });
         if (!outcome.ok) {
@@ -1166,8 +1242,24 @@ async function commandRunAgriPad({ options, project, reportDir, target, variable
         qaTestCaseIds: flow.qaTestCaseIds ?? [],
         tags: flow.tags ?? [],
         suite: flow.suite ?? null,
+        ...(derailed ? { derailed } : {}),
       });
       log(options, `  ${failed ? '✗' : '✓'} ${passed}/${flow.steps?.length ?? 0}\n`);
+      if (derailed) {
+        // The app left the path: nothing after this can test what it was meant to, whatever stopOn says. Stop, and
+        // hand the device to an agent with what it needs to look — never wait out the rest of the suite on it.
+        log(options, [
+          '  ⛔ مسیر عوض شد — فلو همین‌جا متوقف شد و به ایجنت سپرده می‌شود',
+          `     کجا: قدم ${derailed.step} (${derailed.action}${derailed.id ? `، ${derailed.id}` : ''})`,
+          `     چه دیدیم: ${derailed.reason}`,
+          ...(derailed.evidence ? ['     آخرین خطای اپ:', ...derailed.evidence.split('\n').map((l) => `       ${l}`)] : []),
+          '     ایجنت: صفحه را ببین (ui.snapshot / اسکرین‌شات)، لاگ اپ را بخوان، علت را پیدا و درست کن؛ تا آن موقع باگ ثبت نکن.',
+          '',
+        ].join('\n'));
+        run.derailed = { flow: flow.id, ...derailed };
+        pushNotRun(run, flows.slice(flowIndex + 1), flow, options);
+        break;
+      }
       if (stopsSuite(rules, run.flows.at(-1).verdict)) {
         pushNotRun(run, flows.slice(flowIndex + 1), flow, options);
         break;
@@ -1230,7 +1322,7 @@ function substituteDeviceStep(step, variables = {}) {
  * A message about something the app DID and did wrongly is FAIL_PRODUCT.
  *
  * It used to be four alternations inline, and the gap showed up the first time a
- * real device hit it: a background `GET /api/NewAuth` token refresh was still in
+ * real device hit it: a background token refresh (`GET /api/session/refresh`) was still in
  * flight when the flow started, quiescence timed out with "still busy: …", and
  * the run was filed as FAIL_PRODUCT. `app.busy` reported `idle: true` seconds
  * later and the identical suite passed. Nothing was wrong with the product; a
@@ -1275,16 +1367,23 @@ function verdictForDevice(steps, failed) {
     : 'FAIL_PRODUCT';
 }
 
-/** Read `QA/Flows/agripad/**` off disk and apply the same target grammar the web path uses. */
-async function loadDeviceFlows(project, target) {
+/**
+ * Read a device platform's flows (`<flowsDir>/<flowsFolder>/**`) off disk and apply the same target grammar
+ * the web path uses.
+ */
+async function loadDeviceFlows(project, target, device) {
   const root = flowsRoot(project);
-  const files = await collectJson(path.join(root, 'agripad'));
+  const folder = path.join(root, device.flowsFolder);
+  const files = await collectJson(folder);
   const flows = [];
 
-  // The same validator the web path runs, widened by the one action only the
-  // device driver implements. An invalid file used to reach the device and fail
-  // there, step by step, with the file never named.
-  const deviceActions = new Set([...KNOWN_ACTIONS, 'dismiss']);
+  // The same validator the web path runs, widened by the actions only the device
+  // driver implements (dismiss, the map steps, list rows, popups, values — see
+  // drivers/device.mjs). An invalid file used to reach the device and fail there,
+  // step by step, with the file never named.
+  const deviceActions = new Set([
+    ...KNOWN_ACTIONS, 'dismiss', 'tapFeature', 'zoomToFeature', 'longPressFeature', 'selectItem', 'setValue', 'popupButton',
+  ]);
   for (const file of files) {
     let spec;
     try {
@@ -1293,20 +1392,27 @@ async function loadDeviceFlows(project, target) {
       throw new Error(`${file} is not valid JSON: ${err.message}`);
     }
     const problems = validateFlowSpec(spec, { actions: deviceActions });
+    // A flow written for another app is refused by name. Two apps (two builds of one product, say) can
+    // share a vocabulary but not their automation ids, so a flow copied into the wrong folder would fail
+    // step by step with "not found" and be filed as an automation failure instead of as a misplaced file.
+    if (spec?.target?.kind && spec.target.kind !== device.flowKind) {
+      problems.push(`target.kind is "${spec.target.kind}", but ${device.flowsFolder}/ holds "${device.flowKind}" flows.`);
+    }
+    problems.push(...foreignSecretSyntax(spec));
     if (problems.length) throw new Error(`${file} is not a valid FlowSpec:\n- ${problems.join('\n- ')}`);
     flows.push(spec);
   }
 
   if (!flows.length) {
     throw new Error(
-      `No AgriPad flows found under ${path.join(root, 'agripad')}. Record one, or check flowsDir in g9.project.json.`,
+      `No ${device.id} flows found under ${folder}. Record one, or check flowsDir in g9.project.json.`,
     );
   }
 
   if (!target || target === 'all') return flows;
   if (target.startsWith('suite:')) {
     const name = target.slice(6);
-    const suite = await readSuite(root, name);
+    const suite = await readSuite(root, name, device.id);
     const chosen = suite ? applySelect(flows, suite.select ?? {}) : flows.filter((f) => f.suite === name);
     return requireSelection(chosen, target, flows, suite);
   }
@@ -1317,15 +1423,29 @@ async function loadDeviceFlows(project, target) {
   const matched = flows.filter((f) => f.id === target || f.name === target);
   if (!matched.length) {
     throw new Error(
-      `Nothing matched "${target}". Known AgriPad flows:\n` +
+      `Nothing matched "${target}". Known ${device.id} flows:\n` +
         flows.map((f) => `  ${f.id}  ${f.name}`).join('\n'),
     );
   }
   return matched;
 }
 
-async function readSuite(root, name) {
-  for (const candidate of [`${name}.json`, `agripad.${name}.json`]) {
+/**
+ * `${secrets.NAME}` is not this runner's syntax, and nothing would resolve it: the step would type the
+ * literal text into the app (a password field "filled" with a placeholder, the login failing as a
+ * product defect). It is what CI systems and some agent briefs write, so it is refused with the fix.
+ */
+function foreignSecretSyntax(spec) {
+  const names = [...new Set([...JSON.stringify(spec?.steps ?? []).matchAll(/\$\{\s*secrets\.([A-Za-z_][\w.-]*)\s*\}/g)].map((m) => m[1]))];
+  return names.map((name) =>
+    `"\${secrets.${name}}" is not resolved by this runner. Write "{{secret:${name}}}" and declare ` +
+      `"parameters": { "${name}": { "type": "secretRef", "required": true } }; the value then comes from ` +
+      `--data or the environment variable G9_SECRET_${name.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}.`);
+}
+
+/** `suites/<name>.json`, else the platform's own `suites/<platform>.<name>.json`. */
+async function readSuite(root, name, platform = null) {
+  for (const candidate of [`${name}.json`, ...(platform ? [`${platform}.${name}.json`] : [])]) {
     try {
       return JSON.parse(await readFile(path.join(root, 'suites', candidate), 'utf8'));
     } catch {
@@ -1790,12 +1910,12 @@ async function commandSpec({ options }) {
 // ----------------------------------------------------------------- harvest
 
 /**
- * `g9 harvest --platform agripad [--device <serial>] [--out <dir>]`
+ * `g9 harvest --platform <device> [--device <serial>] [--out <dir>]`
  *
  * Pull recorded flow CANDIDATES off a device: the app's passive recorder keeps
  * what a person did (command/activity steps with timing) in a ring buffer, and
  * `flow.record.harvest` returns and drains it. Each candidate lands as
- * `<flowsDir>/agripad/candidates/<yyyyMMdd-HHmm>-<n>.candidate.json` — raw
+ * `<flowsDir>/<flowsFolder>/candidates/<yyyyMMdd-HHmm>-<n>.candidate.json` — raw
  * material for a human to turn INTO a flow, deliberately NOT a FlowSpec: the
  * flow loaders only read `*.flow.json`, and the daemon's library skips
  * `*.candidate.json` by name, so a candidate can never run by accident.
@@ -1806,45 +1926,33 @@ async function commandSpec({ options }) {
  * would weld the runner to a recorder that is still growing.
  */
 async function commandHarvest({ options }) {
-  if ((options.platform ?? null) !== 'agripad') {
-    throw new Error('g9 harvest works on a device: pass --platform agripad (web flows are recorded in the browser, side panel → Record).');
+  if (!options.platform || options.platform === true || options.platform === 'web') {
+    throw new Error('g9 harvest works on a device: pass --platform <a device platform from g9.project.json "devices"> (web flows are recorded in the browser, side panel → Record).');
   }
-  const { AgriPadDriver, listDevices } = await import('./drivers/agripad.mjs');
+  const project = await loadProject(options.project === true ? undefined : options.project);
+  const device = devicePlatformFor(project, options.platform);
+  const { DeviceDriver, listDevices } = await import('./drivers/device.mjs');
 
-  const devices = await listDevices();
-  const usable = devices.filter((d) => d.state === 'device');
-  if (!usable.length) {
-    throw new Error(devices.length
-      ? `adb sees ${devices.length} device(s) but none is ready: ${devices.map((d) => `${d.serial} (${d.state})`).join(', ')}. ` +
-        '"unauthorized" means the tablet is showing a permission dialog — accept it.'
-      : 'adb sees no devices. Check the cable and that USB debugging is on.');
-  }
-  const serial = options.device === true ? null : (options.device ?? (usable.length === 1 ? usable[0].serial : null));
-  if (!serial) {
-    throw new Error(
-      `${usable.length} devices are connected, so there is no unambiguous target: ` +
-        usable.map((d) => `${d.serial}${d.model ? ` (${d.model})` : ''}`).join(', ') +
-        '. Name one with --device <serial>.',
-    );
-  }
-
-  const driver = new AgriPadDriver({
+  const packageName = packageFor(options, device);
+  const serial = await pickDevice(options, listDevices);
+  const driver = new DeviceDriver({
     serial,
-    port: Number(options['device-port'] ?? options.port) || 8799,
+    port: devicePortFor(options, device),
     token: options.token === true ? '' : (options.token ?? ''),
+    packageName,
+    profile: device,
     log: (message) => log(options, `  ${message}`),
   });
 
-  const project = await loadProject(options.project === true ? undefined : options.project);
   const outDir = options.out && options.out !== true
     ? path.resolve(options.out)
-    : path.join(flowsRoot(project), 'agripad', 'candidates');
+    : path.join(flowsRoot(project), device.flowsFolder, 'candidates');
 
   await driver.connect();
   await driver.acquire('g9-harvest');
   try {
     const ping = await driver.command('qa.ping', {}).catch(() => null);
-    const build = ping?.ok ? (ping.result?.build ?? null) : null;
+    const build = ping?.ok ? DeviceDriver.pingBuild(ping.result) : null;
 
     const res = await driver.command('flow.record.harvest', {});
     if (!res.ok) {

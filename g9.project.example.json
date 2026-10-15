@@ -42,6 +42,18 @@
     "GET /api/task/{uuid} 2xx": "task.read"
   },
 
+  "//devices": "CONSUMED since 3.7.0: the apps this project tests on a phone or tablet, each driven through its QA bridge (docs/DEVICE_BRIDGE.md) with `g9 run --platform <name>`. Every field is optional; runner/README.md \"Devices\" lists them. The flow library folder `<flowsDir>/<flowsFolder>` holds the platform's flows.",
+  "devices": {
+    "shop-android": {
+      "package": "com.example.shop",
+      "port": 8799,
+      "errorScreens": ["ErrorPage."],
+      "crashLog": "files/logs/last-crash.log",
+      "setupHint": "Settings → Developer → QA bridge on",
+      "selftestHints": [{ "match": "no such table", "hint": "The first sync has not finished yet; run again in a few minutes." }]
+    }
+  },
+
   "//destructiveActions": "Accessible names an exploratory run must never click. Advisory today; the state-graph explorer will enforce it.",
   "destructiveActions": ["حذف", "Delete", "Remove", "Sign out"],
 

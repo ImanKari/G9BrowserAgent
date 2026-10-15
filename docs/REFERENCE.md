@@ -1069,8 +1069,10 @@ it exactly as to an agent; there is no back door.
   on **another virtual desktop**. Headless Engine 2 has no window, so by design neither state
   applies to it (AIGuide §2.8.1, D3). A logged-off session runs nothing.
 
-`--platform agripad` drives an AgriPad device over adb instead of a browser, with the same flow
-format, verdicts and reports.
+`--platform <device>` drives an app on a phone or tablet over adb, through the app's QA bridge
+([DEVICE_BRIDGE.md](DEVICE_BRIDGE.md)), instead of a browser — with the same flow format, verdicts and
+reports. The project declares its device apps in `g9.project.json` `devices` (package, port, flow folder,
+error screen); see runner/README.md, "Devices".
 
 ---
 
@@ -1752,7 +1754,7 @@ G9BrowserAgent/
 ├── docker/                   the browser node image (3.2): Dockerfile, compose.yaml, root/ (services, autostart), README
 ├── lib/                      version.mjs, ws-client.mjs, ws-codec.mjs, runtime.mjs (how to start a G9BrowserAgent script from
 │                             node, the app or an AppImage) — shared, zero-dependency
-├── runner/                   g9.mjs (unattended CLI), mcp-client.mjs, report.mjs, drivers/ (AgriPad)
+├── runner/                   g9.mjs (unattended CLI), mcp-client.mjs, report.mjs, drivers/device.mjs (devices over adb)
 ├── desktop/                  Electron shell: views, wizard, packages (scripts/build.mjs), updater; its own tests in
 │                             desktop/test, including the real update end-to-end test (update-e2e.mjs)
 ├── bridge/src/server.js      v1 entry point, kept only as a forwarder to mcp/shim.mjs

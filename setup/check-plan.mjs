@@ -28,6 +28,7 @@ export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
  * importing them (spawned scripts, source scans, files read as text).
  */
 export const CHECKS = [
+  unit('device', 3, []),
   unit('daemon', 6, []),
   unit('desktop', 22, ['desktop/**']),
   unit('engine', 35, []),

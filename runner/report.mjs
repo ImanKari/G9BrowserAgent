@@ -271,6 +271,9 @@ function properties(run) {
     if (value != null && value !== '') props.push(`      <property name="${esc(name)}" value="${esc(value)}"/>`);
   };
   add('g9.engine', engineLabel(run));
+  add('g9.platform', run.platform);
+  add('g9.app.package', run.app?.package);
+  add('g9.fidelity', run.fidelity);
   add('g9.daemon.version', run.daemon?.version);
   add('g9.humanize.level', run.humanize ? (run.humanize.level ?? 'default') : null);
   add('g9.humanize.seed', run.humanize?.seed);
@@ -285,6 +288,12 @@ function runFacts(run) {
   const bits = [];
   const engine = engineLabel(run);
   if (engine) bits.push(`موتور <b dir="ltr">${escHtml(engine)}</b>`);
+  // A device run says WHICH app was driven and how much a passing tap proves (gray-box / real-touch):
+  // two apps (or two builds of one app) can share a flow vocabulary, so a report without this cannot be told apart.
+  if (run.platform && run.platform !== 'web') {
+    const app = run.app?.package ? ` (<span dir="ltr">${escHtml(run.app.package)}</span>)` : '';
+    bits.push(`پلتفرم <b dir="ltr">${escHtml(run.platform)}</b>${app}${run.fidelity ? ` · <span dir="ltr">${escHtml(run.fidelity)}</span>` : ''}`);
+  }
   if (run.humanize?.seed != null) {
     bits.push(`seed حرکت <code dir="ltr">${escHtml(run.humanize.seed)}</code>${run.humanize.level ? ` (${escHtml(run.humanize.level)})` : ''}`);
   }

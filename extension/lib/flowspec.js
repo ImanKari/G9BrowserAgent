@@ -247,7 +247,7 @@ export function fromFlowSpec(spec) {
  * Every problem at once, so a fix is one edit rather than a game of whack-a-mole.
  *
  * `actions` widens the accepted step actions for a platform whose driver
- * understands more than the web replayer does (the AgriPad driver's `dismiss`).
+ * understands more than the web replayer does (the device driver's `dismiss`).
  * It only ever ADDS: an action outside the set is still refused, never skipped.
  */
 export function validateFlowSpec(spec, { actions = KNOWN_ACTIONS } = {}) {

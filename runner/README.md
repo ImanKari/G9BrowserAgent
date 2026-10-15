@@ -12,7 +12,8 @@ node runner/g9.mjs calibrate flow_login          # once per flow (per environmen
 node runner/g9.mjs approve  flow_login --by alice --note "new banner is expected"
 node runner/g9.mjs spec     flow_login --out QA/Flows/web/auth/login.flow.json
 node runner/g9.mjs ab       flow_login --a https://released.example --b https://candidate.example
-node runner/g9.mjs harvest  --platform agripad --device R52T80XXXX
+node runner/g9.mjs harvest  --platform shop --device R52T80XXXX
+node runner/g9.mjs run suite:shop-next.smoke --platform shop-next --device emulator-5554
 node runner/g9.mjs help
 ```
 
@@ -75,7 +76,7 @@ that browser (its tabs, focus and window state) with the person, so it is not th
 For launched runs, the flow library on disk is the source of truth:
 - Every `*.flow.json` FlowSpec under the project's `flowsDir` is validated, then imported into the
   launched engine's store before it runs. `flowsDir` comes from `g9.project.json` and defaults to
-  `QA/Flows`; `agripad/` and `suites/` are excluded.
+  `QA/Flows`; the device platforms' folders and `suites/` are excluded.
 - A file that is not valid JSON or not a valid FlowSpec stops the run and names the file. A file
   whose `target.kind` names another platform than `web` is skipped before validation.
 - Re-importing never erases what the store learned about a flow: its **known world**, run history and
@@ -95,7 +96,7 @@ browser is copied into the launched engine by the daemon when it replays.
 - `all` (the default).
 
 A bare name that is no flow's id or name is tried as a suite name (the desktop's Schedule form sends
-one); on `--platform agripad` only ids and names match. A selection that matches nothing is an error
+one); on a device platform only ids and names match. A selection that matches nothing is an error
 that lists the known flows, never an empty PASS.
 
 **Value steps (3.4).** `{ "action": "evaluate", "expression": "…", "saveAs"?, "expect"?, "timeoutMs"? }`
@@ -122,9 +123,10 @@ placeholders in the expression itself are substituted too. A dry run skips `eval
 | `--no-compare` | skip the known-world comparison (produces a reference run) |
 | `--pin <file.har>` / `--strict-pin` | serve the network from a HAR; strict fails any request the HAR does not contain |
 | `--project <file>` | the project adapter |
-| `--platform web\|agripad` | `agripad` drives a real device over adb (below) |
-| `--device <serial>`, `--device-port <n>` | AgriPad only: which device, and its automation port (default 8799; on this path `--port` is still read as the device port when `--device-port` is not given, as in v1) |
-| `--token <token>` | AgriPad only: the device's automation token, when the device requires one (shown on the device under Admin Diagnostics → QA Automation) |
+| `--platform web\|<device>` | `web` (default), or a device platform the project declares in `g9.project.json` `devices`: it drives a real device over adb (below); anything else is refused |
+| `--device <serial>`, `--device-port <n>` | devices only: which device, and its bridge port (default: the platform's `port`, else 8799; on this path `--port` is still read as the device port when `--device-port` is not given, as in v1) |
+| `--package <id>` | devices only: the Android package that must own the device port (default: the platform's `package`, else none); see below |
+| `--token <token>` | devices only: the device's automation token, when the app requires one (where the app shows it: the platform's `tokenHint`) |
 | `--fail-on warning\|surprise\|failure` | the lowest verdict that makes the exit code non-zero (default `surprise`) |
 | `--quiet` | only the closing lines: the summary, the humanize seed and where the reports are |
 
@@ -134,8 +136,8 @@ The runner spawns `mcp/shim.mjs`, the same shim an AI agent's client launches. T
 the one G9BrowserAgent daemon on this machine and starts it if needed. So the runner can do nothing an agent
 could not do: ownership, the Stop button (side panel or desktop app) and every refusal apply to a
 scheduled run exactly as they do to an agent. If Stop is engaged when the run starts, it exits 4 with
-"Stop is engaged". There is no private back door, and there should never be one. (`--platform
-agripad` is the exception: it talks to a device over adb and never contacts the daemon, so Stop does
+"Stop is engaged". There is no private back door, and there should never be one. (A device
+`--platform` is the exception: it talks to a device over adb and never contacts the daemon, so Stop does
 not reach it.)
 
 **The v1 "port rule" is gone.** v1 needed a second browser profile with its own extension copy,
@@ -190,7 +192,7 @@ A flow may declare, at its top level:
 
 Before a tab is opened (or a device command sent), the runner checks it:
 - `environments`: the current `--env` must be one of them;
-- on `--platform agripad`: `qa.ping` (build) and `qa.capabilities` (features/commands) are asked
+- on a device platform: `qa.ping` (build) and `qa.capabilities` (features/commands) are asked
   once per device per run; `minBuild` uses a lenient numeric-dotted compare, and every entry of
   `features` must be present;
 - on web: build/features come from the environment's **object form** in `g9.project.json`
@@ -259,7 +261,7 @@ the same pointer paths and typing rhythm.
 | `list` | the flows in the repository library and in each browser store |
 | `calibrate <flowId>` | replays the flow twice on one build and marks what differs as volatile noise, so it never counts as a surprise. Run it once per flow — per environment: with `--env`, the mask lands in that environment's known world. |
 | `approve <flowId> [--by <name>] [--note <text>] [--env <name>]` | folds the last run into the flow's approved known world — the one belonging to the environment the reviewed run ran on (an `--env` that disagrees is refused). The desktop's Approvals view does the same with your Windows user name. (3.2) When the flow is in a project repository, the approval is written beside it (`<name>.approved.json`; per-environment worlds under its `knownWorlds`), ready to commit. |
-| `harvest --platform agripad [--device <serial>] [--out <dir>]` | drains the device's passive flow recorder (`flow.record.harvest`) and writes each candidate to `<flowsDir>/agripad/candidates/<yyyyMMdd-HHmm>-<n>.candidate.json` (`format: "g9/flow-candidate"`, tagged `@candidate`, device steps passed through untouched, plus capture time, device serial and provenance). Candidates are raw material, **not** flows: no loader ever runs one. An app build without the command gets a friendly message naming the build. |
+| `harvest --platform <device> [--device <serial>] [--out <dir>]` | drains the device's passive flow recorder (`flow.record.harvest`) and writes each candidate to `<flowsDir>/<flowsFolder>/candidates/<yyyyMMdd-HHmm>-<n>.candidate.json` (`format: "g9/flow-candidate"`, tagged `@candidate`, device steps passed through untouched, plus capture time, device serial and provenance). Candidates are raw material, **not** flows: no loader ever runs one. An app build without the command gets a friendly message naming the build. |
 | `spec <flowId> [--out <file>]` | exports a canonical, Git-diffable FlowSpec (to stdout without `--out`). (3.2) With `--out x.flow.json` it also writes what was approved beside it: `x.approved.json` and `x.baselines/*.png`. |
 | `ab <flowId> --a <url> --b <url> [--timing <mode>] [--report <dir>]` | runs the flow against two builds and diffs their full signatures. It reports differences, not verdicts: a shipped feature and a regression look the same. It exits 0 unless a side failed to run (2), and writes `ab.json` with `--report`. |
 
@@ -279,12 +281,62 @@ HAR pinning serves stored responses for requests that match:
 
 Use the comparison to narrow a diagnosis; it does not prove a fully frozen backend.
 
-## AgriPad devices
+## Devices
 
-`--platform agripad` drives a real device over adb through `drivers/agripad.mjs` instead of a
-browser. Flows come from `QA/Flows/agripad/**` and are validated like web flows (the device also
-accepts the `dismiss` action; an invalid file stops the run and is named); `candidates/` files
+A device platform drives an app on a real phone or tablet (or an emulator) over adb through the app's
+**QA bridge** — a small HTTP service the app runs in its test builds ([docs/DEVICE_BRIDGE.md](../docs/DEVICE_BRIDGE.md)
+is the protocol) — instead of a browser. `drivers/device.mjs` speaks the protocol; it names no app.
+Which apps exist is the project's data: `g9.project.json` declares them under `devices`
+([lib/devices.mjs](../lib/devices.mjs) reads it), and `--platform <name>` picks one:
+
+```json
+"devices": {
+  "shop":      { "flowKind": "classic", "label": "classic", "errorScreens": ["ErrorPage."] },
+  "shop-next": { "package": "com.example.shop.next", "port": 8799,
+                 "errorScreens": ["ErrorPage."], "crashLog": "files/logs/last-crash.log",
+                 "setupHint": "Settings → Developer → QA bridge",
+                 "selftestHints": [{ "match": "no such table", "hint": "The first sync has not finished yet." }] }
+}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `flowsFolder` | the name | flows come from `<flowsDir>/<flowsFolder>/**` |
+| `flowKind` | the name | the flows' `target.kind`; a flow of another kind in that folder is refused by name |
+| `label`, `framework` | the name, none | the report's `platform` and `app.framework` |
+| `package` | none | the Android package that must own the bridge port (`--package` overrides) |
+| `port` | 8799 | the bridge port on the device (`--device-port` overrides) |
+| `errorScreens` | none | automation-id prefixes of the app's crash / error screen: a step that lands there is DERAILED |
+| `crashLog` | none | an app-private file (`run-as`) whose head is attached to a derailed step as evidence |
+| `setupHint`, `tokenHint`, `selftestHints` | none | the app's own words for "nothing answered", "where is the token", and known self-test states |
+
+Flows are validated like web flows (an invalid file stops the run and is named); `candidates/` files
 (`*.candidate.json`, from `g9 harvest`) are never loaded as flows. Choose the device with
-`--device <serial>` and its port with `--device-port <n>` (default 8799). `--data` variables and
-`{{secret:…}}` values are substituted into device steps too. It shares the flow format, the
-verdicts and the reports, and its results are labelled `gray-box`.
+`--device <serial>`. `--data` variables, a flow's own parameter defaults and `{{secret:…}}` values are
+substituted into device steps too. A suite is `suites/<name>.json`, or the platform's own
+`suites/<platform>.<name>.json`. A device run shares the flow format, the verdicts and the reports.
+
+Device steps beyond the web vocabulary: `dismiss`, `tapFeature`, `zoomToFeature`, `longPressFeature`
+(`target: { layer, featureId, idField? }`), `selectItem` (`target: { automationId, itemId | text, idField? }`),
+`setValue` (`target.automationId` + `value`) and `popupButton` (`value` = the caption); oracles `visible`,
+`onScreen`, `value`, `probe`, `idle`, `map`, `aria`.
+
+### The port guard
+
+Two builds of one app often share a bridge port. With a package to guard, the driver reads
+`/proc/net/tcp{,6}` over `adb shell` before the first command: the uid LISTENING on the device port must
+be the package's uid (`cmd package list packages -U`). Nothing listening → it launches the package's
+launcher activity and waits (45 s) for the listener; another app listening → the run stops and names it
+(otherwise a run against the wrong build reports that build's results with every step green). A bridge
+whose hello names a package (`package`, or `app` when it is an application id) must name the same one.
+
+### Off the path
+
+Before a flow's first step, after every action and on every failure the driver looks whether the app left
+the path every flow assumes — its error screen (`errorScreens`), a dead process, or a bridge refusal that
+starts with `DERAILED:`. The step then fails as derailed at once (long waits are sliced, so a crash
+mid-wait is seen within seconds), with the head of `crashLog` as evidence.
+
+The report records `platform`, `app: { framework, package }` and `fidelity`: `gray-box` unless the device's
+`qa.capabilities` lists `ui.tap:real-touch` (a bridge that injects a real touch at the control's measured
+centre), then `real-touch`. The build in the report's provenance is `qa.ping`'s `build` or `versionName`.

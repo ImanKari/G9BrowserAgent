@@ -1510,8 +1510,9 @@ await test('the flow library refuses to write local-only run history to the repo
 
   // A path a human can read in a diff, derived from the flow's own metadata.
   assert.equal(
-    relativePathFor({ id: 'rec_a91f3c', name: 'Site switch', folder: 'map', target: { kind: 'maui' } }).replace(/\\/g, '/'),
-    'agripad/map/site-switch.flow.json',
+    relativePathFor({ id: 'rec_a91f3c', name: 'Site switch', folder: 'map', target: { kind: 'classic' } }, { classic: 'shop' }).replace(/\\/g, '/'),
+    'shop/map/site-switch.flow.json',
+    'a kind the project maps (g9.project.json "devices") is filed under its folder',
   );
   assert.equal(
     relativePathFor({ id: 'rec_1', name: 'Login', folder: 'auth', target: { kind: 'web' } }).replace(/\\/g, '/'),
@@ -1712,9 +1713,9 @@ await test('a replay result is bounded, and says what it is not showing', async 
   assert.match(replaySource, /summary\.surprises = classified;/);
 });
 
-await test('the AgriPad driver finds adb and spawns it without a shell', async () => {
-  const driver = await readFile(new URL('../runner/drivers/agripad.mjs', import.meta.url), 'utf8');
-  const { resolveAdb } = await import('../runner/drivers/agripad.mjs');
+await test('the device driver finds adb and spawns it without a shell', async () => {
+  const driver = await readFile(new URL('../runner/drivers/device.mjs', import.meta.url), 'utf8');
+  const { resolveAdb } = await import('../runner/drivers/device.mjs');
 
   // FOUND LIVE, 2026-09-10, twice in a row on a machine with a working emulator:
   //   "adb is not recognized as an internal or external command"   ← not on PATH
@@ -1742,7 +1743,7 @@ await test('a device run reports its duration instead of NaN', async () => {
   // The web path set run.durationMs and the summary line read it; the device
   // path never did, so a passing run printed "PASS=1 · NaNs · exit 0". A summary
   // that prints NaN is a summary people stop reading.
-  const device = runner.slice(runner.indexOf('async function commandRunAgriPad'));
+  const device = runner.slice(runner.indexOf('async function commandRunDevice'));
   assert.match(device, /run\.durationMs = run\.finishedAt - run\.startedAt/);
 });
 
@@ -1816,7 +1817,7 @@ await test('the project file is found by searching upward, not only in the cwd',
   // FOUND 2026-09-11. loadProject looked in process.cwd() and nowhere else, so
   // running the runner from anywhere but the repository root silently returned
   // null, flowsDir fell back to a cwd-relative default, and the run died with
-  // "No AgriPad flows found under <a path that never existed>". Every tool that
+  // "No device flows found under <a path that never existed>". Every tool that
   // reads a project file - git, npm, tsc - climbs to the root instead.
   const load = runner.slice(runner.indexOf('async function loadProject'), runner.indexOf('function flowsRoot'));
   assert.match(load, /const parent = path\.dirname\(dir\)/, 'loadProject must climb');
@@ -1837,7 +1838,7 @@ async function runnerSelection() {
   const path = (await import('node:path')).default;
   const lifted = liftFunctions(
     runner,
-    ['selectFlows', 'loadDeviceFlows', 'requireSelection', 'applySelect', 'readSuite', 'flowsRoot', 'collectJson'],
+    ['selectFlows', 'loadDeviceFlows', 'foreignSecretSyntax', 'requireSelection', 'applySelect', 'readSuite', 'flowsRoot', 'collectJson'],
     // validateFlowSpec/KNOWN_ACTIONS: loadDeviceFlows validates device flows
     // with the shared validator (widened by the driver's own `dismiss`).
     { readFile, path, validateFlowSpec: flowspec.validateFlowSpec, KNOWN_ACTIONS: flowspec.KNOWN_ACTIONS },
@@ -1869,8 +1870,11 @@ await test('a selector that matches no flow refuses instead of reporting PASS', 
   assert.deepEqual((await selectFlows(flows, 'tag:nightly', null, 'here')).map((f) => f.id), ['b']);
 
   // Both platforms must route through it, or the guard only covers one of them.
-  const device = runner.slice(runner.indexOf('async function loadDeviceFlows'));
-  assert.match(device.slice(0, 1600), /requireSelection\(/, 'the AgriPad path must use the guard');
+  // The whole function body, not a fixed-width prefix: the target.kind check and the platform's
+  // folder were added above the selection, and a 1600-character window then missed the guard.
+  const deviceAt = runner.indexOf('async function loadDeviceFlows');
+  const device = runner.slice(deviceAt, runner.indexOf('\n}\n', deviceAt));
+  assert.match(device, /requireSelection\(/, 'the device path must use the guard');
   // v2: every browser path (launched engine, extension) selects through selectFlows.
   for (const fn of ['runLaunched', 'runExtension']) {
     const at = runner.indexOf(`async function ${fn}(`);
@@ -1894,7 +1898,7 @@ await test('a suite means the same thing on both platforms', async () => {
     const project = { dir: root, flowsDir: 'QA/Flows' };
     const lib = path.join(root, 'QA', 'Flows');
     await mkdir(path.join(lib, 'suites'), { recursive: true });
-    await mkdir(path.join(lib, 'agripad', 'map'), { recursive: true });
+    await mkdir(path.join(lib, 'shop', 'map'), { recursive: true });
     await writeFile(path.join(lib, 'suites', 'smoke.json'), JSON.stringify({ id: 'smoke', select: { tags: ['smoke'], excludeTags: ['wip'] } }));
     const web = [
       { id: 'w1', name: 'Web one', tags: ['smoke'] },
@@ -1905,14 +1909,15 @@ await test('a suite means the same thing on both platforms', async () => {
     for (const [id, extra] of [['d1', { tags: ['smoke'] }], ['d2', { tags: ['smoke', 'wip'] }], ['d3', { tags: [], suite: 'smoke' }]]) {
       // Valid FlowSpecs: device flows are validated on load now, so a fixture
       // that is only `{ id, name }` would fail the run before selection.
-      await writeFile(path.join(lib, 'agripad', 'map', `${id}.flow.json`), JSON.stringify({
-        format: 'g9/flowspec', schemaVersion: 1, id, name: id, target: { kind: 'maui' },
+      await writeFile(path.join(lib, 'shop', 'map', `${id}.flow.json`), JSON.stringify({
+        format: 'g9/flowspec', schemaVersion: 1, id, name: id, target: { kind: 'classic' },
         steps: [{ id: 's1', action: 'navigate', target: { automationId: 'Page.Home' } }], ...extra,
       }));
     }
     assert.deepEqual((await selectFlows(web, 'suite:smoke', project, 'web')).map((f) => f.id), ['w1'],
       'the browser path must read the suite file and apply its query');
-    assert.deepEqual((await loadDeviceFlows(project, 'suite:smoke')).map((f) => f.id), ['d1'],
+    const shop = { id: 'shop', flowsFolder: 'shop', flowKind: 'classic' };
+    assert.deepEqual((await loadDeviceFlows(project, 'suite:smoke', shop)).map((f) => f.id), ['d1'],
       'the device path applies the very same query');
     // A bare suite name (what the desktop's Schedule form sends) means the same.
     assert.deepEqual((await selectFlows(web, 'smoke', project, 'web')).map((f) => f.id), ['w1']);
@@ -1927,7 +1932,7 @@ await test('a suite means the same thing on both platforms', async () => {
 await test('a device readiness timeout is not filed as a product regression', async () => {
   const runner = await readFile(new URL('../runner/g9.mjs', import.meta.url), 'utf8');
 
-  // FOUND LIVE, 2026-09-11. A background GET /api/NewAuth token refresh was in
+  // FOUND LIVE, 2026-09-11. A background token refresh request was in
   // flight when the flow started; quiescence timed out with "still busy: ..." and
   // the run was filed FAIL_PRODUCT. app.busy said idle:true seconds later and the
   // same suite passed. The device path had four alternations inline while the
@@ -1945,7 +1950,7 @@ await test('a device readiness timeout is not filed as a product regression', as
 
   // Both directions. Mislabelling a real regression as "just the test" loses
   // defects, which is the worse of the two mistakes.
-  assert.equal(classify('still busy: http:GET /api/NewAuth'), 'FAIL_AUTOMATION');
+  assert.equal(classify('still busy: http:GET /api/session/refresh'), 'FAIL_AUTOMATION');
   assert.equal(classify('"SearchEntry" not found'), 'FAIL_AUTOMATION');
   assert.equal(classify('the device did not answer'), 'FAIL_AUTOMATION');
   assert.equal(classify('expected 96 farms, got 12'), 'FAIL_PRODUCT');
@@ -1953,11 +1958,11 @@ await test('a device readiness timeout is not filed as a product regression', as
 });
 
 await test('the idle oracle waits for quiescence instead of sampling it', async () => {
-  const driver = await readFile(new URL('../runner/drivers/agripad.mjs', import.meta.url), 'utf8');
+  const driver = await readFile(new URL('../runner/drivers/device.mjs', import.meta.url), 'utf8');
 
   // FOUND LIVE, 2026-09-11. The oracle called app.busy - an instantaneous snapshot -
-  // and failed if anything at all was in flight. agripad.smoke asserts idle as its
-  // FIRST step, so a periodic GET /api/NewAuth token refresh (~20s from the emulator)
+  // and failed if anything at all was in flight. A smoke suite asserts idle as its
+  // FIRST step, so a periodic token refresh (~20s from the emulator)
   // reddened the entire suite depending only on when the run started. Three runs after
   // the fix: 21.5s, 0.6s, 0.6s - all green, the first having simply waited it out.
   const idle = driver.slice(driver.indexOf("case 'idle': {"), driver.indexOf("case 'map': {"));
@@ -1975,9 +1980,9 @@ await test('the idle oracle waits for quiescence instead of sampling it', async 
 });
 
 await test('a device command budget rides the request root, not the args object', async () => {
-  const driver = await readFile(new URL('../runner/drivers/agripad.mjs', import.meta.url), 'utf8');
+  const driver = await readFile(new URL('../runner/drivers/device.mjs', import.meta.url), 'utf8');
 
-  // FOUND LIVE, 2026-09-11. QaLocalRequest reads TimeoutMs off the REQUEST ROOT and
+  // FOUND LIVE, 2026-09-11. The bridge reads timeoutMs off the REQUEST ROOT and
   // defaults it to 30000; a "timeoutMs" inside args is never looked at. The server's
   // idle oracle put it in args and silently got the default - an oracle that promises
   // a longer wait and does not take one is a flake waiting to happen. Proven on the
@@ -1986,10 +1991,15 @@ await test('a device command budget rides the request root, not the args object'
   const cmd = driver.slice(driver.indexOf('async command('), driver.indexOf('async command(') + 900);
   assert.match(cmd, /timeoutMs,/, 'the driver must send timeoutMs at the request root');
 
-  // And the caller must pass a budget bigger than the wait it is asking the device for,
-  // or the transport gives up before the gate it is waiting on.
+  // And the transport must wait longer than the wait it is asking the device for, or it gives up
+  // before the gate it is waiting on. Long waits are sliced (waitInSlices, the off-path guard): each
+  // slice asks the device for `slice` ms at the request root, and command() waits that plus 5 s.
+  assert.match(cmd, /AbortSignal\.timeout\(timeoutMs \+ 5_000\)/, 'the transport budget must exceed the wait');
+  const slices = driver.slice(driver.indexOf('async waitInSlices('), driver.indexOf('async stepCore('));
+  assert.match(slices, /this\.command\(command, \{ \.\.\.args, timeoutMs: slice \}, \{ timeoutMs: slice \}\)/,
+    'each slice sends its budget at the request root and as the transport budget');
   const idle = driver.slice(driver.indexOf("case 'idle': {"), driver.indexOf("case 'map': {"));
-  assert.match(idle, /\{ timeoutMs: budget \+ 5_000 \}/, 'the transport budget must exceed the wait');
+  assert.match(idle, /waitInSlices\('ui\.waitIdle', \{\}, budget,/, 'the idle oracle waits the whole budget, in slices');
 });
 
 await test('a project adapter that still lists workspaceDomains loads cleanly and never forwards them', async () => {
@@ -3370,14 +3380,14 @@ await test('a harvested candidate is never mistaken for a flow', async () => {
   const { collectJson } = await runnerSelection();
   await withFlowLibrary(async (library, root, path) => {
     const { mkdir, writeFile } = await import('node:fs/promises');
-    await mkdir(path.join(root, 'agripad', 'candidates'), { recursive: true });
-    await writeFile(path.join(root, 'agripad', 'candidates', '20260927-1200-1.candidate.json'), JSON.stringify({
+    await mkdir(path.join(root, 'shop', 'candidates'), { recursive: true });
+    await writeFile(path.join(root, 'shop', 'candidates', '20260927-1200-1.candidate.json'), JSON.stringify({
       format: 'g9/flow-candidate', schemaVersion: 1, tags: ['@candidate'], device: 'X', steps: [{ kind: 'cmd', source: 'Map', key: 'tap' }],
     }));
     await library.write(flowspec.toFlowSpec({ id: 'real', name: 'Real', steps: [{ id: 's1', type: 'navigate', url: 'https://a.test/' }] }));
     const { flows } = await library.list();
     assert.deepEqual(flows.map((f) => f.id), ['real'], 'the candidate is not listed as a flow');
-    assert.deepEqual((await collectJson(path.join(root, 'agripad'))).length, 0, 'and the runner\'s loader never even reads it');
+    assert.deepEqual((await collectJson(path.join(root, 'shop'))).length, 0, 'and the runner\'s loader never even reads it');
   });
 });
 

@@ -2,7 +2,7 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v3.6.3, 2026-10-13 — the published 3.6 release (3.6.0–3.6.2 never passed the pipeline; §9, the 3.6.3 entry). 3.6.1 (§9): the macOS self-update moves the new bundle into place (a copy was stopped by macOS on a real Mac). 3.6.0 (§9, the 3.6.0 entry): the "Human Wave" icon everywhere; the
+**Status:** v3.7.0, 2026-10-15 — device apps are the project's data: `g9.project.json` `devices` declares them, one generic driver (`runner/drivers/device.mjs`) drives any app that speaks the QA bridge protocol ([docs/DEVICE_BRIDGE.md](docs/DEVICE_BRIDGE.md)), and the device steps `tapFeature`, `zoomToFeature`, `longPressFeature`, `selectItem`, `setValue`, `popupButton` and the `onScreen` oracle join the vocabulary (§9, the 3.7.0 entry). Before it, v3.6.3, 2026-10-13 — the published 3.6 release (3.6.0–3.6.2 never passed the pipeline; §9, the 3.6.3 entry). 3.6.1 (§9): the macOS self-update moves the new bundle into place (a copy was stopped by macOS on a real Mac). 3.6.0 (§9, the 3.6.0 entry): the "Human Wave" icon everywhere; the
 desktop updater clears the way before it installs (the agents' MCP servers no longer make every
 install fail), installs on demand with **Force install**, and a Mac updates itself instead of opening
 the release page; and the next agent field report — case-sensitive and literal name matching, an
@@ -101,9 +101,10 @@ extension/sw.js (Engine 1) ───────────WS /g9────�
 - **The desktop app is a client and an installer**, never an engine (§2.5).
 
 **Browser operations are independent of the site's framework.** Product knowledge lives as data in
-the project under test (`g9.project.json`, the FlowSpec library under its `flowsDir`); the runner has a
-separate AgriPad device adapter (`runner/drivers/agripad.mjs`, adb). None of that puts
-framework-specific behaviour into the browser tools. Keep this repo separate from projects under test.
+the project under test (`g9.project.json`, the FlowSpec library under its `flowsDir`, and since 3.7.0 the
+device apps under `devices`); the runner has one generic device driver (`runner/drivers/device.mjs`, adb)
+for any app that speaks the QA bridge protocol (docs/DEVICE_BRIDGE.md). None of that puts
+framework-specific behaviour into the browser tools, and no app is named in this repository. Keep this repo separate from projects under test.
 
 ---
 
@@ -384,9 +385,10 @@ G9BrowserAgent/
 │                                 http.mjs (MCP over HTTP, bearer token: agents on other machines)
 ├── docker/                       (3.2) the browser node image: Dockerfile, compose.yaml (two nodes), root/ (s6
 │                                 services svc-g9d + svc-g9mcp, the desktop autostart, the health check), README.md
-├── lib/                          version.mjs (reads package.json), ws-client.mjs, ws-codec.mjs (RFC 6455, shared)
-├── runner/                       g9.mjs (run · list · calibrate · approve · spec · ab; exit 0–4), mcp-client.mjs,
-│                                 report.mjs, drivers/agripad.mjs, README.md
+├── lib/                          version.mjs (reads package.json), ws-client.mjs, ws-codec.mjs (RFC 6455, shared),
+│                                 devices.mjs (3.7: g9.project.json "devices" → device platform profiles)
+├── runner/                       g9.mjs (run · list · calibrate · approve · spec · ab · harvest; exit 0–5), mcp-client.mjs,
+│                                 report.mjs, drivers/device.mjs (any app's QA bridge over adb), README.md
 ├── bridge/src/server.js          v1 entry point kept as a 9-line forwarder to mcp/shim.mjs (v1 MCP configs)
 ├── desktop/                      Electron shell (the ONLY npm dependencies): main.mjs, preload.cjs, lib/, renderer/,
 │                                 test/, build/, scripts/, electron-builder.yml, dist/ (built installer)
@@ -1132,13 +1134,13 @@ into view first"). Model limits are in §8.
 ### 6.8 `runner/`
 
 `g9.mjs`: `list`, `run <flowId|suite:<name>|tag:<name>|all>`, `calibrate`, `approve`, `spec`, `ab`,
-`harvest` (AgriPad: drains the device's passive flow recorder into
-`<flowsDir>/agripad/candidates/*.candidate.json` — raw material, never loaded as flows).
+`harvest` (a device platform: drains the app's passive flow recorder into
+`<flowsDir>/<flowsFolder>/candidates/*.candidate.json` — raw material, never loaded as flows).
 Default `--engine launched` (headless, own profile, flows imported from the repository's FlowSpec
 library into the launched store); `--engine extension` runs on the person's browser's current tab.
 `--browser`, `--headed/--headless`, `--profile`, `--humanize`, `--humanize-seed`, `--stealth`,
 `--keep-engine`, `--port`, plus v1's run options (`--env`, `--data`, `--report`, `--timing`,
-`--signature`, `--pin`, `--strict-pin`, `--seed`, `--no-compare`, `--project`, `--platform agripad`,
+`--signature`, `--pin`, `--strict-pin`, `--seed`, `--no-compare`, `--project`, `--platform <device>`,
 `--fail-on`). `--env` is real (3.3.0): it re-points flow URLs at the chosen environment's
 baseUrl, resolves `{{baseUrl}}`, and selects that environment's known world; `--data` (then
 `G9_SECRET_<NAME>`) resolves `{{secret:…}}` parameters, and a flow whose required secret or
@@ -1565,7 +1567,8 @@ Recorded on 2026-09-25; none blocks a release.
 2. **A code-signing certificate** for the installer and `G9BrowserAgent.exe` (§8.3).
 3. **Where updates are hosted** — an http(s) URL for `updateUrl` ([docs/INSTALL.md](docs/INSTALL.md),
    "Updates and update hosting").
-4. **Whether `runner/drivers/agripad.mjs` is still needed.** Kept as is.
+4. ~~Whether the device driver is still needed.~~ Resolved in 3.7.0: kept, made generic — it names no
+   app; the project declares its apps in `g9.project.json` `devices` (docs/DEVICE_BRIDGE.md).
 5. **When to retire the suggestions box (3.6, TEMPORARY).** See Rules item 9: ask the owner at every
    release after 3.6.0 whether to remove it.
 5. **The stealth-critical third-party components.** `setup/stealth-pages.json` lists only the six
@@ -1923,6 +1926,51 @@ after every step of a forty-step flow doubles the run for evidence nobody reads.
 Entries below describe what was believed or tested at the time. Current capability claims and
 unresolved findings are in §§4, 7 and 8, which supersede historical assertions. Entries dated before
 2026-09-21 describe v1 (the bridge, the four control modes, the workspace allowlist).
+
+### 2026-10-15 — v3.7.0: device apps are the project's data, and the device vocabulary grows
+
+**Why.** The runner's device support had grown around one consuming project: its app's name was the
+platform name, its package id and flow folders were constants, its error screen's automation id and crash-log
+path were in the driver, and its own messages ("switch it on under …") were the hints. That broke this
+repository's first rule — product knowledge lives as data in the project under test (§1, `daemon/project.js`)
+— and it meant a second app needed a code change here. Nothing about the mechanism was app-specific; only the
+data was.
+
+- **`g9.project.json` `devices`** (read by the new `lib/devices.mjs`, used by the runner and the daemon). Each
+  entry is a device platform: `flowsFolder`, `flowKind`, `label`, `framework`, `package`, `port`,
+  `errorScreens`, `crashLog`, `setupHint`, `tokenHint`, `selftestHints` — all optional (runner/README.md
+  "Devices"). A malformed entry is reported in the project's `problems` and kept out; the others survive.
+- **One driver for any app: `runner/drivers/device.mjs` (`DeviceDriver`)**, the former app-named driver
+  with every product constant moved to the profile. `--platform <name>` is `web` or a declared device;
+  anything else is refused and the error lists the declared ones and where they are declared.
+  `--device-port` / `--package` default to the profile's `port` / `package`.
+- **The protocol is written down: [docs/DEVICE_BRIDGE.md](docs/DEVICE_BRIDGE.md)** — transport, hello,
+  lease, token, `DERAILED:`, every command the driver sends with its arguments and result. An app that
+  implements it can be tested; nothing in this repository has to change.
+- **The daemon files a device flow under the folder the project maps its kind to** (`relativePathFor(spec,
+  kindFolders)`, `FlowLibrary(root, kindFolders)`); an unmapped kind is its own folder. It used to translate
+  one app's kind to that app's folder by name.
+- **Device steps** (from work on a consuming project's map app, now generic): `tapFeature`, `zoomToFeature`,
+  `longPressFeature` (`target: { layer, featureId, idField? }`), `selectItem` (a virtualized list's row by its
+  data), `setValue` (a picker, date, wheel or switch), `popupButton` (a popup button by its caption), and the
+  `onScreen` oracle (drawn fully, unclipped, clear of the system bars). A flow's own non-secret parameter
+  defaults are its data when `--data` says nothing.
+- **Port guard**: with a package to guard, the uid listening on the device port (`/proc/net/tcp{,6}`) must be
+  the package's; nothing listening → the app is launched and its listener awaited; another app → refused by
+  name. A hello that names a package must name the same one. **Off-path guard**: the profile's error screens,
+  a dead process or a `DERAILED:` refusal stop the flow at once, with the head of the profile's crash log as
+  evidence; long waits are sliced. **Reports** carry `app: { framework, package }` and `fidelity`
+  (`real-touch` when the bridge declares `ui.tap:real-touch`, else `gray-box`).
+- `${secrets.X}` in a device flow is refused with the `{{secret:X}}` fix; device flows are validated before
+  adb is asked anything; `run` and `harvest` share one device-selection helper.
+- History: the change-log entries v1.7.8–v1.7.10 were rewritten without one project's app internals; the
+  tool-side facts are unchanged.
+
+Tests: `setup/unit/device.test.mjs` (32, fictional apps `com.example.shop` / `com.example.shop.next`: the
+profiles and their problems, the kind→folder map, the /proc/net and package parsers, every `ensureApp`
+outcome against a scripted `adb shell`, the hello package check, the self-test hints, each step's wire
+command and settle, the lease, the off-path guard with and without error screens, the CLI refusing bad input
+before adb). `extensiontest.mjs` follows the rename.
 
 ### 2026-10-13 — v3.6.3: the 3.6 release — updates that always install, a Mac that updates itself, and the next field report
 
@@ -2504,7 +2552,7 @@ never a sum past `runs`.
 `runner/report.mjs`). A flow may declare `requires: { minBuild?, features?, environments? }`
 (validated; unknown keys refused; carried through toFlowSpec/fromFlowSpec — they used to drop
 everything they did not know, so a Pull → Push would have silently erased it). Before a tab opens or
-a device is driven: environments against `--env`; on maui, `qa.ping`/`qa.capabilities` once per
+a device is driven: environments against `--env`; on a device, `qa.ping`/`qa.capabilities` once per
 device per run (lenient numeric-dotted `minBuild` compare); on web, the environment object form —
 data it does not declare is a SKIP saying "cannot evaluate requires.X … declare it in
 g9.project.json", never a silent pass. SKIPPED is first-class: `skipReason` in run.json,
@@ -2528,10 +2576,10 @@ desktop's verdict maps learned SKIPPED/NOT_RUN and 5.
 g9.project.json (nulls without git), appBuild from the device's qa.ping or the web environment's
 declared `build`.
 
-**`g9 harvest --platform agripad`** (`runner/g9.mjs`). Reaches the device exactly like
-`run --platform agripad` (adb forward, port 8799, lease), calls `flow.record.harvest` (drains the
+**`g9 harvest --platform <device>`** (`runner/g9.mjs`). Reaches the device exactly like
+`run --platform <device>` (adb forward, the bridge port, lease), calls `flow.record.harvest` (drains the
 app's passive ring buffer) and writes each candidate to
-`<flowsDir>/agripad/candidates/<yyyyMMdd-HHmm>-<n>.candidate.json` (`format: "g9/flow-candidate"`,
+`<flowsDir>/<flowsFolder>/candidates/<yyyyMMdd-HHmm>-<n>.candidate.json` (`format: "g9/flow-candidate"`,
 schemaVersion 1, tags `["@candidate"]`, capture time, device, provenance, the device's steps passed
 through untouched). An app build without the command gets a friendly message naming its build.
 Candidates are NOT flows: the runner's loaders read only `*.flow.json`, and the daemon's library
@@ -2539,7 +2587,7 @@ walk now skips `*.candidate.json` by name (it used to list any `.json` as a flow
 
 **Also found and fixed on the way.**
 - Device `type` steps typed NOTHING: the driver sent `text`, the bridge reads `args.value` — every
-  type step "passed" while the field stayed empty (`runner/drivers/agripad.mjs`).
+  type step "passed" while the field stayed empty (the device driver).
 - The device's consent refusal ("Live access has not been granted") was classified FAIL_PRODUCT:
   the runner's pattern said "has not granted live access". Both wordings classify as
   FAIL_AUTOMATION now.
@@ -3939,9 +3987,9 @@ does nothing. A two-user flow switches; it does not run in parallel.
   `git checkout .` and eventually to discard a real edit.
 - **Suites are queries, not lists.** A hand-maintained array shrinks the first time somebody forgets
   to add their flow, and the Full test still reports green.
-- **An AgriPad driver** (`runner/drivers/agripad.mjs`). FlowSpec always carried
-  `target: { kind, adapter }`; this fills it in. `node runner/g9.mjs run suite:agripad.full
-  --platform agripad` drives a real device over `adb forward` with no server, no operator and no
+- **A device driver** (`runner/drivers/`). FlowSpec always carried
+  `target: { kind, adapter }`; this fills it in. `node runner/g9.mjs run suite:<name>
+  --platform <device>` drives a real device over `adb forward` with no server, no operator and no
   browser. Runs are labelled `gray-box`, stated rather than implied: actuating a control's own
   command proves the command works, not that a finger could have reached the control.
 
@@ -4067,7 +4115,7 @@ scrim and the dismiss button has no id, so the FlowSpec had no way to express th
 already supported. `dismiss` is now an action.
 
 **The active tab carries no tappable id.** The bar offers only the tabs you are *not* on, so a flow
-that opens by clicking its own end state passes once and fails on every rerun. The AgriPad flow
+that opens by clicking its own end state passes once and fails on every rerun. The device flow
 therefore starts on Tasks and ends on Map, and is verified by running it three times in a row rather
 than once: **11.1s / 10.6s / 11.6s, 20/20 each time.**
 
@@ -4075,7 +4123,7 @@ A fifth thing was not a gap but a message: a `visible` assertion missing its id 
 device's own complaint, which is about the command rather than the flow. It now names the step and
 the shape to use.
 
-The flows: `agripad.navigation.site-and-tabs` (20 steps — probes, every tab, the map, the site
+The flows: a device `navigation.site-and-tabs` (20 steps — probes, every tab, the map, the site
 sheet and its search) and `web.tasks.browse-and-open` (17 steps — the grid, the toolbar search,
 clearing it, opening a task and closing it, with nine checks interleaved).
 
@@ -4199,7 +4247,7 @@ Tests: **26/26 bridge, 66/66 extension, 59/59 live CDP.**
 The last two open gaps in the QA ledger are closed. Both were things a tester could describe and
 the tool could not do.
 
-**GAP-0002 — forcing a failure.** `browser_network action:"intercept"` takes rules that match a URL
+**Forcing a failure** (a tool gap reported by a consuming project). `browser_network action:"intercept"` takes rules that match a URL
 substring and then answer the request yourself (`status`, `body`, `headers`), fail it at the network
 level (`abort: "TimedOut"`, `"ConnectionRefused"`, …), or just make it slow (`delayMs`). `times: 1`
 fires once and steps aside, which is how "the first save fails, the retry succeeds" gets written.
@@ -4214,7 +4262,7 @@ response carries `x-g9-intercepted`, so a fake 500 is never mistaken for a real 
 Validation is strict and loud, because the failure mode here is silent: a rule that never matches
 means the test passes, the error path was never exercised, and nobody finds out.
 
-**GAP-0001 — downloads.** `watch_downloads` → `wait_download` → `downloads`. Built on
+**Downloads** (a tool gap reported by a consuming project). `watch_downloads` → `wait_download` → `downloads`. Built on
 `Browser.setDownloadBehavior` with `eventsEnabled` rather than the `downloads` permission, so no QA
 machine is asked for new trust at install time for one assertion. The result reports filename, URL,
 byte count, and a computed **`empty`** flag — which is the actual defect this exists for: "the
@@ -4330,23 +4378,19 @@ converge, and that the bridge stops stripping the entry.
 
 ### 2026-09-11 — v1.7.10: the last two unproven paths, both now driven end to end
 
-**Remote execution works.** The one path that had never been run: server → SignalR → device. A
-`qa.ping` through `/api/automation/devices/{id}/command` came back in **111ms**, and the whole
-`agripad.smoke.device-health` flow ran remotely with **PASS, 4/4, 552ms**, persisted to the run
-history and picked up by the coverage board. Everything about that path had been argued from code
-until now.
+(Rewritten in 3.7.0 without the app-side detail of the project that drove it; the tool-side facts are unchanged.)
 
-Worth recording why it took so long to reach: the device was reporting "متصل شد" in the app while
-`/api/fleet` showed it offline for four hours. Both were true. An `adb uninstall` earlier in the
-session had given the emulator a **new client id**, so the device I kept checking was the old
-identity, sitting where it was abandoned. The fleet had the new one, online and consented, the
-whole time. When two sources disagree about the same device, check that they are talking about the
-same device.
+**Remote execution works.** The one path that had never been run: a project's server relaying a device
+command to the app. A `qa.ping` came back in **111ms**, and a four-step device-health flow ran remotely with
+**PASS, 4/4, 552ms**, persisted to the run history. Everything about that path had been argued from code
+until now. Why it took so long to reach is worth keeping: the app said it was connected while the server's
+device list showed it offline for hours — both true, because a reinstall had given the device a **new client
+id**. When two sources disagree about the same device, check that they are talking about the same device.
 
-**The web flow library is no longer empty.** `web.smoke.sites-search` is recorded, replayed
-(**5/5 PASS**), exported as a FlowSpec and saved to `QA/Flows/web/smoke/`. All four suites now
-select at least one flow, so none of them is a vacuous green any more — which was the failure
-v1.7.5's `requireSelection` was built to catch, now closed from the other end as well.
+**The web flow library is no longer empty.** A sites-search smoke flow is recorded, replayed (**5/5 PASS**),
+exported as a FlowSpec and saved under `QA/Flows/web/smoke/`. All four suites now select at least one flow,
+so none of them is a vacuous green any more — which was the failure v1.7.5's `requireSelection` was built to
+catch, now closed from the other end as well.
 
 The first attempt at that flow is the more useful half of the story. Its `aria` assertion captured
 the whole page **after** the weather widgets had loaded, so on replay it failed with
@@ -4361,81 +4405,48 @@ with an editor or MCP client running, the runner starts its own and nothing join
 listed three things to check that were all fine. It now reads the registry and says which port and
 pid actually has the extension, and what to do about it.
 
-Tests: **26/26 bridge, 59/59 extension**, plus the AgriPad suite green through the QA launcher.
+Tests: **26/26 bridge, 59/59 extension**, plus the device suite green.
 
 ### 2026-09-11 — v1.7.9: dialogs are automatable, and the report is written for the reader
 
-**GAP-0006 is closed: a dialog no longer freezes quiescence.** `G9SafeCommand` keeps a handler
-registered as running until it returns, and a handler awaiting a modal does not return until the
-user chooses — so `AppQuiescence` reported a `cmd:` reason for as long as any dialog was open
-(341s, measured), and every step after that timed out. `QaModalWatch` now answers "is a blocking
-overlay up?" and a bare `cmd:` entry stops counting while one is. **Only `cmd:`**: `http:`, `ui:`
-and explicit `Busy` scopes are untouched, because those are work whether or not a dialog is open.
+(Rewritten in 3.7.0 without the app-side detail of the project that drove it.)
 
-Proof on the device: opening the diagnostics chooser went from `settled:false` plus a 30s timeout
-to `ok:true settled:true busy:[]`, with `app.busy` reporting `idle:true` while the dialog was up.
+**A dialog no longer freezes quiescence — a lesson for every QA bridge.** An app that counts a command
+handler as busy until it returns reports busy for as long as a modal that handler awaits is open (341 s,
+measured), and every step after it times out. The bridge must stop counting such a handler while a
+blocking overlay is up — and must ask the controls for their STATE (is a popup open, how many sheets are
+showing) rather than infer it from type names: the first fix matched every element whose type name
+contained "Popup" or "Sheet", found a permanently present (closed) debug popup, and would have made
+quiescence never wait for anything. Asking beats guessing.
 
-**The first version of that fix was worse than the bug**, and it is worth recording why. It matched
-on the TYPE NAME of every element — anything containing "Popup" or "Sheet". On a completely clean
-screen it reported a dialog every time, because `DeveloperDebugOverlay._devPopup` is a `G9PopupView`
-that lives in the tree permanently and is merely closed. A permanently-true answer there would have
-suppressed every `cmd:` reason forever, so quiescence would never have waited for anything: a wait
-that was too long traded for results that are quietly wrong. It now asks the controls for their
-STATE — `G9PopupView.IsOpen`, `G9BottomSheetHelper.GetOpenSheetCount()` — instead of inferring
-it from a name. Asking beats guessing, and the guess was available the whole time.
-
-**GAP-0007 is closed too.** The chooser's three options carry ids now
-(`DiagnosticsChooser.LiveDiagnostic` and friends) — set by hand, because the popup is built in
-code and there is no `x:Name` to derive from. The dismiss button cannot carry one at all
-(`G9PopupButton` is a description, not a control), so instead there is a new bridge command
-**`ui.dismissOverlay`** that closes any popup or sheet and needs no id — a better answer than
-naming one button, because it works for every dialog rather than this one. Verified end to end:
-open the chooser, tap "Live diagnostics", land on the Live Diagnostic screen, all through
-automation. That path could not be driven at all this morning.
+**`ui.dismissOverlay`** (docs/DEVICE_BRIDGE.md) closes any popup or sheet and needs no id: a popup host that
+renders its buttons from a description gives them no id at all, and one command that works for every
+dialog is a better answer than naming one button.
 
 **Written for the person reading it.** The audience for `report.html` is a tester, not the person
 who wrote the runner, so it is now Persian, RTL, and each verdict carries **one sentence saying what
 to do next** — most importantly that `FAIL_AUTOMATION` must NOT be filed as a bug. A report that
-names a category and stops has not told anybody anything they can act on.
+names a category and stops has not told anybody anything they can act on. In the same spirit a failing
+device self-test explains the ordinary states (an unfinished first sync, nobody signed in) instead of
+printing SQL — since 3.7.0 from the project's own `selftestHints`.
 
-The same reasoning produced `QA/Run-Tests.ps1` (one command: finds the device, launches the app,
-waits for it to be genuinely ready, runs, opens the report) and a precondition message that now
-explains the two ordinary causes instead of printing SQL: "no such table" is an unfinished first
-sync, "no active database" is nobody logged in. Both were hit live, and both read like defects
-without the sentence.
-
-Tests: **26/26 bridge, 59/59 extension**, and a clean end-to-end run through the launcher.
+Tests: **26/26 bridge, 59/59 extension**, and a clean end-to-end run.
 
 ### 2026-09-11 — v1.7.8: the wait budget was being sent where nothing reads it
 
 The v1.7.7 fix made the `idle` oracle wait. This one makes the wait it asks for actually arrive.
 
-`QaLocalRequest` reads `TimeoutMs` off the **request root** and defaults it to 30000. A `timeoutMs`
-inside the `args` object is never looked at. The runner's driver was already correct — it passes
-the budget through `command(cmd, args, { timeoutMs })`, which lands at the root — but the server's
-`TranslateAssertion` put it in `Args`, so every remote `idle` assertion silently got the default no
-matter what the flow asked for. An oracle that promises a longer wait and does not take one is a
-flake with a delayed fuse.
+A QA bridge reads `timeoutMs` off the **request root** (docs/DEVICE_BRIDGE.md) and defaults it to 30000; a
+`timeoutMs` inside the `args` object is never looked at. The runner's driver was already correct — it passes
+the budget through `command(cmd, args, { timeoutMs })`, which lands at the root — but a server that relayed
+assertions put it in `args`, so every remote `idle` assertion silently got the default no matter what the
+flow asked for. An oracle that promises a longer wait and does not take one is a flake with a delayed fuse.
 
 Proven on the device rather than argued: `ui.waitIdle` with a root-level `timeoutMs: 45000` ran
 **30.3s and returned `idle: true`**; the same value inside `args` had been cut off at exactly 30s.
-The server now threads a per-step budget through `CommandBody`, and the translator tuple carries it.
 
-Found while trying to complete the one path that had never been driven end to end — remote
-execution through the Diagnostic server. That attempt also turned up two AgriPad blockers, both now
-in the QA gap ledger rather than quietly fixed:
-
-- **GAP-0006** — a handler that awaits a modal stays registered as running, so `AppQuiescence`
-  reports busy for as long as any dialog is open (measured: 341s). Every step after a flow opens a
-  dialog times out. The app is not working; it is waiting for a human.
-- **GAP-0007** — the dialog's own options carry no `AutomationId`, so even a fixed quiescence
-  could not tap them.
-
-One thing did get fixed on the app: the "Live Diagnostic" card on the Profile page was a `Border`
-with a tap handler and no name, which made the only route to the live-access screen invisible to
-automation. It now has `x:Name="LiveDiagnosticCard"`, verified on the emulator after a full
-rebuild — and the rebuild is worth noting too, because an incremental Android build reported
-success twice without repackaging the APK. `--no-incremental` was what actually produced it.
+Also worth keeping: an incremental Android build reported success twice without repackaging the APK;
+`--no-incremental` was what actually produced a build carrying the change.
 
 Tests: **26/26 bridge, 59/59 extension**, plus three consecutive green device runs.
 
@@ -4444,12 +4455,12 @@ Tests: **26/26 bridge, 59/59 extension**, plus three consecutive green device ru
 The v1.7.6 verdict fix was the right fix for the wrong layer. It correctly stopped filing
 `still busy: …` as a product regression — but the run should not have been failing at all.
 
-`case 'idle'` in the AgriPad driver called `app.busy`, which is an **instantaneous snapshot**, and
-failed if anything whatsoever was in flight at that microsecond. It never waited. `agripad.smoke`
+`case 'idle'` in the device driver called `app.busy`, which is an **instantaneous snapshot**, and
+failed if anything whatsoever was in flight at that microsecond. It never waited. A smoke suite
 asserts `idle` as its very first step, so the entire suite's colour depended on whether a background
 request happened to overlap the moment the run started.
 
-The background request is real and measurable: a periodic `GET /api/NewAuth` token refresh that
+The background request is real and measurable: a periodic token refresh request that
 takes **~20 seconds** from this emulator — `ui.waitIdle` returned `idle: true` after 22.9s of
 genuine waiting. So the suite was a coin flip weighted by a 20-second window.
 
@@ -4471,8 +4482,8 @@ Tests: **26/26 bridge, 58/58 extension**.
 
 ### 2026-09-11 — v1.7.6: the same verdict rule, written three times, had drifted
 
-Found by running the AgriPad smoke suite once more after the v1.7.5 fixes: it came back
-**FAIL_PRODUCT**, with `still busy: http:GET /api/NewAuth`. `app.busy` reported `idle: true`
+Found by running the device smoke suite once more after the v1.7.5 fixes: it came back
+**FAIL_PRODUCT**, with `still busy: http:GET /api/session/refresh`. `app.busy` reported `idle: true`
 seconds later and the identical suite passed. A background token refresh happened to be in flight
 when the flow started — nothing was wrong with the product, and a readiness gate declining to
 proceed is that gate working.
@@ -4501,8 +4512,8 @@ and all in the same area: how a run decides *what to run*.
 **1. The project file was only ever looked for in the working directory.** `loadProject` resolved
 `g9.project.json` against `process.cwd()` and returned `null` on a miss — silently, because a
 missing project file is a legitimate state for the browser path. `flowsDir` then fell back to a
-cwd-relative default, and the run died with `No AgriPad flows found under
-...(tool dir)/QA/Flows/agripad`, naming a directory that has never existed. The flows were
+cwd-relative default, and the run died with `No device flows found under
+...(tool dir)/QA/Flows/<device>`, naming a directory that has never existed. The flows were
 fine; only the search was wrong. Running from the tool's own folder — the most natural place for
 QA to be — was the failing case, and the error blamed the flow library for it.
 
@@ -4526,7 +4537,7 @@ available. The one guard covers both platforms.
 **3. A suite meant two different things depending on the platform.** The device path read
 `QA/Flows/suites/*.json` and applied `select`; the browser path only matched a literal `suite`
 field on the recording. Same id, two semantics, and a "Full-Test" that covered different things on
-web than on AgriPad. The browser path now reads the same suite files and applies the same query,
+web than on a device. The browser path now reads the same suite files and applies the same query,
 keeping the literal-field match as a fallback so recordings made before the suite files still run.
 
 Also in this version: `bridge/package.json` was still 1.6.0 while the extension was at 1.7.4,
@@ -4539,8 +4550,8 @@ reads the suite file.
 
 ### 2026-09-10 — v1.7.3: two more, both about honesty rather than function
 
-**The self-test's port collided with AgriPad's.** `setup/selftest.mjs` used 8799, which is exactly
-the port the AgriPad QA guide tells people to `adb forward`. Anyone with a device plugged in got
+**The self-test's port collided with the device bridge's.** `setup/selftest.mjs` used 8799, which is exactly
+the default port of the device QA bridge (docs/DEVICE_BRIDGE.md) that people `adb forward`. Anyone with a device plugged in got
 three failures reading "Port 8799 is in use by another program" — a true sentence about an
 irrelevant collision, and one that reads like a broken bridge. Moved to 8859, outside the discovery
 range as well so a running bridge cannot wander into it either.

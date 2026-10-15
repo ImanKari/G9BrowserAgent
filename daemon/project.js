@@ -36,6 +36,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { normalizeDevicePlatforms, flowFoldersByKind } from '../lib/devices.mjs';
 
 export const PROJECT_FILENAME = 'g9.project.json';
 
@@ -63,6 +64,8 @@ export function emptyProject() {
     destructiveActions: [],
     reportSink: null,
     flowsDir: null,
+    devices: {},
+    flowFolders: {},
     problems: [],
   };
 }
@@ -143,6 +146,13 @@ export function loadProject(startDir = process.cwd(), options = {}) {
   project.operationAliases = obj(raw.operationAliases);
   project.destructiveActions = arr(raw.destructiveActions).filter((s) => typeof s === 'string');
   project.reportSink = raw.reportSink ?? null;
+
+  // The apps the project tests on a device (lib/devices.mjs): read for the flow library's folders here;
+  // the runner reads the same entries to drive them.
+  const devices = normalizeDevicePlatforms(raw.devices);
+  project.devices = devices.platforms;
+  project.flowFolders = flowFoldersByKind(devices.platforms);
+  project.problems.push(...devices.problems);
 
   // Where the flow library lives, relative to the adapter. Defaults to QA/Flows
   // because that is where the convention puts it; overridable for repos that

@@ -79,7 +79,7 @@ export async function importFlow(spec, { approved = null, images = {}, id = null
     ...fresh,
     id: id ? String(id) : (local?.id ?? undefined),
     flowId: spec.id,
-    platform: local?.platform ?? (spec.target?.kind === 'maui' ? 'maui' : 'web'),
+    platform: local?.platform ?? (spec.target?.kind && spec.target.kind !== 'web' ? spec.target.kind : 'web'),
     ...(local?.createdAt ? { createdAt: local.createdAt } : {}),
   };
   for (const key of LOCAL_TRUTH) if (local?.[key] !== undefined) base[key] = local[key];

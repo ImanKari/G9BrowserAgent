@@ -20,11 +20,13 @@
  * ## Layout
  *
  *   QA/Flows/web/auth/login.flow.json
- *   QA/Flows/agripad/map/site-select.flow.json
+ *   QA/Flows/<device platform>/settings/language.flow.json
  *   QA/Flows/suites/web.full.json
  *
  * The folder path is derived from the flow's own `folder` field, so moving a
- * flow between sections is a metadata edit rather than a manual file move.
+ * flow between sections is a metadata edit rather than a manual file move. The
+ * platform folder is the flow's `target.kind`, unless the project maps that kind
+ * to another folder (g9.project.json "devices": flowKind → flowsFolder).
  *
  * ## Two rules that keep the diffs honest
  *
@@ -55,8 +57,13 @@ const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
 const LOCAL_ONLY = ['runHistory', 'lastRun', 'flaky', 'knownWorld', 'knownWorlds', 'surpriseHistory'];
 
 export class FlowLibrary {
-  constructor(rootDir) {
+  /**
+   * @param {string|null} rootDir the project's flowsDir
+   * @param {Record<string,string>} [kindFolders] FlowSpec target.kind → platform folder (lib/devices.mjs flowFoldersByKind)
+   */
+  constructor(rootDir, kindFolders = {}) {
     this.root = rootDir ? path.resolve(rootDir) : null;
+    this.kindFolders = kindFolders ?? {};
   }
 
   get available() {
@@ -161,7 +168,7 @@ export class FlowLibrary {
       // every suite that selected it quietly stopped covering it (daemon review, 2026-09-22).
       // The fallback name carries the flow's id, so it is the same on every machine and in every
       // push order; later pushes find the file by id anyway.
-      const derived = path.join(this.root, relativePathFor(clean));
+      const derived = path.join(this.root, relativePathFor(clean, this.kindFolders));
       const foreign = await foreignFlowAt(derived, spec.id);
       if (!foreign) {
         target = derived;
@@ -427,10 +434,12 @@ async function foreignFlowAt(file, id) {
  *
  * `platform/folder/name.flow.json`, with the name slugified from the flow's own
  * name rather than its id: `login.flow.json` is reviewable in a diff and
- * `rec_a91f3c.flow.json` is not.
+ * `rec_a91f3c.flow.json` is not. `platform` is the folder the project maps the
+ * flow's `target.kind` to (`kindFolders`), else the kind itself, else `web`.
  */
-export function relativePathFor(spec) {
-  const platform = spec.target?.kind === 'maui' ? 'agripad' : (spec.target?.kind ?? 'web');
+export function relativePathFor(spec, kindFolders = {}) {
+  const kind = spec.target?.kind ?? 'web';
+  const platform = (Object.hasOwn(kindFolders ?? {}, kind) ? kindFolders[kind] : null) ?? kind;
   const folder = (spec.folder ?? '')
     .split('/')
     .map(slug)
