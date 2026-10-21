@@ -719,6 +719,26 @@ test('launch: Chrome for Testing (and only CfT) gets --disable-frame-rate-limit 
   assert.equal(launch.buildArgs({ profileDir: dir, kind: 'cft', extraArgs: ['--disable-frame-rate-limit'] }).filter((a) => a === '--disable-frame-rate-limit').length, 1, 'not doubled');
 });
 
+test('launch: (3.8.1) Edge (and only Edge) gets --edge-skip-compat-layer-relaunch; SYSTEM and code 1002 are explained', () => {
+  // Edge 155.0.4283.62 relaunched itself through its compat layer and exited 0: the new process had
+  // no CDP pipe, so 3 of 3 launches failed ("closed its end of the pipe"). With the switch: ~0.8 s.
+  const dir = path.join(TEMP_ROOT, 'p');
+  const edge = launch.buildArgs({ profileDir: dir, kind: 'edge' });
+  assert.equal(edge.filter((a) => a === '--edge-skip-compat-layer-relaunch').length, 1);
+  for (const kind of ['chrome', 'cft', null]) assert.ok(!launch.buildArgs({ profileDir: dir, kind }).includes('--edge-skip-compat-layer-relaunch'), String(kind));
+  assert.equal(launch.buildArgs({ profileDir: dir, kind: 'edge', extraArgs: ['--edge-skip-compat-layer-relaunch'] })
+    .filter((a) => a === '--edge-skip-compat-layer-relaunch').length, 1, 'not doubled');
+
+  assert.equal(launch.runsAsWindowsSystem({ platform: 'win32', user: 'SYSTEM', home: 'C:\\Windows\\system32\\config\\systemprofile' }), true);
+  assert.equal(launch.runsAsWindowsSystem({ platform: 'win32', user: 'GAM3R$', home: 'C:/WINDOWS/system32/config/systemprofile' }), true, 'the home says it too');
+  assert.equal(launch.runsAsWindowsSystem({ platform: 'win32', user: 'imank', home: 'C:\\Users\\imank' }), false);
+  assert.equal(launch.runsAsWindowsSystem({ platform: 'linux', user: 'SYSTEM', home: '/root' }), false);
+  assert.match(launch.startFailureHint({ kind: 'edge', exit: { code: 1002 }, system: true }), /runs as the Windows SYSTEM account[\s\S]*Edge does not run as SYSTEM \(it exits with code 1002\)[\s\S]*browser:"chrome"/);
+  assert.doesNotMatch(launch.startFailureHint({ kind: 'chrome', exit: { code: 0 }, system: true }), /Edge does not run/);
+  assert.match(launch.startFailureHint({ kind: 'edge', exit: { code: 1002 }, system: false }), /code 1002 when it refuses the account/);
+  assert.equal(launch.startFailureHint({ kind: 'edge', exit: { code: 21 }, system: false }), '');
+});
+
 test('launch: refusals ignore case (Windows Chromium lowercases switch names); "--", switch-like start URLs, JSON nulls', () => {
   const dir = path.join(TEMP_ROOT, 'p');
   for (const arg of ['--ENABLE-AUTOMATION', '--Remote-Debugging-Port=9222', '--User-Data-Dir=C:\\x', '--HEADLESS=new', '--remote-debugging-io-pipes=5,6', '--Disable-Blink-Features=automationcontrolled']) {

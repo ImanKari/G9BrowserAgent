@@ -362,6 +362,51 @@ test('router: ownership refusal between agents, reads always allowed, unknown ta
   await router.call(b, 'browser_interact', { action: 'click', ref: 'e1', tabId: h });
 });
 
+test('router: (3.8.1) a default tab is never another agent\'s current tab; a lost current tab is said once', async () => {
+  const reg = new Registry();
+  const router = makeRouter(reg);
+  const a = agent(reg, 'claude-code');
+  const b = agent(reg, 'claude-code');
+  let active = 5;
+  fakeExtension(reg, router, (msg) => {
+    if (msg.tool === 'browser_tabs') return { tabs: [{ tabId: 5 }, { tabId: 6 }, { tabId: 7 }] };
+    if (msg.tool === 'browser_status') return { current: { tabId: active } };
+    return { tool: msg.tool, tabId: msg.args.tabId };
+  });
+  const [h5, h6, h7] = (await router.call(a, 'browser_tabs', { action: 'list' })).tabs.map((t) => t.tabId);
+
+  const first = await router.call(a, 'browser_snapshot', {});
+  assert.equal(first.tabId, h5, 'a takes the browser\'s active tab');
+  assert.equal(first.currentTab, undefined, 'nothing was lost, nothing is said');
+  // a only READ tab 5, so it owns nothing there — and still b must not land on it.
+  assert.equal(reg.ownerOf(h5), null);
+  await assert.rejects(router.call(b, 'browser_snapshot', {}), /No tab to act on/);
+  active = 6;
+  assert.equal((await router.call(b, 'browser_snapshot', {})).tabId, h6);
+  assert.equal((await router.call(a, 'browser_snapshot', {})).tabId, h5, 'a keeps its own current tab');
+
+  // a's tab closes; the browser shows b's tab, then another one.
+  reg.dropHandle(h5, 'the tab closed');
+  await assert.rejects(router.call(a, 'browser_snapshot', {}), /No tab to act on/, 'never b\'s current tab');
+  active = 7;
+  const moved = await router.call(a, 'browser_snapshot', {});
+  assert.equal(moved.tabId, h7);
+  assert.deepEqual({ tabId: moved.currentTab.tabId, previous: moved.currentTab.previous }, { tabId: h7, previous: h5 });
+  assert.match(moved.currentTab.note, /tab \d+ is gone \(the tab closed\).*Pass tabId/);
+  assert.equal((await router.call(a, 'browser_snapshot', {})).currentTab, undefined, 'said once');
+
+  // A reconnect whose current tab did not come back (daemon.js sets lostCurrent from hello.previous).
+  const c = agent(reg, 'claude-code');
+  c.lostCurrent = { tabId: null, why: 'the daemon restarted, so every tab has a new id' };
+  reg.dropHandle(h6, 'the tab closed');
+  active = 6;
+  await router.call(c, 'browser_tabs', { action: 'list' });
+  const h6b = reg.handleForChrome(reg.extensionEngines()[0].id, 6, { create: false });
+  const status = await router.call(c, 'browser_status', {});
+  assert.equal(status.you.current, h6b);
+  assert.match(status.you.currentTab.note, /current tab was lost: the daemon restarted/);
+});
+
 test('router: (3.5) an argument the tool does not take is refused with the closest real one, never ignored', async () => {
   const reg = new Registry();
   const router = makeRouter(reg);

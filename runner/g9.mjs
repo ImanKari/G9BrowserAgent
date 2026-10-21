@@ -1116,7 +1116,7 @@ async function commandRunDevice({ options, project, reportDir, target, variables
 
   // The flows first: a misplaced or invalid flow file is reported before anything talks to adb, so a
   // broken library is never mistaken for a missing device (and the check runs on a machine without one).
-  let flows = await loadDeviceFlows(project, target, device);
+  let flows = await loadDeviceFlows(project, target, device, { warn: (message) => log(options, `  ! ${message}`) });
   const rules = await suiteRules(project, target, device.id);
   flows = orderFlows(flows, rules.order);
 
@@ -1370,12 +1370,15 @@ function verdictForDevice(steps, failed) {
 /**
  * Read a device platform's flows (`<flowsDir>/<flowsFolder>/**`) off disk and apply the same target grammar
  * the web path uses.
+ *
+ * (3.8.1) Only the flows a run selects must be valid. Every file was validated before selection, so one flow
+ * written for a newer runner (or simply broken) stopped every run of the library, even of flows that did not
+ * use what it used (field report, 2026-10-14). A selected flow that is invalid still refuses the run, naming
+ * its file — as does any invalid file for `all`; one outside the run is a warning (`warn`).
  */
-async function loadDeviceFlows(project, target, device) {
+async function loadDeviceFlows(project, target, device, { warn = () => {} } = {}) {
   const root = flowsRoot(project);
   const folder = path.join(root, device.flowsFolder);
-  const files = await collectJson(folder);
-  const flows = [];
 
   // The same validator the web path runs, widened by the actions only the device
   // driver implements (dismiss, the map steps, list rows, popups, values — see
@@ -1384,12 +1387,14 @@ async function loadDeviceFlows(project, target, device) {
   const deviceActions = new Set([
     ...KNOWN_ACTIONS, 'dismiss', 'tapFeature', 'zoomToFeature', 'longPressFeature', 'selectItem', 'setValue', 'popupButton',
   ]);
-  for (const file of files) {
+  const entries = [];
+  for (const file of await collectJson(folder)) {
     let spec;
     try {
       spec = JSON.parse(await readFile(file, 'utf8'));
     } catch (err) {
-      throw new Error(`${file} is not valid JSON: ${err.message}`);
+      entries.push({ file, spec: null, problems: [`it is not valid JSON: ${err.message}`] });
+      continue;
     }
     const problems = validateFlowSpec(spec, { actions: deviceActions });
     // A flow written for another app is refused by name. Two apps (two builds of one product, say) can
@@ -1399,35 +1404,49 @@ async function loadDeviceFlows(project, target, device) {
       problems.push(`target.kind is "${spec.target.kind}", but ${device.flowsFolder}/ holds "${device.flowKind}" flows.`);
     }
     problems.push(...foreignSecretSyntax(spec));
-    if (problems.length) throw new Error(`${file} is not a valid FlowSpec:\n- ${problems.join('\n- ')}`);
-    flows.push(spec);
+    entries.push({ file, spec, problems });
   }
 
-  if (!flows.length) {
+  if (!entries.length) {
     throw new Error(
       `No ${device.id} flows found under ${folder}. Record one, or check flowsDir in g9.project.json.`,
     );
   }
 
-  if (!target || target === 'all') return flows;
-  if (target.startsWith('suite:')) {
+  const flows = entries.filter((e) => e.spec && typeof e.spec === 'object').map((e) => e.spec);
+  const all = !target || target === 'all';
+  let chosen;
+  if (all) {
+    chosen = flows;
+  } else if (target.startsWith('suite:')) {
     const name = target.slice(6);
     const suite = await readSuite(root, name, device.id);
-    const chosen = suite ? applySelect(flows, suite.select ?? {}) : flows.filter((f) => f.suite === name);
-    return requireSelection(chosen, target, flows, suite);
-  }
-  if (target.startsWith('tag:')) {
+    chosen = requireSelection(suite ? applySelect(flows, suite.select ?? {}) : flows.filter((f) => f.suite === name), target, flows, suite);
+  } else if (target.startsWith('tag:')) {
     const tag = target.slice(4);
-    return requireSelection(flows.filter((f) => (f.tags ?? []).includes(tag)), target, flows, null);
+    chosen = requireSelection(flows.filter((f) => (f.tags ?? []).includes(tag)), target, flows, null);
+  } else {
+    chosen = flows.filter((f) => f.id === target || f.name === target);
+    if (!chosen.length) {
+      throw new Error(
+        `Nothing matched "${target}". Known ${device.id} flows:\n` +
+          flows.map((f) => `  ${f.id}  ${f.name}`).join('\n'),
+      );
+    }
   }
-  const matched = flows.filter((f) => f.id === target || f.name === target);
-  if (!matched.length) {
-    throw new Error(
-      `Nothing matched "${target}". Known ${device.id} flows:\n` +
-        flows.map((f) => `  ${f.id}  ${f.name}`).join('\n'),
-    );
+
+  // A file that is not JSON has no id to select it by: it belongs to "all" and to nothing else.
+  const selected = new Set(chosen);
+  const invalid = entries.filter((e) => e.problems.length);
+  const refused = invalid.filter((e) => (e.spec ? selected.has(e.spec) : all));
+  if (refused.length) {
+    throw new Error(refused.map((e) => `${e.file} is not a valid FlowSpec:\n- ${e.problems.join('\n- ')}`).join('\n\n'));
   }
-  return matched;
+  for (const e of invalid) {
+    warn(`${e.file} is not a valid FlowSpec (not part of this run, so the run goes on): ${e.problems[0]}` +
+      (e.problems.length > 1 ? ` (+${e.problems.length - 1} more)` : ''));
+  }
+  return chosen;
 }
 
 /**

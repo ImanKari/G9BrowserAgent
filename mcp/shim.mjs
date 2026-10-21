@@ -25,13 +25,18 @@
  * stdout is the MCP stream: every diagnostic goes to stderr.
  */
 
+import { randomBytes } from 'node:crypto';
+
 import { log } from './mcp.js';
 import { DaemonLink } from './link.mjs';
 import { createMcpServer } from './server.mjs';
 
 // The daemon link (starts the daemon, names a wrong port holder, heals) is mcp/link.mjs and the tool
 // wiring is mcp/server.mjs, shared with the HTTP transport (mcp/http.mjs) since 3.2.
-const link = new DaemonLink();
+// (3.8.1) Without G9_AGENT_ID, this process is its own identity: a reconnect of THIS shim (a dropped
+// socket) takes back its own tabs and current tab, and two editors that share a client name never
+// share tabs, the call log or opIds.
+const link = new DaemonLink({ identity: process.env.G9_AGENT_ID || `stdio-${process.pid}-${randomBytes(4).toString('hex')}` });
 const mcp = createMcpServer(link, { transport: 'stdio' });
 
 mcp.on('end', () => {

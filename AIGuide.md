@@ -2,7 +2,10 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v3.8.0, 2026-10-15 — the agent-facing text is layered: a core under 2,048 characters (clients cut server instructions at 4,096, older ones at 2,048 — the 13,300-character instructions lost everything after "Acting"), twelve topic guides and a per-tool reference generated from the schemas (`mcp/guides.js`; resources `g9://guide/<topic>`, `g9://tool/<name>`, and `browser_status guide:"…"` answered without a browser); and `browser_tabs action:"finish"` — the last working agent detaches the debugger from the person's browser (§9, the 3.8.0 entry). Before it, v3.7.0, 2026-10-15 — device apps are the project's data: `g9.project.json` `devices` declares them, one generic driver (`runner/drivers/device.mjs`) drives any app that speaks the QA bridge protocol ([docs/DEVICE_BRIDGE.md](docs/DEVICE_BRIDGE.md)), and the device steps `tapFeature`, `zoomToFeature`, `longPressFeature`, `selectItem`, `setValue`, `popupButton` and the `onScreen` oracle join the vocabulary (§9, the 3.7.0 entry). Before it, v3.6.3, 2026-10-13 — the published 3.6 release (3.6.0–3.6.2 never passed the pipeline; §9, the 3.6.3 entry). 3.6.1 (§9): the macOS self-update moves the new bundle into place (a copy was stopped by macOS on a real Mac). 3.6.0 (§9, the 3.6.0 entry): the "Human Wave" icon everywhere; the
+**Status:** v3.8.1, 2026-10-21 — the first four suggestions-box reports (§9, the 3.8.1 entry): launched
+Edge starts again (Edge 155's compat-layer relaunch), a SYSTEM-account daemon is named and `auto` falls
+back to Chrome, an invalid device flow outside a run no longer stops it, and an agent keeps its own
+current tab. Built and published by hand (no pipeline minutes). v3.8.0, 2026-10-15 — the agent-facing text is layered: a core under 2,048 characters (clients cut server instructions at 4,096, older ones at 2,048 — the 13,300-character instructions lost everything after "Acting"), twelve topic guides and a per-tool reference generated from the schemas (`mcp/guides.js`; resources `g9://guide/<topic>`, `g9://tool/<name>`, and `browser_status guide:"…"` answered without a browser); and `browser_tabs action:"finish"` — the last working agent detaches the debugger from the person's browser (§9, the 3.8.0 entry). Before it, v3.7.0, 2026-10-15 — device apps are the project's data: `g9.project.json` `devices` declares them, one generic driver (`runner/drivers/device.mjs`) drives any app that speaks the QA bridge protocol ([docs/DEVICE_BRIDGE.md](docs/DEVICE_BRIDGE.md)), and the device steps `tapFeature`, `zoomToFeature`, `longPressFeature`, `selectItem`, `setValue`, `popupButton` and the `onScreen` oracle join the vocabulary (§9, the 3.7.0 entry). Before it, v3.6.3, 2026-10-13 — the published 3.6 release (3.6.0–3.6.2 never passed the pipeline; §9, the 3.6.3 entry). 3.6.1 (§9): the macOS self-update moves the new bundle into place (a copy was stopped by macOS on a real Mac). 3.6.0 (§9, the 3.6.0 entry): the "Human Wave" icon everywhere; the
 desktop updater clears the way before it installs (the agents' MCP servers no longer make every
 install fail), installs on demand with **Force install**, and a Mac updates itself instead of opening
 the release page; and the next agent field report — case-sensitive and literal name matching, an
@@ -1926,6 +1929,69 @@ after every step of a forty-step flow doubles the run for evidence nobody reads.
 Entries below describe what was believed or tested at the time. Current capability claims and
 unresolved findings are in §§4, 7 and 8, which supersede historical assertions. Entries dated before
 2026-09-21 describe v1 (the bridge, the four control modes, the workspace allowlist).
+
+### 2026-10-21 — v3.8.1: Edge launches again, a SYSTEM daemon says so, one bad device flow no longer stops a run, and an agent keeps its own tab
+
+**Why.** The first four reports in the 3.6 suggestions box (2026-10-13 … 10-15, all from agents on
+3.6.3), checked against the code of 3.8.0 and reproduced where they could be. The box was emptied
+afterwards. Part of one report (the device vocabulary) had already shipped in 3.7.0. This version was
+built and published by hand: the Azure pipeline had no build minutes left (see "Built without the
+pipeline" below).
+
+**1. Launched Edge never started (Windows, Edge 155.0.4283.62, updated 2026-10-16).** Edge now relaunches
+itself through a "compat layer": the process we start exits 0 and a second browser starts with
+`--edge-skip-compat-layer-relaunch` — without our CDP pipe. Every Edge launch failed with "the browser
+closed its end of the pipe … (The browser printed nothing.)" and left a headless Edge running on the
+profile (not in our process tree, so the cleanup missed it). Measured on the owner's PC: 3 of 3 launches
+failed; with the switch Edge answers in 0.6–0.8 s. `engine/launch.js` `KIND_SWITCHES.edge` passes it,
+and a failed start also ends whatever still runs on its profile (`findProfileProcesses`).
+`browser:"auto"` picks Edge when no pinned CfT is installed, so this was every default launch.
+
+**2. Edge exits 1002 under the SYSTEM account.** Two reports, one with a daemon whose home was
+`C:/WINDOWS/system32/config/systemprofile` (an agent started by a service). Reproduced through the
+g9node service of the owner's PC, which runs as SYSTEM: Edge exits 1002 at once, with or without the
+switch; Chrome starts there. Now the error says the daemon runs as SYSTEM, that Edge does not run there,
+and what to do (`startFailureHint`, `runsAsWindowsSystem`); and `browser:"auto"` that hits an early exit
+launches the next installed browser once (Chrome, then CfT, then Edge) and says so in `warnings` ("edge …
+exited before it was ready (code 1002), so chrome … was launched instead"). An explicit `browser` never
+changes. Measured as SYSTEM: explicit `edge` fails with that text; `auto` starts Chrome in 1.7 s with the
+warning; no browser process is left.
+
+**3. One invalid device flow stopped every run of the library.** `g9 run --platform <device>` validated
+EVERY flow before selecting, so one flow with a step the runner did not know refused the run (exit 4)
+even of flows that did not use it. 3.7.0 had already added the steps that report named (`selectItem`,
+`setValue`, `popupButton`, the map steps, `onScreen`, parameter defaults, the map oracle's `featureId`).
+Now only the flows a run selects must be valid; an invalid one outside the run is a warning
+(`loadDeviceFlows(…, { warn })`); a selected one — or any file, for `all` — still refuses the run,
+naming its file. Checked against the reporting project's real library (15 flows): every flow loads and
+every step reaches the bridge with the command its `QaBridge` implements.
+
+**4. An agent's calls landed on another session's tab.** Two Claude Code sessions on one browser: one
+session's calls without `tabId` were answered from the other's tab. The stdio shim had no identity, so a
+reconnect of its socket was a NEW agent with no tabs and no current tab, and the next call took the
+browser's default tab — which could be another agent's (reads claim nothing, so a tab another agent only
+read was free). Now: the stdio shim's identity is its own process (`stdio-<pid>-<random>`, unless
+`G9_AGENT_ID`), so its reconnect takes its tabs back and two editors never share tabs, the call log or
+`opId`s; a default tab is never another connected, working agent's current tab (one that said `finish`
+holds nothing); and when an agent's current tab is gone (closed, or its connection or the daemon renewed:
+`hello.client.previous`), the next call that acts on a default tab says so once in
+`currentTab: { tabId, previous?, note }`. Tagging console and network entries with the agent that caused
+them (also asked) is not done: with the tab no longer shared it would only add noise.
+
+**Tests.** New: daemon (a default tab is never another agent's current tab; a lost current tab is said
+once, also after a reconnect), engine (Edge's switch, the SYSTEM and 1002 hints), extension suite (invalid
+flows outside a run). `check.mjs`: 17 of 17 (unit 637 in the 12 affected suites, self-test 137, extension
+suite 113, panel render, links). Live, on the owner's PC: Engine 2 on Edge 155.0.4283.62 373 passed,
+0 failed; Engine 1 207 passed, 0 failed.
+
+**Built without the pipeline.** The Azure DevOps pipeline (azure-pipelines.yml) could not run (the
+organisation's build minutes were used up), so its stages were done by hand with the same scripts: the
+offline and live checks on Windows; `desktop/scripts/build.mjs` on each OS — Windows on the owner's PC,
+Linux in WSL (Ubuntu 22.04, Node 22), macOS on the office Mac through g9node; the release folder verified
+as one release (`verify-artifacts.mjs --expect win,mac,linux`), SHA256SUMS and the notes
+(`release-notes.mjs`); then tag, mirror and `setup/github-release.mjs`, as the Publish stage does. Not
+repeated by hand: the per-OS update end-to-end test (`desktop/test/update-e2e.mjs`) — `desktop/` did not
+change in this version beyond its version number.
 
 ### 2026-10-15 — v3.8.0: the agent-facing text in layers, and "finish" lets the person's browser go
 

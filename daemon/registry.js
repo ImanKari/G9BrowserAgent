@@ -511,7 +511,12 @@ export class Registry extends EventEmitter {
     const owner = this.owners.get(handle);
     this.owners.delete(handle);
     for (const [name, h] of this.sessions) if (h === handle) this.sessions.delete(name);
-    for (const client of this.clients.values()) if (client.current === handle) client.current = null;
+    for (const client of this.clients.values()) {
+      if (client.current !== handle) continue;
+      client.current = null;
+      // (3.8.1) Said with the next call that acts on a default tab instead (router #takeDefault).
+      client.lostCurrent = { tabId: handle, why: reason };
+    }
     this.emit('tabGone', { tabId: handle, engineId: entry.engineId, owner: owner ?? null, reason });
     if (owner) this.emit('agents');
     return true;
@@ -680,10 +685,19 @@ export class Registry extends EventEmitter {
     const client = this.clients.get(agentId);
     if (!client || client.current == null) return null;
     if (!this.handles.has(client.current)) {
+      client.lostCurrent = { tabId: client.current, why: 'the tab is gone' };
       client.current = null;
       return null;
     }
     return client.current;
+  }
+
+  /** (3.8.1) Another connected, working agent whose current tab this is, or null (one that finished holds nothing). */
+  currentOfOther(handle, agentId) {
+    for (const c of this.clients.values()) {
+      if (c.role === 'agent' && c.id !== agentId && c.working && c.current === handle) return c.id;
+    }
+    return null;
   }
 
   // ------------------------------------------------------------- queues

@@ -884,19 +884,48 @@ export class Router {
       if (!this.registry.extensionEngines().length && !this.engines.list().length) throw this.#noEngineError();
       throw new Error('No tab to act on. Open one with browser_tabs action:"open", or attach one with browser_tabs action:"attach".');
     }
-    this.registry.setCurrent(client.id, handle);
+    this.#takeDefault(client, handle);
     return handle;
+  }
+
+  /**
+   * (3.8.1) A tab chosen by default becomes the caller's current tab. When the caller had a current
+   * tab that is gone (closed, or its connection or the daemon was renewed), the next result says so
+   * (`currentTab`, added in #call): an agent once read another session's page for several calls
+   * before it noticed (field report, 2026-10-13).
+   */
+  #takeDefault(client, handle) {
+    this.registry.setCurrent(client.id, handle);
+    const lost = client.lostCurrent;
+    if (!lost) return;
+    client.lostCurrent = null;
+    client.currentNotice = {
+      tabId: handle,
+      ...(lost.tabId != null ? { previous: lost.tabId } : {}),
+      note: `${lost.tabId != null ? `Your current tab ${lost.tabId} is gone (${lost.why})` : `Your current tab was lost: ${lost.why}`}; ` +
+        `this call acted on tab ${handle}, the browser's default. Pass tabId on every call to be sure which tab you act on.`,
+    };
+  }
+
+  /** (3.8.1) The pending notice of #takeDefault, once: `{ currentTab }` or `{}`. */
+  #takeNotice(client) {
+    const notice = client.currentNotice;
+    client.currentNotice = null;
+    return notice ? { currentTab: notice } : {};
   }
 
   /**
    * May this tab become the caller's current tab by default? Not when another
    * connected agent owns it: a second agent that latched onto the first one's
    * page would have its first action refused and its implicit reads land on
-   * someone else's work. An explicit tabId/session is never subject to this.
+   * someone else's work. (3.8.1) Nor when it is another connected agent's
+   * current tab: reads claim nothing, so an agent that only reads a page owns
+   * none of it. An explicit tabId/session is never subject to this.
    */
   #availableTo(client, handle) {
     const owner = this.registry.ownerOf(handle);
-    return !owner || owner === client?.id || !this.registry.getClient(owner);
+    if (owner) return owner === client?.id || !this.registry.getClient(owner);
+    return !this.registry.currentOfOther(handle, client?.id);
   }
 
   /** The default engine's own idea of "the current tab", among the tabs this caller may take. */
@@ -993,6 +1022,9 @@ export class Router {
     let result = readOnly || tool === 'browser_dialog' ? await execute() : await this.registry.enqueue(handle, execute);
     result = await this.#finishFiles(tool, args, result, target.kind);
     if (written && result && typeof result === 'object' && !Array.isArray(result)) result = { ...result, written };
+    if (client.currentNotice && result && typeof result === 'object' && !Array.isArray(result)) {
+      result = { ...result, ...this.#takeNotice(client) };
+    }
     if (claim?.fromIdle && result && typeof result === 'object' && !Array.isArray(result)) {
       result = { ...result, tookOver: { from: this.registry.describe(claim.fromIdle), idleMinutes: Math.round(claim.idleMs / 60_000), note: 'Its owner is connected but sent nothing for that long, so its claim lapsed.' } };
     }
@@ -2065,7 +2097,7 @@ export class Router {
     // it has none, so the next call acts on the page this status described.
     const target = pickStatusTarget(engineStatus);
     if (this.registry.current(client.id) == null && target != null && this.registry.hasHandle(target) && this.#availableTo(client, target)) {
-      this.registry.setCurrent(client.id, target);
+      this.#takeDefault(client, target);
     }
 
     // The engine reports on the tab it was asked about (F4: status(args.tabId)
@@ -2106,7 +2138,7 @@ export class Router {
         flowLibrary: client.project?.flowsDir ?? null,
         ...(client.project?.problems?.length ? { projectProblems: client.project.problems } : {}),
       },
-      you: { agentId: client.id, name: client.name, current: this.registry.current(client.id) },
+      you: { agentId: client.id, name: client.name, current: this.registry.current(client.id), ...this.#takeNotice(client) },
       owned: this.registry.ownedBy(client.id),
       halted: {
         global: g.halted,

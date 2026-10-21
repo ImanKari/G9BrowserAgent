@@ -404,7 +404,11 @@ tool that acts on a tab takes:
 - `tabId`: a G9BrowserAgent handle from `browser_tabs action:"list"`, the same for every engine; or
 - `session`: a name you gave a tab.
 
-Without either, the call acts on the caller's **current tab**.
+Without either, the call acts on the caller's **current tab**. (3.8.1) When that tab is gone (it
+closed, or your connection to the daemon or the daemon itself was renewed), the call acts on the
+browser's default tab — never one that another connected agent owns or is reading as its current
+tab — and its result says so once in `currentTab` (`{ tabId, previous?, note }`). Pass `tabId` on
+every call when several agents share a browser.
 
 ### `browser_engine`
 

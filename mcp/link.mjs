@@ -83,6 +83,8 @@ export class DaemonLink {
     this.identity = identity;
     this.ws = null;
     this.welcome = null;
+    this.previous = null; // { agentId, bootId } of the last connection
+
     this.connecting = null;
     this.pending = new Map();
     this.nextId = 1;
@@ -211,6 +213,7 @@ export class DaemonLink {
         }
         this.ws = ws;
         this.welcome = msg;
+        this.previous = { agentId: msg.id, bootId: msg.bootId ?? null };
         ws.on('message', (m) => this.#onMessage(m));
         ws.on('close', (info) => this.#onClose(ws, info));
         resolve();
@@ -225,7 +228,13 @@ export class DaemonLink {
         type: 'hello',
         role: 'agent',
         version: VERSION,
-        client: { name: this.name, pid: process.pid, cwd: this.cwd, project: this.project, ...(this.identity ? { identity: this.identity } : {}) },
+        client: {
+          name: this.name, pid: process.pid, cwd: this.cwd, project: this.project,
+          ...(this.identity ? { identity: this.identity } : {}),
+          // (3.8.1) A reconnect says who this link was, so the daemon can tell the agent when its
+          // current tab did not come back with it (router #takeDefault).
+          ...(this.previous ? { previous: this.previous } : {}),
+        },
       });
     });
   }

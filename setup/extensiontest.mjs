@@ -1931,6 +1931,42 @@ await test('a suite means the same thing on both platforms', async () => {
   }
 });
 
+await test('(3.8.1) one invalid device flow no longer stops a run of the others; a selected one still does', async () => {
+  const { loadDeviceFlows, path } = await runnerSelection();
+  // FIELD REPORT, 2026-10-14: every file in the device folder was validated before selection, so one flow
+  // with a step this runner did not know stopped every run with exit 4 — even of flows without it.
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises');
+  const os = await import('node:os');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'g9-devflows-'));
+  try {
+    const project = { dir: root, flowsDir: 'QA/Flows' };
+    const shop = { id: 'shop', flowsFolder: 'shop', flowKind: 'classic' };
+    const dir = path.join(root, 'QA', 'Flows', 'shop', 'x');
+    await mkdir(dir, { recursive: true });
+    const flow = (id, steps, kind = 'classic') => JSON.stringify({ format: 'g9/flowspec', schemaVersion: 1, id, name: id, target: { kind }, steps });
+    await writeFile(path.join(dir, 'good.flow.json'), flow('good', [
+      { id: 's1', action: 'selectItem', target: { automationId: 'Farms.List', itemId: '{{siteId}}' } },
+      { id: 's2', action: 'assert', target: { automationId: 'Form.Save' }, oracle: { kind: 'onScreen' } },
+    ]));
+    await writeFile(path.join(dir, 'future.flow.json'), flow('future', [{ id: 's1', action: 'teleport' }]));
+    await writeFile(path.join(dir, 'other-app.flow.json'), flow('other-app', [{ id: 's1', action: 'navigate', target: { automationId: 'A' } }], 'next'));
+    await writeFile(path.join(dir, 'broken.flow.json'), '{ not json');
+
+    const warnings = [];
+    const chosen = await loadDeviceFlows(project, 'good', shop, { warn: (m) => warnings.push(m) });
+    assert.deepEqual(chosen.map((f) => f.id), ['good'], 'the selected flow runs');
+    assert.equal(warnings.length, 3, 'each invalid flow outside the run is named once');
+    assert.ok(warnings.some((w) => w.includes('future.flow.json') && /unknown action "teleport"/.test(w)));
+    assert.ok(warnings.some((w) => w.includes('other-app.flow.json') && /target\.kind is "next"/.test(w)));
+    assert.ok(warnings.some((w) => w.includes('broken.flow.json') && /not valid JSON/.test(w)));
+    await assert.rejects(loadDeviceFlows(project, 'future', shop), /future\.flow\.json is not a valid FlowSpec:\n- step 1 has unknown action "teleport"/,
+      'a SELECTED invalid flow still refuses the run, naming its file');
+    await assert.rejects(loadDeviceFlows(project, 'all', shop), /broken\.flow\.json/, '"all" selects every file, the unreadable one included');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 await test('a device readiness timeout is not filed as a product regression', async () => {
   const runner = await readFile(new URL('../runner/g9.mjs', import.meta.url), 'utf8');
 

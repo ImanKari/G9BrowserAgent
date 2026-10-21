@@ -310,7 +310,8 @@ Which apps exist is the project's data: `g9.project.json` declares them under `d
 | `crashLog` | none | an app-private file (`run-as`) whose head is attached to a derailed step as evidence |
 | `setupHint`, `tokenHint`, `selftestHints` | none | the app's own words for "nothing answered", "where is the token", and known self-test states |
 
-Flows are validated like web flows (an invalid file stops the run and is named); `candidates/` files
+Flows are validated like web flows: an invalid flow the run selects (any invalid file, for `all`) stops
+the run and is named; (3.8.1) one outside the run is a warning, and the run goes on. `candidates/` files
 (`*.candidate.json`, from `g9 harvest`) are never loaded as flows. Choose the device with
 `--device <serial>`. `--data` variables, a flow's own parameter defaults and `{{secret:…}}` values are
 substituted into device steps too. A suite is `suites/<name>.json`, or the platform's own

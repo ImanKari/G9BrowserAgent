@@ -106,7 +106,11 @@ browser whose G9BrowserAgent extension is reconnecting …"; `browser_tabs list`
   a departed owner never blocks anyone), and the current tab. `welcome.adopted` then says
   `{ from:[agentId…], tabs:[handle…], current }`, and the agent rows carry `identity` (and
   `supersededBy` on the older connection). `mcp/http.mjs` sends the `X-G9-Agent` header, else the MCP
-  client's name (G9_MCP_AGENT_IDENTITY); the stdio shim only `G9_AGENT_ID`. Session names are the
+  client's name (G9_MCP_AGENT_IDENTITY); the stdio shim `G9_AGENT_ID`, else (3.8.1) an identity of its
+  own process (`stdio-<pid>-<random>`), so its own reconnect takes its tabs back while two editors
+  that share a client name stay two agents. (3.8.1) A reconnecting link sends
+  `client.previous: { agentId, bootId }`; when its current tab did not come back with it, its next
+  call on a default tab carries `currentTab` saying so. Session names are the
   daemon's, not an agent's: they survive the agent that set them.
 * An agent's `client.cwd` (and optional `client.project`, the value of `G9_PROJECT`) selects the
   project adapter (`g9.project.json`) reported to that agent in `welcome` and `browser_status` — one

@@ -384,6 +384,15 @@ export class Daemon {
     client.conn = conn;
     client.project = role === 'agent' && (c.cwd || c.project) ? this.#projectFor(c.cwd, c.project) : this.project;
     const adopted = role === 'agent' ? this.registry.adoptIdentity(client.id) : null;
+    // (3.8.1) A reconnecting agent whose current tab did not come back: its next call on a default
+    // tab says so (router #takeDefault) instead of silently acting on whatever tab the browser shows.
+    if (role === 'agent' && c.previous && typeof c.previous === 'object' && adopted?.current == null) {
+      const restarted = typeof c.previous.bootId === 'string' && c.previous.bootId !== this.bootId;
+      client.lostCurrent = {
+        tabId: null,
+        why: restarted ? 'the daemon restarted, so every tab has a new id' : `this agent reconnected to the daemon (it was ${String(c.previous.agentId ?? '?').slice(0, 40)})`,
+      };
+    }
 
     conn.send({
       type: 'welcome',

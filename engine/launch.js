@@ -15,7 +15,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { resolveBrowser, isDefaultUserDataDir, systemBinary } from './find.js';
+import { resolveBrowser, findBrowsers, isDefaultUserDataDir, systemBinary } from './find.js';
 import { PipeCdp } from './pipe-cdp.js';
 import { launchArgsFor, launchWarnings, normalizeLevel } from './stealth.js';
 import { profileInUse } from './profile.js';
@@ -145,7 +145,15 @@ export const GRACEFUL_EXIT_MS = 30_000;
  * (25–59 ms) because each dispatch costs 17.3 ms; the product's own planner (`perform` rule 1, the
  * 80 % rule) is what brings it back to 60–151 ms in the stealth suite.
  */
-export const KIND_SWITCHES = Object.freeze({ cft: Object.freeze(['--disable-frame-rate-limit']) });
+export const KIND_SWITCHES = Object.freeze({
+  cft: Object.freeze(['--disable-frame-rate-limit']),
+  // (3.8.1) Edge 155.0.4283.62 (Windows, 2026-10-16) starts a SECOND browser process through its
+  // "compat layer" and exits 0: the relaunched one carries --edge-skip-compat-layer-relaunch but not
+  // our CDP pipe, so every Edge launch failed with "the browser closed its end of the pipe" and left a
+  // headless Edge running. Measured on 155.0.4283.62: without the switch 3 of 3 launches failed (exit 0,
+  // nothing printed); with it the browser answers in ~0.8 s. Not a page-visible switch.
+  edge: Object.freeze(['--edge-skip-compat-layer-relaunch']),
+});
 
 // Switches extraArgs may not carry, and why. The first group would identify automation or open the
 // browser to other clients; the second is owned by launchBrowser's own options so that the argv
@@ -387,6 +395,32 @@ export function sandboxHint(output) {
       ? `Its helper must be owned by root with mode 4755: sudo chown root:root ${helper} && sudo chmod 4755 ${helper} (reinstalling the browser's package also does it).`
       : 'Allow unprivileged user namespaces, or install the browser from its official package (which sets up its sandbox helper).') +
     ' Only on a disposable machine or container: G9_BROWSER_NO_SANDBOX=1 in the daemon\'s environment starts launched browsers without the sandbox.';
+}
+
+/** (3.8.1) Is this process the Windows SYSTEM account (a service, a scheduled task, an agent run by one)? */
+export function runsAsWindowsSystem({ platform = process.platform, user = null, home = os.homedir() } = {}) {
+  if (platform !== 'win32') return false;
+  let name = user;
+  if (name == null) { try { name = os.userInfo().username; } catch { name = ''; } }
+  return /^system$/i.test(String(name)) || /[\\/]config[\\/]systemprofile$/i.test(String(home ?? ''));
+}
+
+/**
+ * (3.8.1) What an early exit means, when we know (field reports, 2026-10-13 and -15: "Edge exited with
+ * code 1002, printed nothing"). Measured on 155.0.4283.62: Edge exits 1002 at once under SYSTEM, with
+ * or without --edge-skip-compat-layer-relaunch, while Chrome starts there.
+ */
+export function startFailureHint({ kind = null, exit = null, system = runsAsWindowsSystem() } = {}) {
+  if (system) {
+    return '\nThis G9BrowserAgent daemon runs as the Windows SYSTEM account (a service or scheduled task started the MCP ' +
+      'client that started it). ' + (kind === 'edge' ? 'Microsoft Edge does not run as SYSTEM (it exits with code 1002); Chrome and Chrome for Testing do: pass browser:"chrome" or browser:"cft". ' : '') +
+      'Better: run the MCP client as the signed-in user, so the daemon and its browsers are that user\'s.';
+  }
+  if (kind === 'edge' && exit?.code === 1002) {
+    return '\nEdge exits with code 1002 when it refuses the account or session it was started in (measured: the Windows ' +
+      'SYSTEM account). Check which account the daemon runs as (browser_status: daemon.home), or pass browser:"chrome".';
+  }
+  return '';
 }
 
 export function killTree(pid) {
@@ -648,6 +682,9 @@ export async function launchBrowser({
     if (!hasExited()) killTree(child.pid);
     await Promise.race([exited, delay(5000)]);
     conn.close('launch failed');
+    // (3.8.1) A browser that relaunched itself (Edge's compat layer) is not in our process tree, but
+    // it runs on OUR profile: end it, or every failed start leaves a headless browser behind.
+    if (exitInfo) for (const p of await findProfileProcesses(dir).catch(() => [])) killTree(p.pid);
     if (tempProfile) await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {});
   };
 
@@ -659,10 +696,31 @@ export async function launchBrowser({
     const exit = exitInfo ? ` The browser exited (${exitInfo.signal ? `signal ${exitInfo.signal}` : `code ${exitInfo.code}`}).` : '';
     const tail = stderr.get();
     await cleanupFailedStart();
-    throw new Error(
-      `${label} did not become ready: ${err.message}${exit}` + sandboxHint(tail) +
+    const failure = new Error(
+      `${label} did not become ready: ${err.message}${exit}` + sandboxHint(tail) + startFailureHint({ kind: target.kind, exit: exitInfo }) +
       (tail ? `\nLast browser output:\n${tail}` : '\n(The browser printed nothing.)'),
     );
+    // (3.8.1) "auto" chose this browser, and it exited before it was ready: another installed one
+    // may well start (Edge does not run as SYSTEM; Chrome does). Once, and said in the warnings.
+    const auto = original.browser == null || original.browser === 'auto';
+    if (auto && exitInfo) {
+      const order = ['chrome', 'cft', 'edge'];
+      const next = (await findBrowsers({ home }).catch(() => []))
+        .filter((b) => b.path !== target.path && order.includes(b.kind))
+        .sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind))[0];
+      if (next) {
+        const nextLabel = `${next.kind}${next.version ? ` ${next.version}` : ''}`;
+        const retried = await launchBrowser({ ...original, browser: { kind: next.kind, path: next.path, version: next.version, channel: next.channel ?? null } })
+          .catch((again) => { throw new Error(`${failure.message}\n\n${nextLabel} was tried instead and did not start either: ${again.message}`); });
+        retried.warnings = [
+          `${label} exited before it was ready (${exitInfo.signal ? `signal ${exitInfo.signal}` : `code ${exitInfo.code}`}), so ${nextLabel} was launched instead (browser "auto").` +
+            (profileDir ? ' Sign-ins this profile kept for the other browser may not be readable by this one.' : ''),
+          ...(retried.warnings ?? []),
+        ];
+        return retried;
+      }
+    }
+    throw failure;
   }
 
   const info = {
