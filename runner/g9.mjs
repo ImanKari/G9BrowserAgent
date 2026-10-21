@@ -53,7 +53,7 @@ import { writeReports } from './report.mjs';
 // growing a second implementation that drifts.
 import { calibrateVolatile } from '../extension/lib/signature.js';
 import { validateFlowSpec, KNOWN_ACTIONS } from '../extension/lib/flowspec.js';
-import { normalizeDevicePlatforms, DEFAULT_BRIDGE_PORT } from '../lib/devices.mjs';
+import { normalizeDevicePlatforms, DEFAULT_BRIDGE_PORT, PACKAGE } from '../lib/devices.mjs';
 
 const EXIT = { OK: 0, PRODUCT: 1, AUTOMATION: 2, SURPRISE: 3, RUNNER: 4, ERROR: 5 };
 
@@ -1010,9 +1010,12 @@ function pushSkipped(run, flow, reason, options) {
  * distinct from SKIPPED: a skip is a decision about THIS flow, not-run is
  * collateral of another flow's failure — and the entry names the culprit.
  */
-function pushNotRun(run, remaining, stopper, options) {
+function pushNotRun(run, remaining, stopper, options, { cause = 'stopOn' } = {}) {
   if (!remaining.length) return;
-  const reason = `not run — the suite stopped after "${stopper.name}" (${run.flows.at(-1)?.verdict ?? 'failure'})`;
+  // (3.8.2) A derailed app stops the suite whatever stopOn says; the reason says which of the two stopped it.
+  const reason = cause === 'derailed'
+    ? `not run — the app left its path in "${stopper.name}", so the suite stopped there`
+    : `not run — the suite stopped after "${stopper.name}" (${run.flows.at(-1)?.verdict ?? 'failure'})`;
   for (const flow of remaining) {
     run.flows.push({
       id: flow.id,
@@ -1029,7 +1032,9 @@ function pushNotRun(run, remaining, stopper, options) {
       suite: flow.suite ?? null,
     });
   }
-  log(options, `  stopOn: failure — ${remaining.length} flow(s) not run (stopped after "${stopper.name}")\n`);
+  log(options, cause === 'derailed'
+    ? `  the app left its path — ${remaining.length} flow(s) not run (stopped in "${stopper.name}")\n`
+    : `  stopOn: failure — ${remaining.length} flow(s) not run (stopped after "${stopper.name}")\n`);
 }
 
 // -------------------------------------------------------------- devices
@@ -1088,6 +1093,10 @@ async function pickDevice(options, listDevices) {
 /** `--package`, else the platform's own package; `--package` with no value is a mistake, not "none". */
 function packageFor(options, device) {
   if (options.package === true) throw new Error('--package needs a value, e.g. --package com.example.app');
+  // (3.8.2) It goes into `adb shell` command lines: an application id, or nothing.
+  if (options.package != null && !PACKAGE.test(String(options.package))) {
+    throw new Error(`--package "${options.package}" is not an Android application id (e.g. com.example.app).`);
+  }
   return options.package ?? device.package ?? null;
 }
 
@@ -1219,8 +1228,9 @@ async function commandRunDevice({ options, project, reportDir, target, variables
         } catch (err) {
           outcome = { ok: false, error: String(err.message ?? err) };
         }
-        if (outcome.derailed) derailed = { step: index + 1, id: step.id, action: step.action, reason: outcome.error, evidence: outcome.evidence ?? null };
         outcome = maskSecretsDeep(outcome, secrets.values);
+        // (3.8.2) From the MASKED outcome: the reason and the crash-log evidence go to the reports and the log.
+        if (outcome.derailed) derailed = { step: index + 1, id: step.id, action: step.action, reason: outcome.error, evidence: outcome.evidence ?? null };
         steps.push({ step: index + 1, id: step.id, action: step.action, ...outcome });
         if (!outcome.ok) {
           failed += 1;
@@ -1233,7 +1243,9 @@ async function commandRunDevice({ options, project, reportDir, target, variables
       run.flows.push({
         id: flow.id,
         name: flow.name,
-        verdict: verdictForDevice(steps, failed),
+        // (3.8.2) A derailed flow is not a product verdict yet: the runner hands it to an agent and says "do not
+        // file a bug until the cause is known" — FAIL_PRODUCT (what its DERAILED text matched) said the opposite.
+        verdict: derailed ? 'FAIL_AUTOMATION' : verdictForDevice(steps, failed),
         total: flow.steps?.length ?? 0,
         passed,
         failed,
@@ -1257,7 +1269,7 @@ async function commandRunDevice({ options, project, reportDir, target, variables
           '',
         ].join('\n'));
         run.derailed = { flow: flow.id, ...derailed };
-        pushNotRun(run, flows.slice(flowIndex + 1), flow, options);
+        pushNotRun(run, flows.slice(flowIndex + 1), flow, options, { cause: 'derailed' });
         break;
       }
       if (stopsSuite(rules, run.flows.at(-1).verdict)) {

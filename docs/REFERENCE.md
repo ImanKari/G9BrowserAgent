@@ -408,7 +408,8 @@ Without either, the call acts on the caller's **current tab**. (3.8.1) When that
 closed, or your connection to the daemon or the daemon itself was renewed), the call acts on the
 browser's default tab — never one that another connected agent owns or is reading as its current
 tab — and its result says so once in `currentTab` (`{ tabId, previous?, note }`). Pass `tabId` on
-every call when several agents share a browser.
+every call when several agents share a browser. (3.8.2) When the tab in front of the person's browser
+is another agent's, the call is refused with `[code: tab_in_use]`, naming that agent; pass `tabId`.
 
 ### `browser_engine`
 

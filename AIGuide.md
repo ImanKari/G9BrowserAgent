@@ -2,7 +2,7 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v3.8.1, 2026-10-21 — the first four suggestions-box reports (§9, the 3.8.1 entry): launched
+**Status:** v3.8.2, 2026-10-22 — the ten findings of a code review of 3.7–3.8.1 fixed (§9, the 3.8.2 entry): secrets masked in derailed reports, no device shell injection, no flow written outside the library, a hung browser no longer taken for an exited one, and `finish` safe against calls in flight. v3.8.1, 2026-10-21 — the first four suggestions-box reports (§9, the 3.8.1 entry): launched
 Edge starts again (Edge 155's compat-layer relaunch), a SYSTEM-account daemon is named and `auto` falls
 back to Chrome, an invalid device flow outside a run no longer stops it, and an agent keeps its own
 current tab. Built and published by hand (no pipeline minutes). v3.8.0, 2026-10-15 — the agent-facing text is layered: a core under 2,048 characters (clients cut server instructions at 4,096, older ones at 2,048 — the 13,300-character instructions lost everything after "Acting"), twelve topic guides and a per-tool reference generated from the schemas (`mcp/guides.js`; resources `g9://guide/<topic>`, `g9://tool/<name>`, and `browser_status guide:"…"` answered without a browser); and `browser_tabs action:"finish"` — the last working agent detaches the debugger from the person's browser (§9, the 3.8.0 entry). Before it, v3.7.0, 2026-10-15 — device apps are the project's data: `g9.project.json` `devices` declares them, one generic driver (`runner/drivers/device.mjs`) drives any app that speaks the QA bridge protocol ([docs/DEVICE_BRIDGE.md](docs/DEVICE_BRIDGE.md)), and the device steps `tapFeature`, `zoomToFeature`, `longPressFeature`, `selectItem`, `setValue`, `popupButton` and the `onScreen` oracle join the vocabulary (§9, the 3.7.0 entry). Before it, v3.6.3, 2026-10-13 — the published 3.6 release (3.6.0–3.6.2 never passed the pipeline; §9, the 3.6.3 entry). 3.6.1 (§9): the macOS self-update moves the new bundle into place (a copy was stopped by macOS on a real Mac). 3.6.0 (§9, the 3.6.0 entry): the "Human Wave" icon everywhere; the
@@ -1929,6 +1929,49 @@ after every step of a forty-step flow doubles the run for evidence nobody reads.
 Entries below describe what was believed or tested at the time. Current capability claims and
 unresolved findings are in §§4, 7 and 8, which supersede historical assertions. Entries dated before
 2026-09-21 describe v1 (the bridge, the four control modes, the workspace allowlist).
+
+### 2026-10-22 — v3.8.2: a code review of 3.7–3.8.1, and every finding fixed
+
+**Why.** A code review of the work since 3.6.3 named ten defects; each was checked against the code and
+each was real.
+
+- **Secrets in a derailed flow's report** (`runner/g9.mjs`): the `derailed` record (reason, crash-log
+  evidence) was built from the step outcome BEFORE `maskSecretsDeep`, so a password typed with
+  `{{secret:…}}` reached `run.derailed`, the reports and the log in clear text. It is built from the
+  masked outcome now.
+- **A derailed flow was filed FAIL_PRODUCT** while the runner says "do not file a bug until someone has
+  looked": it is `FAIL_AUTOMATION` now, and the flows after it are NOT_RUN with "the app left its path"
+  (it said "stopOn: failure" for a suite without stopOn).
+- **A hung browser read as one that exited** (`engine/launch.js`, 3.8.1): `exitInfo` was read after the
+  cleanup had killed the browser, so a readiness timeout under `browser:"auto"` started the fallback
+  (another full timeout), said "exited (code 1)" and scanned processes for 20 s. The early exit is
+  taken before the cleanup.
+- **A pushed flow could be written outside the library** (`daemon/flows.js relativePathFor`): the
+  platform folder came from the spec's `target.kind` unslugged — `"../../x"` escaped `flowsDir`, and a
+  non-string kind threw a TypeError. Each segment is made safe now (case kept, so existing folders stay).
+  The project's `devices.<name>.flowsFolder` must be a folder inside flowsDir (`lib/devices.mjs`).
+- **Device shell injection** (`runner/drivers/device.mjs`): `--package` was never checked and `crashLog`
+  went unquoted into `adb shell` lines (`monkey`, `pidof`, `run-as … cat …`). `--package` must be an
+  application id (refused before adb), a profile's `crashLog` a plain path, and the driver checks the
+  package and single-quotes the path itself (`shellPackage`, `shellQuote`).
+- **A spurious "your tab was lost"** (3.8.1): set on every reconnect that adopted no current tab, even
+  for an agent that never had one, and never cleared by an explicit open/attach. Within one daemon the
+  identity's adoption already returns what was held; after a daemon restart the notice needs the link's
+  `previous.hadCurrent` (it sent a call without tabId/session); `setCurrent` clears it.
+- **`finish` named the wrong kept tab**: `kept[].tabId` was mapped Chrome id → handle twice (relay()
+  already rewrites `tabId`). Mapped once now.
+- **A call during `finish`'s detach had its tab detached under it.** A detach in flight now makes new
+  calls wait for it (bounded by its relay timeout), and a working agent's current tab is kept attached.
+- **"No tab to act on" when a tab was in front**: when the default tab is another agent's, the error says
+  so — `[code: tab_in_use]`, naming the agent and telling to pass tabId.
+- **`detach_all` was a sequential loop** re-reading state per tab and could outrun the daemon's 20 s
+  relay timeout: one parallel `detachMany` now (recording tabs still kept).
+
+**Tests.** daemon +1 (kept handles; a call waits for a detach in flight) and the current-tab test
+extended; device +5 (profile paths, the shell's package and quoting, a hostile flow kind, the derail
+record and verdict, `--package` refused before adb). A readiness timeout under `auto` checked by hand:
+fails in 4.4 s, no fallback, no "exited". `check.mjs` 19 of 19; live: Engine 2 373 passed, 0 failed;
+Engine 1 207 passed, 0 failed. Built and published by hand as 3.8.1 was.
 
 ### 2026-10-21 — v3.8.1: Edge launches again, a SYSTEM daemon says so, one bad device flow no longer stops a run, and an agent keeps its own tab
 

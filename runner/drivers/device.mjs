@@ -38,7 +38,20 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { DEFAULT_BRIDGE_PORT } from '../../lib/devices.mjs';
+import { DEFAULT_BRIDGE_PORT, PACKAGE } from '../../lib/devices.mjs';
+
+/**
+ * (3.8.2) What goes into an `adb shell` command line. adb hands the line to the device's shell, so a package
+ * id is checked against the application-id grammar and a path is single-quoted: `--package "x; reboot"` or a
+ * project's crashLog must never run as a command (and a path with a space must read that file).
+ */
+export function shellPackage(pkg) {
+  if (typeof pkg !== 'string' || !PACKAGE.test(pkg)) throw new Error(`"${pkg}" is not an Android application id (e.g. com.example.app).`);
+  return pkg;
+}
+export function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
 
 /**
  * The uids of the sockets LISTENING on `port`, from the text of `/proc/net/tcp` + `/proc/net/tcp6`.
@@ -293,7 +306,7 @@ export class DeviceDriver {
     let listening = await owners();
     if (!listening.length) {
       this.log(`nothing listens on device port ${this.port}; launching ${pkg}`);
-      await this.shell(`monkey -p ${pkg} -c android.intent.category.LAUNCHER 1`);
+      await this.shell(`monkey -p ${shellPackage(pkg)} -c android.intent.category.LAUNCHER 1`);
       const deadline = Date.now() + this.launchTimeoutMs;
       while (!listening.length && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 500));
@@ -386,7 +399,7 @@ export class DeviceDriver {
     }
     const pkg = this.packageName ?? this.servingPackage;
     if (this.serial !== false && pkg) {
-      const pid = (await this.shell(`pidof ${pkg}`).catch(() => '')).trim();
+      const pid = (await this.shell(`pidof ${shellPackage(pkg)}`).catch(() => '')).trim();
       if (!pid) return `the app process ${pkg} is not running — it crashed or was killed`;
     }
     return null;
@@ -414,7 +427,7 @@ export class DeviceDriver {
     const crashLog = this.profile?.crashLog;
     const pkg = crashLog ? (this.packageName ?? this.servingPackage ?? (await this.packageOnPort().catch(() => null))) : null;
     if (this.serial !== false && pkg) {
-      const text = await this.shell(`run-as ${pkg} cat ${crashLog}`).catch(() => '');
+      const text = await this.shell(`run-as ${shellPackage(pkg)} cat ${shellQuote(crashLog)}`).catch(() => '');
       evidence = text.split('\n').slice(0, 12).join('\n').trim() || null;
     }
     const why = String(reason).startsWith(DERAILED_PREFIX) ? String(reason) : `${DERAILED_PREFIX} ${reason}`;

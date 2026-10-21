@@ -678,13 +678,14 @@ export async function launchBrowser({
 
   const conn = new PipeCdp(child.stdio[3], child.stdio[4], { name: label, child });
 
-  const cleanupFailedStart = async () => {
+  const cleanupFailedStart = async ({ exitedEarly = false } = {}) => {
     if (!hasExited()) killTree(child.pid);
     await Promise.race([exited, delay(5000)]);
     conn.close('launch failed');
     // (3.8.1) A browser that relaunched itself (Edge's compat layer) is not in our process tree, but
     // it runs on OUR profile: end it, or every failed start leaves a headless browser behind.
-    if (exitInfo) for (const p of await findProfileProcesses(dir).catch(() => [])) killTree(p.pid);
+    // Only when it exited by itself: one we killed after a timeout went with its own tree.
+    if (exitedEarly) for (const p of await findProfileProcesses(dir).catch(() => [])) killTree(p.pid);
     if (tempProfile) await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {});
   };
 
@@ -693,17 +694,20 @@ export async function launchBrowser({
     version = await Promise.race([conn.send('Browser.getVersion', {}, null, { timeoutMs }), spawnFailed]);
   } catch (err) {
     await delay(200);   // let the exit code and the last stderr lines arrive
-    const exit = exitInfo ? ` The browser exited (${exitInfo.signal ? `signal ${exitInfo.signal}` : `code ${exitInfo.code}`}).` : '';
+    // (3.8.2) Taken BEFORE the cleanup: it kills a browser that is still running, after which exitInfo is
+    // always set, and a hung browser read as one that "exited before it was ready" (the auto fallback).
+    const earlyExit = exitInfo;
+    const exit = earlyExit ? ` The browser exited (${earlyExit.signal ? `signal ${earlyExit.signal}` : `code ${earlyExit.code}`}).` : '';
     const tail = stderr.get();
-    await cleanupFailedStart();
+    await cleanupFailedStart({ exitedEarly: !!earlyExit });
     const failure = new Error(
-      `${label} did not become ready: ${err.message}${exit}` + sandboxHint(tail) + startFailureHint({ kind: target.kind, exit: exitInfo }) +
+      `${label} did not become ready: ${err.message}${exit}` + sandboxHint(tail) + startFailureHint({ kind: target.kind, exit: earlyExit }) +
       (tail ? `\nLast browser output:\n${tail}` : '\n(The browser printed nothing.)'),
     );
     // (3.8.1) "auto" chose this browser, and it exited before it was ready: another installed one
     // may well start (Edge does not run as SYSTEM; Chrome does). Once, and said in the warnings.
     const auto = original.browser == null || original.browser === 'auto';
-    if (auto && exitInfo) {
+    if (auto && earlyExit) {
       const order = ['chrome', 'cft', 'edge'];
       const next = (await findBrowsers({ home }).catch(() => []))
         .filter((b) => b.path !== target.path && order.includes(b.kind))
@@ -713,7 +717,7 @@ export async function launchBrowser({
         const retried = await launchBrowser({ ...original, browser: { kind: next.kind, path: next.path, version: next.version, channel: next.channel ?? null } })
           .catch((again) => { throw new Error(`${failure.message}\n\n${nextLabel} was tried instead and did not start either: ${again.message}`); });
         retried.warnings = [
-          `${label} exited before it was ready (${exitInfo.signal ? `signal ${exitInfo.signal}` : `code ${exitInfo.code}`}), so ${nextLabel} was launched instead (browser "auto").` +
+          `${label} exited before it was ready (${earlyExit.signal ? `signal ${earlyExit.signal}` : `code ${earlyExit.code}`}), so ${nextLabel} was launched instead (browser "auto").` +
             (profileDir ? ' Sign-ins this profile kept for the other browser may not be readable by this one.' : ''),
           ...(retried.warnings ?? []),
         ];

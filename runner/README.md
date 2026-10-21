@@ -301,13 +301,13 @@ Which apps exist is the project's data: `g9.project.json` declares them under `d
 
 | Field | Default | Meaning |
 |---|---|---|
-| `flowsFolder` | the name | flows come from `<flowsDir>/<flowsFolder>/**` |
+| `flowsFolder` | the name | flows come from `<flowsDir>/<flowsFolder>/**`; a folder inside flowsDir (no absolute path, no `..`) |
 | `flowKind` | the name | the flows' `target.kind`; a flow of another kind in that folder is refused by name |
 | `label`, `framework` | the name, none | the report's `platform` and `app.framework` |
-| `package` | none | the Android package that must own the bridge port (`--package` overrides) |
+| `package` | none | the Android package that must own the bridge port (`--package` overrides; both must be an application id) |
 | `port` | 8799 | the bridge port on the device (`--device-port` overrides) |
 | `errorScreens` | none | automation-id prefixes of the app's crash / error screen: a step that lands there is DERAILED |
-| `crashLog` | none | an app-private file (`run-as`) whose head is attached to a derailed step as evidence |
+| `crashLog` | none | an app-private file (`run-as`) whose head is attached to a derailed step as evidence; a plain path (letters, digits, `. / _ - @ +`) |
 | `setupHint`, `tokenHint`, `selftestHints` | none | the app's own words for "nothing answered", "where is the token", and known self-test states |
 
 Flows are validated like web flows: an invalid flow the run selects (any invalid file, for `all`) stops
@@ -336,7 +336,9 @@ whose hello names a package (`package`, or `app` when it is an application id) m
 Before a flow's first step, after every action and on every failure the driver looks whether the app left
 the path every flow assumes — its error screen (`errorScreens`), a dead process, or a bridge refusal that
 starts with `DERAILED:`. The step then fails as derailed at once (long waits are sliced, so a crash
-mid-wait is seen within seconds), with the head of `crashLog` as evidence.
+mid-wait is seen within seconds), with the head of `crashLog` as evidence. (3.8.2) A derailed flow is
+`FAIL_AUTOMATION`, not a product verdict, until someone has looked; secrets are masked in its reason and
+evidence; the flows after it are `NOT_RUN` with "the app left its path".
 
 The report records `platform`, `app: { framework, package }` and `fidelity`: `gray-box` unless the device's
 `qa.capabilities` lists `ui.tap:real-touch` (a bridge that injects a real touch at the control's measured

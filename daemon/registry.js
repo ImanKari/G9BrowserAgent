@@ -675,6 +675,8 @@ export class Registry extends EventEmitter {
   setCurrent(agentId, handle) {
     const client = this.clients.get(agentId);
     if (!client) return;
+    // (3.8.2) A current tab chosen (open, attach, focus, a default) ends any "your tab was lost" pending.
+    if (handle != null) client.lostCurrent = null;
     if (client.current !== handle) {
       client.current = handle;
       this.emit('agents');

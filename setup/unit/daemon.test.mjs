@@ -380,14 +380,14 @@ test('router: (3.8.1) a default tab is never another agent\'s current tab; a los
   assert.equal(first.currentTab, undefined, 'nothing was lost, nothing is said');
   // a only READ tab 5, so it owns nothing there — and still b must not land on it.
   assert.equal(reg.ownerOf(h5), null);
-  await assert.rejects(router.call(b, 'browser_snapshot', {}), /No tab to act on/);
+  await assert.rejects(router.call(b, 'browser_snapshot', {}), /tab \d+\) is in use by agent-1 \(claude-code\)[\s\S]*Pass tabId/, '(3.8.2) the error names who is on it');
   active = 6;
   assert.equal((await router.call(b, 'browser_snapshot', {})).tabId, h6);
   assert.equal((await router.call(a, 'browser_snapshot', {})).tabId, h5, 'a keeps its own current tab');
 
   // a's tab closes; the browser shows b's tab, then another one.
   reg.dropHandle(h5, 'the tab closed');
-  await assert.rejects(router.call(a, 'browser_snapshot', {}), /No tab to act on/, 'never b\'s current tab');
+  await assert.rejects(router.call(a, 'browser_snapshot', {}), /in use by agent-2/, 'never b\'s current tab');
   active = 7;
   const moved = await router.call(a, 'browser_snapshot', {});
   assert.equal(moved.tabId, h7);
@@ -405,6 +405,48 @@ test('router: (3.8.1) a default tab is never another agent\'s current tab; a los
   const status = await router.call(c, 'browser_status', {});
   assert.equal(status.you.current, h6b);
   assert.match(status.you.currentTab.note, /current tab was lost: the daemon restarted/);
+
+  // (3.8.2) A tab the agent chose itself ends a pending notice: nothing was lost from its point of view.
+  const d = agent(reg, 'claude-code');
+  d.lostCurrent = { tabId: null, why: 'the daemon restarted, so every tab has a new id' };
+  reg.setCurrent(d.id, h7);
+  assert.equal(d.lostCurrent, null);
+});
+
+test('router: (3.8.2) detach_all — kept tabs come back as handles once; a call waits for a detach in flight', async () => {
+  const reg = new Registry();
+  const router = makeRouter(reg);
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const order = [];
+  // Chrome ids 3, 5, 7: handle 3 is Chrome tab 7, and Chrome tab 3 exists too — a second mapping names it.
+  fakeExtension(reg, router, async (msg) => {
+    if (msg.tool === 'browser_tabs' && msg.args.action === 'list') return { tabs: [{ tabId: 3 }, { tabId: 5 }, { tabId: 7 }] };
+    if (msg.tool === 'browser_tabs' && msg.args.action === 'detach_all') {
+      order.push('detach:start');
+      await gate;
+      order.push('detach:end');
+      return { detached: [3, 5], kept: (msg.args.keep ?? []).map((tabId) => ({ tabId, reason: 'in use' })) };
+    }
+    order.push(`${msg.tool}:${msg.args.tabId}`);
+    return { tabId: msg.args.tabId };
+  });
+  const a = agent(reg, 'a');
+  const b = agent(reg, 'b');
+  const [h3, h5, h7] = (await router.call(a, 'browser_tabs', { action: 'list' })).tabs.map((t) => t.tabId);
+  assert.equal(h7, 3, 'the rig needs handle 3 to be Chrome tab 7');
+  reg.ensureOwnership(h7, b.id); // b holds tab 7 and is not working
+  const detaching = router.detachEverywhere('test');
+  await new Promise((r) => setTimeout(r, 20));
+  const read = router.call(a, 'browser_snapshot', { tabId: h5 });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(order, ['detach:start'], 'the call has not reached the browser while the detach runs');
+  release();
+  const outcome = await detaching;
+  await read;
+  assert.deepEqual(order, ['detach:start', 'detach:end', 'browser_snapshot:5'], 'it runs after the detach, and attaches again');
+  assert.deepEqual(outcome.kept.map((k) => k.tabId), [h7], 'kept names tab 7, not Chrome tab 3');
+  assert.deepEqual(outcome.detached, [h3, h5]);
 });
 
 test('router: (3.5) an argument the tool does not take is refused with the closest real one, never ignored', async () => {
@@ -2075,7 +2117,7 @@ test('review: a default current tab is never another agent\'s tab', async () => 
   fakeExtension(reg, router, (msg) => (msg.tool === 'browser_status' ? { current: { tabId: 1 } } : { ok: true, tabId: msg.args.tabId }));
   const first = await router.call(a, 'browser_interact', { action: 'click', ref: 'e1' });
   assert.equal(reg.ownerOf(first.tabId), a.id, 'a took the extension\'s current tab');
-  await assert.rejects(router.call(b, 'browser_snapshot', {}), /No tab to act on/);
+  await assert.rejects(router.call(b, 'browser_snapshot', {}), /in use by agent-1 \(a\)/);
   const st = await router.call(b, 'browser_status', {});
   assert.equal(st.you.current, null, 'status does not adopt a\'s tab for b either');
   assert.equal((await router.call(b, 'browser_snapshot', { tabId: first.tabId })).tabId, first.tabId, 'an explicit read is still allowed');

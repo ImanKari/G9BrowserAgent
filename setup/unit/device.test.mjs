@@ -15,7 +15,7 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -486,6 +486,62 @@ test('cli: --package without a value is an error, not "no guard"', () => {
       assert.notEqual(out.status, 0);
       assert.match(out.stderr + out.stdout, /--package needs a value/, `${command}: checked before adb is asked anything`);
     }
+  } finally { p.cleanup(); }
+});
+
+test('(3.8.2) a profile\'s flowsFolder stays inside flowsDir, and its crashLog is a plain path', () => {
+  for (const flowsFolder of ['shop', 'android/shop']) {
+    assert.ok(normalizeDevicePlatforms({ x: { flowsFolder } }).platforms.x, flowsFolder);
+  }
+  for (const flowsFolder of ['../x', '/abs', 'C:/x', 'a//b', 'a/../b', 'a\\..\\b']) {
+    const { platforms, problems } = normalizeDevicePlatforms({ x: { flowsFolder } });
+    assert.equal(platforms.x, undefined, flowsFolder);
+    assert.match(problems.join('\n'), /must be a folder inside flowsDir/);
+  }
+  assert.ok(normalizeDevicePlatforms({ x: { crashLog: 'files/crash-last.log' } }).platforms.x);
+  for (const crashLog of ['x; reboot', 'a b', '$(id)']) {
+    assert.equal(normalizeDevicePlatforms({ x: { crashLog } }).platforms.x, undefined, crashLog);
+  }
+});
+
+test('(3.8.2) the device shell gets a checked package id and a quoted crash-log path', async () => {
+  const { shellPackage, shellQuote } = await import('../../runner/drivers/device.mjs');
+  assert.equal(shellPackage('com.example.shop'), 'com.example.shop');
+  assert.throws(() => shellPackage('com.x; rm -rf /sdcard/Download'), /not an Android application id/);
+  assert.equal(shellQuote("files/my crash.log"), "'files/my crash.log'");
+  assert.equal(shellQuote("it's"), "'it'\\''s'");
+  // A profile path that predates the validation (or a value set in code) still reaches the shell quoted.
+  const driver = new DeviceDriver({ serial: 's1', packageName: 'com.example.shop.next', profile: { crashLog: "files/my crash.log" } });
+  const sent = [];
+  driver.shell = async (command) => { sent.push(command); return 'line 1\nline 2\n'; };
+  const out = await driver.derailed('the app is on its error screen');
+  assert.deepEqual(sent, ["run-as com.example.shop.next cat 'files/my crash.log'"]);
+  assert.equal(out.evidence, 'line 1\nline 2');
+});
+
+test('(3.8.2) the platform folder of a pushed flow cannot leave the library', () => {
+  const at = (kind, kindFolders) => relativePathFor({ target: { kind }, name: 'Smoke', folder: 'a' }, kindFolders).split(path.sep).join('/');
+  assert.equal(at('classic', { classic: 'shop' }), 'shop/a/smoke.flow.json');
+  assert.equal(at('../../../../Users/x/evil'), 'Users/x/evil/a/smoke.flow.json', 'no ".." survives');
+  assert.equal(at({ not: 'a string' }), 'web/a/smoke.flow.json', 'a kind that is not a string is web, not a TypeError');
+  assert.equal(at('Classic'), 'Classic/a/smoke.flow.json', 'case is kept: existing folders stay where they are');
+});
+
+test('(3.8.2) a derailed flow: its report text is masked and its verdict is not FAIL_PRODUCT', () => {
+  const runner = readFileSync(G9, 'utf8');
+  const loop = runner.slice(runner.indexOf('let derailed = null;'), runner.indexOf('const passed = steps.filter'));
+  assert.ok(loop.indexOf('maskSecretsDeep(outcome') < loop.indexOf('derailed = { step'), 'masked before the derail record is built');
+  assert.match(runner, /verdict: derailed \? 'FAIL_AUTOMATION' : verdictForDevice\(steps, failed\)/);
+  assert.match(runner, /pushNotRun\(run, flows\.slice\(flowIndex \+ 1\), flow, options, \{ cause: 'derailed' \}\)/);
+});
+
+test('cli: (3.8.2) --package that is not an application id is refused before adb', () => {
+  const p = tempProject();
+  try {
+    p.write('shop-next/smoke.flow.json', flow('next.smoke', 'shop-next'));
+    const out = g9(p.dir, 'run', 'all', '--platform', 'shop-next', '--package', 'com.x;reboot');
+    assert.notEqual(out.status, 0);
+    assert.match(out.stderr + out.stdout, /--package "com\.x;reboot" is not an Android application id/);
   } finally { p.cleanup(); }
 });
 

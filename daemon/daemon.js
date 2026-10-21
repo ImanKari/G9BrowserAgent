@@ -386,12 +386,12 @@ export class Daemon {
     const adopted = role === 'agent' ? this.registry.adoptIdentity(client.id) : null;
     // (3.8.1) A reconnecting agent whose current tab did not come back: its next call on a default
     // tab says so (router #takeDefault) instead of silently acting on whatever tab the browser shows.
-    if (role === 'agent' && c.previous && typeof c.previous === 'object' && adopted?.current == null) {
-      const restarted = typeof c.previous.bootId === 'string' && c.previous.bootId !== this.bootId;
-      client.lostCurrent = {
-        tabId: null,
-        why: restarted ? 'the daemon restarted, so every tab has a new id' : `this agent reconnected to the daemon (it was ${String(c.previous.agentId ?? '?').slice(0, 40)})`,
-      };
+    // (3.8.2) Only when it was really lost: within one daemon the identity's adoption above gives back
+    // what the agent held (nothing held, nothing lost); after a daemon restart every handle is new, and
+    // the link says whether it relied on a current tab (`hadCurrent`: a call without tabId/session).
+    const restarted = typeof c.previous?.bootId === 'string' && c.previous.bootId !== this.bootId;
+    if (role === 'agent' && restarted && c.previous.hadCurrent === true && adopted?.current == null) {
+      client.lostCurrent = { tabId: null, why: 'the daemon restarted, so every tab has a new id' };
     }
 
     conn.send({

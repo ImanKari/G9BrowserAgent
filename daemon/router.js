@@ -819,6 +819,10 @@ export class Router {
     if (client.role === 'agent' && !(tool === 'browser_tabs' && args.action === 'finish')) {
       client.working = true;
       this.#cancelAutoDetach();
+      // (3.8.2) A detach of the person's browser in flight (a finish, the auto-detach) is let finish first:
+      // a call that attached a tab meanwhile would have that tab detached under it. Bounded by the
+      // detach's own relay timeout; the call then attaches again where it needs to.
+      if (this.detaching) await this.detaching.catch(() => {});
     }
 
     // (3.5) The call log (daemon/calls.js): an id per call, opId deduplication, a pending answer
@@ -895,10 +899,9 @@ export class Router {
    * before it noticed (field report, 2026-10-13).
    */
   #takeDefault(client, handle) {
+    const lost = client.lostCurrent; // read first: setCurrent clears it (an explicit choice is no loss)
     this.registry.setCurrent(client.id, handle);
-    const lost = client.lostCurrent;
     if (!lost) return;
-    client.lostCurrent = null;
     client.currentNotice = {
       tabId: handle,
       ...(lost.tabId != null ? { previous: lost.tabId } : {}),
@@ -933,7 +936,15 @@ export class Router {
     const ext = this.#extensionClient();
     if (ext) {
       const handle = await this.#extensionDefaultTab(client, ext);
-      if (handle != null) return this.#availableTo(client, handle) ? handle : null;
+      if (handle != null) {
+        if (this.#availableTo(client, handle)) return handle;
+        // (3.8.2) Said in the error: the person's tab is there, but another agent is on it.
+        const by = this.registry.ownerOf(handle) ?? this.registry.currentOfOther(handle, client.id);
+        throw Object.assign(new Error(
+          `The tab in front of the person's browser (tab ${handle}) is in use by ${this.registry.describe(by)}, so it is not taken for you by default. ` +
+            'Pass tabId (browser_tabs action:"list" shows every tab), or open your own with browser_tabs action:"open".',
+        ), { errorCode: 'tab_in_use' });
+      }
     }
     const last = this.engines.currentTab?.() ?? null;
     if (last != null && this.#availableTo(client, last)) return last;
@@ -1642,14 +1653,22 @@ export class Router {
    * (watched live by a person, or owned by a connected agent). Launched engines are always attached and
    * have no bar; they are left alone.
    */
-  async detachEverywhere(caller = 'daemon') {
+  detachEverywhere(caller = 'daemon') {
+    if (this.detaching) return this.detaching;
+    const pending = this.#detachEverywhere(caller).finally(() => { if (this.detaching === pending) this.detaching = null; });
+    this.detaching = pending;
+    return pending;
+  }
+
+  async #detachEverywhere(caller) {
     const detached = [];
     const kept = [];
     for (const engine of this.registry.extensionEngines()) {
       if (this.registry.isParked?.(engine.id)) continue;
       const keep = [];
       for (const handle of this.registry.handlesOf(engine.id)) {
-        if (!this.isWatched(handle) && !this.registry.ownerOf(handle)) continue;
+        // (3.8.2) Also a working agent's current tab: reads claim nothing, but that agent is on it.
+        if (!this.isWatched(handle) && !this.registry.ownerOf(handle) && !this.registry.currentOfOther(handle, null)) continue;
         const chrome = this.registry.chromeTabOf(handle, engine.id);
         if (chrome != null) keep.push(chrome);
       }
@@ -1657,7 +1676,10 @@ export class Router {
         const r = await this.relay(engine, 'browser_tabs', { action: 'detach_all', keep }, caller, { timeoutMs: TAB_CONTROL_TIMEOUT_MS });
         const toHandle = (id) => this.registry.handleForChrome(engine.id, id, { create: false }) ?? id;
         for (const id of r?.detached ?? []) detached.push(toHandle(id));
-        for (const k of r?.kept ?? []) kept.push({ ...k, tabId: toHandle(k.tabId) });
+        // (3.8.2) `kept[].tabId` is already a handle: relay() rewrites every `tabId` key on the way back
+        // (`detached` is a bare id list, which it does not). Mapping it again named whatever Chrome tab had
+        // the handle's number.
+        for (const k of r?.kept ?? []) kept.push(k);
       } catch (err) {
         kept.push({ engine: engine.id, reason: String(err?.message ?? err) });
       }

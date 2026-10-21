@@ -84,6 +84,7 @@ export class DaemonLink {
     this.ws = null;
     this.welcome = null;
     this.previous = null; // { agentId, bootId } of the last connection
+    this.hadCurrent = false; // (3.8.2) a call without tabId/session was sent: this agent relies on its current tab
 
     this.connecting = null;
     this.pending = new Map();
@@ -233,7 +234,7 @@ export class DaemonLink {
           ...(this.identity ? { identity: this.identity } : {}),
           // (3.8.1) A reconnect says who this link was, so the daemon can tell the agent when its
           // current tab did not come back with it (router #takeDefault).
-          ...(this.previous ? { previous: this.previous } : {}),
+          ...(this.previous ? { previous: { ...this.previous, hadCurrent: this.hadCurrent } } : {}),
         },
       });
     });
@@ -269,6 +270,7 @@ export class DaemonLink {
 
   async call(tool, args) {
     await this.ensure();
+    if (tool !== 'browser_status' && args?.tabId == null && !args?.session) this.hadCurrent = true;
     const ms = timeoutFor(tool, args ?? {}, BASE_TIMEOUT_MS) + 30_000;
     return new Promise((resolve, reject) => {
       const id = this.nextId++;

@@ -19,7 +19,7 @@
 import { platform } from '../lib/platform.js';
 import { getState, logActivity, forgetDialog } from '../lib/state.js';
 import { inWorld } from '../lib/world.js';
-import { evaluate, send as cdpSend, attachedTabIds, recoverTab, keepAwake, attachIssuesOf, pendingCommands, detach as detachDebugger } from '../lib/cdp.js';
+import { evaluate, send as cdpSend, attachedTabIds, recoverTab, keepAwake, attachIssuesOf, pendingCommands, detach as detachDebugger, detachMany } from '../lib/cdp.js';
 import { bindCallSignal, bindCallDeadline, callSignalFor } from '../lib/humanize.js';
 import { tagCode, codeFor, codedError } from '../lib/errcode.js';
 import * as navwatch from '../lib/navwatch.js';
@@ -625,8 +625,8 @@ async function detachTab(tabId) {
 
 /**
  * (3.8) End the debugger session on EVERY tab this extension debugs, except `keep` (Chrome tab ids the
- * daemon still needs: a live view a person is watching, a tab a working agent owns). Each tab goes through
- * detachTab, so a tab with a recording running stays attached. Sent by the daemon when the last working
+ * daemon still needs: a live view a person is watching, a tab a working agent owns). A tab with a recording
+ * running stays attached, as in detachTab. Sent by the daemon when the last working
  * agent finished (browser_tabs action:"finish") or left without finishing: nobody is using the person's
  * browser any more, and its "started debugging this browser" bar should go. The next agent call attaches again.
  */
@@ -634,14 +634,25 @@ async function detachEveryTab(keep = []) {
   if (platform.name !== 'extension') return { detached: [], kept: [], note: 'A launched browser’s tabs are always attached; nothing to detach.' };
   const keepSet = new Set((Array.isArray(keep) ? keep : []).map(Number));
   const state = await getState();
-  const held = new Set([...(state.attachedTabs ?? []), ...(await attachedTabIds().catch(() => []))]);
-  const detached = [];
+  const attachedNow = await attachedTabIds().catch(() => []);
+  const held = new Set([...(state.attachedTabs ?? []), ...attachedNow]);
   const kept = [];
-  for (const tabId of held) {
-    if (keepSet.has(tabId)) { kept.push({ tabId, reason: 'in use' }); continue; }
-    const r = await detachTab(tabId).catch((err) => ({ tabId, detached: false, error: String(err?.message ?? err) }));
-    if (r.detached) detached.push(tabId);
-    else if (r.wasAttached !== false) kept.push({ tabId, reason: r.note ?? r.error ?? 'still attached' });
+  // (3.8.2) One parallel detachMany for every tab that may go (each bounded at 5 s), not a sequential
+  // detachTab per tab that re-read the recording state and the attached list every time: with a few slow
+  // tabs the loop outran the daemon's 20 s relay timeout and the whole engine was reported as kept.
+  const candidates = [];
+  await Promise.all([...held].map(async (tabId) => {
+    if (keepSet.has(tabId)) { kept.push({ tabId, reason: 'in use' }); return; }
+    if (!attachedNow.includes(tabId)) return; // remembered, but no longer attached: nothing to do
+    const rec = await record.recordingStatus(tabId).catch(() => null);
+    if (rec?.recording) kept.push({ tabId, reason: 'A recording is running on this tab; it stays attached until the recording stops.' });
+    else candidates.push(tabId);
+  }));
+  const results = await detachMany(candidates).catch((err) => candidates.map((tabId) => ({ tabId, detached: false, error: String(err?.message ?? err) })));
+  const detached = [];
+  for (const r of results) {
+    if (r.detached) detached.push(r.tabId);
+    else kept.push({ tabId: r.tabId, reason: r.error ?? 'still attached (DevTools may be open on it)' });
   }
   return { detached, kept };
 }

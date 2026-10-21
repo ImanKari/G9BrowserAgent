@@ -438,8 +438,14 @@ async function foreignFlowAt(file, id) {
  * flow's `target.kind` to (`kindFolders`), else the kind itself, else `web`.
  */
 export function relativePathFor(spec, kindFolders = {}) {
-  const kind = spec.target?.kind ?? 'web';
-  const platform = (Object.hasOwn(kindFolders ?? {}, kind) ? kindFolders[kind] : null) ?? kind;
+  const kind = typeof spec.target?.kind === 'string' && spec.target.kind.trim() ? spec.target.kind.trim() : 'web';
+  // (3.8.2) The platform folder comes from the pushed spec (or the project): every segment is made safe like
+  // the others, so a kind of "../../x" cannot write outside the library. Case is kept (existing folders).
+  const platform = String((Object.hasOwn(kindFolders ?? {}, kind) ? kindFolders[kind] : null) ?? kind)
+    .split(/[\\/]/)
+    .map(safeSegment)
+    .filter(Boolean)
+    .join('/') || 'web';
   const folder = (spec.folder ?? '')
     .split('/')
     .map(slug)
@@ -447,6 +453,15 @@ export function relativePathFor(spec, kindFolders = {}) {
     .join('/');
   const base = slug(spec.name) || slug(spec.id) || 'flow';
   return path.join(platform, folder, `${base}${FLOW_SUFFIX}`);
+}
+
+/** (3.8.2) A folder name as it may stand in a path: no separators, no leading/trailing dots ("..", "."). */
+function safeSegment(value) {
+  return String(value ?? '')
+    .trim()
+    .replace(/[^A-Za-z0-9._؀-ۿ-]+/g, '-')
+    .replace(/^[.-]+|[.-]+$/g, '')
+    .slice(0, 60);
 }
 
 function slug(value) {
