@@ -134,6 +134,16 @@ test('an unsigned bridge gets no signature (a bridge of protocol 1 is unchanged)
   } finally { await bridge.close(); }
 });
 
+test('(3.8.6) a key from the environment signs only a bridge that asks: an unsigned bridge gets no signature', async () => {
+  const bridge = await signedBridge({ signatureRequired: false });
+  try {
+    const driver = new DeviceDriver({ port: bridge.port, serial: false, profile: PROFILE.plain, signing: signingFor(PROFILE.plain, { G9_SECRET_DEVICE_SIGNING_KEY: PRIVATE_B64, G9_DEVICE_SIGNING_KID: 'lab' }) });
+    await driver.connect();
+    await driver.command('ui.snapshot', {});
+    assert.ok(bridge.seen.length > 0 && bridge.seen.every((s) => !s.signed));
+  } finally { await bridge.close(); }
+});
+
 test('(3.8.5) a bridge step sends one command as setup and says so; without a command it is refused', async () => {
   const bridge = await signedBridge({ signatureRequired: false });
   try {

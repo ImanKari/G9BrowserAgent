@@ -738,8 +738,10 @@ export class DeviceDriver {
 
     const headers = { 'content-type': 'application/json' };
     if (this.token) headers['x-qa-token'] = this.token;
-    if (this.signing) {
-      if (!this.hello) this.hello = await this.get('/qa');
+    if (this.signing && !this.hello) this.hello = await this.get('/qa');
+    // (3.8.6) Only a bridge that asks for signatures gets one: a lab hands its key to every device lane, and a protocol-1
+    // bridge (no app id to sign for) would otherwise receive headers that mean nothing.
+    if (this.signing && this.hello?.signatureRequired) {
       Object.assign(headers, signRequest({
         key: this.signing.key,
         kid: this.signing.kid ?? this.hello.kids?.[0],
