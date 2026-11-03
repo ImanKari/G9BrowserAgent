@@ -401,13 +401,14 @@ async function suiteRules(project, target, platform = null) {
   if (!name) return {};
   const suite = await readSuite(flowsRoot(project), name, platform);
   if (!suite) return {};
-  if (suite.stopOn != null && suite.stopOn !== 'failure') {
-    throw new Error(`Suite "${name}" has stopOn "${suite.stopOn}", which this runner does not implement. Supported: "failure". Refusing rather than guessing.`);
+  // (3.8.4) "never" says outright what a missing stopOn means: every selected flow runs.
+  if (suite.stopOn != null && suite.stopOn !== 'failure' && suite.stopOn !== 'never') {
+    throw new Error(`Suite "${name}" has stopOn "${suite.stopOn}", which this runner does not implement. Supported: "failure", "never". Refusing rather than guessing.`);
   }
   if (suite.order != null && !['risk-desc', 'name'].includes(suite.order)) {
     throw new Error(`Suite "${name}" has order "${suite.order}", which this runner does not implement. Supported: "risk-desc", "name". Refusing rather than guessing.`);
   }
-  return { order: suite.order ?? null, stopOn: suite.stopOn ?? null };
+  return { order: suite.order ?? null, stopOn: suite.stopOn === 'never' ? null : (suite.stopOn ?? null) };
 }
 
 /** Does this verdict stop a `stopOn: "failure"` suite? SURPRISE and SKIPPED do not. */

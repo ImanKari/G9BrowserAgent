@@ -214,6 +214,8 @@ A suite file may add, next to `select`:
 - `"stopOn": "failure"` — stop the suite after a flow whose verdict is `FAIL_PRODUCT`,
   `FAIL_AUTOMATION` or `ERROR` (not `SURPRISE`, not `SKIPPED`). The remaining flows are reported
   as **NOT_RUN**, naming the flow that stopped the suite — distinct from SKIPPED on purpose.
+- `"stopOn": "never"` (3.8.4) — every selected flow runs, whatever the verdicts: the same as no `stopOn`, said
+  outright. A derailed app still stops the suite.
 
 ## Exit codes
 

@@ -72,7 +72,8 @@ Where the runner finds the key — never in the project file itself, only WHERE 
   "key": { "file": "…", "windows": "<Credential Manager target>", "macos": { "service": "…", "account": "…" } } } } }
 ```
 
-`G9_SECRET_DEVICE_SIGNING_KEY` (PEM or base64 PKCS#8) wins over the profile. The key is never printed or written
+`G9_SECRET_DEVICE_SIGNING_KEY` (PEM or base64 PKCS#8) wins over the profile, and `G9_DEVICE_SIGNING_KID` names that key
+(a lab machine's own key; without it the profile's kid is used). The key is never printed or written
 by the runner. A bridge that requires signatures with no key configured fails the run at connect, with a message
 that names the missing setting.
 

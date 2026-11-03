@@ -91,5 +91,7 @@ export function signingFor(profile, env = process.env) {
     if (text) source = `keychain:${ref.macos.service}`;
   }
   if (!text) return null;
-  return { key: privateKeyFrom(text), kid: signing.kid ?? null, source };
+  // (3.8.4) The environment's key names its own kid (a lab machine signs with its own key, not the profile's person's).
+  const kid = (source.startsWith('env:') && env.G9_DEVICE_SIGNING_KID) || signing.kid || null;
+  return { key: privateKeyFrom(text), kid, source };
 }

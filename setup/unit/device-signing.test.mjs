@@ -87,6 +87,12 @@ test('the environment key wins and its source is named, not its value', () => {
   assert.equal(signingFor(PROFILE.plain, {}), null);
 });
 
+test('(3.8.4) the environment key names its own kid; the profile kid is for the profile key', () => {
+  const s = signingFor(PROFILE.next, { G9_SECRET_DEVICE_SIGNING_KEY: PRIVATE_B64, G9_DEVICE_SIGNING_KID: 'lab-node' });
+  assert.equal(s.kid, 'lab-node');
+  assert.equal(s.source, 'env:G9_SECRET_DEVICE_SIGNING_KEY');
+});
+
 test('a bridge that requires signatures is refused without a key, with the way to provide one', async () => {
   const bridge = await signedBridge();
   try {
