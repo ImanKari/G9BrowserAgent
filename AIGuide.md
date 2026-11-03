@@ -2,7 +2,7 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v3.8.2, 2026-10-22 — the ten findings of a code review of 3.7–3.8.1 fixed (§9, the 3.8.2 entry): secrets masked in derailed reports, no device shell injection, no flow written outside the library, a hung browser no longer taken for an exited one, and `finish` safe against calls in flight. v3.8.1, 2026-10-21 — the first four suggestions-box reports (§9, the 3.8.1 entry): launched
+**Status:** v3.8.3, 2026-11-03 — signed device bridges: a bridge whose hello says `signatureRequired` gets every request signed (ECDSA P-256, four `X-G9P-*` headers, the device clock corrected and a `CLOCK_SKEW` retried once); the key is found where the project's device profile says (`signing`: a file, the Windows Credential Manager, the macOS keychain) or in `G9_SECRET_DEVICE_SIGNING_KEY`, never printed (§9, the 3.8.3 entry; docs/DEVICE_BRIDGE.md «Signed bridges»). v3.8.2, 2026-10-22 — the ten findings of a code review of 3.7–3.8.1 fixed (§9, the 3.8.2 entry): secrets masked in derailed reports, no device shell injection, no flow written outside the library, a hung browser no longer taken for an exited one, and `finish` safe against calls in flight. v3.8.1, 2026-10-21 — the first four suggestions-box reports (§9, the 3.8.1 entry): launched
 Edge starts again (Edge 155's compat-layer relaunch), a SYSTEM-account daemon is named and `auto` falls
 back to Chrome, an invalid device flow outside a run no longer stops it, and an agent keeps its own
 current tab. Built and published by hand (no pipeline minutes). v3.8.0, 2026-10-15 — the agent-facing text is layered: a core under 2,048 characters (clients cut server instructions at 4,096, older ones at 2,048 — the 13,300-character instructions lost everything after "Acting"), twelve topic guides and a per-tool reference generated from the schemas (`mcp/guides.js`; resources `g9://guide/<topic>`, `g9://tool/<name>`, and `browser_status guide:"…"` answered without a browser); and `browser_tabs action:"finish"` — the last working agent detaches the debugger from the person's browser (§9, the 3.8.0 entry). Before it, v3.7.0, 2026-10-15 — device apps are the project's data: `g9.project.json` `devices` declares them, one generic driver (`runner/drivers/device.mjs`) drives any app that speaks the QA bridge protocol ([docs/DEVICE_BRIDGE.md](docs/DEVICE_BRIDGE.md)), and the device steps `tapFeature`, `zoomToFeature`, `longPressFeature`, `selectItem`, `setValue`, `popupButton` and the `onScreen` oracle join the vocabulary (§9, the 3.7.0 entry). Before it, v3.6.3, 2026-10-13 — the published 3.6 release (3.6.0–3.6.2 never passed the pipeline; §9, the 3.6.3 entry). 3.6.1 (§9): the macOS self-update moves the new bundle into place (a copy was stopped by macOS on a real Mac). 3.6.0 (§9, the 3.6.0 entry): the "Human Wave" icon everywhere; the
@@ -1929,6 +1929,28 @@ after every step of a forty-step flow doubles the run for evidence nobody reads.
 Entries below describe what was believed or tested at the time. Current capability claims and
 unresolved findings are in §§4, 7 and 8, which supersede historical assertions. Entries dated before
 2026-09-21 describe v1 (the bridge, the four control modes, the workspace allowlist).
+
+### 2026-11-03 — v3.8.3: signed device bridges
+
+**Why.** A device bridge that can tap, type and read an app's data is a door; an app that wants it open on more
+than the loopback (a second phone app on the device, a lab that reaches the phone over the network) needs every
+request to prove who sent it. Protocol 2 does that with a signature per request; the app holds only public keys.
+
+- **`runner/drivers/signing.mjs`** (new): `signRequest` (the protocol-2 signing string: `g9p2`, the app id, ts,
+  nonce, METHOD, path, sha256 of the body), `privateKeyFrom` (PEM or base64 PKCS#8), `signingFor(profile, env)` —
+  `G9_SECRET_DEVICE_SIGNING_KEY`, else the profile's file, Windows Credential Manager target or macOS keychain
+  item. The key is held in memory only; a failure names the setting, never the key.
+- **`runner/drivers/device.mjs`**: the hello is kept (`app`, `kids`, `signatureRequired`, `deviceTime` → the clock
+  offset); a bridge that requires signatures with no key stops the run at connect; every POST is signed; a
+  `CLOCK_SKEW` refusal corrects the offset from the answer's `deviceTime` and retries once.
+- **`lib/devices.mjs`**: a device profile's `signing { kid, key: { file, windows, macos: { service, account } } }`
+  is read and frozen (it was dropped as an unknown field).
+- **`runner/g9.mjs`**: both driver constructions pass `signing: signingFor(device)`.
+- **Tests**: `setup/unit/device-signing.test.mjs` (7: a profile keeps where the key is, never a key; the
+  environment key wins and only its source is named; a signing bridge without a key is refused with the way to
+  provide one; every command is signed and verifies with the profile's kid; a skewed clock is corrected once; a
+  protocol-1 bridge gets no signature; the signature covers the app id); the device suite still passes.
+- **Docs**: docs/DEVICE_BRIDGE.md «Signed bridges», runner/README.md `signing`.
 
 ### 2026-10-22 — v3.8.2: a code review of 3.7–3.8.1, and every finding fixed
 

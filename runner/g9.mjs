@@ -1122,6 +1122,7 @@ function devicePortFor(options, device) {
  */
 async function commandRunDevice({ options, project, reportDir, target, variables = {}, device }) {
   const { DeviceDriver, listDevices, tapFidelity } = await import('./drivers/device.mjs');
+  const { signingFor } = await import('./drivers/signing.mjs');
 
   // The flows first: a misplaced or invalid flow file is reported before anything talks to adb, so a
   // broken library is never mistaken for a missing device (and the check runs on a machine without one).
@@ -1138,6 +1139,7 @@ async function commandRunDevice({ options, project, reportDir, target, variables
     token: options.token === true ? '' : (options.token ?? ''),
     packageName,
     profile: device,
+    signing: signingFor(device),
     log: (message) => log(options, `  ${message}`),
   });
 
@@ -1963,6 +1965,7 @@ async function commandHarvest({ options }) {
   const project = await loadProject(options.project === true ? undefined : options.project);
   const device = devicePlatformFor(project, options.platform);
   const { DeviceDriver, listDevices } = await import('./drivers/device.mjs');
+  const { signingFor } = await import('./drivers/signing.mjs');
 
   const packageName = packageFor(options, device);
   const serial = await pickDevice(options, listDevices);
@@ -1972,6 +1975,7 @@ async function commandHarvest({ options }) {
     token: options.token === true ? '' : (options.token ?? ''),
     packageName,
     profile: device,
+    signing: signingFor(device),
     log: (message) => log(options, `  ${message}`),
   });
 

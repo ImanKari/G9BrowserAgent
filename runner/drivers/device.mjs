@@ -35,6 +35,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { signRequest } from './signing.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -171,7 +172,7 @@ export class DeviceDriver {
    */
   constructor({
     port = DEFAULT_BRIDGE_PORT, host = '127.0.0.1', token = '', serial = null, packageName = null,
-    profile = null, launchTimeoutMs = 45_000, log = () => {},
+    profile = null, launchTimeoutMs = 45_000, log = () => {}, signing = null,
   } = {}) {
     this.port = port;
     this.host = host;
@@ -182,6 +183,10 @@ export class DeviceDriver {
     this.launchTimeoutMs = launchTimeoutMs;
     this.log = log;
     this.leaseId = null;
+    // {key, kid, source} for a bridge that requires signed requests (./signing.mjs); null signs nothing.
+    this.signing = signing;
+    this.hello = null;
+    this.clockOffsetMs = 0;
   }
 
   get base() {
@@ -221,6 +226,17 @@ export class DeviceDriver {
           `Another app holds port ${this.port}: stop it, or point --device-port at the right one.`,
       );
     }
+
+    this.hello = hello;
+    if (typeof hello.deviceTime === 'number') this.clockOffsetMs = hello.deviceTime - Date.now();
+    if (hello.signatureRequired && !this.signing) {
+      throw new Error(
+        `This device's bridge requires signed requests (keys ${JSON.stringify(hello.kids ?? [])}), and no signing key ` +
+          'was found: set G9_SECRET_DEVICE_SIGNING_KEY, or name a key file / OS store in the device profile ' +
+          '(`signing: { kid, key: { file | windows | macos } }`, docs/DEVICE_BRIDGE.md «Signed bridges»).',
+      );
+    }
+    if (this.signing) this.log(`signing as ${this.signing.kid ?? hello.kids?.[0] ?? '?'} (key from ${this.signing.source})`);
 
     if (hello.tokenRequired && !this.token) {
       throw new Error(
@@ -702,7 +718,7 @@ export class DeviceDriver {
 
   // ---------------------------------------------------------------- transport
 
-  async command(command, args = {}, { timeoutMs = 30_000 } = {}) {
+  async command(command, args = {}, { timeoutMs = 30_000 } = {}, retriedSkew = false) {
     const body = JSON.stringify({
       command,
       args,
@@ -712,6 +728,18 @@ export class DeviceDriver {
 
     const headers = { 'content-type': 'application/json' };
     if (this.token) headers['x-qa-token'] = this.token;
+    if (this.signing) {
+      if (!this.hello) this.hello = await this.get('/qa');
+      Object.assign(headers, signRequest({
+        key: this.signing.key,
+        kid: this.signing.kid ?? this.hello.kids?.[0],
+        app: this.hello.app,
+        method: 'POST',
+        path: '/qa',
+        body,
+        now: Date.now() + Math.round(this.clockOffsetMs),
+      }));
+    }
 
     const response = await fetch(`${this.base}/qa`, {
       method: 'POST',
@@ -727,7 +755,13 @@ export class DeviceDriver {
       );
     }
 
-    return response.json();
+    const answer = await response.json();
+    // A device whose clock is off: correct once from the time it reports, then retry.
+    if (answer?.code === 'CLOCK_SKEW' && typeof answer.deviceTime === 'number' && !retriedSkew) {
+      this.clockOffsetMs = answer.deviceTime - Date.now();
+      return this.command(command, args, { timeoutMs }, true);
+    }
+    return answer;
   }
 
   get(path) {

@@ -11,7 +11,7 @@ must not contain it.
 
 An HTTP/1.1 listener inside the app, bound to the device's loopback on one port (default **8799**, a
 platform's `port` overrides it). The runner reaches it with `adb forward tcp:<port> tcp:<port>`, so nothing
-is exposed to the network.
+is exposed to the network. (A signed bridge may listen on every interface: «Signed bridges».)
 
 | Request | Body | Answer |
 |---|---|---|
@@ -21,6 +21,7 @@ is exposed to the network.
 - `timeoutMs` is on the request ROOT: it is the command's own budget. The runner waits `timeoutMs + 5 s` for
   the HTTP answer.
 - When the hello says `tokenRequired`, every POST carries `x-qa-token: <token>`; a wrong token is HTTP 401.
+- When the hello says `signatureRequired`, every request is signed instead (below, «Signed bridges»).
 - Once a lease is taken (`lease.acquire`), every command carries its `leaseId`; a command without the current
   lease is refused while another runner holds the device.
 - An unknown command answers `ok: false` with an error that contains `unknown command`.
@@ -34,6 +35,46 @@ is exposed to the network.
 
 `package` (or `app`, when it is an application id) names the app. When the runner was told which package must
 own the port, a hello naming another one is refused before any command.
+
+### Signed bridges (protocol 2)
+
+A bridge may refuse every command that is not signed. Its hello then says so:
+
+```json
+{ "ok": true, "protocol": 2, "app": "com.example.shop.next", "kids": ["lab-1"], "signatureRequired": true,
+  "deviceTime": 1762171200000 }
+```
+
+The app holds only PUBLIC keys; the runner signs each request with the matching private key (ECDSA P-256,
+SHA-256) in four headers:
+
+| Header | Value |
+|---|---|
+| `X-G9P-Kid` | the key id (one of `kids`) |
+| `X-G9P-Ts` | unix milliseconds (the runner corrects for the device clock from `deviceTime`) |
+| `X-G9P-Nonce` | base64url of 16 random bytes; a nonce is accepted once |
+| `X-G9P-Sig` | base64url DER signature of `"g9p2
+" + app + "
+" + ts + "
+" + nonce + "
+" + METHOD + "
+" + path + "
+" + hex(sha256(body))` |
+
+A refusal is HTTP 401 with `{ ok: false, code }`: `SIG_MISSING`, `UNKNOWN_KID`, `CLOCK_SKEW` (the answer carries
+`deviceTime`; the runner corrects and retries once), `SIG_INVALID`, `REPLAY`. A signed bridge may listen beyond
+loopback, because nothing unsigned gets through.
+
+Where the runner finds the key — never in the project file itself, only WHERE it is:
+
+```json
+"devices": { "shop-next": { "signing": { "kid": "lab-1",
+  "key": { "file": "…", "windows": "<Credential Manager target>", "macos": { "service": "…", "account": "…" } } } } }
+```
+
+`G9_SECRET_DEVICE_SIGNING_KEY` (PEM or base64 PKCS#8) wins over the profile. The key is never printed or written
+by the runner. A bridge that requires signatures with no key configured fails the run at connect, with a message
+that names the missing setting.
 
 ### Off the path: `DERAILED:`
 

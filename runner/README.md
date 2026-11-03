@@ -309,6 +309,7 @@ Which apps exist is the project's data: `g9.project.json` declares them under `d
 | `errorScreens` | none | automation-id prefixes of the app's crash / error screen: a step that lands there is DERAILED |
 | `crashLog` | none | an app-private file (`run-as`) whose head is attached to a derailed step as evidence; a plain path (letters, digits, `. / _ - @ +`) |
 | `setupHint`, `tokenHint`, `selftestHints` | none | the app's own words for "nothing answered", "where is the token", and known self-test states |
+| `signing` | none | (3.8.3) a bridge that requires signed requests: `{ kid, key: { file \| windows \| macos: { service, account } } }` — WHERE the private key is, never the key; `G9_SECRET_DEVICE_SIGNING_KEY` wins ([DEVICE_BRIDGE.md «Signed bridges»](../docs/DEVICE_BRIDGE.md)) |
 
 Flows are validated like web flows: an invalid flow the run selects (any invalid file, for `all`) stops
 the run and is named; (3.8.1) one outside the run is a warning, and the run goes on. `candidates/` files
