@@ -31,6 +31,7 @@ export const CHECKS = [
   unit('device', 3, []),
   unit('device-signing', 0.5, []),
   unit('guides', 0.5, []),
+  unit('hostwatch', 0.2, []),
   unit('daemon', 6, []),
   unit('desktop', 22, ['desktop/**']),
   unit('engine', 35, []),

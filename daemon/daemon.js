@@ -35,6 +35,7 @@ import { Scheduler } from './scheduler.js';
 import { installExtension } from './extension-update.js';
 import { loadProject, projectForClient } from './project.js';
 import { FlowLibrary } from './flows.js';
+import { HostWatch } from './hostwatch.js';
 import { layout, writeFileAtomicSync } from './paths.js';
 import { EngineManager } from '../engine/manager.js';
 
@@ -96,6 +97,9 @@ export class Daemon {
       timeoutMs,
       info: () => ({ pid: process.pid, port: this.port, home: this.home.replace(/\\/g, '/'), repoRoot: REPO_ROOT, installId: INSTALL_ID, startedAt: this.startedAt }),
     });
+    // (3.8.7) The memory of the local servers the agents test, and of this daemon.
+    this.hostWatch = new HostWatch({ settings: () => this.settings.get().hostWatch, log });
+    this.router.hostWatch = this.hostWatch;
     this.router.emitUi = (topic, data) => this.broadcastUi(topic, data);
     this.router.onHaltFromEngine = (engineId, halted, by) => this.setGlobalHalt(halted, by, { except: engineId });
     this.router.onWatchData = (handle, kind, data) => this.#watchData(handle, kind, data);
@@ -204,6 +208,7 @@ export class Daemon {
       if (!this.engines.available()) this.log(`[g9d] Engine 2 unavailable: ${this.engines.unavailableReason()}`);
     });
     this.scheduler.start();
+    this.hostWatch.start();
     this.idleTimer = setInterval(() => this.#idleCheck(), this.idleExitMs ? Math.max(100, Math.min(30_000, Math.floor(this.idleExitMs / 4))) : 30_000);
     this.idleTimer.unref?.();
     return { port: this.port };
@@ -214,6 +219,7 @@ export class Daemon {
     this.stopping = (async () => {
       this.log(`[g9d] shutting down: ${reason}`);
       clearInterval(this.idleTimer);
+      this.hostWatch.stop();
       this.scheduler.stop();
       for (const handle of [...this.watchers.keys()]) await this.#stopWatching(handle).catch(() => {});
       await this.engines.shutdown().catch((err) => this.log(`[g9d] engine shutdown: ${err.message}`));

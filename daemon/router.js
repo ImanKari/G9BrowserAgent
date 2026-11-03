@@ -832,11 +832,30 @@ export class Router {
       // (3.5) While a call runs, its agent's claims are live (registry idleFor).
       this.registry.beginCall?.(client.id);
       try {
-        return await this.#dispatch(client, tool, rest);
+        return this.#withHostWarning(client, rest, await this.#dispatch(client, tool, rest));
       } finally {
         this.registry.endCall?.(client.id);
       }
     });
+  }
+
+  /**
+   * (3.8.7) The local servers an agent opens or lands on are watched (daemon/hostwatch.js); a new
+   * memory warning rides once on each agent's next result, as `hostWarning`.
+   */
+  #withHostWarning(client, args, result) {
+    const watch = this.hostWatch;
+    if (!watch) return result;
+    watch.note(args.url);
+    if (result && typeof result === 'object' && !Array.isArray(result)) {
+      watch.note(result.url);
+      const warnings = watch.warnings();
+      if (warnings.length && (client.hostSeen ?? 0) < watch.generation) {
+        client.hostSeen = watch.generation;
+        return { ...result, hostWarning: warnings };
+      }
+    }
+    return result;
   }
 
   #dispatch(client, tool, args) {
@@ -2185,7 +2204,9 @@ export class Router {
       ...(engineError ? { engineError } : {}),
       ...(targetError ? { targetError } : {}),
       ...(skew ? { versionMismatch: skew } : {}),
+      ...(this.hostWatch?.warnings().length ? { hostWarnings: this.hostWatch.warnings() } : {}),
     };
+    if (status.hostWarnings) client.hostSeen = this.hostWatch.generation; // seen here: not repeated on the next result
     status.hint = statusHint(status, { engineStatus, g, me });
     return status;
   }

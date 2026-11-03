@@ -918,7 +918,8 @@ G9_HOME/
   settings.json             daemon/settings.js DEFAULTS: port 8765, defaultBrowser 'auto', headless true,
                             humanize 'human', stealth 'off', maxParallel 8, evidence { maxFrames 3000,
                             maxBytes 300 MiB, keepRuns 200, quality 60, maxWidth 1280, maxHeight 800 },
-                            idleExitMinutes 60, updateMode 'official', updateUrl '', updateChannel 'stable',
+                            idleExitMinutes 60, hostWatch { limitMb 4096, growthMbPerHour 2048 } (3.8.7),
+                            updateMode 'official', updateUrl '', updateChannel 'stable',
                             schedule [] (3.1.0: updateMode 'official'|'custom'|'off', 'custom' needs updateUrl;
                             a file with updateUrl and no updateMode loads as 'custom'. F6: updateChannel
                             'stable'|'beta'; updateUrl https:// (http:// only on localhost, 127.0.0.1 or ::1) or

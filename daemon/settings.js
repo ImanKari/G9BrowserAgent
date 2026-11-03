@@ -45,6 +45,11 @@ export const DEFAULTS = Object.freeze({
   /** Exit after this long with no client, no launched engine and no enabled schedule. 0 = never. */
   idleExitMinutes: 60,
   /**
+   * (3.8.7) Warn the agents when a local server they test (or the daemon) passes `limitMb`, or grows
+   * faster than `growthMbPerHour` over ten minutes or more (daemon/hostwatch.js). 0 turns a check off.
+   */
+  hostWatch: Object.freeze({ limitMb: 4096, growthMbPerHour: 2048 }),
+  /**
    * Where the desktop app updates from (desktop/lib/updater.mjs): 'official' (the default) is the
    * published G9BrowserAgent releases on GitHub and needs nothing configured; 'custom' uses `updateUrl`;
    * 'off' never checks.
@@ -117,6 +122,14 @@ export function validateSettings(s) {
   if (!STEALTH_LEVELS.includes(s.stealth)) problems.push(`stealth must be one of ${STEALTH_LEVELS.join(', ')} (got ${JSON.stringify(s.stealth)}).`);
   int('maxParallel', 1, 256);
   int('idleExitMinutes', 0, 60 * 24 * 30);
+  if (!isPlainObject(s.hostWatch)) {
+    problems.push('hostWatch must be an object: { "limitMb": 4096, "growthMbPerHour": 2048 } (0 turns a check off).');
+  } else {
+    for (const key of ['limitMb', 'growthMbPerHour']) {
+      const v = s.hostWatch[key];
+      if (!Number.isInteger(v) || v < 0 || v > 1_048_576) problems.push(`hostWatch.${key} must be an integer 0..1048576 (got ${JSON.stringify(v)}).`);
+    }
+  }
   if (!UPDATE_MODES.includes(s.updateMode)) problems.push(`updateMode must be one of ${UPDATE_MODES.join(', ')} (got ${JSON.stringify(s.updateMode)}).`);
   if (s.updateMode === 'custom' && typeof s.updateUrl === 'string' && !s.updateUrl.trim()) problems.push('updateMode "custom" needs updateUrl (an https:// folder).');
   if (typeof s.feedbackUrl !== 'string') problems.push('feedbackUrl must be a string: an https:// URL, or empty to turn suggestions off.');

@@ -2,7 +2,7 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v3.8.6, 2026-11-03 — a key signs only a bridge that asks for signatures (a lab hands its key to every device lane) (§9, the 3.8.6 entry). v3.8.5, 2026-11-03 — a device flow can set up its own start state: the `bridge` step sends one bridge command and the report marks it `setup` (§9, the 3.8.5 entry). v3.8.4, 2026-11-03 — a lab machine signs with its own key (`G9_DEVICE_SIGNING_KID` names the key `G9_SECRET_DEVICE_SIGNING_KEY` carries), and a suite may say `"stopOn": "never"` outright (§9, the 3.8.4 entry). v3.8.3, 2026-11-03 — signed device bridges: a bridge whose hello says `signatureRequired` gets every request signed (ECDSA P-256, four `X-G9P-*` headers, the device clock corrected and a `CLOCK_SKEW` retried once); the key is found where the project's device profile says (`signing`: a file, the Windows Credential Manager, the macOS keychain) or in `G9_SECRET_DEVICE_SIGNING_KEY`, never printed (§9, the 3.8.3 entry; docs/DEVICE_BRIDGE.md «Signed bridges»). v3.8.2, 2026-10-22 — the ten findings of a code review of 3.7–3.8.1 fixed (§9, the 3.8.2 entry): secrets masked in derailed reports, no device shell injection, no flow written outside the library, a hung browser no longer taken for an exited one, and `finish` safe against calls in flight. v3.8.1, 2026-10-21 — the first four suggestions-box reports (§9, the 3.8.1 entry): launched
+**Status:** v3.8.7, 2026-11-04 — the host watch: the daemon reads the memory of the local servers its agents test (and its own) and warns the agents when one passes 4 GB or grows faster than 2 GB an hour — a looping dev-server watcher once took 109 GB (§9, the 3.8.7 entry). v3.8.6, 2026-11-03 — a key signs only a bridge that asks for signatures (a lab hands its key to every device lane) (§9, the 3.8.6 entry). v3.8.5, 2026-11-03 — a device flow can set up its own start state: the `bridge` step sends one bridge command and the report marks it `setup` (§9, the 3.8.5 entry). v3.8.4, 2026-11-03 — a lab machine signs with its own key (`G9_DEVICE_SIGNING_KID` names the key `G9_SECRET_DEVICE_SIGNING_KEY` carries), and a suite may say `"stopOn": "never"` outright (§9, the 3.8.4 entry). v3.8.3, 2026-11-03 — signed device bridges: a bridge whose hello says `signatureRequired` gets every request signed (ECDSA P-256, four `X-G9P-*` headers, the device clock corrected and a `CLOCK_SKEW` retried once); the key is found where the project's device profile says (`signing`: a file, the Windows Credential Manager, the macOS keychain) or in `G9_SECRET_DEVICE_SIGNING_KEY`, never printed (§9, the 3.8.3 entry; docs/DEVICE_BRIDGE.md «Signed bridges»). v3.8.2, 2026-10-22 — the ten findings of a code review of 3.7–3.8.1 fixed (§9, the 3.8.2 entry): secrets masked in derailed reports, no device shell injection, no flow written outside the library, a hung browser no longer taken for an exited one, and `finish` safe against calls in flight. v3.8.1, 2026-10-21 — the first four suggestions-box reports (§9, the 3.8.1 entry): launched
 Edge starts again (Edge 155's compat-layer relaunch), a SYSTEM-account daemon is named and `auto` falls
 back to Chrome, an invalid device flow outside a run no longer stops it, and an agent keeps its own
 current tab. Built and published by hand (no pipeline minutes). v3.8.0, 2026-10-15 — the agent-facing text is layered: a core under 2,048 characters (clients cut server instructions at 4,096, older ones at 2,048 — the 13,300-character instructions lost everything after "Acting"), twelve topic guides and a per-tool reference generated from the schemas (`mcp/guides.js`; resources `g9://guide/<topic>`, `g9://tool/<name>`, and `browser_status guide:"…"` answered without a browser); and `browser_tabs action:"finish"` — the last working agent detaches the debugger from the person's browser (§9, the 3.8.0 entry). Before it, v3.7.0, 2026-10-15 — device apps are the project's data: `g9.project.json` `devices` declares them, one generic driver (`runner/drivers/device.mjs`) drives any app that speaks the QA bridge protocol ([docs/DEVICE_BRIDGE.md](docs/DEVICE_BRIDGE.md)), and the device steps `tapFeature`, `zoomToFeature`, `longPressFeature`, `selectItem`, `setValue`, `popupButton` and the `onScreen` oracle join the vocabulary (§9, the 3.7.0 entry). Before it, v3.6.3, 2026-10-13 — the published 3.6 release (3.6.0–3.6.2 never passed the pipeline; §9, the 3.6.3 entry). 3.6.1 (§9): the macOS self-update moves the new bundle into place (a copy was stopped by macOS on a real Mac). 3.6.0 (§9, the 3.6.0 entry): the "Human Wave" icon everywhere; the
@@ -382,7 +382,8 @@ G9BrowserAgent/
 ├── daemon/                       g9d: g9d.mjs (CLI), daemon.js (composition), ws-server.js, registry.js,
 │                                 router.js, handoff.js, storage.js, evidence.js, scheduler.js, settings.js,
 │                                 paths.js, home-lock.js, project.js, flows.js, extension-update.js,
-│                                 calls.js (3.5: the call log — call ids, opId, pending answers, late outcomes)
+│                                 calls.js (3.5: the call log — call ids, opId, pending answers, late outcomes),
+│                                 hostwatch.js (3.8.7: memory of the local servers under test and of the daemon)
 ├── mcp/                          shim.mjs (what an AI client launches), mcp.js (stdio MCP), tools.js (schemas + INSTRUCTIONS);
 │                                 (3.2) link.mjs (the daemon link), server.mjs (tools + resources on a link),
 │                                 http.mjs (MCP over HTTP, bearer token: agents on other machines)
@@ -1929,6 +1930,42 @@ after every step of a forty-step flow doubles the run for evidence nobody reads.
 Entries below describe what was believed or tested at the time. Current capability claims and
 unresolved findings are in §§4, 7 and 8, which supersede historical assertions. Entries dated before
 2026-09-21 describe v1 (the bridge, the four control modes, the workspace allowlist).
+
+### 2026-11-04 — v3.8.7: the host watch — a local server under test that eats the machine's memory is named
+
+**Why.** The owner's workstation slowed down after one to five hours of agent work and applications crashed; Task
+Manager showed a "Node.js JavaScript Runtime" at 7–20 GB, and Windows' low-memory diagnosis (System log, event 2004)
+named `node.exe` at 51–109 GB of commit on 2026-10-28, 10-29, 10-30 and 11-03. **It was not G9BrowserAgent**: the
+daemon log has no daemon at all from 10-23 to 11-03 19:31, the span of every one of those events, and an installed
+daemon runs as `G9BrowserAgent.exe` (only a shim configured with `node` starts a daemon that shows as Node.js). It was
+a Vite dev server an agent had started for the project under test: a `vite build` rewrote the `build/` folder that
+`vite dev` watched, and from then on Windows reported ~2,200 `rename` events a second for that folder (the event's file
+name was the folder's own `\\?\` path, so chokidar never settled — measured with a logpoint through the Node inspector);
+the server grew ~100 MB a minute with no client connected, its JS heap at 110 MB (the growth was native). Excluding the
+build output from the dev server's watch (`server.watch.ignored`) ended it: 333 watchers instead of 721, and twenty
+create/delete cycles inside `build/` cost 63 ms of CPU. That fix belongs to the project; what G9BrowserAgent can do is
+notice, because it knows which local servers its agents test.
+
+- **`daemon/hostwatch.js`** (new): every `http(s)://localhost|127.x|[::1]:port` an agent passes (`url`) or lands on
+  (a result's `url`) is remembered for six hours. Every two minutes, while such a port is known, the listening process
+  is found and its memory read — `netstat -ano` + `tasklist` on Windows (listening = foreign `*:0`, so no localized
+  state word; ~2 s, asynchronous), `ss -ltnpH` + `/proc/<pid>/status` on Linux, `lsof` + `ps` on macOS — and the
+  daemon's own RSS. A process at `limitMb` or more, or growing at `growthMbPerHour` or more over ten minutes or more
+  (and above 1 GB), is a warning: logged once per level, listed in `browser_status` as `hostWarnings`, and attached
+  once to every agent's next result as `hostWarning`, with the likely cause and the fix. Nothing is stopped. A new pid
+  on the port (a restart) starts a new history.
+- **`daemon/settings.js`**: `hostWatch { limitMb: 4096, growthMbPerHour: 2048 }`; 0 turns a check off, both 0 the watch.
+- **`daemon/router.js`** `#withHostWarning` (around every dispatched call), `#status` `hostWarnings`;
+  **`daemon/daemon.js`** starts and stops it.
+- **Tests**: `setup/unit/hostwatch.test.mjs` (9: loopback ports only; netstat in another language; tasklist digits in
+  any locale; ss and lsof; growth over ten minutes; nothing probed before a local server is used; a 6 GB/h server
+  warned once, a restarted one not; over the limit, the daemon itself, and off; the setting). The real probe on the
+  owner's PC found the looping dev server (pid 54280, 3.2 GB) and the daemon in 2.2 s.
+- **`setup/extensiontest.mjs`**: the source scan of the device driver's `command()` read a fixed 900 characters, and
+  3.8.3's signing code had pushed the transport line (`AbortSignal.timeout(timeoutMs + 5_000)`) past them, so the
+  extension suite failed since 3.8.3 with correct code; it now reads the whole method. 113/113.
+- **The suggestions box** was read through the gate on 2026-11-04: empty since it was emptied on 10-21. Rules item 9
+  still stands — ask the owner whether to remove it.
 
 ### 2026-11-03 — v3.8.6: a key signs only a bridge that asks
 

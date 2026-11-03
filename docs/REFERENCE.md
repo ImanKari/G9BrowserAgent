@@ -1154,6 +1154,7 @@ are kept; invalid values are refused by name.
 | `maxParallel` | 8 | Concurrent state-changing Engine 2 calls ([measured](#measured-performance)). |
 | `evidence` | `{maxFrames:3000, maxBytes:300 MB, keepRuns:200, quality:60, maxWidth:1280, maxHeight:800}` | Evidence-run limits. |
 | `idleExitMinutes` | 60 | Idle time before the daemon exits; 0 means never. |
+| `hostWatch` | `{limitMb:4096, growthMbPerHour:2048}` | Warn agents (`hostWarning`, `browser_status` `hostWarnings`) when a local server they test, or the daemon, passes `limitMb` or grows faster than `growthMbPerHour`; 0 turns a check off. |
 | `updateMode` | `official` | Where the desktop app looks for updates: `official` (the GitHub releases), `custom` (`updateUrl`) or `off`. |
 | `updateUrl`, `updateChannel` | `''`, `stable` | The custom feed's `https://` folder; `beta` also takes prereleases. |
 

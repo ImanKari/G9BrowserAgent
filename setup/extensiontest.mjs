@@ -2026,7 +2026,10 @@ await test('a device command budget rides the request root, not the args object'
   // a longer wait and does not take one is a flake waiting to happen. Proven on the
   // device: ui.waitIdle with a root-level 45000 ran 30.3s and returned idle, where the
   // same value inside args had been cut off at exactly 30s.
-  const cmd = driver.slice(driver.indexOf('async command('), driver.indexOf('async command(') + 900);
+  // The whole method, up to the next one: a fixed 900 characters lost the transport line when 3.8.3 signed requests.
+  const start = driver.indexOf('async command(');
+  const next = driver.indexOf('\n  async ', start + 1);
+  const cmd = driver.slice(start, next > start ? next : undefined);
   assert.match(cmd, /timeoutMs,/, 'the driver must send timeoutMs at the request root');
 
   // And the transport must wait longer than the wait it is asking the device for, or it gives up
