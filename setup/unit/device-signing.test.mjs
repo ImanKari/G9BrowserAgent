@@ -134,6 +134,19 @@ test('an unsigned bridge gets no signature (a bridge of protocol 1 is unchanged)
   } finally { await bridge.close(); }
 });
 
+test('(3.8.5) a bridge step sends one command as setup and says so; without a command it is refused', async () => {
+  const bridge = await signedBridge({ signatureRequired: false });
+  try {
+    const driver = new DeviceDriver({ port: bridge.port, serial: false, profile: PROFILE.plain });
+    await driver.connect();
+    const res = await driver.stepCore({ id: 's0', action: 'bridge', command: 'dev.menu', args: {} });
+    assert.equal(res.ok, true);
+    assert.equal(res.setup, true);
+    assert.ok(bridge.seen.some((s) => s.command === 'dev.menu'));
+    await assert.rejects(() => driver.stepCore({ id: 's1', action: 'bridge' }), /needs "command"/);
+  } finally { await bridge.close(); }
+});
+
 test('the signature covers the app: a header made for another app does not verify', () => {
   const headers = signRequest({ key: pair.privateKey, kid: 'k1', app: 'other.app', method: 'POST', path: '/qa', body: '{}' });
   const req = { headers: Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v])), method: 'POST', url: '/qa' };

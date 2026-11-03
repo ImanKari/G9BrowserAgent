@@ -1400,7 +1400,7 @@ async function loadDeviceFlows(project, target, device, { warn = () => {} } = {}
   // drivers/device.mjs). An invalid file used to reach the device and fail there,
   // step by step, with the file never named.
   const deviceActions = new Set([
-    ...KNOWN_ACTIONS, 'dismiss', 'tapFeature', 'zoomToFeature', 'longPressFeature', 'selectItem', 'setValue', 'popupButton',
+    ...KNOWN_ACTIONS, 'dismiss', 'tapFeature', 'zoomToFeature', 'longPressFeature', 'selectItem', 'setValue', 'popupButton', 'bridge',
   ]);
   const entries = [];
   for (const file of await collectJson(folder)) {

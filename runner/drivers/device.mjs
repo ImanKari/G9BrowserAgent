@@ -532,11 +532,21 @@ export class DeviceDriver {
         // A picker, wheel, date or switch, set through the property the user's choice would set. A picker
         // that opens its own sheet often has nothing to tap; the bridge sets what the choice would set.
         return this.actuate('ui.setValue', { automationId: requireId(target, spec), value: String(spec.value ?? '') });
+      case 'bridge': {
+        // (3.8.5) One bridge command as a SETUP step: the start state a flow needs and no person's path leads to
+        // (a developer menu, a mock, a feature flag). It is not a user action, so the report marks it `setup`.
+        const command = spec.command ?? spec.value;
+        if (typeof command !== 'string' || !command) {
+          throw new Error(`Step "${spec.id}" (bridge) needs "command" (a bridge command name) and optionally "args".`);
+        }
+        const res = await this.actuate(command, spec.args && typeof spec.args === 'object' ? spec.args : {});
+        return { ...res, setup: true };
+      }
       default:
         throw new Error(
           `Step "${spec.id}" uses action "${spec.action}", which the device driver does not ` +
             `implement. Supported: click, type, dismiss, assert, navigate, tapFeature, zoomToFeature, ` +
-            `longPressFeature, selectItem, setValue, popupButton. Refusing rather than skipping.`,
+            `longPressFeature, selectItem, setValue, popupButton, bridge. Refusing rather than skipping.`,
         );
     }
   }
