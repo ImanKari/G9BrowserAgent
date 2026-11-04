@@ -119,7 +119,8 @@ Run options:
   --data <file.json>    variables substituted into {{placeholders}}; also the first
                         source for {{secret:NAME}} values (then G9_SECRET_<NAME> env vars)
   --report <dir>        where to write run.json / junit.xml / report.html
-  --timing <mode>       recorded (default) | adaptive | fast
+  --timing <mode>       recorded (default on the web) | adaptive (default on a device) | fast;
+                        on a device "recorded" also waits a step's recorded gapMs (≤ 10 s)
   --signature <mode>    lite (default) | full | off
   --pin <file.har>      serve the network from a HAR; any difference is then the client's
   --strict-pin          fail requests the HAR does not contain
@@ -1257,7 +1258,16 @@ async function commandRunDevice({ options, project, reportDir, target, variables
       }
 
       let derailed = null;
+      // (3.9) --timing on a device: every step already waits for the app's idle (adaptive, the device default; fast is
+      // the same here). `recorded` also keeps the person's pause before a step (`gapMs`, from the app's recorder), what is
+      // left of it after the previous step's own wait, capped at 10 s like the web replay — a debounce gets to fire.
+      const recordedPace = options.timing === 'recorded';
+      let lastStepEnd = Date.now();
       for (const [index, step] of (pre.ok ? (flow.steps ?? []) : []).entries()) {
+        if (recordedPace && Number(step.gapMs) > 0) {
+          const left = Math.min(Number(step.gapMs), 10_000) - (Date.now() - lastStepEnd);
+          if (left > 0) await new Promise((resolve) => setTimeout(resolve, left));
+        }
         let outcome;
         try {
           outcome = await driver.step(substituteDeviceStep(step, flowVariables), { first: index === 0 });
@@ -1273,6 +1283,7 @@ async function commandRunDevice({ options, project, reportDir, target, variables
           log(options, `  ✗ step ${index + 1} (${step.action}): ${outcome.error}`);
           break; // stop on first failure: later steps run against a state nobody intended
         }
+        lastStepEnd = Date.now();
         if (options.progress === true) log(options, `  · step ${index + 1}/${flow.steps.length} (${step.action})`);
       }
 
