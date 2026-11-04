@@ -1252,3 +1252,16 @@ function run(command, args, { cwd, env } = {}) {
     child.on('close', (code) => resolve({ code, stdout, stderr }));
   });
 }
+
+/**
+ * (3.9) What a protocol-1 bridge (an older app, a build of another framework) cannot answer is not its failure: a step
+ * or a precondition that needs a protocol-2 command it does not have («Unknown command», no event stream) makes the
+ * flow SKIPPED with that reason — «needs a protocol-2 bridge» — never FAIL_PRODUCT. A protocol-2 bridge that lacks a
+ * command still fails: there it is the app's (or the flow's) problem.
+ */
+export function needsNewerBridge(steps, protocol) {
+  if (!(Number(protocol) < 2)) return null;
+  const bad = steps.find((s) => !s.ok);
+  const m = String(bad?.error ?? '');
+  return /Unknown command|not a command this bridge|has no event stream|protocol-1 bridge/i.test(m) ? `step ${bad.step} (${bad.action}) needs a protocol-2 bridge — this app's bridge is protocol ${protocol}: ${m.slice(0, 160)}` : null;
+}

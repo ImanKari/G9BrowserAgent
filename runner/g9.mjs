@@ -1127,7 +1127,7 @@ function devicePortFor(options, device) {
  * A device flow has no browser to live in, so `<flowsDir>/<the platform's flowsFolder>/**` IS the library.
  */
 async function commandRunDevice({ options, project, reportDir, target, variables = {}, device }) {
-  const { DeviceDriver, deviceUrlFor, listDevices, tapFidelity } = await import('./drivers/device.mjs');
+  const { DeviceDriver, deviceUrlFor, listDevices, needsNewerBridge, tapFidelity } = await import('./drivers/device.mjs');
   const { signingFor } = await import('./drivers/signing.mjs');
 
   // The flows first: a misplaced or invalid flow file is reported before anything talks to adb, so a
@@ -1312,7 +1312,8 @@ async function commandRunDevice({ options, project, reportDir, target, variables
         name: flow.name,
         // (3.8.2) A derailed flow is not a product verdict yet: the runner hands it to an agent and says "do not
         // file a bug until the cause is known" — FAIL_PRODUCT (what its DERAILED text matched) said the opposite.
-        verdict: derailed ? 'FAIL_AUTOMATION' : verdictForDevice(steps, failed),
+        verdict: derailed ? 'FAIL_AUTOMATION' : (failed && needsNewerBridge(steps, driver.hello?.protocol ?? 1) ? 'SKIPPED' : verdictForDevice(steps, failed)),
+        ...(failed && !derailed && needsNewerBridge(steps, driver.hello?.protocol ?? 1) ? { skipReason: needsNewerBridge(steps, driver.hello?.protocol ?? 1) } : {}),
         total: flow.steps?.length ?? 0,
         passed,
         failed,

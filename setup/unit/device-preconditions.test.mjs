@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 
-import { DeviceDriver } from '../../runner/drivers/device.mjs';
+import { DeviceDriver, needsNewerBridge } from '../../runner/drivers/device.mjs';
 
 const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
@@ -132,6 +132,15 @@ test('a savepoint precondition runs the profile\'s load command from the project
     b.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+// (3.9) A protocol-1 bridge cannot answer a protocol-2 command: SKIPPED with the reason, never a product failure; a
+// protocol-2 bridge without the command still fails.
+test('a step a protocol-1 bridge cannot answer makes the flow skipped, not failed', async () => {
+  const steps = [{ step: 1, action: 'tap', ok: true }, { step: 2, action: 'bridge', ok: false, error: 'Unknown command "screen.model".' }];
+  assert.match(needsNewerBridge(steps, 1), /step 2 \(bridge\) needs a protocol-2 bridge/);
+  assert.equal(needsNewerBridge(steps, 2), null);
+  assert.match(needsNewerBridge([{ step: 0, action: 'preconditions', ok: false, error: 'precondition net.shape failed: Unknown command "net.shape".' }], 1), /needs a protocol-2 bridge/);
+  assert.equal(needsNewerBridge([{ step: 1, action: 'tap', ok: false, error: 'No visible control' }], 1), null, 'a real failure stays one');
 });
 for (const { name, fn } of tests) {
   try {
