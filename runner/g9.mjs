@@ -1258,7 +1258,9 @@ async function commandRunDevice({ options, project, reportDir, target, variables
 
       driver.endFlow();
       // (3.8.11) A failed flow keeps the app's state at the failure (trace + screen), before anything is put back.
-      const failure = failed ? await driver.failureBundle(flow.id, steps.find((s) => !s.ok)?.error).catch(() => null) : null;
+      const failedStep = steps.find((s) => !s.ok);
+      // (3.8.12) "flow failed: …" tells a trace explainer this capture IS the failure, not a trace taken on request.
+      const failure = failed ? await driver.failureBundle(flow.id, `flow failed: step ${failedStep?.step ?? '?'} (${failedStep?.action ?? '?'}): ${failedStep?.error ?? ''}`).catch(() => null) : null;
       if (failure) log(options, `  failure bundle: ${[failure.trace, failure.screenshot].filter(Boolean).map((f) => path.relative(reportDir, f)).join(', ')}`);
       // (3.8.10) What the preconditions set is put back even when the flow failed: the next flow starts clean.
       const undoProblems = await driver.undoPreconditions();
