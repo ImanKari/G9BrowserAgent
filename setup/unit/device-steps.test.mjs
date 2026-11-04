@@ -9,7 +9,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
-import { DeviceDriver, eventMatches, parseSseBlock } from '../../runner/drivers/device.mjs';
+import { DeviceDriver, deviceUrlFor, eventMatches, parseSseBlock } from '../../runner/drivers/device.mjs';
 
 const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
@@ -155,6 +155,24 @@ test('parseSseBlock and eventMatches: the whole event in data, text contained, n
   assert.equal(eventMatches(e.data, { site: { name: 'Nor' }, rows: 3 }), true);
   assert.equal(eventMatches(e.data, { rows: 4 }), false);
   assert.equal(eventMatches(e.data, {}), true);
+});
+
+test('--device-url: host and port from an address; none without it; a bad one refused by name', () => {
+  assert.deepEqual(deviceUrlFor({ 'device-url': 'http://127.0.0.1:18797/qa' }), { url: 'http://127.0.0.1:18797', host: '127.0.0.1', port: 18797 });
+  assert.equal(deviceUrlFor({}), null);
+  assert.throws(() => deviceUrlFor({ 'device-url': true }), /needs an address/);
+  assert.throws(() => deviceUrlFor({ 'device-url': 'ftp://x:1' }), /only http/);
+  assert.throws(() => deviceUrlFor({ 'device-url': 'nonsense' }), /not an address/);
+});
+
+test('a driver on a direct address reaches the bridge without adb', async () => {
+  const b = await bridge();
+  try {
+    const d = new DeviceDriver({ serial: false, host: '127.0.0.1', port: b.port });
+    assert.equal((await d.step({ id: 's', action: 'screenshot' })).ok, true);
+  } finally {
+    b.close();
+  }
 });
 
 for (const { name, fn } of tests) {

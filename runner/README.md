@@ -125,6 +125,7 @@ placeholders in the expression itself are substituted too. A dry run skips `eval
 | `--project <file>` | the project adapter |
 | `--platform web\|<device>` | `web` (default), or a device platform the project declares in `g9.project.json` `devices`: it drives a real device over adb (below); anything else is refused |
 | `--device <serial>`, `--device-port <n>` | devices only: which device, and its bridge port (default: the platform's `port`, else 8799; on this path `--port` is still read as the device port when `--device-port` is not given, as in v1) |
+| `--device-url <http://host:port>` | (3.8.13) devices only: a bridge at that address, reached directly — no adb, no forward (a phone cabled to another machine through a relay, a simulator, a desktop build) |
 | `--package <id>` | devices only: the Android package that must own the device port (default: the platform's `package`, else none); see below |
 | `--token <token>` | devices only: the device's automation token, when the app requires one (where the app shows it: the platform's `tokenHint`) |
 | `--fail-on warning\|surprise\|failure` | the lowest verdict that makes the exit code non-zero (default `surprise`) |
@@ -316,7 +317,8 @@ Which apps exist is the project's data: `g9.project.json` declares them under `d
 Flows are validated like web flows: an invalid flow the run selects (any invalid file, for `all`) stops
 the run and is named; (3.8.1) one outside the run is a warning, and the run goes on. `candidates/` files
 (`*.candidate.json`, from `g9 harvest`) are never loaded as flows. Choose the device with
-`--device <serial>`. `--data` variables, a flow's own parameter defaults and `{{secret:…}}` values are
+`--device <serial>`, or (3.8.13) reach a bridge at an address with `--device-url http://host:port` — no adb (a phone
+cabled to another machine through a relay, a simulator). `--data` variables, a flow's own parameter defaults and `{{secret:…}}` values are
 substituted into device steps too. A suite is `suites/<name>.json`, or the platform's own
 `suites/<platform>.<name>.json`. A device run shares the flow format, the verdicts and the reports.
 

@@ -132,6 +132,8 @@ Run options:
   --device <serial>     which device, when adb sees more than one (device platforms only)
   --device-port <n>     the device automation port (device platforms only; default: the
                         platform's "port", else 8799)
+  --device-url <url>    (3.8.13) a bridge at this address, reached directly — no adb, no forward:
+                        a phone on another machine through a relay, a simulator, a desktop build
   --package <id>        the Android package that must own the device port; the run refuses a
                         device whose port another app holds, and launches the app when nothing
                         listens (default: the platform's "package", else none)
@@ -1122,7 +1124,7 @@ function devicePortFor(options, device) {
  * A device flow has no browser to live in, so `<flowsDir>/<the platform's flowsFolder>/**` IS the library.
  */
 async function commandRunDevice({ options, project, reportDir, target, variables = {}, device }) {
-  const { DeviceDriver, listDevices, tapFidelity } = await import('./drivers/device.mjs');
+  const { DeviceDriver, deviceUrlFor, listDevices, tapFidelity } = await import('./drivers/device.mjs');
   const { signingFor } = await import('./drivers/signing.mjs');
 
   // The flows first: a misplaced or invalid flow file is reported before anything talks to adb, so a
@@ -1132,11 +1134,14 @@ async function commandRunDevice({ options, project, reportDir, target, variables
   flows = orderFlows(flows, rules.order);
 
   const packageName = packageFor(options, device);
-  const serial = await pickDevice(options, listDevices);
+  // (3.8.13) --device-url: a bridge at an address (a relay to a phone on another machine, a simulator) — no adb at all.
+  const direct = deviceUrlFor(options);
+  const serial = direct ? false : await pickDevice(options, listDevices);
 
   const driver = new DeviceDriver({
     serial,
-    port: devicePortFor(options, device),
+    ...(direct ? { host: direct.host } : {}),
+    port: direct ? direct.port : devicePortFor(options, device),
     token: options.token === true ? '' : (options.token ?? ''),
     packageName,
     profile: device,
@@ -1146,7 +1151,7 @@ async function commandRunDevice({ options, project, reportDir, target, variables
     artifactsDir: path.join(reportDir, 'screens'),
   });
 
-  log(options, `${flows.length} ${device.id} flow(s) to run on ${serial}${packageName ? ` (${packageName})` : ''}\n`);
+  log(options, `${flows.length} ${device.id} flow(s) to run on ${direct ? direct.url : serial}${packageName ? ` (${packageName})` : ''}\n`);
 
   const envName = options.env && options.env !== true ? options.env : (project?.defaultEnvironment ?? null);
   const run = {

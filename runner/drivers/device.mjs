@@ -1047,6 +1047,25 @@ export function summarizeTrace(trace, { since = 0 } = {}) {
   };
 }
 
+/**
+ * (3.8.13) `--device-url http://host:port`: a bridge reached directly. Only http(s) with a port; the path is ignored.
+ * Null without the option.
+ */
+export function deviceUrlFor(options) {
+  const raw = options['device-url'];
+  if (raw === undefined) return null;
+  if (raw === true) throw new Error('--device-url needs an address, e.g. --device-url http://127.0.0.1:18797');
+  let u;
+  try {
+    u = new URL(String(raw));
+  } catch {
+    throw new Error(`--device-url ${raw}: not an address (http://host:port)`);
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error(`--device-url ${raw}: only http(s)`);
+  const port = Number(u.port || (u.protocol === 'https:' ? 443 : 80));
+  return { url: `${u.protocol}//${u.hostname}:${port}`, host: u.hostname, port };
+}
+
 /** One Server-Sent Event block → { seq, kind, data, t } (t = the event's own time, else its arrival). */
 export function parseSseBlock(block) {
   let id = null;
