@@ -810,19 +810,22 @@ export class DeviceDriver {
     if (this.signing && !this.hello) this.hello = await this.get('/qa');
     // (3.8.6) Only a bridge that asks for signatures gets one: a lab hands its key to every device lane, and a protocol-1
     // bridge (no app id to sign for) would otherwise receive headers that mean nothing.
+    // (3.9.3) A protocol-2 bridge's command route is `/pilot`; `/qa` is its old name (Deprecation since 2026-11-04,
+    // Sunset 2027-02-01). A protocol-1 bridge (an older app) has only `/qa`.
+    const route = this.hello?.protocol === 2 ? '/pilot' : '/qa';
     if (this.signing && this.hello?.signatureRequired) {
       Object.assign(headers, signRequest({
         key: this.signing.key,
         kid: this.signing.kid ?? this.hello.kids?.[0],
         app: this.hello.app,
         method: 'POST',
-        path: '/qa',
+        path: route,
         body,
         now: Date.now() + Math.round(this.clockOffsetMs),
       }));
     }
 
-    const response = await fetch(`${this.base}/qa`, {
+    const response = await fetch(`${this.base}${route}`, {
       method: 'POST',
       headers,
       body,
