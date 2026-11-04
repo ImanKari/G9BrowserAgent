@@ -1127,7 +1127,7 @@ function devicePortFor(options, device) {
  * A device flow has no browser to live in, so `<flowsDir>/<the platform's flowsFolder>/**` IS the library.
  */
 async function commandRunDevice({ options, project, reportDir, target, variables = {}, device }) {
-  const { DeviceDriver, deviceUrlFor, listDevices, needsNewerBridge, tapFidelity } = await import('./drivers/device.mjs');
+  const { DeviceDriver, captureInto, deviceUrlFor, listDevices, needsNewerBridge, tapFidelity } = await import('./drivers/device.mjs');
   const { signingFor } = await import('./drivers/signing.mjs');
 
   // The flows first: a misplaced or invalid flow file is reported before anything talks to adb, so a
@@ -1273,6 +1273,11 @@ async function commandRunDevice({ options, project, reportDir, target, variables
           outcome = await driver.step(substituteDeviceStep(step, flowVariables), { first: index === 0 });
         } catch (err) {
           outcome = { ok: false, error: String(err.message ?? err) };
+        }
+        // (3.9.2) `capture`: the answer's values for the later steps' {{name}} (taken before masking: a secret is never one).
+        if (outcome.ok && step.capture) {
+          const problem = captureInto(flowVariables, step.capture, outcome);
+          if (problem) outcome = { ...outcome, ok: false, error: `Step "${step.id}": ${problem}` };
         }
         outcome = maskSecretsDeep(outcome, secrets.values);
         // (3.8.2) From the MASKED outcome: the reason and the crash-log evidence go to the reports and the log.

@@ -1937,7 +1937,7 @@ The device path always chose its target through the local adb and forwarded the 
 (a lab Mac, reached through a relay) or a simulator was out of reach although its bridge answered on an address.
 `--device-url http://host:port` (runner/g9.mjs → `deviceUrlFor` in drivers/device.mjs) gives the driver `serial: false`
 and that host and port: no adb, no forward, no package guard by process — the hello's own package check still runs.
-Proven: AgriPad Lynx on a real Android phone cabled to the lab Mac, reached from the PC at 127.0.0.1:18797 through a
+Proven: a Lynx app on a real Android phone cabled to the lab Mac, reached from the PC at 127.0.0.1:18797 through a
 relay, all device flows of a round. Tests: device-steps (+2: the option's parsing and refusals; a driver on an address).
 
 ### 2026-11-04 — v3.8.12: a failure bundle's trace says it is the failure
@@ -1989,6 +1989,22 @@ an MCP server's `pilot_flow`) is a file, not a library entry — the runner refu
 - **Proven on a device**: a Lynx app on the Android emulator — a `@write` flow with `savepoint`, `permissions.grant`
   (a permission the app did not have) and `os` (dark, 1.15): before/after savepoints taken (470 MB each, ~25 s),
   PASS, and after it the theme, the text size and the permission were back as they were.
+
+### 2026-11-04 — v3.9.2 (unreleased): `capture` — what the app chose becomes a variable; a bridge step's own budget
+
+**Why.** A write flow that MAKES something (a drawing) has to reach it later by an id the app chose while the flow ran;
+and a bridge step that waits on the app itself (a sync run, a phase) was cut at the driver's 30 s.
+
+- **`runner/drivers/device.mjs`** `captureInto(variables, capture, outcome)`: a step's `capture: {"name": "dot.path"}`
+  takes values from its answer (`result` first) into the flow's variables, for the LATER steps' `{{name}}`. A path that
+  finds nothing (or an object) fails the step by name, so no step runs with `{{name}}` literally. A `bridge` step takes
+  `waitBudgetMs` (at most 120 s) as its command's time limit.
+- **`runner/g9.mjs`**: the device loop applies `capture` after a passed step (before secrets are masked).
+- **Tests**: `setup/unit/device-preconditions.test.mjs` +1 (capture: a value, a missing path, an object, a bad name).
+  The suite: 822 pass; `engine` and `platform-cdp` fail the same way without this change.
+- **Proven on a device**: an app's write flow on the Android emulator makes a drawing, cuts the network while it is
+  being sent, sends again, captures the drawing's id from a bridge answer and deletes it by `MapAnnotationRow.{{id}}`:
+  44/44 steps, PASS twice in a row.
 ### 2026-11-04 — v3.8.10: a device flow builds its own start state (`preconditions`)
 
 **Why.** A flow assumed the state the one before it left. One failure (a network left cut, a clock left moved, a flag

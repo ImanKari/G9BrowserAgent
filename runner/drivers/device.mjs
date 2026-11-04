@@ -582,7 +582,9 @@ export class DeviceDriver {
         if (typeof command !== 'string' || !command) {
           throw new Error(`Step "${spec.id}" (bridge) needs "command" (a bridge command name) and optionally "args".`);
         }
-        const res = await this.actuate(command, spec.args && typeof spec.args === 'object' ? spec.args : {});
+        // (3.9.2) `waitBudgetMs` (at most 120 s) for a command that waits on the app itself (a sync run, a phase).
+        const budget = Number(spec.waitBudgetMs) > 0 ? Math.min(Number(spec.waitBudgetMs), 120_000) : undefined;
+        const res = await this.actuate(command, spec.args && typeof spec.args === 'object' ? spec.args : {}, budget ? { timeoutMs: budget } : {});
         return { ...res, setup: true };
       }
       case 'longPress':
@@ -640,8 +642,8 @@ export class DeviceDriver {
     return { layer, featureId: String(featureId), ...(idField ? { idField } : {}) };
   }
 
-  async actuate(command, args) {
-    const res = await this.command(command, args);
+  async actuate(command, args, options = {}) {
+    const res = await this.command(command, args, options);
     if (!res.ok) return res;
     if (ACTUATING.has(command)) {
       // Every action ends by waiting for the app to settle. There is no sleep in this driver and
@@ -1251,6 +1253,23 @@ function run(command, args, { cwd, env } = {}) {
     child.on('error', (err) => resolve({ code: -1, stdout, stderr: String(err.message) }));
     child.on('close', (code) => resolve({ code, stdout, stderr }));
   });
+}
+
+/**
+ * (3.9.2) A step's `capture: {name: "dot.path"}`: values from the step's answer (`result` first) become variables for the
+ * LATER steps' {{name}} — an id the app chose while the flow ran (the drawing it just made). A path that finds nothing
+ * fails the step: a later step would otherwise run with "{{name}}" literally. Returns null, or the error text.
+ */
+export function captureInto(variables, capture, outcome) {
+  if (!capture || typeof capture !== 'object' || Array.isArray(capture)) return capture == null ? null : 'capture must be an object: {"name": "dot.path"}';
+  for (const [name, at] of Object.entries(capture)) {
+    if (!/^[A-Za-z_][\w]*$/.test(name)) return `capture: "${name}" is not a variable name`;
+    const walk = (root) => String(at).split('.').filter(Boolean).reduce((o, k) => (o == null ? undefined : o[k]), root);
+    const value = walk(outcome?.result) ?? walk(outcome);
+    if (value === undefined || value === null || typeof value === 'object') return `capture ${name}: the answer has no value at "${at}"`;
+    variables[name] = String(value);
+  }
+  return null;
 }
 
 /**

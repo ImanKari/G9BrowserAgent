@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 
-import { DeviceDriver, needsNewerBridge } from '../../runner/drivers/device.mjs';
+import { captureInto, DeviceDriver, needsNewerBridge } from '../../runner/drivers/device.mjs';
 
 const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
@@ -141,6 +141,16 @@ test('a step a protocol-1 bridge cannot answer makes the flow skipped, not faile
   assert.equal(needsNewerBridge(steps, 2), null);
   assert.match(needsNewerBridge([{ step: 0, action: 'preconditions', ok: false, error: 'precondition net.shape failed: Unknown command "net.shape".' }], 1), /needs a protocol-2 bridge/);
   assert.equal(needsNewerBridge([{ step: 1, action: 'tap', ok: false, error: 'No visible control' }], 1), null, 'a real failure stays one');
+});
+test('capture: a value from a bridge answer becomes a variable; nothing there, a bad name or an object fails the step', () => {
+  const vars = { siteId: 's1' };
+  assert.equal(captureInto(vars, { drawingId: 'items.0.id', n: 'count' }, { ok: true, result: { items: [{ id: 'd-42' }], count: 3 } }), null);
+  assert.deepEqual(vars, { siteId: 's1', drawingId: 'd-42', n: '3' });
+  assert.match(captureInto(vars, { x: 'missing.path' }, { ok: true, result: {} }), /no value at "missing.path"/);
+  assert.match(captureInto(vars, { x: 'items' }, { ok: true, result: { items: [] } }), /no value/, 'an object is not a value');
+  assert.match(captureInto(vars, { 'bad-name': 'a' }, { ok: true, result: { a: 1 } }), /not a variable name/);
+  assert.match(captureInto(vars, ['a'], { ok: true }), /must be an object/);
+  assert.equal(captureInto(vars, undefined, { ok: true }), null);
 });
 for (const { name, fn } of tests) {
   try {

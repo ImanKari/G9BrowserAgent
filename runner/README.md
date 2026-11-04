@@ -326,7 +326,7 @@ Device steps beyond the web vocabulary: `dismiss`, `tapFeature`, `zoomToFeature`
 (`target: { layer, featureId, idField? }`), `selectItem` (`target: { automationId, itemId | text, idField? }`),
 `setValue` (`target.automationId` + `value`), `popupButton` (`value` = the caption) and (3.8.5) `bridge`
 (`command` + `args`: one bridge command as a setup step — a start state no person's path leads to; the report marks it
-`setup`); (3.8.9) `longPress` (`target`), `swipe` / `scroll` (`direction` up|down|left|right, optional `target`, `distance`, `durationMs`; swipe = where the finger goes, scroll = where the content goes), `screenshot` (`name`: the app window kept in `<report>/screens/`) and `expectEvent` (`kind`, `match`, `within` ms: an app event raised since the step before — read from the bridge's event stream); oracles `visible`,
+`setup`; `waitBudgetMs` up to 120 s for a command that waits on the app); (3.9.2) on any step, `capture: {"name": "dot.path"}` puts a value of its answer into `{{name}}` for the later steps (a missing value fails the step); (3.8.9) `longPress` (`target`), `swipe` / `scroll` (`direction` up|down|left|right, optional `target`, `distance`, `durationMs`; swipe = where the finger goes, scroll = where the content goes), `screenshot` (`name`: the app window kept in `<report>/screens/`) and `expectEvent` (`kind`, `match`, `within` ms: an app event raised since the step before — read from the bridge's event stream); oracles `visible`,
 `onScreen`, `value`, `probe`, `idle`, `map`, `aria`.
 
 **(3.8.10) `preconditions`** at the top of a device flow build its start state from bridge commands before step 1 and
