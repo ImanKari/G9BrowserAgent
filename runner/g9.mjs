@@ -1142,6 +1142,8 @@ async function commandRunDevice({ options, project, reportDir, target, variables
     profile: device,
     signing: signingFor(device),
     log: (message) => log(options, `  ${message}`),
+    // (3.8.9) `screenshot` steps keep their pictures beside the report
+    artifactsDir: path.join(reportDir, 'screens'),
   });
 
   log(options, `${flows.length} ${device.id} flow(s) to run on ${serial}${packageName ? ` (${packageName})` : ''}\n`);
@@ -1224,6 +1226,8 @@ async function commandRunDevice({ options, project, reportDir, target, variables
       let failed = 0;
       // (3.8.8) Where the app's own checks stood before the flow: what they notice DURING it is the flow's.
       const noticedBefore = await driver.noticed(Number.MAX_SAFE_INTEGER).catch(() => null);
+      // (3.8.9) A flow with an expectEvent step listens to the app's events for its whole length.
+      await driver.prepareFlow(flow);
 
       let derailed = null;
       for (const [index, step] of (flow.steps ?? []).entries()) {
@@ -1244,6 +1248,7 @@ async function commandRunDevice({ options, project, reportDir, target, variables
         }
       }
 
+      driver.endFlow();
       const passed = steps.filter((s) => s.ok).length;
       // (3.8.8) What the app's checks noticed while this flow ran — not a step's verdict, a finding to read.
       const noticedNow = noticedBefore ? await driver.noticed(noticedBefore.last).catch(() => null) : null;
@@ -1408,6 +1413,7 @@ async function loadDeviceFlows(project, target, device, { warn = () => {} } = {}
   // step by step, with the file never named.
   const deviceActions = new Set([
     ...KNOWN_ACTIONS, 'dismiss', 'tapFeature', 'zoomToFeature', 'longPressFeature', 'selectItem', 'setValue', 'popupButton', 'bridge',
+    'longPress', 'swipe', 'scroll', 'screenshot', 'expectEvent',
   ]);
   const entries = [];
   for (const file of await collectJson(folder)) {

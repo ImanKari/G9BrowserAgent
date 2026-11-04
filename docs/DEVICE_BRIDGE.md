@@ -110,11 +110,18 @@ platform's `errorScreens` prefixes and checks that the app's process is alive.
 | `map.assertFeatureVisible` | `{ layer, featureId, idField? }` | — | the `map` oracle |
 | `db.probe` | `{ name, args: [] }` | `{ value }` | the `probe` oracle: a named, read-only question about the app's data |
 | `flow.record.harvest` | — | `{ candidates: [] }` | `g9 harvest`: drain the app's passive flow recorder |
+| `ui.longPress` | `{ automationId, durationMs? }` | — | (3.8.9) `longPress` |
+| `ui.swipe` | `{ automationId?, direction, distance?, durationMs? }` | — | (3.8.9) `swipe` / `scroll`: a finger drag; `direction` is where the finger goes |
+| `ui.screenshot` | `{ maxLongEdgePx? }` | `{ base64, width, height }` | (3.8.9) `screenshot`: the window as a JPEG, kept beside the report |
 | `oracle.list` | `{ since? }` | `{ last, violations: [{ rule, severity, key, message, count }] }` | (3.8.8) the flow's `noticed`: what the app's own always-awake checks saw while the flow ran — never a step's verdict |
 
 `idField` defaults to `Id`. `bounds` is `{ x, y, width, height, visibleFraction, onScreen, screenWidth,
 screenHeight, safeBottom }` in dp, where `onScreen` means fully drawn, unclipped and clear of the system bars
 showing now.
+
+(3.8.9) `expectEvent` reads a protocol-2 bridge's `GET /pilot/events?since=0` (Server-Sent Events, `id:` / `event:` /
+`data: {seq, t, kind, data}`), signed like a command when the bridge asks for signatures, for the length of a flow
+that has such a step.
 
 A bridge implements what its app needs: the map commands only in a map app, `flow.record.harvest` only with a
 recorder. A step whose command the bridge does not know fails with the bridge's own `unknown command`, and a

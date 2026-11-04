@@ -2,7 +2,7 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v3.8.8, 2026-11-04 — a device flow's report carries what the app's own always-awake checks noticed while it ran (`oracle.list`: a JS error, a nameless control, a raw key on screen) — logged as «⚠ noticed», kept as the flow's `noticed`, never a step's verdict (§9, the 3.8.8 entry). v3.8.7, 2026-11-04 — the host watch: the daemon reads the memory of the local servers its agents test (and its own) and warns the agents when one passes 4 GB or grows faster than 2 GB an hour — a looping dev-server watcher once took 109 GB (§9, the 3.8.7 entry). v3.8.6, 2026-11-03 — a key signs only a bridge that asks for signatures (a lab hands its key to every device lane) (§9, the 3.8.6 entry). v3.8.5, 2026-11-03 — a device flow can set up its own start state: the `bridge` step sends one bridge command and the report marks it `setup` (§9, the 3.8.5 entry). v3.8.4, 2026-11-03 — a lab machine signs with its own key (`G9_DEVICE_SIGNING_KID` names the key `G9_SECRET_DEVICE_SIGNING_KEY` carries), and a suite may say `"stopOn": "never"` outright (§9, the 3.8.4 entry). v3.8.3, 2026-11-03 — signed device bridges: a bridge whose hello says `signatureRequired` gets every request signed (ECDSA P-256, four `X-G9P-*` headers, the device clock corrected and a `CLOCK_SKEW` retried once); the key is found where the project's device profile says (`signing`: a file, the Windows Credential Manager, the macOS keychain) or in `G9_SECRET_DEVICE_SIGNING_KEY`, never printed (§9, the 3.8.3 entry; docs/DEVICE_BRIDGE.md «Signed bridges»). v3.8.2, 2026-10-22 — the ten findings of a code review of 3.7–3.8.1 fixed (§9, the 3.8.2 entry): secrets masked in derailed reports, no device shell injection, no flow written outside the library, a hung browser no longer taken for an exited one, and `finish` safe against calls in flight. v3.8.1, 2026-10-21 — the first four suggestions-box reports (§9, the 3.8.1 entry): launched
+**Status:** v3.8.9, 2026-11-04 — five new device steps: `longPress`, `swipe` and `scroll` (a finger drag; scroll names where the content goes), `screenshot` (the app window kept beside the report) and `expectEvent` (an event of the app, raised since the step before, waited for; the bridge's event stream is read for the flow) (§9, the 3.8.9 entry). v3.8.8, 2026-11-04 — a device flow's report carries what the app's own always-awake checks noticed while it ran (`oracle.list`: a JS error, a nameless control, a raw key on screen) — logged as «⚠ noticed», kept as the flow's `noticed`, never a step's verdict (§9, the 3.8.8 entry). v3.8.7, 2026-11-04 — the host watch: the daemon reads the memory of the local servers its agents test (and its own) and warns the agents when one passes 4 GB or grows faster than 2 GB an hour — a looping dev-server watcher once took 109 GB (§9, the 3.8.7 entry). v3.8.6, 2026-11-03 — a key signs only a bridge that asks for signatures (a lab hands its key to every device lane) (§9, the 3.8.6 entry). v3.8.5, 2026-11-03 — a device flow can set up its own start state: the `bridge` step sends one bridge command and the report marks it `setup` (§9, the 3.8.5 entry). v3.8.4, 2026-11-03 — a lab machine signs with its own key (`G9_DEVICE_SIGNING_KID` names the key `G9_SECRET_DEVICE_SIGNING_KEY` carries), and a suite may say `"stopOn": "never"` outright (§9, the 3.8.4 entry). v3.8.3, 2026-11-03 — signed device bridges: a bridge whose hello says `signatureRequired` gets every request signed (ECDSA P-256, four `X-G9P-*` headers, the device clock corrected and a `CLOCK_SKEW` retried once); the key is found where the project's device profile says (`signing`: a file, the Windows Credential Manager, the macOS keychain) or in `G9_SECRET_DEVICE_SIGNING_KEY`, never printed (§9, the 3.8.3 entry; docs/DEVICE_BRIDGE.md «Signed bridges»). v3.8.2, 2026-10-22 — the ten findings of a code review of 3.7–3.8.1 fixed (§9, the 3.8.2 entry): secrets masked in derailed reports, no device shell injection, no flow written outside the library, a hung browser no longer taken for an exited one, and `finish` safe against calls in flight. v3.8.1, 2026-10-21 — the first four suggestions-box reports (§9, the 3.8.1 entry): launched
 Edge starts again (Edge 155's compat-layer relaunch), a SYSTEM-account daemon is named and `auto` falls
 back to Chrome, an invalid device flow outside a run no longer stops it, and an agent keeps its own
 current tab. Built and published by hand (no pipeline minutes). v3.8.0, 2026-10-15 — the agent-facing text is layered: a core under 2,048 characters (clients cut server instructions at 4,096, older ones at 2,048 — the 13,300-character instructions lost everything after "Acting"), twelve topic guides and a per-tool reference generated from the schemas (`mcp/guides.js`; resources `g9://guide/<topic>`, `g9://tool/<name>`, and `browser_status guide:"…"` answered without a browser); and `browser_tabs action:"finish"` — the last working agent detaches the debugger from the person's browser (§9, the 3.8.0 entry). Before it, v3.7.0, 2026-10-15 — device apps are the project's data: `g9.project.json` `devices` declares them, one generic driver (`runner/drivers/device.mjs`) drives any app that speaks the QA bridge protocol ([docs/DEVICE_BRIDGE.md](docs/DEVICE_BRIDGE.md)), and the device steps `tapFeature`, `zoomToFeature`, `longPressFeature`, `selectItem`, `setValue`, `popupButton` and the `onScreen` oracle join the vocabulary (§9, the 3.7.0 entry). Before it, v3.6.3, 2026-10-13 — the published 3.6 release (3.6.0–3.6.2 never passed the pipeline; §9, the 3.6.3 entry). 3.6.1 (§9): the macOS self-update moves the new bundle into place (a copy was stopped by macOS on a real Mac). 3.6.0 (§9, the 3.6.0 entry): the "Human Wave" icon everywhere; the
@@ -1930,6 +1930,37 @@ after every step of a forty-step flow doubles the run for evidence nobody reads.
 Entries below describe what was believed or tested at the time. Current capability claims and
 unresolved findings are in §§4, 7 and 8, which supersede historical assertions. Entries dated before
 2026-09-21 describe v1 (the bridge, the four control modes, the workspace allowlist).
+
+### 2026-11-04 — v3.8.9: longPress, swipe, scroll, screenshot and expectEvent on a device
+
+**Why.** A device flow could tap, type, pick and assert, but not hold a finger on a control, drag a list or a card,
+keep a picture of what it saw, or say «after Save, the app said "saved"». The last is the strongest check a flow can
+make about a write — the app's own announcement, not a guess from the screen — and a protocol-2 bridge already
+streams those announcements (`GET /pilot/events`); the runner never read them.
+
+- **`runner/drivers/device.mjs`**:
+  - `longPress { target, durationMs? }` → `ui.longPress`; `swipe { target?, direction, distance?, durationMs? }` →
+    `ui.swipe` with `direction` = where the finger goes; `scroll { target?, direction }` → the same drag the other way
+    (scroll down = finger up), the way a person says it. All three settle like every action (`ui.waitIdle`).
+  - `screenshot { name? }` → `ui.screenshot` (the app's JPEG), written to `<report>/screens/<time>-<name>.jpg`; the
+    step result names the file and the HTML report shows the pictures under «عکس‌های فلو». Evidence, not a
+    comparison: a lossless reference check is a G9AppPilot `visual check`.
+  - `expectEvent { kind, match?, within? }`: `prepareFlow(flow)` opens the event stream when a flow has such a step
+    (signed like a command when the bridge asks), `endFlow()` closes it. The step passes on an event of that kind
+    raised since the step BEFORE it began (device time corrected by the known skew, 1 s of slack), whose data holds
+    every `match` field (text = contains, objects nested); otherwise it waits up to `within` ms (5 000). An event
+    from before the flow never counts; a miss names what WAS seen. A protocol-1 bridge answers with its reason.
+- **`runner/g9.mjs`**: the five actions are valid device actions; the driver gets `artifactsDir`; `prepareFlow` /
+  `endFlow` around each flow.
+- **`runner/report.mjs`**: a flow's screenshots.
+- **`docs/DEVICE_BRIDGE.md`**: `ui.longPress`, `ui.swipe`, `ui.screenshot` and the event stream in the tables.
+- **Tests**: `setup/unit/device-steps.test.mjs` (5: the wire of longPress/swipe/scroll, a bad direction, a missing
+  target; the picture kept or not; an event of the step before found, one from before the flow not, a non-match
+  naming what was seen; a bridge without a stream; the SSE block and the matcher). `device.test.mjs` used `swipe` as
+  its example of an unknown action — now `teleport`. `device-noticed.test.mjs` (3.8.8) listened on an OS-chosen port
+  against rule 7 — moved to 18000–18999 like the rest.
+- **Proven on a device**: a Lynx app on the Android emulator (G9AppPilot `ui.swipe` added for it): see the entry's
+  numbers in the commit message.
 
 ### 2026-11-04 — v3.8.8: a device flow reports what the app's own checks noticed
 

@@ -29,7 +29,15 @@ async function bridge({ knows = true } = {}) {
       res.end(JSON.stringify({ ok: true, result: { violations: all.filter((v) => v.seq > since), last: 2, findings: 2 } }));
     });
   });
-  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  // A random port in 18000-18999 (AIGuide rule 7: never 8765, never an OS-chosen port), retried when taken.
+  for (let attempt = 0; ; attempt++) {
+    const candidate = 18000 + Math.floor(Math.random() * 1000);
+    const bound = await new Promise((resolve, reject) => {
+      server.once('error', (err) => (err.code === 'EADDRINUSE' && attempt < 20 ? resolve(false) : reject(err)));
+      server.listen(candidate, '127.0.0.1', () => resolve(true));
+    });
+    if (bound) break;
+  }
   return { port: server.address().port, close: () => server.close() };
 }
 

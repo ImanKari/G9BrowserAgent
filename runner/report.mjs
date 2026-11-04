@@ -188,6 +188,7 @@ function html(run) {
         · <span dir="ltr">${escHtml(flow.verdict)}</span></p>
       ${steps ? `<h3>مراحلی که باید نگاه کنی</h3><ul class="steps" dir="ltr">${steps}</ul>` : ''}
       ${surprises ? `<h3>تغییرات غیرمنتظره</h3><ul class="surprises" dir="ltr">${surprises}</ul>` : ''}
+      ${(flow.steps ?? []).some((s) => s.screenshot) ? `<h3>عکس‌های فلو</h3><div class="shots">${flow.steps.filter((s) => s.screenshot).map((s) => `<figure><img loading="lazy" src="screens/${escHtml(String(s.screenshot).split(String.fromCharCode(92)).join('/').split('/').pop())}" alt="${escHtml(s.id ?? '')}"><figcaption dir="ltr">step ${s.step} · ${escHtml(s.id ?? '')}</figcaption></figure>`).join('')}</div>` : ''}
       ${flow.noticed?.length ? `<h3>آنچه بررسی‌های خود اپ دید</h3><ul class="steps" dir="ltr">${flow.noticed.map((v) => `<li class="${v.severity === 'finding' ? 'bad' : 'warn'}">${escHtml(v.rule)} — ${escHtml(v.message)}${v.count > 1 ? ` (×${v.count})` : ''}</li>`).join('')}</ul>` : ''}
     </section>`;
   }).join('');
@@ -218,6 +219,7 @@ function html(run) {
   body { font:15px/1.8 Vazirmatn,Segoe UI,Tahoma,ui-sans-serif,system-ui,sans-serif; margin:0; padding:32px; color:var(--fg); background:var(--bg); }
   .advice { margin:0 0 10px; font-size:14px; }
   ul.steps, ul.surprises { text-align:left; }
+  .shots { display:flex; flex-wrap:wrap; gap:10px; } .shots figure { margin:0; } .shots img { max-width:220px; border:1px solid #ccc; border-radius:6px; }
   h1 { font-size:20px; margin:0 0 4px; } h2 { font-size:16px; margin:0 0 6px; }
   h3 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:14px 0 4px; }
   .meta { color:var(--muted); margin:0 0 8px; font-size:12px; }

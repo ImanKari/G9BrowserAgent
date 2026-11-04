@@ -291,7 +291,7 @@ test('a map step without a feature, and an unknown action, are refused — never
   try {
     const d = driverOn(bridge);
     await assert.rejects(d.step({ id: 'x', action: 'tapFeature', target: { layer: 'Parcels' } }), /needs a map feature/);
-    await assert.rejects(d.step({ id: 'y', action: 'swipe' }), /does not implement.*Refusing rather than skipping/);
+    await assert.rejects(d.step({ id: 'y', action: 'teleport' }), /does not implement.*Refusing rather than skipping/);
     assert.equal(bridge.calls.length, 0);
   } finally { await bridge.close(); }
 });

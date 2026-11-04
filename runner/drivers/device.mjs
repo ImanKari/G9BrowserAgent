@@ -159,7 +159,14 @@ const UNSETTLED_ACTIONS = new Set(['dismiss']);
 const ACTUATING = new Set([
   'ui.tap', 'ui.type', 'ui.selectItem', 'ui.setValue', 'ui.tapPopupButton',
   'map.selectFeature', 'map.tapFeature', 'map.longPressFeature', 'map.zoomToFeature',
+  'ui.longPress', 'ui.swipe',
 ]);
+
+/** (3.8.9) `swipe` / `scroll` directions; a scroll moves the finger the other way. */
+const SWIPE_DIRECTIONS = new Set(['up', 'down', 'left', 'right']);
+const OPPOSITE = { up: 'down', down: 'up', left: 'right', right: 'left' };
+const NL = String.fromCharCode(10);
+const CR = String.fromCharCode(13);
 
 export class DeviceDriver {
   /**
@@ -172,7 +179,7 @@ export class DeviceDriver {
    */
   constructor({
     port = DEFAULT_BRIDGE_PORT, host = '127.0.0.1', token = '', serial = null, packageName = null,
-    profile = null, launchTimeoutMs = 45_000, log = () => {}, signing = null,
+    profile = null, launchTimeoutMs = 45_000, log = () => {}, signing = null, artifactsDir = null,
   } = {}) {
     this.port = port;
     this.host = host;
@@ -187,6 +194,11 @@ export class DeviceDriver {
     this.signing = signing;
     this.hello = null;
     this.clockOffsetMs = 0;
+    // (3.8.9) Where a `screenshot` step writes its picture (the run's report folder); null keeps no file.
+    this.artifactsDir = artifactsDir;
+    // (3.8.9) The event stream of the current flow (expectEvent), and when the previous and current steps began.
+    this.events = null;
+    this.stepAt = { previous: 0, current: 0 };
   }
 
   get base() {
@@ -385,6 +397,8 @@ export class DeviceDriver {
       if (already) return this.derailed(already);
     }
 
+    // (3.8.9) An expectEvent step looks at what happened since the step BEFORE it began.
+    this.stepAt = { previous: this.stepAt.current, current: Date.now() };
     // A refusal (unknown action, malformed step) stays a throw and reaches no device: the caller's contract.
     const outcome = await this.stepCore(spec);
     if (outcome.derailed) return outcome;
@@ -542,11 +556,35 @@ export class DeviceDriver {
         const res = await this.actuate(command, spec.args && typeof spec.args === 'object' ? spec.args : {});
         return { ...res, setup: true };
       }
+      case 'longPress':
+        // (3.8.9) A finger held on a control (what opens a context menu or starts a selection) — `ui.longPress`.
+        return this.actuate('ui.longPress', { automationId: requireId(target, spec), ...(spec.durationMs ? { durationMs: spec.durationMs } : {}) });
+      case 'swipe':
+      case 'scroll': {
+        // (3.8.9) A drag. `swipe` names where the FINGER goes; `scroll` names where the CONTENT should move into view
+        // (scroll down = the finger goes up), the way a person says it. Without a target, the screen's centre.
+        const direction = String(spec.direction ?? spec.value ?? '');
+        if (!SWIPE_DIRECTIONS.has(direction)) {
+          throw new Error(`Step "${spec.id}" (${spec.action}) needs "direction": up, down, left or right.`);
+        }
+        const finger = spec.action === 'scroll' ? OPPOSITE[direction] : direction;
+        return this.actuate('ui.swipe', {
+          ...(target ? { automationId: target } : {}),
+          direction: finger,
+          ...(spec.distance ? { distance: spec.distance } : {}),
+          ...(spec.durationMs ? { durationMs: spec.durationMs } : {}),
+        });
+      }
+      case 'screenshot':
+        return this.screenshot(spec);
+      case 'expectEvent':
+        return this.expectEvent(spec);
       default:
         throw new Error(
           `Step "${spec.id}" uses action "${spec.action}", which the device driver does not ` +
             `implement. Supported: click, type, dismiss, assert, navigate, tapFeature, zoomToFeature, ` +
-            `longPressFeature, selectItem, setValue, popupButton, bridge. Refusing rather than skipping.`,
+            `longPressFeature, selectItem, setValue, popupButton, bridge, longPress, swipe, scroll, screenshot, ` +
+            `expectEvent. Refusing rather than skipping.`,
         );
     }
   }
@@ -792,9 +830,136 @@ export class DeviceDriver {
     }
   }
 
+  /**
+   * (3.8.9) Called before a flow's steps: a flow with an `expectEvent` step gets the bridge's event stream opened for
+   * its whole length (events of the step before an expectEvent arrive while that step runs). Closes the last flow's.
+   */
+  async prepareFlow(flow) {
+    this.endFlow();
+    this.stepAt = { previous: 0, current: 0 };
+    if (!(flow?.steps ?? []).some((s) => s?.action === 'expectEvent')) return;
+    this.events = { list: [], waiters: new Set(), error: null, ctrl: new AbortController() };
+    void this.readEvents(this.events);
+  }
+
+  endFlow() {
+    if (this.events) this.events.ctrl.abort();
+    this.events = null;
+  }
+
+  /** Reads `GET /pilot/events?since=0` (protocol 2, Server-Sent Events) into `stream.list` until aborted. */
+  async readEvents(stream) {
+    try {
+      if (!this.hello) this.hello = await this.get('/qa');
+      const path = '/pilot/events';
+      const headers = { accept: 'text/event-stream' };
+      if (this.token) headers['x-qa-token'] = this.token;
+      if (this.signing && this.hello?.signatureRequired) {
+        Object.assign(headers, signRequest({ key: this.signing.key, kid: this.signing.kid ?? this.hello.kids?.[0], app: this.hello.app, method: 'GET', path, body: '', now: Date.now() + Math.round(this.clockOffsetMs) }));
+      }
+      const response = await fetch(`${this.base}${path}?since=0`, { headers, signal: stream.ctrl.signal });
+      if (!response.ok) throw new Error(`the bridge has no event stream (GET ${path}: HTTP ${response.status}) — a protocol-1 bridge cannot answer expectEvent`);
+      const decoder = new TextDecoder();
+      let buffer = '';
+      for await (const chunk of response.body) {
+        buffer += decoder.decode(chunk, { stream: true }).split(CR).join('');
+        let end;
+        while ((end = buffer.indexOf(NL + NL)) >= 0) {
+          const event = parseSseBlock(buffer.slice(0, end));
+          buffer = buffer.slice(end + 2);
+          if (!event) continue;
+          stream.list.push(event);
+          for (const wake of stream.waiters) wake();
+        }
+      }
+    } catch (err) {
+      if (stream.ctrl.signal.aborted) return;
+      stream.error = String(err?.message ?? err);
+      for (const wake of stream.waiters) wake();
+    }
+  }
+
+  /**
+   * (3.8.9) `expectEvent { kind, match?, within? }`: an event of that kind, raised since the step before this one
+   * began, whose data holds every `match` field (a string field matches when it contains the expected text). Waits up
+   * to `within` ms (default 5 000) for one still to come. Event time is the device's, corrected by the known skew.
+   */
+  async expectEvent(spec) {
+    const kind = spec.kind ?? spec.event?.kind ?? spec.value;
+    if (typeof kind !== 'string' || !kind) throw new Error(`Step "${spec.id}" (expectEvent) needs "kind" (an event kind such as "toast").`);
+    const match = spec.match ?? spec.event?.match ?? {};
+    const within = Number(spec.within ?? spec.event?.within ?? 5_000);
+    const stream = this.events;
+    if (!stream) return { ok: false, error: 'expectEvent: the event stream was not opened for this flow (prepareFlow)' };
+    // 1 s of slack: the two clocks and the batching of events within one turn
+    const since = (this.stepAt.previous || this.stepAt.current) - 1_000;
+    const fits = (e) => e.kind === kind && e.t - this.clockOffsetMs >= since && eventMatches(e.data, match);
+    const deadline = Date.now() + within;
+    for (;;) {
+      const hit = stream.list.find(fits);
+      if (hit) return { ok: true, detail: `${kind} #${hit.seq}`, event: { seq: hit.seq, kind: hit.kind, data: hit.data } };
+      if (stream.error) return { ok: false, error: `expectEvent: ${stream.error}` };
+      const left = deadline - Date.now();
+      if (left <= 0) {
+        const seen = [...new Set(stream.list.filter((e) => e.t - this.clockOffsetMs >= since).map((e) => e.kind))];
+        return { ok: false, error: `no "${kind}" event${Object.keys(match).length ? ` matching ${JSON.stringify(match)}` : ''} within ${within} ms (seen since the step before: ${seen.join(', ') || 'none'})` };
+      }
+      await new Promise((resolve) => {
+        const wake = () => { clearTimeout(timer); stream.waiters.delete(wake); resolve(); };
+        const timer = setTimeout(wake, left);
+        stream.waiters.add(wake);
+      });
+    }
+  }
+
+  /**
+   * (3.8.9) `screenshot { name? }`: the app's window as the bridge draws it (`ui.screenshot`, JPEG) — evidence beside
+   * the report, not a comparison (a lossless reference check is the app pilot's `visual check`).
+   */
+  async screenshot(spec) {
+    const res = await this.command('ui.screenshot', { maxLongEdgePx: Number(spec.maxLongEdgePx ?? 1400) }, { timeoutMs: 30_000 });
+    if (!res.ok) return res;
+    const name = String(spec.name ?? spec.value ?? spec.id ?? 'screen').replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 80);
+    const r = res.result ?? {};
+    if (!this.artifactsDir || typeof r.base64 !== 'string') return { ok: true, detail: `${r.width ?? '?'}×${r.height ?? '?'} (not kept)` };
+    fs.mkdirSync(this.artifactsDir, { recursive: true });
+    const file = path.join(this.artifactsDir, `${Date.now()}-${name}.jpg`);
+    fs.writeFileSync(file, Buffer.from(r.base64, 'base64'));
+    return { ok: true, detail: `${r.width}×${r.height}`, screenshot: file };
+  }
+
   get(path) {
     return fetch(`${this.base}${path}`, { signal: AbortSignal.timeout(5_000) }).then((r) => r.json());
   }
+}
+
+/** One Server-Sent Event block → { seq, kind, data, t } (t = the event's own time, else its arrival). */
+export function parseSseBlock(block) {
+  let id = null;
+  let kind = 'message';
+  const data = [];
+  for (const line of block.split(NL)) {
+    if (line.startsWith('id:')) id = Number(line.slice(3).trim());
+    else if (line.startsWith('event:')) kind = line.slice(6).trim();
+    else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+  }
+  if (id === null && !data.length) return null;
+  let payload = data.join(NL);
+  try { payload = JSON.parse(payload); } catch { /* plain text stays text */ }
+  const t = payload && typeof payload === 'object' && typeof payload.t === 'number' ? payload.t : Date.now();
+  const inner = payload && typeof payload === 'object' && 'data' in payload ? payload.data : payload;
+  return { seq: id, kind: payload?.kind ?? kind, data: inner, t };
+}
+
+/** Every `match` field is in `data`: equal, or — for text — contained. Nested objects are matched the same way. */
+export function eventMatches(data, match) {
+  if (!match || typeof match !== 'object') return true;
+  return Object.entries(match).every(([key, want]) => {
+    const have = data?.[key];
+    if (want && typeof want === 'object') return eventMatches(have, want);
+    if (typeof want === 'string' && typeof have === 'string') return have.includes(want);
+    return have === want;
+  });
 }
 
 /**
