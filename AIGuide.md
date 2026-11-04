@@ -2,7 +2,7 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v3.8.7, 2026-11-04 — the host watch: the daemon reads the memory of the local servers its agents test (and its own) and warns the agents when one passes 4 GB or grows faster than 2 GB an hour — a looping dev-server watcher once took 109 GB (§9, the 3.8.7 entry). v3.8.6, 2026-11-03 — a key signs only a bridge that asks for signatures (a lab hands its key to every device lane) (§9, the 3.8.6 entry). v3.8.5, 2026-11-03 — a device flow can set up its own start state: the `bridge` step sends one bridge command and the report marks it `setup` (§9, the 3.8.5 entry). v3.8.4, 2026-11-03 — a lab machine signs with its own key (`G9_DEVICE_SIGNING_KID` names the key `G9_SECRET_DEVICE_SIGNING_KEY` carries), and a suite may say `"stopOn": "never"` outright (§9, the 3.8.4 entry). v3.8.3, 2026-11-03 — signed device bridges: a bridge whose hello says `signatureRequired` gets every request signed (ECDSA P-256, four `X-G9P-*` headers, the device clock corrected and a `CLOCK_SKEW` retried once); the key is found where the project's device profile says (`signing`: a file, the Windows Credential Manager, the macOS keychain) or in `G9_SECRET_DEVICE_SIGNING_KEY`, never printed (§9, the 3.8.3 entry; docs/DEVICE_BRIDGE.md «Signed bridges»). v3.8.2, 2026-10-22 — the ten findings of a code review of 3.7–3.8.1 fixed (§9, the 3.8.2 entry): secrets masked in derailed reports, no device shell injection, no flow written outside the library, a hung browser no longer taken for an exited one, and `finish` safe against calls in flight. v3.8.1, 2026-10-21 — the first four suggestions-box reports (§9, the 3.8.1 entry): launched
+**Status:** v3.8.8, 2026-11-04 — a device flow's report carries what the app's own always-awake checks noticed while it ran (`oracle.list`: a JS error, a nameless control, a raw key on screen) — logged as «⚠ noticed», kept as the flow's `noticed`, never a step's verdict (§9, the 3.8.8 entry). v3.8.7, 2026-11-04 — the host watch: the daemon reads the memory of the local servers its agents test (and its own) and warns the agents when one passes 4 GB or grows faster than 2 GB an hour — a looping dev-server watcher once took 109 GB (§9, the 3.8.7 entry). v3.8.6, 2026-11-03 — a key signs only a bridge that asks for signatures (a lab hands its key to every device lane) (§9, the 3.8.6 entry). v3.8.5, 2026-11-03 — a device flow can set up its own start state: the `bridge` step sends one bridge command and the report marks it `setup` (§9, the 3.8.5 entry). v3.8.4, 2026-11-03 — a lab machine signs with its own key (`G9_DEVICE_SIGNING_KID` names the key `G9_SECRET_DEVICE_SIGNING_KEY` carries), and a suite may say `"stopOn": "never"` outright (§9, the 3.8.4 entry). v3.8.3, 2026-11-03 — signed device bridges: a bridge whose hello says `signatureRequired` gets every request signed (ECDSA P-256, four `X-G9P-*` headers, the device clock corrected and a `CLOCK_SKEW` retried once); the key is found where the project's device profile says (`signing`: a file, the Windows Credential Manager, the macOS keychain) or in `G9_SECRET_DEVICE_SIGNING_KEY`, never printed (§9, the 3.8.3 entry; docs/DEVICE_BRIDGE.md «Signed bridges»). v3.8.2, 2026-10-22 — the ten findings of a code review of 3.7–3.8.1 fixed (§9, the 3.8.2 entry): secrets masked in derailed reports, no device shell injection, no flow written outside the library, a hung browser no longer taken for an exited one, and `finish` safe against calls in flight. v3.8.1, 2026-10-21 — the first four suggestions-box reports (§9, the 3.8.1 entry): launched
 Edge starts again (Edge 155's compat-layer relaunch), a SYSTEM-account daemon is named and `auto` falls
 back to Chrome, an invalid device flow outside a run no longer stops it, and an agent keeps its own
 current tab. Built and published by hand (no pipeline minutes). v3.8.0, 2026-10-15 — the agent-facing text is layered: a core under 2,048 characters (clients cut server instructions at 4,096, older ones at 2,048 — the 13,300-character instructions lost everything after "Acting"), twelve topic guides and a per-tool reference generated from the schemas (`mcp/guides.js`; resources `g9://guide/<topic>`, `g9://tool/<name>`, and `browser_status guide:"…"` answered without a browser); and `browser_tabs action:"finish"` — the last working agent detaches the debugger from the person's browser (§9, the 3.8.0 entry). Before it, v3.7.0, 2026-10-15 — device apps are the project's data: `g9.project.json` `devices` declares them, one generic driver (`runner/drivers/device.mjs`) drives any app that speaks the QA bridge protocol ([docs/DEVICE_BRIDGE.md](docs/DEVICE_BRIDGE.md)), and the device steps `tapFeature`, `zoomToFeature`, `longPressFeature`, `selectItem`, `setValue`, `popupButton` and the `onScreen` oracle join the vocabulary (§9, the 3.7.0 entry). Before it, v3.6.3, 2026-10-13 — the published 3.6 release (3.6.0–3.6.2 never passed the pipeline; §9, the 3.6.3 entry). 3.6.1 (§9): the macOS self-update moves the new bundle into place (a copy was stopped by macOS on a real Mac). 3.6.0 (§9, the 3.6.0 entry): the "Human Wave" icon everywhere; the
@@ -1930,6 +1930,29 @@ after every step of a forty-step flow doubles the run for evidence nobody reads.
 Entries below describe what was believed or tested at the time. Current capability claims and
 unresolved findings are in §§4, 7 and 8, which supersede historical assertions. Entries dated before
 2026-09-21 describe v1 (the bridge, the four control modes, the workspace allowlist).
+
+### 2026-11-04 — v3.8.8: a device flow reports what the app's own checks noticed
+
+**Why.** A flow asserts what its author thought of. An app built with an always-awake checker (G9AppPilot's oracles:
+an uncaught JS error or rejection, an error log line, a busy reason that never cleared, a control with no name, a
+string key drawn instead of its text, a control drawn off screen) notices more, on every screen the flow passes —
+but until now nobody asked it. On the first run against such an app the runner found nothing new, which is the
+point: the report now says so, per flow, instead of staying silent.
+
+- **`runner/drivers/device.mjs`** `noticed(since)`: one `oracle.list {since}` call (8 s); the answer is
+  `{ last, violations }`. A bridge without the command, an older build or a failed call answers `null`, and nothing
+  else changes.
+- **`runner/g9.mjs`**: before a flow's steps the runner reads where the checks stand
+  (`noticed(Number.MAX_SAFE_INTEGER)` returns only the current number), and after them what came since. Each one is
+  logged `⚠ noticed (<severity>): <rule> — <message>` and kept on the flow as `noticed: [{ rule, severity, key,
+  message, count }]` (key 200, message 300 characters). A finding there is something to read, not a failed step: the
+  flow's verdict is still its steps'.
+- **`runner/report.mjs`**: a flow with `noticed` gets the section «آنچه بررسی‌های خود اپ دید» (what the app's own
+  checks saw).
+- **`docs/DEVICE_BRIDGE.md`**: `oracle.list` in the command table.
+- **Tests**: `setup/unit/device-noticed.test.mjs` (2: the answer read from a bridge that has the command; `null`
+  from one without it). The whole unit run: 806 passed, the live-browser suites skipped; with them, the two
+  live-Edge cases of `engine` and `platform-cdp` fail on this PC exactly as they did on 3.8.7 unchanged.
 
 ### 2026-11-04 — v3.8.7: the host watch — a local server under test that eats the machine's memory is named
 

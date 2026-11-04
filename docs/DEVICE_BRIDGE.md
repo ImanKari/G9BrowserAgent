@@ -110,6 +110,7 @@ platform's `errorScreens` prefixes and checks that the app's process is alive.
 | `map.assertFeatureVisible` | `{ layer, featureId, idField? }` | — | the `map` oracle |
 | `db.probe` | `{ name, args: [] }` | `{ value }` | the `probe` oracle: a named, read-only question about the app's data |
 | `flow.record.harvest` | — | `{ candidates: [] }` | `g9 harvest`: drain the app's passive flow recorder |
+| `oracle.list` | `{ since? }` | `{ last, violations: [{ rule, severity, key, message, count }] }` | (3.8.8) the flow's `noticed`: what the app's own always-awake checks saw while the flow ran — never a step's verdict |
 
 `idField` defaults to `Id`. `bounds` is `{ x, y, width, height, visibleFraction, onScreen, screenWidth,
 screenHeight, safeBottom }` in dp, where `onScreen` means fully drawn, unclipped and clear of the system bars

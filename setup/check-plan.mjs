@@ -30,6 +30,7 @@ export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 export const CHECKS = [
   unit('device', 3, []),
   unit('device-signing', 0.5, []),
+  unit('device-noticed', 0.5, []),
   unit('guides', 0.5, []),
   unit('hostwatch', 0.2, []),
   unit('daemon', 6, []),

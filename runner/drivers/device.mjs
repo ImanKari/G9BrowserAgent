@@ -776,6 +776,22 @@ export class DeviceDriver {
     return answer;
   }
 
+  /**
+   * (3.8.8) The app's always-awake checks (G9AppPilot `oracle.list`): what it noticed without a step asking — a JS error,
+   * a nameless control, a key on screen instead of its text. `since` = the number a previous call returned. An app
+   * without them (an older build, a protocol-1 bridge) answers null, and nothing changes for it.
+   */
+  async noticed(since = 0) {
+    try {
+      const answer = await this.command('oracle.list', { since }, { timeoutMs: 8_000 });
+      if (!answer?.ok) return null;
+      const r = answer.result ?? {};
+      return { last: typeof r.last === 'number' ? r.last : since, violations: Array.isArray(r.violations) ? r.violations : [] };
+    } catch {
+      return null;
+    }
+  }
+
   get(path) {
     return fetch(`${this.base}${path}`, { signal: AbortSignal.timeout(5_000) }).then((r) => r.json());
   }

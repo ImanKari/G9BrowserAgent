@@ -1222,6 +1222,8 @@ async function commandRunDevice({ options, project, reportDir, target, variables
 
       const steps = [];
       let failed = 0;
+      // (3.8.8) Where the app's own checks stood before the flow: what they notice DURING it is the flow's.
+      const noticedBefore = await driver.noticed(Number.MAX_SAFE_INTEGER).catch(() => null);
 
       let derailed = null;
       for (const [index, step] of (flow.steps ?? []).entries()) {
@@ -1243,6 +1245,10 @@ async function commandRunDevice({ options, project, reportDir, target, variables
       }
 
       const passed = steps.filter((s) => s.ok).length;
+      // (3.8.8) What the app's checks noticed while this flow ran — not a step's verdict, a finding to read.
+      const noticedNow = noticedBefore ? await driver.noticed(noticedBefore.last).catch(() => null) : null;
+      const noticed = (noticedNow?.violations ?? []).map((v) => ({ rule: v.rule, severity: v.severity, key: String(v.key ?? '').slice(0, 200), message: String(v.message ?? '').slice(0, 300), count: v.count ?? 1 }));
+      for (const v of noticed) log(options, `  ⚠ noticed (${v.severity}): ${v.rule} — ${v.message}`);
       run.flows.push({
         id: flow.id,
         name: flow.name,
@@ -1258,6 +1264,7 @@ async function commandRunDevice({ options, project, reportDir, target, variables
         tags: flow.tags ?? [],
         suite: flow.suite ?? null,
         ...(derailed ? { derailed } : {}),
+        ...(noticed.length ? { noticed } : {}),
       });
       log(options, `  ${failed ? '✗' : '✓'} ${passed}/${flow.steps?.length ?? 0}\n`);
       if (derailed) {

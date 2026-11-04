@@ -188,6 +188,7 @@ function html(run) {
         · <span dir="ltr">${escHtml(flow.verdict)}</span></p>
       ${steps ? `<h3>مراحلی که باید نگاه کنی</h3><ul class="steps" dir="ltr">${steps}</ul>` : ''}
       ${surprises ? `<h3>تغییرات غیرمنتظره</h3><ul class="surprises" dir="ltr">${surprises}</ul>` : ''}
+      ${flow.noticed?.length ? `<h3>آنچه بررسی‌های خود اپ دید</h3><ul class="steps" dir="ltr">${flow.noticed.map((v) => `<li class="${v.severity === 'finding' ? 'bad' : 'warn'}">${escHtml(v.rule)} — ${escHtml(v.message)}${v.count > 1 ? ` (×${v.count})` : ''}</li>`).join('')}</ul>` : ''}
     </section>`;
   }).join('');
 
