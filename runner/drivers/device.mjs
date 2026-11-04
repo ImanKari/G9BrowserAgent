@@ -166,7 +166,7 @@ const ACTUATING = new Set([
 const SWIPE_DIRECTIONS = new Set(['up', 'down', 'left', 'right']);
 const OPPOSITE = { up: 'down', down: 'up', left: 'right', right: 'left' };
 /** (3.8.10) The keys a flow's `preconditions` may have. */
-const PRECONDITION_KEYS = new Set(['net', 'clock', 'seed', 'flags', 'bridge', 'cleanup']);
+const PRECONDITION_KEYS = new Set(['net', 'clock', 'seed', 'flags', 'bridge', 'cleanup', 'savepoint', 'permissions', 'os']);
 const NL = String.fromCharCode(10);
 const CR = String.fromCharCode(13);
 
@@ -201,6 +201,33 @@ export class DeviceDriver {
     // (3.8.9) The event stream of the current flow (expectEvent), and when the previous and current steps began.
     this.events = null;
     this.stepAt = { previous: 0, current: 0 };
+    // (3.9) adb shell commands that put back what preconditions.permissions / os changed.
+    this.undoShell = [];
+  }
+
+  /**
+   * (3.9) A savepoint of the app's data through the device profile's own tool (g9.project.json devices.<id>.savepoint:
+   * {save: [cmd…], load: [cmd…]}, with {name}, {package}, {serial}, {port} filled in; run from the project's folder).
+   * The runner knows no savepoint format — the app's controller does. After a save or a load the app is started again
+   * and the runner waits for its bridge. Returns { ok, output } or { ok: false, error }.
+   */
+  async savepoint(verb, name) {
+    const template = this.profile?.savepoint?.[verb];
+    if (!Array.isArray(template) || !template.length) return { ok: false, error: `the device profile names no savepoint.${verb} command (g9.project.json devices.<id>.savepoint)` };
+    if (!name || !/^[A-Za-z0-9._-]{1,64}$/.test(String(name))) return { ok: false, error: `a savepoint name is letters, digits, . _ - (got «${name}»)` };
+    const fill = (x) => String(x).replace(/\{name\}/g, name).replace(/\{package\}/g, this.packageName ?? '').replace(/\{serial\}/g, this.serial ?? '').replace(/\{port\}/g, String(this.port));
+    const [cmd, ...args] = template.map(fill);
+    // The tool gets the adb this runner uses (ADB), so it needs no PATH of its own.
+    const r = await run(cmd === 'node' ? process.execPath : cmd, args, { cwd: this.profile?.root, env: { ...process.env, ADB: resolveAdb() } });
+    if (r.code !== 0) return { ok: false, error: (r.stderr || r.stdout).trim().split(NL).slice(-2).join(' ').slice(0, 300) || `exit ${r.code}` };
+    // A save stops the app too (no database copied half-written): both come back to a running app with its bridge.
+    if (this.serial !== false && this.packageName) await this.ensureApp();
+    for (const until = Date.now() + this.launchTimeoutMs; Date.now() < until; ) {
+      const hello = await this.get('/qa').catch(() => null);
+      if (hello?.jsReady) break;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    return { ok: true, output: r.stdout.trim().slice(-400) };
   }
 
   get base() {
@@ -856,6 +883,10 @@ export class DeviceDriver {
    *   net: "offline" | [rules] (net.shape)   clock: { offsetMs | at } (clock.set)   seed: n (state.seed)
    *   flags: { name: value } (flags.set)     bridge: [{ command, args }] (anything else the app's bridge offers),
    *   cleanup: [{ command, args }] (run after the flow, besides the automatic undo)
+   *   savepoint: "<name>" (3.9: the app's data from a savepoint, FIRST — it replaces the data and restarts the app; the
+   *              command is the device profile's `savepoint.load`, no undo: the next flow names its own start)
+   *   permissions: { grant: [..], revoke: [..] } (3.9, Android `pm grant|revoke`; each put back as it was)
+   *   os: { appearance: "dark"|"light", fontScale: n } (3.9, Android; each put back as it was)
    * An unknown key is refused, never skipped. Returns { ok, applied } or { ok: false, error } — the first command
    * that failed; what was already set is undone by undoPreconditions all the same.
    */
@@ -865,6 +896,42 @@ export class DeviceDriver {
     if (typeof pre !== 'object' || Array.isArray(pre)) return { ok: false, error: 'preconditions must be an object' };
     const unknown = Object.keys(pre).filter((k) => !PRECONDITION_KEYS.has(k));
     if (unknown.length) return { ok: false, error: `preconditions.${unknown[0]} is not known (known: ${[...PRECONDITION_KEYS].join(', ')}). A runner must refuse, not skip.` };
+    const early = [];
+    if (pre.savepoint !== undefined) {
+      const name = typeof pre.savepoint === 'string' ? pre.savepoint : pre.savepoint?.name;
+      const r = await this.savepoint('load', name);
+      if (!r.ok) return { ok: false, error: `precondition savepoint ${name ?? ''} failed: ${r.error}`, applied: early };
+      early.push(`savepoint ${name}`);
+    }
+    if (pre.permissions !== undefined || pre.os !== undefined) {
+      if (this.serial === false || !this.packageName) return { ok: false, error: 'preconditions.permissions / os need an Android device over adb with a package (this device has none)', applied: early };
+      const pkg = shellPackage(this.packageName);
+      const granted = async (perm) => new RegExp(`${perm.replace(/\./g, '\\.')}: granted=true`).test(await this.shell(`dumpsys package ${pkg}`));
+      for (const [verb, list] of [['grant', pre.permissions?.grant ?? []], ['revoke', pre.permissions?.revoke ?? []]]) {
+        for (const perm of list) {
+          if (!/^[\w.]+$/.test(String(perm))) return { ok: false, error: `preconditions.permissions: «${perm}» is not a permission name`, applied: early };
+          const was = await granted(perm);
+          await this.shell(`pm ${verb} ${pkg} ${perm}`).catch(() => null);
+          if (was !== (verb === 'grant')) this.undoShell.unshift(`pm ${was ? 'grant' : 'revoke'} ${pkg} ${perm}`);
+          early.push(`${verb} ${perm}`);
+        }
+      }
+      if (pre.os?.appearance !== undefined) {
+        if (!['dark', 'light'].includes(pre.os.appearance)) return { ok: false, error: 'preconditions.os.appearance is "dark" or "light"', applied: early };
+        const was = /yes/.test(await this.shell('cmd uimode night'));
+        await this.shell(`cmd uimode night ${pre.os.appearance === 'dark' ? 'yes' : 'no'}`);
+        this.undoShell.unshift(`cmd uimode night ${was ? 'yes' : 'no'}`);
+        early.push(`appearance ${pre.os.appearance}`);
+      }
+      if (pre.os?.fontScale !== undefined) {
+        const n = Number(pre.os.fontScale);
+        if (!(n >= 0.5 && n <= 2)) return { ok: false, error: 'preconditions.os.fontScale is a number from 0.5 to 2', applied: early };
+        const was = (await this.shell('settings get system font_scale')).trim();
+        await this.shell(`settings put system font_scale ${n}`);
+        this.undoShell.unshift(/^[\d.]+$/.test(was) ? `settings put system font_scale ${was}` : 'settings delete system font_scale');
+        early.push(`fontScale ${n}`);
+      }
+    }
     const plan = [];
     if (pre.net !== undefined) {
       const rules = pre.net === 'offline' ? [{ mode: 'offline' }] : pre.net;
@@ -878,7 +945,7 @@ export class DeviceDriver {
     }
     for (const b of pre.bridge ?? []) plan.push({ command: b?.command, args: b?.args ?? {} });
     for (const c of pre.cleanup ?? []) this.undo.push({ command: c?.command, args: c?.args ?? {} });
-    const applied = [];
+    const applied = [...early];
     for (const p of plan) {
       if (typeof p.command !== 'string' || !p.command) return { ok: false, error: 'a preconditions.bridge entry has no "command"' };
       const res = await this.command(p.command, p.args ?? {});
@@ -927,6 +994,10 @@ export class DeviceDriver {
     const undo = this.undo ?? [];
     this.undo = [];
     const problems = [];
+    // (3.9) What permissions / os changed on the device itself, newest first.
+    for (const command of this.undoShell.splice(0)) {
+      await this.shell(command).catch((err) => problems.push(`${command}: ${err?.message ?? err}`));
+    }
     for (const u of undo) {
       const res = await this.command(u.command, u.args ?? {}).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
       if (!res?.ok) problems.push(`${u.command}: ${res?.error ?? 'no answer'}`);
@@ -1170,9 +1241,9 @@ function compare(actual, oracle, what) {
  * spaces are simply not a syntax any more. Nothing here needs a shell: there is
  * no pipe, no glob, no redirection.
  */
-function run(command, args) {
+function run(command, args, { cwd, env } = {}) {
   return new Promise((resolve) => {
-    const child = spawn(command, args, { shell: false, windowsHide: true });
+    const child = spawn(command, args, { shell: false, windowsHide: true, ...(cwd ? { cwd } : {}), ...(env ? { env } : {}) });
     let stdout = '';
     let stderr = '';
     child.stdout?.on('data', (d) => (stdout += d));

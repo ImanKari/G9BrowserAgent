@@ -1966,6 +1966,29 @@ black box and answers `trace.capture` with all of it at once.
 - **Proven on a device**: a Lynx app on the Android emulator, a flow failing on purpose: the trace (`T-4`) and the
   screen kept, the summary empty of the previous flow's cut requests once limited to the flow's own time.
 
+### 2026-11-04 — v3.9 (unreleased): savepoints, permissions and the OS as preconditions; `@write` flows bracketed; a flow file as the target; `--progress`
+
+**Why.** A flow's start state often lives in the app's DATA (signed in, a site downloaded, a half-sent change), not in
+anything a bridge command sets; a flow that writes leaves the data changed with no way back; and an agent's flow (or
+an MCP server's `pilot_flow`) is a file, not a library entry — the runner refused it ("Nothing matched").
+
+- **`runner/drivers/device.mjs`** `applyPreconditions`: `savepoint: "<name>"` FIRST (it replaces the data and
+  restarts the app) through the device profile's own tool — the runner knows no savepoint format;
+  `permissions: { grant: [..], revoke: [..] }` (`pm grant|revoke`) and `os: { appearance, fontScale }` (`cmd uimode
+  night`, `settings … font_scale`), each put back as it WAS (read first), newest first. Over a `--device-url` (no adb)
+  permissions/os are refused with the reason. `savepoint(verb, name)` fills `{name} {package} {serial} {port}` in
+  `devices.<id>.savepoint.save|load` (`lib/devices.mjs` keeps it), runs it from the project's folder with `ADB` set to
+  the runner's adb, then waits for the app's bridge again (a save stops the app too).
+- **`runner/g9.mjs`**: a flow tagged `@write` takes `<flow>.before` before its preconditions and `<flow>.after` after
+  its undo when the profile names a savepoint tool — the report keeps `savepoints: {before, after}` (or why not); a
+  failed save is logged, never fatal. A `*.json` target that exists is that one FlowSpec (validated like the library's).
+  `--progress` prints `· step n/m (action)` after each passed step (an MCP server turns them into progress notifications).
+- **Tests**: `setup/unit/device-preconditions.test.mjs` +1 (a savepoint load from the profile's command, first, from
+  the project folder; a save; a bad name; no tool / no adb refused). The suite: 820 pass; `engine` and `platform-cdp`
+  fail the same way without this change (they need a browser engine).
+- **Proven on a device**: a Lynx app on the Android emulator — a `@write` flow with `savepoint`, `permissions.grant`
+  (a permission the app did not have) and `os` (dark, 1.15): before/after savepoints taken (470 MB each, ~25 s),
+  PASS, and after it the theme, the text size and the permission were back as they were.
 ### 2026-11-04 — v3.8.10: a device flow builds its own start state (`preconditions`)
 
 **Why.** A flow assumed the state the one before it left. One failure (a network left cut, a clock left moved, a flag

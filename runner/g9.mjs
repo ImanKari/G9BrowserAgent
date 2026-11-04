@@ -45,6 +45,7 @@
 
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { McpClient } from './mcp-client.mjs';
 import { writeReports } from './report.mjs';
@@ -1145,7 +1146,8 @@ async function commandRunDevice({ options, project, reportDir, target, variables
     port: direct ? direct.port : devicePortFor(options, device),
     token: options.token === true ? '' : (options.token ?? ''),
     packageName,
-    profile: device,
+    // (3.9) the project's folder: where the profile's savepoint commands run
+    profile: { ...device, root: project?.dir ?? process.cwd() },
     signing: signingFor(device),
     log: (message) => log(options, `  ${message}`),
     // (3.8.9) `screenshot` steps keep their pictures beside the report
@@ -1234,6 +1236,17 @@ async function commandRunDevice({ options, project, reportDir, target, variables
       const noticedBefore = await driver.noticed(Number.MAX_SAFE_INTEGER).catch(() => null);
       // (3.8.9) A flow with an expectEvent step listens to the app's events for its whole length.
       await driver.prepareFlow(flow);
+      // (3.9) A flow that writes (tag @write) is bracketed by savepoints of the app's data — the way back to before it,
+      // and the evidence of what it left — when the device profile names a savepoint tool. A failed save is noted, not fatal.
+      const writes = (flow.tags ?? []).includes('@write') && Array.isArray(driver.profile?.savepoint?.save);
+      const spName = (when) => `${String(flow.id ?? 'flow').replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 50)}.${when}`;
+      const savepoints = {};
+      if (writes) {
+        const r = await driver.savepoint('save', spName('before')).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
+        if (r.ok) savepoints.before = spName('before');
+        else savepoints.beforeError = r.error;
+        log(options, `  savepoint before: ${r.ok ? spName('before') : `not taken — ${r.error}`}`);
+      }
       // (3.8.10) The start state the flow builds itself; a failed precondition fails the flow before any step.
       const pre = await driver.applyPreconditions(flow.preconditions).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
       if (pre.applied?.length) log(options, `  preconditions: ${pre.applied.join(', ')}`);
@@ -1272,6 +1285,12 @@ async function commandRunDevice({ options, project, reportDir, target, variables
       // (3.8.10) What the preconditions set is put back even when the flow failed: the next flow starts clean.
       const undoProblems = await driver.undoPreconditions();
       for (const p of undoProblems) log(options, `  ! precondition not undone: ${p}`);
+      if (writes) {
+        const r = await driver.savepoint('save', spName('after')).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
+        if (r.ok) savepoints.after = spName('after');
+        else savepoints.afterError = r.error;
+        log(options, `  savepoint after: ${r.ok ? spName('after') : `not taken — ${r.error}`}`);
+      }
       const passed = steps.filter((s) => s.ok).length;
       // (3.8.8) What the app's checks noticed while this flow ran — not a step's verdict, a finding to read.
       const noticedNow = noticedBefore ? await driver.noticed(noticedBefore.last).catch(() => null) : null;
@@ -1294,6 +1313,7 @@ async function commandRunDevice({ options, project, reportDir, target, variables
         ...(derailed ? { derailed } : {}),
         ...(noticed.length ? { noticed } : {}),
         ...(undoProblems.length ? { undoProblems } : {}),
+        ...(writes ? { savepoints } : {}),
         ...(failure ? { failure: { ...failure, ...(failure.trace ? { trace: path.relative(reportDir, failure.trace) } : {}), ...(failure.screenshot ? { screenshot: path.relative(reportDir, failure.screenshot) } : {}) } } : {}),
       });
       log(options, `  ${failed ? '✗' : '✓'} ${passed}/${flow.steps?.length ?? 0}\n`);
@@ -1443,7 +1463,10 @@ async function loadDeviceFlows(project, target, device, { warn = () => {} } = {}
     'longPress', 'swipe', 'scroll', 'screenshot', 'expectEvent',
   ]);
   const entries = [];
-  for (const file of await collectJson(folder)) {
+  // (3.9) A FlowSpec FILE as the target (an agent's flow, an MCP server's pilot_flow): that one flow, validated the same
+  // way — it need not live in the library.
+  const fileTarget = typeof target === 'string' && /\.json$/i.test(target) && existsSync(path.resolve(target)) ? path.resolve(target) : null;
+  for (const file of fileTarget ? [fileTarget] : await collectJson(folder)) {
     let spec;
     try {
       spec = JSON.parse(await readFile(file, 'utf8'));
@@ -1469,7 +1492,7 @@ async function loadDeviceFlows(project, target, device, { warn = () => {} } = {}
   }
 
   const flows = entries.filter((e) => e.spec && typeof e.spec === 'object').map((e) => e.spec);
-  const all = !target || target === 'all';
+  const all = !target || target === 'all' || !!fileTarget;
   let chosen;
   if (all) {
     chosen = flows;
@@ -2015,7 +2038,8 @@ async function commandHarvest({ options }) {
     port: devicePortFor(options, device),
     token: options.token === true ? '' : (options.token ?? ''),
     packageName,
-    profile: device,
+    // (3.9) the project's folder: where the profile's savepoint commands run
+    profile: { ...device, root: project?.dir ?? process.cwd() },
     signing: signingFor(device),
     log: (message) => log(options, `  ${message}`),
   });

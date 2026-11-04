@@ -77,9 +77,9 @@ test('an unknown key is refused before anything is sent; a malformed net too', a
   const b = await bridge();
   try {
     const d = new DeviceDriver({ port: b.port, serial: false });
-    const r = await d.applyPreconditions({ seed: 1, savepoint: 'clean' });
+    const r = await d.applyPreconditions({ seed: 1, teleport: 'clean' });
     assert.equal(r.ok, false);
-    assert.match(r.error, /preconditions\.savepoint is not known.*refuse, not skip/);
+    assert.match(r.error, /preconditions\.teleport is not known.*refuse, not skip/);
     assert.equal(b.calls.length, 0);
     assert.match((await d.applyPreconditions({ net: 'slow' })).error, /"offline" or a list/);
     assert.deepEqual(await d.applyPreconditions(undefined), { ok: true, applied: [] });
@@ -104,6 +104,35 @@ test('a refused command stops there, and what was already set is still undone', 
   }
 });
 
+// (3.9) A savepoint through the device profile's own tool: the runner fills the template and runs it from the
+// project's folder, and knows no format; a profile without one, a bad name, and permissions/os without adb are refused.
+test('a savepoint precondition runs the profile\'s load command from the project folder, first', async () => {
+  const b = await bridge();
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'g9-sp-'));
+  fs.writeFileSync(path.join(dir, 'tool.mjs'), "import fs from 'node:fs'; fs.writeFileSync('called.txt', process.argv.slice(2).join(' '));");
+  try {
+    const profile = { savepoint: { load: ['node', 'tool.mjs', 'load', '{name}', '--package', '{package}'], save: ['node', 'tool.mjs', 'save', '{name}'] }, root: dir };
+    const d = new DeviceDriver({ port: b.port, serial: false, packageName: 'com.example.app', profile, launchTimeoutMs: 300 });
+    const r = await d.applyPreconditions({ savepoint: 'signed-in', seed: 1 });
+    assert.equal(r.ok, true, r.error);
+    assert.deepEqual(r.applied, ['savepoint signed-in', 'state.seed'], 'the savepoint first, then the bridge');
+    assert.equal(fs.readFileSync(path.join(dir, 'called.txt'), 'utf8'), 'load signed-in --package com.example.app');
+    const saved = await d.savepoint('save', 'x.before');
+    assert.equal(saved.ok, true);
+    assert.equal(fs.readFileSync(path.join(dir, 'called.txt'), 'utf8'), 'save x.before');
+    assert.match((await d.savepoint('save', '../etc')).error, /savepoint name/);
+    const none = new DeviceDriver({ port: b.port, serial: false, profile: { root: dir } });
+    assert.match((await none.applyPreconditions({ savepoint: 'a' })).error, /names no savepoint\.load/);
+    assert.match((await none.applyPreconditions({ permissions: { grant: ['android.permission.CAMERA'] } })).error, /need an Android device over adb/);
+    assert.match((await none.applyPreconditions({ os: { appearance: 'dark' } })).error, /need an Android device over adb/);
+  } finally {
+    b.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 for (const { name, fn } of tests) {
   try {
     await fn();
