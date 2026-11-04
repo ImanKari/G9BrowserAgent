@@ -165,6 +165,8 @@ const ACTUATING = new Set([
 /** (3.8.9) `swipe` / `scroll` directions; a scroll moves the finger the other way. */
 const SWIPE_DIRECTIONS = new Set(['up', 'down', 'left', 'right']);
 const OPPOSITE = { up: 'down', down: 'up', left: 'right', right: 'left' };
+/** (3.8.10) The keys a flow's `preconditions` may have. */
+const PRECONDITION_KEYS = new Set(['net', 'clock', 'seed', 'flags', 'bridge', 'cleanup']);
 const NL = String.fromCharCode(10);
 const CR = String.fromCharCode(13);
 
@@ -845,6 +847,57 @@ export class DeviceDriver {
   endFlow() {
     if (this.events) this.events.ctrl.abort();
     this.events = null;
+  }
+
+  /**
+   * (3.8.10) A flow's `preconditions`: the start state it builds itself, so one failed flow no longer breaks the next.
+   *   net: "offline" | [rules] (net.shape)   clock: { offsetMs | at } (clock.set)   seed: n (state.seed)
+   *   flags: { name: value } (flags.set)     bridge: [{ command, args }] (anything else the app's bridge offers),
+   *   cleanup: [{ command, args }] (run after the flow, besides the automatic undo)
+   * An unknown key is refused, never skipped. Returns { ok, applied } or { ok: false, error } — the first command
+   * that failed; what was already set is undone by undoPreconditions all the same.
+   */
+  async applyPreconditions(pre) {
+    this.undo = [];
+    if (!pre) return { ok: true, applied: [] };
+    if (typeof pre !== 'object' || Array.isArray(pre)) return { ok: false, error: 'preconditions must be an object' };
+    const unknown = Object.keys(pre).filter((k) => !PRECONDITION_KEYS.has(k));
+    if (unknown.length) return { ok: false, error: `preconditions.${unknown[0]} is not known (known: ${[...PRECONDITION_KEYS].join(', ')}). A runner must refuse, not skip.` };
+    const plan = [];
+    if (pre.net !== undefined) {
+      const rules = pre.net === 'offline' ? [{ mode: 'offline' }] : pre.net;
+      if (!Array.isArray(rules)) return { ok: false, error: 'preconditions.net is "offline" or a list of net.shape rules' };
+      plan.push({ command: 'net.shape', args: { rules }, undo: { command: 'net.shape', args: { clear: true } } });
+    }
+    if (pre.clock !== undefined) plan.push({ command: 'clock.set', args: pre.clock, undo: { command: 'clock.reset', args: {} } });
+    if (pre.seed !== undefined) plan.push({ command: 'state.seed', args: { seed: pre.seed }, undo: { command: 'state.seed', args: { off: true } } });
+    for (const [name, value] of Object.entries(pre.flags ?? {})) {
+      plan.push({ command: 'flags.set', args: { name, value }, undo: { command: 'flags.set', args: { name, value: null } } });
+    }
+    for (const b of pre.bridge ?? []) plan.push({ command: b?.command, args: b?.args ?? {} });
+    for (const c of pre.cleanup ?? []) this.undo.push({ command: c?.command, args: c?.args ?? {} });
+    const applied = [];
+    for (const p of plan) {
+      if (typeof p.command !== 'string' || !p.command) return { ok: false, error: 'a preconditions.bridge entry has no "command"' };
+      const res = await this.command(p.command, p.args ?? {});
+      if (!res?.ok) return { ok: false, error: `precondition ${p.command} failed: ${res?.error ?? 'no answer'}`, applied };
+      applied.push(p.command);
+      if (p.undo) this.undo.unshift(p.undo);
+    }
+    if (applied.length) await this.waitInSlices('ui.waitIdle', {}, 15_000, (res) => res.ok);
+    return { ok: true, applied };
+  }
+
+  /** (3.8.10) Puts back what applyPreconditions set (newest first) and runs the flow's own cleanup. Never throws. */
+  async undoPreconditions() {
+    const undo = this.undo ?? [];
+    this.undo = [];
+    const problems = [];
+    for (const u of undo) {
+      const res = await this.command(u.command, u.args ?? {}).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
+      if (!res?.ok) problems.push(`${u.command}: ${res?.error ?? 'no answer'}`);
+    }
+    return problems;
   }
 
   /** Reads `GET /pilot/events?since=0` (protocol 2, Server-Sent Events) into `stream.list` until aborted. */

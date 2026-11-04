@@ -1228,9 +1228,17 @@ async function commandRunDevice({ options, project, reportDir, target, variables
       const noticedBefore = await driver.noticed(Number.MAX_SAFE_INTEGER).catch(() => null);
       // (3.8.9) A flow with an expectEvent step listens to the app's events for its whole length.
       await driver.prepareFlow(flow);
+      // (3.8.10) The start state the flow builds itself; a failed precondition fails the flow before any step.
+      const pre = await driver.applyPreconditions(flow.preconditions).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
+      if (pre.applied?.length) log(options, `  preconditions: ${pre.applied.join(', ')}`);
+      if (!pre.ok) {
+        failed += 1;
+        steps.push({ step: 0, id: 'preconditions', action: 'preconditions', ok: false, error: pre.error });
+        log(options, `  ✗ preconditions: ${pre.error}`);
+      }
 
       let derailed = null;
-      for (const [index, step] of (flow.steps ?? []).entries()) {
+      for (const [index, step] of (pre.ok ? (flow.steps ?? []) : []).entries()) {
         let outcome;
         try {
           outcome = await driver.step(substituteDeviceStep(step, flowVariables), { first: index === 0 });
@@ -1249,6 +1257,9 @@ async function commandRunDevice({ options, project, reportDir, target, variables
       }
 
       driver.endFlow();
+      // (3.8.10) What the preconditions set is put back even when the flow failed: the next flow starts clean.
+      const undoProblems = await driver.undoPreconditions();
+      for (const p of undoProblems) log(options, `  ! precondition not undone: ${p}`);
       const passed = steps.filter((s) => s.ok).length;
       // (3.8.8) What the app's checks noticed while this flow ran — not a step's verdict, a finding to read.
       const noticedNow = noticedBefore ? await driver.noticed(noticedBefore.last).catch(() => null) : null;
@@ -1270,6 +1281,7 @@ async function commandRunDevice({ options, project, reportDir, target, variables
         suite: flow.suite ?? null,
         ...(derailed ? { derailed } : {}),
         ...(noticed.length ? { noticed } : {}),
+        ...(undoProblems.length ? { undoProblems } : {}),
       });
       log(options, `  ${failed ? '✗' : '✓'} ${passed}/${flow.steps?.length ?? 0}\n`);
       if (derailed) {
@@ -1360,6 +1372,8 @@ function substituteDeviceStep(step, variables = {}) {
  * this is the drift. Keep them in step when any of them changes.
  */
 const DEVICE_AUTOMATION_FAILURES = [
+  // (3.8.10) The flow's own start state could not be built — setup, not the product.
+  /^preconditions?[ .]/i,
   // Control identity — the recorded automation ids no longer address anything.
   /not found/i,
   /automationId/i,

@@ -327,6 +327,11 @@ Device steps beyond the web vocabulary: `dismiss`, `tapFeature`, `zoomToFeature`
 `setup`); (3.8.9) `longPress` (`target`), `swipe` / `scroll` (`direction` up|down|left|right, optional `target`, `distance`, `durationMs`; swipe = where the finger goes, scroll = where the content goes), `screenshot` (`name`: the app window kept in `<report>/screens/`) and `expectEvent` (`kind`, `match`, `within` ms: an app event raised since the step before — read from the bridge's event stream); oracles `visible`,
 `onScreen`, `value`, `probe`, `idle`, `map`, `aria`.
 
+**(3.8.10) `preconditions`** at the top of a device flow build its start state from bridge commands before step 1 and
+put it back after the flow, failed or not: `{ "net": "offline" | [rules], "clock": { "offsetMs": … }, "seed": 42,
+"flags": { "reduceMotion": true }, "bridge": [{ "command": …, "args": … }], "cleanup": [{ … }] }`. An unknown key is
+refused; a refused command fails the flow as `FAIL_AUTOMATION` before any step.
+
 ### The port guard
 
 Two builds of one app often share a bridge port. With a package to guard, the driver reads
