@@ -531,7 +531,8 @@ test('(3.8.2) a derailed flow: its report text is masked and its verdict is not 
   const runner = readFileSync(G9, 'utf8');
   const loop = runner.slice(runner.indexOf('let derailed = null;'), runner.indexOf('const passed = steps.filter'));
   assert.ok(loop.indexOf('maskSecretsDeep(outcome') < loop.indexOf('derailed = { step'), 'masked before the derail record is built');
-  assert.match(runner, /verdict: derailed \? 'FAIL_AUTOMATION' : verdictForDevice\(steps, failed\)/);
+  // derailed first, always FAIL_AUTOMATION; then (3.9) a protocol-1 bridge's missing command is SKIPPED; else the verdict
+  assert.match(runner, /verdict: derailed \? 'FAIL_AUTOMATION' : \(failed && needsNewerBridge\(steps, [^)]*\) \? 'SKIPPED' : verdictForDevice\(steps, failed\)\)/);
   assert.match(runner, /pushNotRun\(run, flows\.slice\(flowIndex \+ 1\), flow, options, \{ cause: 'derailed' \}\)/);
 });
 
