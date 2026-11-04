@@ -447,11 +447,14 @@ export class DeviceDriver {
    * known by the automation-id prefixes of the profile's `errorScreens`.
    */
   async derailment() {
-    const snap = await this.command('ui.snapshot', { maxNodes: 80 }, { timeoutMs: 8_000 })
-      .catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
+    // (3.9.4) Only the error screens' own controls are measured (`prefixes`; an older bridge ignores it and measures all),
+    // and none at all when the profile names no error screen: the check after every step cost ~0.5 s (plan P2-07).
+    const prefixes = this.profile?.errorScreens ?? [];
+    const snap = prefixes.length
+      ? await this.command('ui.snapshot', { maxNodes: 80, prefixes }, { timeoutMs: 8_000 }).catch((err) => ({ ok: false, error: String(err?.message ?? err) }))
+      : { ok: true, result: { nodes: [] } };
     if (snap?.ok) {
       if (!this.servingPackage) this.servingPackage = await this.packageOnPort().catch(() => null);
-      const prefixes = this.profile?.errorScreens ?? [];
       const ids = (snap.result?.nodes ?? []).map((n) => n.automationId ?? '').filter(Boolean);
       const hit = prefixes.length ? ids.find((id) => prefixes.some((p) => id.startsWith(p))) : null;
       return hit ? `the app is on its error screen (${hit}) — it crashed or failed to initialize` : null;
@@ -646,6 +649,12 @@ export class DeviceDriver {
     const res = await this.command(command, args, options);
     if (!res.ok) return res;
     if (ACTUATING.has(command)) {
+      // (3.9.4) The command already waited for the app to settle on the device (its answer says `settled: true`): a
+      // second quiet window from here only adds time. The off-path guard is still asked (an error screen is idle too).
+      if (res.result?.settled === true) {
+        const off = await this.derailment();
+        return off ? this.derailed(off, null) : res;
+      }
       // Every action ends by waiting for the app to settle. There is no sleep in this driver and
       // there must never be one: a fixed pause is what makes recorded tests flaky, and it hides
       // the very slowness it is compensating for.

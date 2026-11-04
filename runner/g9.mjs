@@ -1257,6 +1257,8 @@ async function commandRunDevice({ options, project, reportDir, target, variables
         log(options, `  ✗ preconditions: ${pre.error}`);
       }
 
+      // (3.9.4) Where a flow's time goes outside its steps (plan P2-07): before the first step, the steps, after the last.
+      const stepsStarted = Date.now();
       let derailed = null;
       // (3.9) --timing on a device: every step already waits for the app's idle (adaptive, the device default; fast is
       // the same here). `recorded` also keeps the person's pause before a step (`gapMs`, from the app's recorder), what is
@@ -1269,11 +1271,15 @@ async function commandRunDevice({ options, project, reportDir, target, variables
           if (left > 0) await new Promise((resolve) => setTimeout(resolve, left));
         }
         let outcome;
+        const stepStarted = Date.now();
         try {
           outcome = await driver.step(substituteDeviceStep(step, flowVariables), { first: index === 0 });
         } catch (err) {
           outcome = { ok: false, error: String(err.message ?? err) };
         }
+        // (3.9.4) Every step's own time, waits and assertions included: where a flow's time goes (plan P2-07).
+        // `durationMs` may be the bridge's own (the command on the device); `wallMs` is the step as the runner waited for it.
+        outcome = { ...outcome, wallMs: Date.now() - stepStarted, ...(typeof outcome.durationMs === 'number' ? {} : { durationMs: Date.now() - stepStarted }) };
         // (3.9.2) `capture`: the answer's values for the later steps' {{name}} (taken before masking: a secret is never one).
         if (outcome.ok && step.capture) {
           const problem = captureInto(flowVariables, step.capture, outcome);
@@ -1292,6 +1298,7 @@ async function commandRunDevice({ options, project, reportDir, target, variables
         if (options.progress === true) log(options, `  · step ${index + 1}/${flow.steps.length} (${step.action})`);
       }
 
+      const stepsEnded = Date.now();
       driver.endFlow();
       // (3.8.11) A failed flow keeps the app's state at the failure (trace + screen), before anything is put back.
       const failedStep = steps.find((s) => !s.ok);
@@ -1323,6 +1330,7 @@ async function commandRunDevice({ options, project, reportDir, target, variables
         passed,
         failed,
         durationMs: Date.now() - started,
+        phasesMs: { before: stepsStarted - started, steps: stepsEnded - stepsStarted, after: Date.now() - stepsEnded },
         steps,
         qaTestCaseIds: flow.qaTestCaseIds ?? [],
         tags: flow.tags ?? [],

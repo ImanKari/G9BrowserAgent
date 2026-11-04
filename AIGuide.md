@@ -1990,6 +1990,21 @@ an MCP server's `pilot_flow`) is a file, not a library entry — the runner refu
   (a permission the app did not have) and `os` (dark, 1.15): before/after savepoints taken (470 MB each, ~25 s),
   PASS, and after it the theme, the text size and the permission were back as they were.
 
+### 2026-11-05 — v3.9.4 (unreleased): a device suite 2.5 times faster; where a flow's time goes
+
+**Why.** An app's read-only suite of 13 flows took 278 s, and the steps' own times added up to 100 s: the rest was
+invisible. Measured per step, a click took 1.3 s of wall time for 0.65 s on the device.
+
+- **`runner/drivers/device.mjs`** `derailment()` (the off-path check after every step) asked `ui.snapshot` for EVERY
+  control on screen to find an error screen; it now passes `prefixes` (the profile's `errorScreens`) so only those are
+  measured, and skips the snapshot when the profile names none. An older bridge ignores `prefixes` (as before).
+  `actuate`: an answer that says `settled: true` gets no second idle wait from the runner.
+- **`runner/g9.mjs`**: every device step carries `wallMs` (the runner's own time for it, waits included; `durationMs`
+  may be the device's) and every flow `phasesMs {before, steps, after}`.
+- **Measured** (an Android emulator, the same 13 flows): 278 s → 112 s, all PASS; the idle assertions 68 s → 6 s, a
+  click 1308 → 761 ms of wall time. An error screen is still caught (the filtered snapshot finds it).
+- **`runner/drivers/device.mjs`** (3.9.3): a protocol-2 bridge's command route is `/pilot`; `/qa` is its old name.
+
 ### 2026-11-04 — v3.9.2 (unreleased): `capture` — what the app chose becomes a variable; a bridge step's own budget
 
 **Why.** A write flow that MAKES something (a drawing) has to reach it later by an id the app chose while the flow ran;
