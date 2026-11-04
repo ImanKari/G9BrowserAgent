@@ -839,6 +839,8 @@ export class DeviceDriver {
   async prepareFlow(flow) {
     this.endFlow();
     this.stepAt = { previous: 0, current: 0 };
+    // (3.8.11) The failure bundle's summary keeps only what happened since this moment.
+    this.flowStartedAt = Date.now();
     if (!(flow?.steps ?? []).some((s) => s?.action === 'expectEvent')) return;
     this.events = { list: [], waiters: new Set(), error: null, ctrl: new AbortController() };
     void this.readEvents(this.events);
@@ -886,6 +888,38 @@ export class DeviceDriver {
     }
     if (applied.length) await this.waitInSlices('ui.waitIdle', {}, 15_000, (res) => res.ok);
     return { ok: true, applied };
+  }
+
+  /**
+   * (3.8.11) The failure bundle: when a flow fails, the app's state AT that moment — a trace from the bridge's black box
+   * (`trace.capture`: what was busy, the last commands, log lines and requests, the app's own sections) and the screen
+   * (`ui.screenshot`) — written beside the report, with a short summary for the report itself. Taken before the
+   * preconditions are undone. A bridge without one or both gives what it has; null when it has neither. Never throws.
+   */
+  async failureBundle(flowId, reason) {
+    if (!this.artifactsDir) return null;
+    const dir = path.join(path.dirname(this.artifactsDir), 'failures');
+    const base = String(flowId ?? 'flow').replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 100);
+    const bundle = {};
+    try {
+      const t = await this.command('trace.capture', { reason: String(reason ?? 'flow failed').slice(0, 300) }, { timeoutMs: 20_000 });
+      if (t?.ok && t.result) {
+        fs.mkdirSync(dir, { recursive: true });
+        bundle.trace = path.join(dir, `${base}.trace.json`);
+        fs.writeFileSync(bundle.trace, JSON.stringify(t.result, null, 2));
+        // the device's clock, corrected by the known skew, with 1 s of slack
+        bundle.summary = summarizeTrace(t.result, { since: this.flowStartedAt ? this.flowStartedAt + this.clockOffsetMs - 1_000 : 0 });
+      }
+    } catch { /* a bridge without a black box */ }
+    try {
+      const s = await this.command('ui.screenshot', { maxLongEdgePx: 1000 }, { timeoutMs: 20_000 });
+      if (s?.ok && typeof s.result?.base64 === 'string') {
+        fs.mkdirSync(dir, { recursive: true });
+        bundle.screenshot = path.join(dir, `${base}.jpg`);
+        fs.writeFileSync(bundle.screenshot, Buffer.from(s.result.base64, 'base64'));
+      }
+    } catch { /* no screen to show */ }
+    return bundle.trace || bundle.screenshot ? bundle : null;
   }
 
   /** (3.8.10) Puts back what applyPreconditions set (newest first) and runs the flow's own cleanup. Never throws. */
@@ -984,6 +1018,33 @@ export class DeviceDriver {
   get(path) {
     return fetch(`${this.base}${path}`, { signal: AbortSignal.timeout(5_000) }).then((r) => r.json());
   }
+}
+
+/**
+ * (3.8.11) The few lines of a black-box trace a reader needs first: what was still busy, the warnings and errors the
+ * app logged last, the requests that failed. The whole trace stays in its file.
+ */
+export function summarizeTrace(trace, { since = 0 } = {}) {
+  const t = trace ?? {};
+  const recent = (e) => !since || typeof e?.t !== 'number' || e.t >= since;
+  const text = (v, n) => String(v ?? '').slice(0, n);
+  const busy = Array.isArray(t.busy) ? t.busy : Array.isArray(t.busy?.reasons) ? t.busy.reasons : [];
+  const logs = (Array.isArray(t.logs) ? t.logs : [])
+    .filter(recent)
+    .filter((l) => /warn|error|fatal/i.test(String(l?.level ?? '')))
+    .slice(-6)
+    .map((l) => `${text(l.level, 5)} ${text(l.tag ?? l.source, 24)} ${text(l.message ?? l.text, 220)}`.replace(/\s+/g, ' ').trim());
+  const net = (Array.isArray(t.net) ? t.net : [])
+    .filter(recent)
+    .filter((r) => r?.error || (typeof r?.status === 'number' && r.status >= 400) || r?.status === null)
+    .slice(-4)
+    .map((r) => `${text(r.method, 6)} ${text(r.url, 120)} → ${r.status ?? text(r.error, 80)}`);
+  return {
+    ...(t.id ? { id: t.id } : {}),
+    busy: busy.slice(0, 6).map((b) => text(typeof b === 'string' ? b : b?.reason ?? b?.name ?? JSON.stringify(b), 120)),
+    logs,
+    net,
+  };
 }
 
 /** One Server-Sent Event block → { seq, kind, data, t } (t = the event's own time, else its arrival). */

@@ -332,6 +332,10 @@ put it back after the flow, failed or not: `{ "net": "offline" | [rules], "clock
 "flags": { "reduceMotion": true }, "bridge": [{ "command": …, "args": … }], "cleanup": [{ … }] }`. An unknown key is
 refused; a refused command fails the flow as `FAIL_AUTOMATION` before any step.
 
+**(3.8.11) The failure bundle.** A failed device flow keeps `<report>/failures/<flow>.trace.json` (the bridge's
+`trace.capture`) and `<flow>.jpg` (its screen), and the report shows them with what was busy, the warnings and errors
+and the failed requests of that flow.
+
 ### The port guard
 
 Two builds of one app often share a bridge port. With a package to guard, the driver reads
