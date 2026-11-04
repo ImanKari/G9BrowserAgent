@@ -697,6 +697,13 @@ export class DeviceDriver {
       case 'visible': {
         const id = DeviceDriver.requireAssertId(spec);
         if (id.error) return id;
+        // (3.9.5) `waitBudgetMs` on a visible assertion: what appears a moment after the step before it (a notice drawn
+        // when an offline request fails) is waited for on the device, then read. Without it the read is immediate — the
+        // step before already waited for the app to settle, and a control that should be there now is asserted now.
+        if (Number.isFinite(spec.waitBudgetMs) && spec.waitBudgetMs > 0) {
+          const waited = await this.waitInSlices('ui.waitFor', { automationId: id.automationId }, spec.waitBudgetMs, (res) => res.ok);
+          if (waited.derailed) return waited;
+        }
         const res = await this.command('ui.find', { automationId: id.automationId });
         return res.ok
           ? { ok: true, detail: `found ${id.automationId}` }

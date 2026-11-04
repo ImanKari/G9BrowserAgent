@@ -1990,6 +1990,19 @@ an MCP server's `pilot_flow`) is a file, not a library entry — the runner refu
   (a permission the app did not have) and `os` (dark, 1.15): before/after savepoints taken (470 MB each, ~25 s),
   PASS, and after it the theme, the text size and the permission were back as they were.
 
+### 2026-11-05 — v3.9.5 (unreleased): a visible assertion can wait for what appears a moment later
+
+**Why.** Since 3.9.4 a settled click gets no second idle wait, so a step right after it runs sooner. A control the app
+draws a moment AFTER settling (a notice shown when an offline request fails) was asserted before it existed: an app's
+read-only flow failed after 0.9 s with the notice drawn on its screenshot.
+
+- **`runner/drivers/device.mjs`** `assert` `visible`: with `waitBudgetMs` the control is first waited for on the device
+  (`ui.waitFor`, in slices, the off-path guard between them), then read with `ui.find`. Without it nothing changes: the
+  read is immediate, as before.
+- **Tests**: `setup/unit/device-steps.test.mjs` +1 (no budget = one `ui.find`; a budget = `ui.waitFor` then `ui.find`).
+- **Proven on a device**: the flow above with `waitBudgetMs: 15000` on that step passed twice (the wait took 0.1 s), and
+  an app's 13-flow read-only suite passed 13 of 13 in 105 s.
+
 ### 2026-11-05 — v3.9.4 (unreleased): a device suite 2.5 times faster; where a flow's time goes
 
 **Why.** An app's read-only suite of 13 flows took 278 s, and the steps' own times added up to 100 s: the rest was

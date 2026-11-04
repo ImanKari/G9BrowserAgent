@@ -157,6 +157,24 @@ test('parseSseBlock and eventMatches: the whole event in data, text contained, n
   assert.equal(eventMatches(e.data, {}), true);
 });
 
+test('a visible assertion with waitBudgetMs waits on the device first; without it the read is immediate (3.9.5)', async () => {
+  const b = await bridge();
+  try {
+    const d = new DeviceDriver({ port: b.port, serial: false });
+    const now = await d.step({ id: 'a', action: 'assert', oracle: { kind: 'visible' }, target: { automationId: 'Weather.Notice' } });
+    assert.equal(now.ok, true, now.error);
+    assert.deepEqual(b.calls.map((c) => c.command).filter((c) => c.startsWith('ui.') && c !== 'ui.snapshot'), ['ui.find']);
+    b.calls.length = 0;
+    const waited = await d.step({ id: 'b', action: 'assert', oracle: { kind: 'visible' }, target: { automationId: 'Weather.Notice' }, waitBudgetMs: 5000 });
+    assert.equal(waited.ok, true, waited.error);
+    const order = b.calls.map((c) => c.command).filter((c) => c.startsWith('ui.') && c !== 'ui.snapshot');
+    assert.deepEqual(order, ['ui.waitFor', 'ui.find']);
+    assert.equal(b.calls.find((c) => c.command === 'ui.waitFor').args.automationId, 'Weather.Notice');
+  } finally {
+    b.close();
+  }
+});
+
 test('--device-url: host and port from an address; none without it; a bad one refused by name', () => {
   assert.deepEqual(deviceUrlFor({ 'device-url': 'http://127.0.0.1:18797/qa' }), { url: 'http://127.0.0.1:18797', host: '127.0.0.1', port: 18797 });
   assert.equal(deviceUrlFor({}), null);
