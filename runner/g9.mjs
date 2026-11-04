@@ -60,7 +60,7 @@ const EXIT = { OK: 0, PRODUCT: 1, AUTOMATION: 2, SURPRISE: 3, RUNNER: 4, ERROR: 
 // ------------------------------------------------------------------- CLI
 
 /** Flags that never take a value, so `--headed suite:smoke` does not swallow the target. */
-const BOOLEAN_FLAGS = new Set(['seed', 'no-compare', 'strict-pin', 'quiet', 'headless', 'headed', 'help', 'keep-engine']);
+const BOOLEAN_FLAGS = new Set(['seed', 'no-compare', 'strict-pin', 'quiet', 'progress', 'headless', 'headed', 'help', 'keep-engine']);
 
 function parseArgs(argv) {
   const [command = 'help', ...rest] = argv;
@@ -141,6 +141,7 @@ Run options:
   --fail-on <verdict>   lowest verdict that makes the exit code non-zero
                         (warning | surprise | failure — default: surprise)
   --quiet               only the summary line
+  --progress            one line per passed step («· step 3/12 (tap)») — for a caller that shows progress
 
 Options for "ab":
   --a <url>             the reference build (usually what is already released)
@@ -1259,6 +1260,7 @@ async function commandRunDevice({ options, project, reportDir, target, variables
           log(options, `  ✗ step ${index + 1} (${step.action}): ${outcome.error}`);
           break; // stop on first failure: later steps run against a state nobody intended
         }
+        if (options.progress === true) log(options, `  · step ${index + 1}/${flow.steps.length} (${step.action})`);
       }
 
       driver.endFlow();
