@@ -13,8 +13,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
-  scriptCommand, isAppImageRuntime, ensureBootstrap, bootstrapPath, BOOTSTRAP_SOURCE, installId, cleanChildEnv,
+  scriptCommand, isAppImageRuntime, ensureBootstrap, bootstrapPath, BOOTSTRAP_SOURCE, installId, cleanChildEnv, runsAsWindowsSystem,
 } from '../../lib/runtime.mjs';
+import { systemMayStartDaemon, SYSTEM_NO_DAEMON } from '../../mcp/link.mjs';
 
 const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
@@ -93,6 +94,17 @@ test('ensureBootstrap writes the bootstrap once, rewrites a changed one, and it 
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test('(3.9.6) an MCP client running as SYSTEM connects to a daemon but never starts one, unless G9_ALLOW_SYSTEM_DAEMON=1', () => {
+  // Field report, 2026-11-17: a node agent service started its MCP server at boot; its shim started a SYSTEM daemon
+  // that every agent of the signed-in person then used (Edge 1002, downloads in the SYSTEM profile).
+  assert.equal(runsAsWindowsSystem({ platform: 'win32', user: 'SYSTEM', home: 'C:\\Windows\\system32\\config\\systemprofile' }), true);
+  assert.equal(systemMayStartDaemon({ system: true, env: {} }), false);
+  assert.equal(systemMayStartDaemon({ system: true, env: { G9_ALLOW_SYSTEM_DAEMON: '1' } }), true);
+  assert.equal(systemMayStartDaemon({ system: false, env: {} }), true);
+  assert.match(SYSTEM_NO_DAEMON, /SYSTEM account/);
+  assert.match(SYSTEM_NO_DAEMON, /G9_ALLOW_SYSTEM_DAEMON=1/);
 });
 
 for (const { name, fn } of tests) {

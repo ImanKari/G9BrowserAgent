@@ -2636,7 +2636,7 @@ export async function scroll(tabId, opts = {}) {
   return directScroll(tabId, opts);
 }
 
-async function directScroll(tabId, { ref, direction = 'down', amount = 400, x, y, url } = {}) {
+async function directScroll(tabId, { ref, direction = 'down', amount = 400, x, y, url, modifiers = 0 } = {}) {
   let px = x ?? 400;
   let py = y ?? 300;
   let node = null;
@@ -2674,7 +2674,7 @@ async function directScroll(tabId, { ref, direction = 'down', amount = 400, x, y
     await send(
       tabId,
       'Input.dispatchMouseEvent',
-      { type: 'mouseWheel', x: px, y: py, deltaX, deltaY, pointerType: 'mouse' },
+      { type: 'mouseWheel', x: px, y: py, deltaX, deltaY, pointerType: 'mouse', modifiers: modifierMask(modifiers) },
       { timeoutMs: 4000, sessionId },
     );
     if (!sessionId || origin) pointer.record(tabId, { at: Date.now(), x: px + (origin?.x ?? 0), y: py + (origin?.y ?? 0), buttons: 0, type: 'mouseWheel' });
@@ -2738,7 +2738,7 @@ async function directScroll(tabId, { ref, direction = 'down', amount = 400, x, y
   };
 }
 
-async function humanScroll(tabId, { ref, direction = 'down', amount = 400, x, y, url, snap = false } = {}, hz) {
+async function humanScroll(tabId, { ref, direction = 'down', amount = 400, x, y, url, snap = false, modifiers = 0 } = {}, hz) {
   const rng = createRng(hz.seed);
   const deltas = { down: [0, amount], up: [0, -amount], right: [amount, 0], left: [-amount, 0] };
   const [deltaX, deltaY] = deltas[direction] ?? deltas.down;
@@ -2787,7 +2787,8 @@ async function humanScroll(tabId, { ref, direction = 'down', amount = 400, x, y,
   const before = await scrollState(tabId, node);
   // snap: whole notches only (replay's scroll to a recorded resting place). An explicit agent
   // amount is kept exact, so one that is not a multiple of a notch ends on a partial notch.
-  const plan = planScroll(rng, hz.profile, { at: from, deltaY, deltaX, viewport, room, snap: snap === true });
+  // (3.9.6) modifiers reach the wheel (suggestions box, 2026-11-14: Shift + scroll arrived with shiftKey false).
+  const plan = planScroll(rng, hz.profile, { at: from, deltaY, deltaX, viewport, room, snap: snap === true, modifiers });
   const witness = await armWitness(tabId, ['wheel'], WITNESS_TIMEOUT_MS + plan.durationMs, node ? [node.sessionId ?? null] : [null]);
   try {
     // A stalled wheel throws here and is REPORTED: at these levels it is never

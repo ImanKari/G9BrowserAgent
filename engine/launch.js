@@ -20,7 +20,7 @@ import { PipeCdp } from './pipe-cdp.js';
 import { launchArgsFor, launchWarnings, normalizeLevel } from './stealth.js';
 import { profileInUse } from './profile.js';
 import { noteFirewallLaunch } from './firewall.js';
-import { cleanChildEnv } from '../lib/runtime.mjs';
+import { cleanChildEnv, runsAsWindowsSystem } from '../lib/runtime.mjs';
 
 /**
  * The designed list (engine/README.md), plus ONE deliberate addition: `msImplicitSignin`. Features merged with any
@@ -397,13 +397,8 @@ export function sandboxHint(output) {
     ' Only on a disposable machine or container: G9_BROWSER_NO_SANDBOX=1 in the daemon\'s environment starts launched browsers without the sandbox.';
 }
 
-/** (3.8.1) Is this process the Windows SYSTEM account (a service, a scheduled task, an agent run by one)? */
-export function runsAsWindowsSystem({ platform = process.platform, user = null, home = os.homedir() } = {}) {
-  if (platform !== 'win32') return false;
-  let name = user;
-  if (name == null) { try { name = os.userInfo().username; } catch { name = ''; } }
-  return /^system$/i.test(String(name)) || /[\\/]config[\\/]systemprofile$/i.test(String(home ?? ''));
-}
+/** (3.8.1; in lib/runtime.mjs since 3.9.6, where the shim needs it too.) */
+export { runsAsWindowsSystem };
 
 /**
  * (3.8.1) What an early exit means, when we know (field reports, 2026-10-13 and -15: "Edge exited with

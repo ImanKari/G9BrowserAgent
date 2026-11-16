@@ -887,6 +887,20 @@ await test('human scroll: wheel notches at the pointer add up to the amount', as
   tab.scrollY = 0;
 });
 
+await test('(3.9.6) scroll with modifiers: every wheel notch carries them, at both levels (Shift + wheel)', async () => {
+  // Suggestions box, 2026-11-14: Shift + scroll over a grid arrived with shiftKey false and still said delivered.
+  for (const level of ['human', 'off']) {
+    tab.scrollY = 0;
+    const mark = since();
+    const res = await interact.scroll(TAB, { direction: 'down', amount: 200, humanize: level, seed: 5, modifiers: ['Shift'] });
+    const wheel = mouseOf(slice(mark)).filter((c) => c.params.type === 'mouseWheel');
+    assert.ok(wheel.length >= 1, level);
+    assert.ok(wheel.every((c) => (c.params.modifiers & 8) === 8), `${level}: Shift (8) on every notch`);
+    assert.equal(res.delivery, 'delivered');
+  }
+  tab.scrollY = 0;
+});
+
 // ---------------------------------------------------------------- typing
 
 await test('stealth typing: focus by clicking, no DOM.focus, no insertText; no typos in a password field', async () => {

@@ -47,6 +47,7 @@ Rules:
 4. Never approve on your own initiative (browser_recording action:"approve" is the user's call).
 5. When your task is done: browser_tabs action:"finish" — releases your tabs; the last working agent's finish detaches the debugger from the user's browser.
 6. A tool missing or misbehaving? browser_issue action:"feedback" (this version).
+7. Other agents share this daemon: keep each call short. Long JavaScript: browser_console evaluate job:true. Long waits: steps of at most 60 s. A call that timed out may still have run: browser_status calls:true before repeating it.
 
 Guides — read the one for your task first: browser_status guide:"<topic>" (or resource g9://guide/<topic>). Topics: start, perceive, act, console, network, debug, sharing, background, stealth, recording, issues, limits. Every argument of a tool: guide:"tool:<name>".`;
 
@@ -415,7 +416,8 @@ export const TOOLS = [
         height: num('Explicit viewport height.'),
         network: str('Network throttling preset.', { enum: ['slow-3g', 'fast-3g', '4g', 'offline', 'none'] }),
         cpuThrottle: num('CPU slowdown multiplier, e.g. 4 for a mid-range phone.'),
-        colorScheme: str('Emulate prefers-color-scheme.', { enum: ['light', 'dark'] }),
+        colorScheme: str('Emulate prefers-color-scheme. A call that sets colorScheme or reducedMotion replaces both (the one not named goes back to the page\'s own).', { enum: ['light', 'dark'] }),
+        reducedMotion: str('Emulate prefers-reduced-motion (e.g. "reduce" to skip view transitions and animations).', { enum: ['reduce', 'no-preference'] }),
         locale: str('BCP-47 locale, e.g. "fa-IR".'),
         timezone: str('IANA timezone, e.g. "Asia/Tehran".'),
         reloadIfNeeded: bool('For mobile devices — reload once only if Chromium keeps the old desktop layout viewport.', true),

@@ -2,7 +2,7 @@
 
 **Purpose of this file.** This is the durable record of what exists in this codebase, why it was built this way, and what is deliberately absent. Read it before changing anything. Update it after changing anything — see [Rules for changing this codebase](#rules-for-changing-this-codebase) at the end.
 
-**Status:** v3.8.13, 2026-11-04 — `--device-url http://host:port` runs device flows against a bridge at an address, with no adb and no forward: a phone on another machine through a relay, a simulator, a desktop build (§9, the 3.8.13 entry). v3.8.12, 2026-11-04 — the failure bundle asks for its trace with the reason `flow failed: step N (action): …`, so a trace explainer (G9AppPilot `g9pilot trace --file`) explains it as the failure, not as a trace on request (§9, the 3.8.12 entry). v3.8.11, 2026-11-04 — a failed device flow keeps its failure bundle: the app's black-box trace (`trace.capture`) and its screen, beside the report, with a summary of what was busy, the warnings and errors and the failed requests of that flow (§9, the 3.8.11 entry). v3.8.10, 2026-11-04 — a device flow builds its own start state: `preconditions` { net, clock, seed, flags, bridge, cleanup } are sent as bridge commands before the first step and put back after the flow, failed or not; an unknown key is refused (§9, the 3.8.10 entry). v3.8.9, 2026-11-04 — five new device steps: `longPress`, `swipe` and `scroll` (a finger drag; scroll names where the content goes), `screenshot` (the app window kept beside the report) and `expectEvent` (an event of the app, raised since the step before, waited for; the bridge's event stream is read for the flow) (§9, the 3.8.9 entry). v3.8.8, 2026-11-04 — a device flow's report carries what the app's own always-awake checks noticed while it ran (`oracle.list`: a JS error, a nameless control, a raw key on screen) — logged as «⚠ noticed», kept as the flow's `noticed`, never a step's verdict (§9, the 3.8.8 entry). v3.8.7, 2026-11-04 — the host watch: the daemon reads the memory of the local servers its agents test (and its own) and warns the agents when one passes 4 GB or grows faster than 2 GB an hour — a looping dev-server watcher once took 109 GB (§9, the 3.8.7 entry). v3.8.6, 2026-11-03 — a key signs only a bridge that asks for signatures (a lab hands its key to every device lane) (§9, the 3.8.6 entry). v3.8.5, 2026-11-03 — a device flow can set up its own start state: the `bridge` step sends one bridge command and the report marks it `setup` (§9, the 3.8.5 entry). v3.8.4, 2026-11-03 — a lab machine signs with its own key (`G9_DEVICE_SIGNING_KID` names the key `G9_SECRET_DEVICE_SIGNING_KEY` carries), and a suite may say `"stopOn": "never"` outright (§9, the 3.8.4 entry). v3.8.3, 2026-11-03 — signed device bridges: a bridge whose hello says `signatureRequired` gets every request signed (ECDSA P-256, four `X-G9P-*` headers, the device clock corrected and a `CLOCK_SKEW` retried once); the key is found where the project's device profile says (`signing`: a file, the Windows Credential Manager, the macOS keychain) or in `G9_SECRET_DEVICE_SIGNING_KEY`, never printed (§9, the 3.8.3 entry; docs/DEVICE_BRIDGE.md «Signed bridges»). v3.8.2, 2026-10-22 — the ten findings of a code review of 3.7–3.8.1 fixed (§9, the 3.8.2 entry): secrets masked in derailed reports, no device shell injection, no flow written outside the library, a hung browser no longer taken for an exited one, and `finish` safe against calls in flight. v3.8.1, 2026-10-21 — the first four suggestions-box reports (§9, the 3.8.1 entry): launched
+**Status:** v3.9.6, 2026-11-17 — several agents at once no longer stall the daemon: console and network events are written in batches, one per tab per turn of the event loop (each event had copied its tab's whole buffer twice, on microtasks, and the daemon answered nothing for minutes), and an MCP client running as Windows SYSTEM never starts the daemon (§9, the 3.9.6 entry). v3.9.5, 2026-11-05 — the runner work of 3.9.0–3.9.5, published together: savepoints, permissions and the OS as preconditions, `@write` flows bracketed, `capture`, a device suite 2.5 times faster, `/pilot` for protocol-2 bridges (§9, the 3.9.x entries). v3.8.13, 2026-11-04 — `--device-url http://host:port` runs device flows against a bridge at an address, with no adb and no forward: a phone on another machine through a relay, a simulator, a desktop build (§9, the 3.8.13 entry). v3.8.12, 2026-11-04 — the failure bundle asks for its trace with the reason `flow failed: step N (action): …`, so a trace explainer (G9AppPilot `g9pilot trace --file`) explains it as the failure, not as a trace on request (§9, the 3.8.12 entry). v3.8.11, 2026-11-04 — a failed device flow keeps its failure bundle: the app's black-box trace (`trace.capture`) and its screen, beside the report, with a summary of what was busy, the warnings and errors and the failed requests of that flow (§9, the 3.8.11 entry). v3.8.10, 2026-11-04 — a device flow builds its own start state: `preconditions` { net, clock, seed, flags, bridge, cleanup } are sent as bridge commands before the first step and put back after the flow, failed or not; an unknown key is refused (§9, the 3.8.10 entry). v3.8.9, 2026-11-04 — five new device steps: `longPress`, `swipe` and `scroll` (a finger drag; scroll names where the content goes), `screenshot` (the app window kept beside the report) and `expectEvent` (an event of the app, raised since the step before, waited for; the bridge's event stream is read for the flow) (§9, the 3.8.9 entry). v3.8.8, 2026-11-04 — a device flow's report carries what the app's own always-awake checks noticed while it ran (`oracle.list`: a JS error, a nameless control, a raw key on screen) — logged as «⚠ noticed», kept as the flow's `noticed`, never a step's verdict (§9, the 3.8.8 entry). v3.8.7, 2026-11-04 — the host watch: the daemon reads the memory of the local servers its agents test (and its own) and warns the agents when one passes 4 GB or grows faster than 2 GB an hour — a looping dev-server watcher once took 109 GB (§9, the 3.8.7 entry). v3.8.6, 2026-11-03 — a key signs only a bridge that asks for signatures (a lab hands its key to every device lane) (§9, the 3.8.6 entry). v3.8.5, 2026-11-03 — a device flow can set up its own start state: the `bridge` step sends one bridge command and the report marks it `setup` (§9, the 3.8.5 entry). v3.8.4, 2026-11-03 — a lab machine signs with its own key (`G9_DEVICE_SIGNING_KID` names the key `G9_SECRET_DEVICE_SIGNING_KEY` carries), and a suite may say `"stopOn": "never"` outright (§9, the 3.8.4 entry). v3.8.3, 2026-11-03 — signed device bridges: a bridge whose hello says `signatureRequired` gets every request signed (ECDSA P-256, four `X-G9P-*` headers, the device clock corrected and a `CLOCK_SKEW` retried once); the key is found where the project's device profile says (`signing`: a file, the Windows Credential Manager, the macOS keychain) or in `G9_SECRET_DEVICE_SIGNING_KEY`, never printed (§9, the 3.8.3 entry; docs/DEVICE_BRIDGE.md «Signed bridges»). v3.8.2, 2026-10-22 — the ten findings of a code review of 3.7–3.8.1 fixed (§9, the 3.8.2 entry): secrets masked in derailed reports, no device shell injection, no flow written outside the library, a hung browser no longer taken for an exited one, and `finish` safe against calls in flight. v3.8.1, 2026-10-21 — the first four suggestions-box reports (§9, the 3.8.1 entry): launched
 Edge starts again (Edge 155's compat-layer relaunch), a SYSTEM-account daemon is named and `auto` falls
 back to Chrome, an invalid device flow outside a run no longer stops it, and an agent keeps its own
 current tab. Built and published by hand (no pipeline minutes). v3.8.0, 2026-10-15 — the agent-facing text is layered: a core under 2,048 characters (clients cut server instructions at 4,096, older ones at 2,048 — the 13,300-character instructions lost everything after "Acting"), twelve topic guides and a per-tool reference generated from the schemas (`mcp/guides.js`; resources `g9://guide/<topic>`, `g9://tool/<name>`, and `browser_status guide:"…"` answered without a browser); and `browser_tabs action:"finish"` — the last working agent detaches the debugger from the person's browser (§9, the 3.8.0 entry). Before it, v3.7.0, 2026-10-15 — device apps are the project's data: `g9.project.json` `devices` declares them, one generic driver (`runner/drivers/device.mjs`) drives any app that speaks the QA bridge protocol ([docs/DEVICE_BRIDGE.md](docs/DEVICE_BRIDGE.md)), and the device steps `tapFeature`, `zoomToFeature`, `longPressFeature`, `selectItem`, `setValue`, `popupButton` and the `onScreen` oracle join the vocabulary (§9, the 3.7.0 entry). Before it, v3.6.3, 2026-10-13 — the published 3.6 release (3.6.0–3.6.2 never passed the pipeline; §9, the 3.6.3 entry). 3.6.1 (§9): the macOS self-update moves the new bundle into place (a copy was stopped by macOS on a real Mac). 3.6.0 (§9, the 3.6.0 entry): the "Human Wave" icon everywhere; the
@@ -1931,6 +1931,116 @@ Entries below describe what was believed or tested at the time. Current capabili
 unresolved findings are in §§4, 7 and 8, which supersede historical assertions. Entries dated before
 2026-09-21 describe v1 (the bridge, the four control modes, the workspace allowlist).
 
+### 2026-11-17 — v3.9.6: several agents at once no longer stall the daemon; a SYSTEM client never starts it
+
+**Why.** Five agents on the owner's PC (ChatGPT tabs in the person's Edge, a Blazor app whose server restarted, two
+launched engines) reported the same thing on 2026-11-16/17: every call — `browser_status` and `browser_issue` included —
+"did not answer within 150 s" (up to 345 s), and the work HAD run (a navigation done, a tab opened, a message typed);
+it answered late or never. Measured on the hung daemon through the Node inspector: its JS was not blocked in a
+syscall — a 5-second CPU profile was 96% `clone` (`daemon/storage.js`), called from `extension/tools/observe.js`, one
+core at 100%, and not even GET /health answered. Every console and network event of every tab was its own
+read-modify-write of that tab's whole buffer through the shared `serialize()` chain: `storage.get` copies the buffer,
+`storage.set` copies it again (chrome.storage semantics), so 400 records with their headers were JSON-copied twice per
+event. The daemon's session store is in memory, so the chain ran on microtasks only and never gave the event loop a
+turn; a busy page's burst of events kept it there for minutes. The same daemon had been started by a node agent's
+service (session 0, Windows SYSTEM) at boot: its shim found no daemon and started one as SYSTEM, which every agent of
+the person then used (Edge exits 1002 there, downloads went to the SYSTEM profile, a headed browser opens on no desktop).
+
+- **`extension/tools/observe.js`**: events are queued per tab and written as ONE batch — one read, one write — from a
+  `setTimeout`, so the loop runs between batches; `writeConsole` / `writeNetwork` apply a batch (the create-only rule
+  of `requestWillBeSent` kept). Every reader (`consoleLog`, `network`, `networkDetail`, `har`) and `pruneToLoader`
+  settle the tab's batch first; `clearBuffers` drops it. Both engines run this code.
+- **`mcp/link.mjs`**: a client running as the Windows SYSTEM account connects to a daemon but never starts one
+  (`systemMayStartDaemon`; `G9_ALLOW_SYSTEM_DAEMON=1` allows it); with none running it says why and what to do. The
+  shim's timeout now says the call may still have run and to check `browser_status calls:true` before repeating it.
+  **`lib/runtime.mjs`**: `runsAsWindowsSystem` moved here (re-exported by `engine/launch.js`).
+- **`mcp/tools.js`** INSTRUCTIONS rule 7 (1,757 characters, under the 2,048 cut): other agents share the daemon — long
+  JavaScript as `evaluate job:true`, long waits in steps of at most 60 s, a timed-out call checked before it is repeated.
+  The agents' reports showed they had never seen `job:true` in a guide.
+- **From the suggestions box** (seven reports since 2026-11-07, read through the gate; one of them, 11-07, had already
+  named the SYSTEM shim): `browser_interact action:"scroll"` applies `modifiers` to every wheel notch at both levels
+  (Shift + wheel arrived with `shiftKey` false and still said delivered); `browser_emulate reducedMotion:"reduce" |
+  "no-preference"` (one `setEmulatedMedia` call with `colorScheme`, which it replaces). Left for later: shadow-aware
+  `wait text:` and stall detection, a script kept across reloads and `expressionFile`, a `painting:false` flag for a
+  headless tab that draws no frames, launched engines brought back after a daemon restart, queue depth in
+  `browser_status`, one signed-in profile per agent.
+- **Tests**: `setup/extensiontest.mjs` +3 (3,000 events in one turn are at most two writes, the caps and the console
+  numbering hold; a reader sees the same turn's events, a cleared tab's batch is dropped; reducedMotion with
+  colorScheme in one call), 116/116; `setup/unit/interaction.test.mjs` +1 (Shift on every notch, human and off);
+  `setup/unit/runtime.test.mjs` +1 (a SYSTEM client may not start a daemon unless allowed). Engine 2 live suite on
+  real headless Edge: 373 passed, 0 failed.
+- **On the owner's PC**: the hung SYSTEM daemon (pid 10464) and its shim were stopped through g9node; the desktop app
+  started the person's own daemon at once. The node's MCP entry for G9BrowserAgent stays: from 3.9.6 its shim only
+  connects (G9ServerManager may point it at an HTTP endpoint, or start it as the signed-in user, later).
+
+### 2026-11-05 — v3.9.5: a visible assertion can wait for what appears a moment later
+
+**Why.** Since 3.9.4 a settled click gets no second idle wait, so a step right after it runs sooner. A control the app
+draws a moment AFTER settling (a notice shown when an offline request fails) was asserted before it existed: an app's
+read-only flow failed after 0.9 s with the notice drawn on its screenshot.
+
+- **`runner/drivers/device.mjs`** `assert` `visible`: with `waitBudgetMs` the control is first waited for on the device
+  (`ui.waitFor`, in slices, the off-path guard between them), then read with `ui.find`. Without it nothing changes: the
+  read is immediate, as before.
+- **Tests**: `setup/unit/device-steps.test.mjs` +1 (no budget = one `ui.find`; a budget = `ui.waitFor` then `ui.find`).
+- **Proven on a device**: the flow above with `waitBudgetMs: 15000` on that step passed twice (the wait took 0.1 s), and
+  an app's 13-flow read-only suite passed 13 of 13 in 105 s.
+
+### 2026-11-05 — v3.9.4 (published as 3.9.5): a device suite 2.5 times faster; where a flow's time goes
+
+**Why.** An app's read-only suite of 13 flows took 278 s, and the steps' own times added up to 100 s: the rest was
+invisible. Measured per step, a click took 1.3 s of wall time for 0.65 s on the device.
+
+- **`runner/drivers/device.mjs`** `derailment()` (the off-path check after every step) asked `ui.snapshot` for EVERY
+  control on screen to find an error screen; it now passes `prefixes` (the profile's `errorScreens`) so only those are
+  measured, and skips the snapshot when the profile names none. An older bridge ignores `prefixes` (as before).
+  `actuate`: an answer that says `settled: true` gets no second idle wait from the runner.
+- **`runner/g9.mjs`**: every device step carries `wallMs` (the runner's own time for it, waits included; `durationMs`
+  may be the device's) and every flow `phasesMs {before, steps, after}`.
+- **Measured** (an Android emulator, the same 13 flows): 278 s → 112 s, all PASS; the idle assertions 68 s → 6 s, a
+  click 1308 → 761 ms of wall time. An error screen is still caught (the filtered snapshot finds it).
+- **`runner/drivers/device.mjs`** (3.9.3): a protocol-2 bridge's command route is `/pilot`; `/qa` is its old name.
+
+### 2026-11-04 — v3.9.2 (published as 3.9.5): `capture` — what the app chose becomes a variable; a bridge step's own budget
+
+**Why.** A write flow that MAKES something (a drawing) has to reach it later by an id the app chose while the flow ran;
+and a bridge step that waits on the app itself (a sync run, a phase) was cut at the driver's 30 s.
+
+- **`runner/drivers/device.mjs`** `captureInto(variables, capture, outcome)`: a step's `capture: {"name": "dot.path"}`
+  takes values from its answer (`result` first) into the flow's variables, for the LATER steps' `{{name}}`. A path that
+  finds nothing (or an object) fails the step by name, so no step runs with `{{name}}` literally. A `bridge` step takes
+  `waitBudgetMs` (at most 120 s) as its command's time limit.
+- **`runner/g9.mjs`**: the device loop applies `capture` after a passed step (before secrets are masked).
+- **Tests**: `setup/unit/device-preconditions.test.mjs` +1 (capture: a value, a missing path, an object, a bad name).
+  The suite: 822 pass; `engine` and `platform-cdp` fail the same way without this change.
+- **Proven on a device**: an app's write flow on the Android emulator makes a drawing, cuts the network while it is
+  being sent, sends again, captures the drawing's id from a bridge answer and deletes it by `MapAnnotationRow.{{id}}`:
+  44/44 steps, PASS twice in a row.
+
+### 2026-11-04 — v3.9 (published as 3.9.5): savepoints, permissions and the OS as preconditions; `@write` flows bracketed; a flow file as the target; `--progress`
+
+**Why.** A flow's start state often lives in the app's DATA (signed in, a site downloaded, a half-sent change), not in
+anything a bridge command sets; a flow that writes leaves the data changed with no way back; and an agent's flow (or
+an MCP server's `pilot_flow`) is a file, not a library entry — the runner refused it ("Nothing matched").
+
+- **`runner/drivers/device.mjs`** `applyPreconditions`: `savepoint: "<name>"` FIRST (it replaces the data and
+  restarts the app) through the device profile's own tool — the runner knows no savepoint format;
+  `permissions: { grant: [..], revoke: [..] }` (`pm grant|revoke`) and `os: { appearance, fontScale }` (`cmd uimode
+  night`, `settings … font_scale`), each put back as it WAS (read first), newest first. Over a `--device-url` (no adb)
+  permissions/os are refused with the reason. `savepoint(verb, name)` fills `{name} {package} {serial} {port}` in
+  `devices.<id>.savepoint.save|load` (`lib/devices.mjs` keeps it), runs it from the project's folder with `ADB` set to
+  the runner's adb, then waits for the app's bridge again (a save stops the app too).
+- **`runner/g9.mjs`**: a flow tagged `@write` takes `<flow>.before` before its preconditions and `<flow>.after` after
+  its undo when the profile names a savepoint tool — the report keeps `savepoints: {before, after}` (or why not); a
+  failed save is logged, never fatal. A `*.json` target that exists is that one FlowSpec (validated like the library's).
+  `--progress` prints `· step n/m (action)` after each passed step (an MCP server turns them into progress notifications).
+- **Tests**: `setup/unit/device-preconditions.test.mjs` +1 (a savepoint load from the profile's command, first, from
+  the project folder; a save; a bad name; no tool / no adb refused). The suite: 820 pass; `engine` and `platform-cdp`
+  fail the same way without this change (they need a browser engine).
+- **Proven on a device**: a Lynx app on the Android emulator — a `@write` flow with `savepoint`, `permissions.grant`
+  (a permission the app did not have) and `os` (dark, 1.15): before/after savepoints taken (470 MB each, ~25 s),
+  PASS, and after it the theme, the text size and the permission were back as they were.
+
 ### 2026-11-04 — v3.8.13: `--device-url` — a device bridge at an address, no adb
 
 The device path always chose its target through the local adb and forwarded the port; a phone cabled to ANOTHER machine
@@ -1966,73 +2076,6 @@ black box and answers `trace.capture` with all of it at once.
 - **Proven on a device**: a Lynx app on the Android emulator, a flow failing on purpose: the trace (`T-4`) and the
   screen kept, the summary empty of the previous flow's cut requests once limited to the flow's own time.
 
-### 2026-11-04 — v3.9 (unreleased): savepoints, permissions and the OS as preconditions; `@write` flows bracketed; a flow file as the target; `--progress`
-
-**Why.** A flow's start state often lives in the app's DATA (signed in, a site downloaded, a half-sent change), not in
-anything a bridge command sets; a flow that writes leaves the data changed with no way back; and an agent's flow (or
-an MCP server's `pilot_flow`) is a file, not a library entry — the runner refused it ("Nothing matched").
-
-- **`runner/drivers/device.mjs`** `applyPreconditions`: `savepoint: "<name>"` FIRST (it replaces the data and
-  restarts the app) through the device profile's own tool — the runner knows no savepoint format;
-  `permissions: { grant: [..], revoke: [..] }` (`pm grant|revoke`) and `os: { appearance, fontScale }` (`cmd uimode
-  night`, `settings … font_scale`), each put back as it WAS (read first), newest first. Over a `--device-url` (no adb)
-  permissions/os are refused with the reason. `savepoint(verb, name)` fills `{name} {package} {serial} {port}` in
-  `devices.<id>.savepoint.save|load` (`lib/devices.mjs` keeps it), runs it from the project's folder with `ADB` set to
-  the runner's adb, then waits for the app's bridge again (a save stops the app too).
-- **`runner/g9.mjs`**: a flow tagged `@write` takes `<flow>.before` before its preconditions and `<flow>.after` after
-  its undo when the profile names a savepoint tool — the report keeps `savepoints: {before, after}` (or why not); a
-  failed save is logged, never fatal. A `*.json` target that exists is that one FlowSpec (validated like the library's).
-  `--progress` prints `· step n/m (action)` after each passed step (an MCP server turns them into progress notifications).
-- **Tests**: `setup/unit/device-preconditions.test.mjs` +1 (a savepoint load from the profile's command, first, from
-  the project folder; a save; a bad name; no tool / no adb refused). The suite: 820 pass; `engine` and `platform-cdp`
-  fail the same way without this change (they need a browser engine).
-- **Proven on a device**: a Lynx app on the Android emulator — a `@write` flow with `savepoint`, `permissions.grant`
-  (a permission the app did not have) and `os` (dark, 1.15): before/after savepoints taken (470 MB each, ~25 s),
-  PASS, and after it the theme, the text size and the permission were back as they were.
-
-### 2026-11-05 — v3.9.5 (unreleased): a visible assertion can wait for what appears a moment later
-
-**Why.** Since 3.9.4 a settled click gets no second idle wait, so a step right after it runs sooner. A control the app
-draws a moment AFTER settling (a notice shown when an offline request fails) was asserted before it existed: an app's
-read-only flow failed after 0.9 s with the notice drawn on its screenshot.
-
-- **`runner/drivers/device.mjs`** `assert` `visible`: with `waitBudgetMs` the control is first waited for on the device
-  (`ui.waitFor`, in slices, the off-path guard between them), then read with `ui.find`. Without it nothing changes: the
-  read is immediate, as before.
-- **Tests**: `setup/unit/device-steps.test.mjs` +1 (no budget = one `ui.find`; a budget = `ui.waitFor` then `ui.find`).
-- **Proven on a device**: the flow above with `waitBudgetMs: 15000` on that step passed twice (the wait took 0.1 s), and
-  an app's 13-flow read-only suite passed 13 of 13 in 105 s.
-
-### 2026-11-05 — v3.9.4 (unreleased): a device suite 2.5 times faster; where a flow's time goes
-
-**Why.** An app's read-only suite of 13 flows took 278 s, and the steps' own times added up to 100 s: the rest was
-invisible. Measured per step, a click took 1.3 s of wall time for 0.65 s on the device.
-
-- **`runner/drivers/device.mjs`** `derailment()` (the off-path check after every step) asked `ui.snapshot` for EVERY
-  control on screen to find an error screen; it now passes `prefixes` (the profile's `errorScreens`) so only those are
-  measured, and skips the snapshot when the profile names none. An older bridge ignores `prefixes` (as before).
-  `actuate`: an answer that says `settled: true` gets no second idle wait from the runner.
-- **`runner/g9.mjs`**: every device step carries `wallMs` (the runner's own time for it, waits included; `durationMs`
-  may be the device's) and every flow `phasesMs {before, steps, after}`.
-- **Measured** (an Android emulator, the same 13 flows): 278 s → 112 s, all PASS; the idle assertions 68 s → 6 s, a
-  click 1308 → 761 ms of wall time. An error screen is still caught (the filtered snapshot finds it).
-- **`runner/drivers/device.mjs`** (3.9.3): a protocol-2 bridge's command route is `/pilot`; `/qa` is its old name.
-
-### 2026-11-04 — v3.9.2 (unreleased): `capture` — what the app chose becomes a variable; a bridge step's own budget
-
-**Why.** A write flow that MAKES something (a drawing) has to reach it later by an id the app chose while the flow ran;
-and a bridge step that waits on the app itself (a sync run, a phase) was cut at the driver's 30 s.
-
-- **`runner/drivers/device.mjs`** `captureInto(variables, capture, outcome)`: a step's `capture: {"name": "dot.path"}`
-  takes values from its answer (`result` first) into the flow's variables, for the LATER steps' `{{name}}`. A path that
-  finds nothing (or an object) fails the step by name, so no step runs with `{{name}}` literally. A `bridge` step takes
-  `waitBudgetMs` (at most 120 s) as its command's time limit.
-- **`runner/g9.mjs`**: the device loop applies `capture` after a passed step (before secrets are masked).
-- **Tests**: `setup/unit/device-preconditions.test.mjs` +1 (capture: a value, a missing path, an object, a bad name).
-  The suite: 822 pass; `engine` and `platform-cdp` fail the same way without this change.
-- **Proven on a device**: an app's write flow on the Android emulator makes a drawing, cuts the network while it is
-  being sent, sends again, captures the drawing's id from a bridge answer and deletes it by `MapAnnotationRow.{{id}}`:
-  44/44 steps, PASS twice in a row.
 ### 2026-11-04 — v3.8.10: a device flow builds its own start state (`preconditions`)
 
 **Why.** A flow assumed the state the one before it left. One failure (a network left cut, a clock left moved, a flag

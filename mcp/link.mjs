@@ -20,7 +20,7 @@ import { WsClient } from '../lib/ws-client.mjs';
 import { timeoutFor } from '../daemon/router.js';
 import { resolveHome, updatingMarker } from '../daemon/paths.js';
 import { runningDaemonFor } from '../daemon/home-lock.js';
-import { scriptCommand, isAppImageRuntime, ensureBootstrap } from '../lib/runtime.mjs';
+import { scriptCommand, isAppImageRuntime, ensureBootstrap, runsAsWindowsSystem } from '../lib/runtime.mjs';
 
 export const HOST = process.env.G9_HOST || '127.0.0.1';
 export const PORT = (() => {
@@ -32,6 +32,25 @@ const START_WINDOW_MS = 8_000;
 const BASE_TIMEOUT_MS = Number(process.env.G9_TIMEOUT_MS) > 0 ? Number(process.env.G9_TIMEOUT_MS) : 120_000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * (3.9.6) An MCP client running as the Windows SYSTEM account never STARTS the daemon; it only connects to one.
+ *
+ * Field report, 2026-11-17: a node agent service (session 0, SYSTEM) started its G9BrowserAgent MCP server at
+ * boot, before the person signed in; with no daemon yet, that shim started one as SYSTEM, and every agent of the
+ * person then worked through it — Edge exits 1002 there, a headed browser opens on no one's desktop, downloads land
+ * in the SYSTEM profile the person cannot read. G9_ALLOW_SYSTEM_DAEMON=1 allows it (a machine where SYSTEM is the
+ * only account that runs agents).
+ */
+export function systemMayStartDaemon({ system = runsAsWindowsSystem(), env = process.env } = {}) {
+  return !system || env.G9_ALLOW_SYSTEM_DAEMON === '1';
+}
+
+export const SYSTEM_NO_DAEMON =
+  `No G9BrowserAgent daemon is running on port ${PORT}, and this MCP client runs as the Windows SYSTEM account, so it does not ` +
+  'start one: a SYSTEM daemon\'s browsers, downloads and Edge would not be the signed-in person\'s. Sign in and start the ' +
+  'G9BrowserAgent app (it starts the daemon at sign-in), then retry; G9_ALLOW_SYSTEM_DAEMON=1 in this MCP server\'s environment ' +
+  'allows a SYSTEM daemon on a machine where SYSTEM is the only account that runs agents.';
 
 /**
  * Who is on the port, when it is not a daemon that accepts us. The v1 bridge
@@ -109,6 +128,7 @@ export class DaemonLink {
   async #connect() {
     const deadline = Date.now() + START_WINDOW_MS;
     let spawned = false;
+    let systemWait = false; // (3.9.6) a SYSTEM client waited for a daemon it may not start
     let lastError = null;
     for (;;) {
       let ws;
@@ -131,8 +151,14 @@ export class DaemonLink {
                   'Retry this call in a minute: the daemon starts again by itself once the update is in place.',
               );
             }
-            this.#spawnDaemon();
-            spawned = true;
+            if (!systemMayStartDaemon()) {
+              // Keep waiting for the person's own daemon (their app starts it at sign-in): this link connects to it.
+              spawned = true;
+              systemWait = true;
+            } else {
+              this.#spawnDaemon();
+              spawned = true;
+            }
           }
         } else if (err.status != null) {
           throw new Error(await describePortHolder(err));
@@ -144,6 +170,7 @@ export class DaemonLink {
       await this.#handshake(ws);
       return;
     }
+    if (systemWait && lastError?.code === 'ECONNREFUSED') throw new Error(SYSTEM_NO_DAEMON);
     if (lastError?.code === 'ECONNREFUSED') {
       await this.#refuseOtherPort();
       throw new Error(
@@ -276,7 +303,12 @@ export class DaemonLink {
       const id = this.nextId++;
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`The G9BrowserAgent daemon did not answer "${tool}" within ${Math.round(ms / 1000)}s.`));
+        // (3.9.6) A late answer is not a lost call: field reports (2026-11-17) of navigations, typing and opened tabs
+        // that HAD happened, repeated by agents who took the timeout for a failure.
+        reject(new Error(
+          `The G9BrowserAgent daemon did not answer "${tool}" within ${Math.round(ms / 1000)}s. The call may still have run: ` +
+            'check browser_status calls:true before repeating it, and never repeat a state-changing call blindly.',
+        ));
       }, ms);
       this.pending.set(id, { resolve, reject, timer });
       // The socket can close between ensure() and here (the daemon restarted);

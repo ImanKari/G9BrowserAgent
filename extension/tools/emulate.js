@@ -77,7 +77,7 @@ async function applyNetwork(tabId, preset) {
 
 export async function emulate(tabId, opts = {}) {
   const {
-    device, width, height, network, cpuThrottle, colorScheme, locale, timezone,
+    device, width, height, network, cpuThrottle, colorScheme, reducedMotion, locale, timezone,
     reset = false, reloadIfNeeded = true,
   } = opts;
   const applied = {};
@@ -239,11 +239,16 @@ export async function emulate(tabId, opts = {}) {
     applied.cpuThrottle = `${cpuThrottle}x slowdown`;
   }
 
-  if (colorScheme) {
-    await send(tabId, 'Emulation.setEmulatedMedia', {
-      features: [{ name: 'prefers-color-scheme', value: colorScheme }],
-    });
-    applied.colorScheme = colorScheme;
+  // (3.9.6) reducedMotion beside colorScheme (suggestions box, 2026-11-07: a site's view transition froze painting in
+  // a headless tab; the site skips it under prefers-reduced-motion). setEmulatedMedia REPLACES the emulated features,
+  // so both go in one call, and a call that names one of them puts the other back to the page's own.
+  if (colorScheme || reducedMotion) {
+    const features = [];
+    if (colorScheme) features.push({ name: 'prefers-color-scheme', value: colorScheme });
+    if (reducedMotion) features.push({ name: 'prefers-reduced-motion', value: reducedMotion });
+    await send(tabId, 'Emulation.setEmulatedMedia', { features });
+    if (colorScheme) applied.colorScheme = colorScheme;
+    if (reducedMotion) applied.reducedMotion = reducedMotion;
   }
 
   if (locale) {

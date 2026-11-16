@@ -37,13 +37,61 @@ const MAX_ENTRY_CHARS = 4_000;
 const CONSOLE_KEY = (tabId) => `console:${tabId}`;
 const NETWORK_KEY = (tabId) => `network:${tabId}`;
 
+// ---------------------------------------------------------------- batching
+
+/**
+ * (3.9.6) Events are written in batches, one batch per tab per turn of the event loop.
+ *
+ * Each event used to be its own read-modify-write of the whole buffer: storage.get copies the buffer,
+ * storage.set copies it again (chrome.storage semantics, daemon/storage.js `clone`), so a tab's 400
+ * network records with their headers were JSON-copied twice for every one of its events. In the daemon
+ * the session store is in memory, so that chain of writes ran entirely on microtasks and never gave the
+ * event loop a turn: with three to five agents on busy pages (ChatGPT streaming, a Blazor app that
+ * reconnects after its server restarted), the daemon spent 96% of a core in `clone` and answered no
+ * WebSocket message, no timer and not even GET /health for minutes — every agent's call ran late and
+ * timed out at 150 s (field report, 2026-11-17; measured with the inspector). A batch is ONE read and
+ * ONE write, started from a timer, so the loop runs between batches.
+ *
+ * The batch lives in memory only until its timer fires (the same turn of the loop, in practice); every
+ * reader settles the tab's batch first, so what it reads is complete.
+ */
+const pending = new Map(); // tabId → { console: [], network: [], done, release }
+
+function enqueue(tabId, kind, item) {
+  let batch = pending.get(tabId);
+  if (!batch) {
+    batch = { console: [], network: [] };
+    batch.done = new Promise((resolve) => { batch.release = resolve; });
+    pending.set(tabId, batch);
+    setTimeout(() => { flushTab(tabId); }, 0);
+  }
+  batch[kind].push(item);
+  return batch.done;
+}
+
+/** Write the tab's pending batch now (a no-op when there is none). Never rejects. */
+function flushTab(tabId) {
+  const batch = pending.get(tabId);
+  if (!batch) return Promise.resolve();
+  pending.delete(tabId);
+  const work = (async () => {
+    if (batch.console.length) await writeConsole(tabId, batch.console);
+    if (batch.network.length) await writeNetwork(tabId, batch.network);
+  })().catch((err) => console.error('[G9BrowserAgent] event capture failed', err));
+  work.then(batch.release);
+  return work;
+}
+
+/** What a reader awaits: the tab's events so far are in storage. */
+const settle = (tabId) => flushTab(tabId);
+
 // ---------------------------------------------------------------- ingestion
 
 /** Called by tools/events.js for every CDP event of an attached tab. */
 export async function ingest(tabId, method, params) {
   switch (method) {
     case 'Runtime.consoleAPICalled':
-      return pushConsole(tabId, {
+      return enqueue(tabId, 'console', {
         level: params.type,
         text: params.args.map(fmtRemoteObject).join(' '),
         stack: topFrame(params.stackTrace),
@@ -52,7 +100,7 @@ export async function ingest(tabId, method, params) {
 
     case 'Runtime.exceptionThrown': {
       const d = params.exceptionDetails;
-      return pushConsole(tabId, {
+      return enqueue(tabId, 'console', {
         level: 'error',
         text: d.exception?.description ?? d.text ?? 'Uncaught exception',
         stack: topFrame(d.stackTrace),
@@ -62,7 +110,7 @@ export async function ingest(tabId, method, params) {
     }
 
     case 'Log.entryAdded':
-      return pushConsole(tabId, {
+      return enqueue(tabId, 'console', {
         level: params.entry.level,
         text: params.entry.text,
         source: params.entry.source,
@@ -71,11 +119,10 @@ export async function ingest(tabId, method, params) {
       });
 
     case 'Network.requestWillBeSent':
-      // The only event that may CREATE a record. See upsertRequest.
-      return upsertRequest(
-        tabId,
-        params.requestId,
-        {
+      // The only event that may CREATE a record. See writeNetwork.
+      return enqueue(tabId, 'network', {
+        requestId: params.requestId,
+        patch: {
           requestId: params.requestId,
           // Which document this request belongs to. Used to drop the previous
           // page's traffic the moment a new one commits — see pruneToLoader.
@@ -89,11 +136,11 @@ export async function ingest(tabId, method, params) {
           hasPostData: !!params.request.hasPostData,
           status: null,
         },
-        { create: true },
-      );
+        create: true,
+      });
 
     case 'Network.responseReceived':
-      return upsertRequest(tabId, params.requestId, {
+      return enqueue(tabId, 'network', { requestId: params.requestId, patch: {
         status: params.response.status,
         statusText: params.response.statusText,
         mimeType: params.response.mimeType,
@@ -101,21 +148,21 @@ export async function ingest(tabId, method, params) {
         fromCache: params.response.fromDiskCache || params.response.fromPrefetchCache,
         remoteAddress: params.response.remoteIPAddress,
         protocol: params.response.protocol,
-      });
+      } });
 
     case 'Network.loadingFinished':
-      return upsertRequest(tabId, params.requestId, {
+      return enqueue(tabId, 'network', { requestId: params.requestId, patch: {
         finishedAt: params.timestamp,
         encodedDataLength: params.encodedDataLength,
-      });
+      } });
 
     case 'Network.loadingFailed':
-      return upsertRequest(tabId, params.requestId, {
+      return enqueue(tabId, 'network', { requestId: params.requestId, patch: {
         failed: true,
         errorText: params.errorText,
         canceled: params.canceled,
         finishedAt: params.timestamp,
-      });
+      } });
 
     default:
       return undefined;
@@ -131,6 +178,12 @@ export async function ingest(tabId, method, params) {
  * session.
  */
 export async function clearBuffers(tabId) {
+  // (3.9.6) What was still waiting for its batch is dropped with the rest.
+  const batch = pending.get(tabId);
+  if (batch) {
+    pending.delete(tabId);
+    batch.release();
+  }
   await session().remove([CONSOLE_KEY(tabId), NETWORK_KEY(tabId)]);
 }
 
@@ -153,6 +206,7 @@ export async function clearBuffers(tabId) {
  * not `Page.frameNavigated`, so SPA route changes correctly keep their buffers.
  */
 export async function pruneToLoader(tabId, loaderId) {
+  await settle(tabId); // (3.9.6) the events that came before the commit, written before the prune
   await serialize(async () => {
     const key = NETWORK_KEY(tabId);
     const stored = await session().get(key);
@@ -168,16 +222,19 @@ export async function pruneToLoader(tabId, loaderId) {
 
 // ------------------------------------------------------------------ console
 
-function pushConsole(tabId, entry) {
+/** A batch of console entries: one read, one write (see enqueue). */
+function writeConsole(tabId, entries) {
   return serialize(async () => {
     const key = CONSOLE_KEY(tabId);
     const stored = await session().get(key);
     const list = stored[key] ?? [];
-    list.push({
-      ...entry,
-      text: truncate(entry.text, MAX_ENTRY_CHARS),
-      seq: list.length ? list[list.length - 1].seq + 1 : 1,
-    });
+    for (const entry of entries) {
+      list.push({
+        ...entry,
+        text: truncate(entry.text, MAX_ENTRY_CHARS),
+        seq: list.length ? list[list.length - 1].seq + 1 : 1,
+      });
+    }
     if (list.length > MAX_CONSOLE) list.splice(0, list.length - MAX_CONSOLE);
 
     try {
@@ -200,6 +257,7 @@ function pushConsole(tabId, entry) {
 }
 
 export async function consoleLog(tabId, { level, limit = 100, since, contains, clear = false } = {}) {
+  await settle(tabId); // (3.9.6) this tab's batched events are in storage first
   const key = CONSOLE_KEY(tabId);
 
   if (clear) {
@@ -261,7 +319,7 @@ export async function consoleLog(tabId, { level, limit = 100, since, contains, c
 // ------------------------------------------------------------------ network
 
 /**
- * Update one request record.
+ * Apply a batch of request events, `{ requestId, patch, create }` each: one read, one write (see enqueue).
  *
  * Only `Network.requestWillBeSent` may create a record (`create: true`). Every
  * other event describes a request that must already exist, and if it does not,
@@ -272,14 +330,19 @@ export async function consoleLog(tabId, { level, limit = 100, since, contains, c
  * finding that names nothing is worse than no finding: the agent cannot act on
  * it and cannot tell it is meaningless.
  */
-function upsertRequest(tabId, requestId, patch, { create = false } = {}) {
+function writeNetwork(tabId, ops) {
   return serialize(async () => {
     const key = NETWORK_KEY(tabId);
     const stored = await session().get(key);
     const map = stored[key] ?? {};
 
-    if (!map[requestId] && !create) return;
-    map[requestId] = { ...(map[requestId] ?? {}), ...patch };
+    let changed = false;
+    for (const { requestId, patch, create = false } of ops) {
+      if (!map[requestId] && !create) continue;
+      map[requestId] = { ...(map[requestId] ?? {}), ...patch };
+      changed = true;
+    }
+    if (!changed) return;
 
     trimOldest(map, MAX_NETWORK);
 
@@ -305,6 +368,7 @@ function trimOldest(map, keep) {
 }
 
 export async function network(tabId, { filter, status, method, limit = 50, clear = false } = {}) {
+  await settle(tabId); // (3.9.6) this tab's batched events are in storage first
   const key = NETWORK_KEY(tabId);
 
   if (clear) {
@@ -346,6 +410,7 @@ export async function network(tabId, { filter, status, method, limit = 50, clear
 
 /** Full detail for one request, including the response body. */
 export async function networkDetail(tabId, { requestId, includeBody = true }) {
+  await settle(tabId); // (3.9.6) this tab's batched events are in storage first
   const key = NETWORK_KEY(tabId);
   const stored = await session().get(key);
   const record = (stored[key] ?? {})[requestId];
@@ -392,6 +457,7 @@ const MAX_HAR_BODY_BYTES = 8 * 1024 * 1024;
 
 /** Standards-shaped HAR 1.2 export from the captured request buffer. */
 export async function har(tabId, { filter, includeBody = false } = {}) {
+  await settle(tabId); // (3.9.6) this tab's batched events are in storage first
   const key = NETWORK_KEY(tabId);
   const stored = await session().get(key);
   let records = Object.values(stored[key] ?? {});

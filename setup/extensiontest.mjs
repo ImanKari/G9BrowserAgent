@@ -320,6 +320,50 @@ await test('network capture preserves concurrent request lifecycles', async () =
   assert.equal((await observe.network(7, { status: 'pending', limit: 100 })).returned, 0);
 });
 
+await test('a burst of events is one batch: one write, not two buffer copies per event (3.9.6)', async () => {
+  // FOUND LIVE, 2026-11-17: each event was its own read-modify-write of the whole buffer, and the daemon spent 96% of
+  // a core copying buffers on microtasks while no WebSocket message, timer or /health got a turn.
+  await observe.clearBuffers(9);
+  const session = globalThis.chrome.storage.session;
+  const realSet = session.set;
+  let sets = 0;
+  session.set = (items, ...rest) => { if (Object.keys(items).some((k) => k.endsWith(':9'))) sets += 1; return realSet.call(session, items, ...rest); };
+  try {
+    const headers = Object.fromEntries(Array.from({ length: 40 }, (_, i) => ['x-header-' + i, 'v'.repeat(50)]));
+    const burst = [];
+    for (let index = 0; index < 1000; index += 1) {
+      const requestId = 'b' + index;
+      burst.push(observe.ingest(9, 'Network.requestWillBeSent', {
+        requestId, loaderId: 'l', timestamp: index, wallTime: 1000 + index,
+        type: 'Fetch', request: { url: 'http://example.test/' + index, method: 'GET', headers },
+      }));
+      burst.push(observe.ingest(9, 'Network.loadingFinished', { requestId, timestamp: index + 0.5, encodedDataLength: 10 }));
+      burst.push(observe.ingest(9, 'Runtime.consoleAPICalled', { type: 'log', args: [{ type: 'string', value: 'line ' + index }], timestamp: index }));
+    }
+    await Promise.all(burst);
+    assert.ok(sets <= 2, `3000 events in one turn are written in one batch (console + network), not ${sets} writes`);
+    const net = await observe.network(9, { limit: 1 });
+    assert.equal(net.total, 400, 'the ring buffer cap still holds');
+    const log = await observe.consoleLog(9, { limit: 1 });
+    assert.equal(log.total, 500);
+    assert.equal(log.lastSeq, 1000, 'every console line was numbered in order');
+  } finally {
+    session.set = realSet;
+    await observe.clearBuffers(9);
+  }
+});
+
+await test('a reader sees the events of the same turn, and a cleared tab drops its batch (3.9.6)', async () => {
+  await observe.clearBuffers(10);
+  observe.ingest(10, 'Runtime.consoleAPICalled', { type: 'warn', args: [{ type: 'string', value: 'same turn' }], timestamp: 1 });
+  assert.equal((await observe.consoleLog(10, {})).total, 1, 'consoleLog settles the batch before it reads');
+  const dropped = observe.ingest(10, 'Runtime.consoleAPICalled', { type: 'warn', args: [{ type: 'string', value: 'gone' }], timestamp: 2 });
+  await observe.clearBuffers(10);
+  await dropped; // its waiter is released, not left hanging
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal((await observe.consoleLog(10, {})).total, 0);
+});
+
 await test('pending includes responses that have not finished loading', async () => {
   await observe.ingest(7, 'Network.requestWillBeSent', {
     requestId: 'pending', loaderId: 'l', timestamp: 99, wallTime: 1099,
@@ -350,6 +394,18 @@ await test('network emulation uses modern CDP then an explicit legacy fallback',
   failModernNetwork = true;
   assert.equal((await emulateModule.emulate(7, { network: '4g' })).applied.network.engine, 'legacy-fallback');
   failModernNetwork = false;
+});
+
+await test('(3.9.6) reducedMotion and colorScheme go in ONE setEmulatedMedia call (it replaces the emulated features)', async () => {
+  const mark = commandLog.length;
+  const res = await emulateModule.emulate(7, { colorScheme: 'dark', reducedMotion: 'reduce' });
+  assert.deepEqual(res.applied, { colorScheme: 'dark', reducedMotion: 'reduce' });
+  const media = commandLog.slice(mark).filter((c) => c.method === 'Emulation.setEmulatedMedia');
+  assert.equal(media.length, 1);
+  assert.deepEqual(media[0].params.features, [
+    { name: 'prefers-color-scheme', value: 'dark' },
+    { name: 'prefers-reduced-motion', value: 'reduce' },
+  ]);
 });
 
 await test('emulation reports failures and retains reset state for retry', async () => {
