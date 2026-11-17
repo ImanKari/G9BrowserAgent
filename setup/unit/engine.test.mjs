@@ -925,6 +925,11 @@ test('(3.6) profile: session cookies are kept for the next launch — only sessi
   assert.deepEqual(profile.sessionCookieParams(rows), [
     { name: 'SID', value: 'a', domain: '.example.test', path: '/', secure: true, httpOnly: true, sameSite: 'Lax', priority: 'High', sourceScheme: 'Secure', sourcePort: 443 },
   ]);
+  // (3.10) launch profileFrom copies EVERY cookie; a persistent one keeps its expiry.
+  assert.deepEqual(profile.cookieParams(rows), [
+    { name: 'SID', value: 'a', domain: '.example.test', path: '/', secure: true, httpOnly: true, sameSite: 'Lax', priority: 'High', sourceScheme: 'Secure', sourcePort: 443 },
+    { name: 'pref', value: 'b', domain: 'example.test', path: '/', secure: false, httpOnly: false, expires: 2e9 },
+  ]);
   const now = Date.now();
   assert.deepEqual(await profile.saveSessionCookies('sess-1', rows, { now }), { saved: 1 });
   assert.equal((await profile.readSessionCookies('sess-1', { now: now + 1000 }))[0].name, 'SID');

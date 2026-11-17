@@ -448,8 +448,16 @@ export function timeoutMessage(method, timeoutMs) {
       `unreachable) — this is not a stuck browser, and the navigation may still complete in the background. ` +
       `Pass a larger timeoutMs if the server is known to be slow, or check that it is up.`;
   }
+  // (3.10) Commands the page's renderer answers (evaluate, the accessibility tree, a screenshot) hang when that renderer
+  // is busy — a page streaming a 100 KB answer froze evaluate, getFullAXTree and screenshots alike until the tab was
+  // reopened (field report, 2026-11-17).
+  const rendererBound = /^(Runtime\.|Accessibility\.|DOM\.|Page\.captureScreenshot|Input\.)/.test(method);
   return `The CDP command "${method}" did not return after ${s}s. ` +
-    `The command is stuck rather than slow — the browser accepted it and never answered.`;
+    `The command is stuck rather than slow — the browser accepted it and never answered.` +
+    (rendererBound
+      ? ' This command is answered by the page\'s renderer, so the page itself is most likely hung or saturated (a long script, a huge DOM update): ' +
+        'other tabs are not affected. Wait and retry once; if it stays stuck, close the tab and open the same URL again.'
+      : '');
 }
 
 /**

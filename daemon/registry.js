@@ -99,6 +99,7 @@ export class Registry extends EventEmitter {
     this.sessions = new Map(); // name → handle
     this.owners = new Map(); // handle → agentId
     this.queues = new Map(); // handle → tail promise
+    this.queueDepth = new Map(); // (3.10) handle → calls held (running + waiting)
 
     this.global = { halted: false, by: null, at: null };
   }
@@ -710,7 +711,13 @@ export class Registry extends EventEmitter {
    */
   enqueue(handle, fn) {
     const previous = this.queues.get(handle) ?? Promise.resolve();
-    const run = previous.then(() => fn());
+    // (3.10) How many calls this tab holds (running + waiting), for browser_status `load`.
+    this.queueDepth.set(handle, (this.queueDepth.get(handle) ?? 0) + 1);
+    const run = previous.then(() => fn()).finally(() => {
+      const left = (this.queueDepth.get(handle) ?? 1) - 1;
+      if (left > 0) this.queueDepth.set(handle, left);
+      else this.queueDepth.delete(handle);
+    });
     const tail = run.then(() => {}, () => {});
     this.queues.set(handle, tail);
     tail.then(() => {

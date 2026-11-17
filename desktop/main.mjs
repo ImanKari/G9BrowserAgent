@@ -422,7 +422,13 @@ async function startApp() {
       clearUpdatingMarker(ctx.daemonHome);
       ctx.store.notices = ctx.store.notices.filter((n) => n.id !== 'home');
       if (ctx.daemonHome.toLowerCase() !== path.resolve(home).toLowerCase()) {
-        ctx.store.notices.push({ id: 'home', tone: 'warn', text: `The daemon uses G9_HOME ${daemonHome}; this app was started with ${home}. Runs are read from the daemon's folder.` });
+        // (3.10) The usual cause is a service (Windows SYSTEM, root) that started the daemon before this app: the way
+        // back is one button, and the app then starts a daemon under this account.
+        ctx.store.notices.push({
+          id: 'home', tone: 'warn',
+          text: `The daemon uses G9_HOME ${daemonHome}; this app was started with ${home}. Runs are read from the daemon's folder. ` +
+            'If a service (Windows SYSTEM, root) started that daemon, press "Shut down daemon" in Settings: this app then starts one under your account.',
+        });
       }
     }
     // Watches survive a reconnect only if we ask again.

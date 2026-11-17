@@ -408,6 +408,20 @@ export async function network(tabId, { filter, status, method, limit = 50, clear
   };
 }
 
+/**
+ * (3.10) The requests of this tab that started at or after `sinceMs` (epoch ms, from the request's wallTime), with a
+ * response or a failure: what browser_navigate wait response: matches. → [{ requestId, url, method, status, startedMs }]
+ */
+export async function requestsSince(tabId, sinceMs) {
+  await settle(tabId);
+  const key = NETWORK_KEY(tabId);
+  const stored = await session().get(key);
+  return Object.values(stored[key] ?? {})
+    .filter((r) => Number.isFinite(r.wallTime) && r.wallTime * 1000 >= sinceMs && (r.status != null || r.failed))
+    .sort((a, b) => a.wallTime - b.wallTime)
+    .map((r) => ({ requestId: r.requestId, url: r.url, method: r.method, status: r.failed ? `FAILED: ${r.errorText}` : r.status, startedMs: Math.round(r.wallTime * 1000) }));
+}
+
 /** Full detail for one request, including the response body. */
 export async function networkDetail(tabId, { requestId, includeBody = true }) {
   await settle(tabId); // (3.9.6) this tab's batched events are in storage first

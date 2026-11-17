@@ -98,6 +98,33 @@ export class CallLog {
     return [...this.calls.values()].filter((c) => c.identity === who).sort((a, b) => b.startedAt - a.startedAt).slice(0, limit).map((c) => this.view(c));
   }
 
+  /**
+   * (3.10) How busy the daemon is, for browser_status `load`: calls running now (the longest, by whom, on which tab)
+   * and the calls that ended in the last minute (count, average and slowest time). Suggestions box, 2026-11-16: an
+   * agent could not tell "my page is slow" from "the daemon is busy with another agent" or "the daemon hangs".
+   */
+  load(windowMs = 60_000) {
+    const now = this.now();
+    const running = [...this.calls.values()].filter((c) => c.state === 'running');
+    const ended = [...this.calls.values()].filter((c) => c.state !== 'running' && c.endedAt != null && now - c.endedAt <= windowMs);
+    const longest = running.sort((a, b) => a.startedAt - b.startedAt)[0];
+    const ms = ended.map((c) => c.endedAt - c.startedAt);
+    return {
+      callsRunning: running.length,
+      ...(longest ? {
+        longestRunning: {
+          callId: longest.callId, tool: longest.tool, ...(longest.action ? { action: longest.action } : {}),
+          agentId: longest.agentId, ...(longest.tabId != null ? { tabId: longest.tabId } : {}), runningMs: now - longest.startedAt,
+        },
+      } : {}),
+      lastMinute: {
+        calls: ended.length,
+        avgMs: ms.length ? Math.round(ms.reduce((a, b) => a + b, 0) / ms.length) : null,
+        maxMs: ms.length ? Math.max(...ms) : null,
+      },
+    };
+  }
+
   /** Wait until a call ends or `ms` passes. → the record view (null for an unknown id). */
   async wait(callId, ms) {
     const record = this.get(callId);

@@ -360,10 +360,20 @@ export function sessionCookiesFile(name, { home = g9Home() } = {}) {
 
 /** CDP Storage.getCookies rows → the session ones, as Storage.setCookies params. Pure. */
 export function sessionCookieParams(cookies) {
+  return cookieParams(cookies, { sessionOnly: true });
+}
+
+/**
+ * (3.10) CDP Storage.getCookies rows → Storage.setCookies params: every cookie (persistent ones keep their
+ * `expires`), or only the session ones. Pure.
+ */
+export function cookieParams(cookies, { sessionOnly = false } = {}) {
   const out = [];
   for (const c of cookies ?? []) {
-    if (!c || c.session !== true || !c.name || !c.domain) continue;
+    if (!c || !c.name || !c.domain) continue;
+    if (sessionOnly && c.session !== true) continue;
     const p = { name: c.name, value: String(c.value ?? ''), domain: c.domain, path: c.path || '/', secure: !!c.secure, httpOnly: !!c.httpOnly };
+    if (!sessionOnly && c.session !== true && Number(c.expires) > 0) p.expires = Number(c.expires);
     if (c.sameSite) p.sameSite = c.sameSite;
     if (c.priority) p.priority = c.priority;
     if (c.sourceScheme) p.sourceScheme = c.sourceScheme;

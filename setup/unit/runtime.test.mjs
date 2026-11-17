@@ -13,7 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
-  scriptCommand, isAppImageRuntime, ensureBootstrap, bootstrapPath, BOOTSTRAP_SOURCE, installId, cleanChildEnv, runsAsWindowsSystem,
+  scriptCommand, isAppImageRuntime, ensureBootstrap, bootstrapPath, BOOTSTRAP_SOURCE, installId, cleanChildEnv, runsAsWindowsSystem, serviceAccount,
 } from '../../lib/runtime.mjs';
 import { systemMayStartDaemon, SYSTEM_NO_DAEMON } from '../../mcp/link.mjs';
 
@@ -103,8 +103,13 @@ test('(3.9.6) an MCP client running as SYSTEM connects to a daemon but never sta
   assert.equal(systemMayStartDaemon({ system: true, env: {} }), false);
   assert.equal(systemMayStartDaemon({ system: true, env: { G9_ALLOW_SYSTEM_DAEMON: '1' } }), true);
   assert.equal(systemMayStartDaemon({ system: false, env: {} }), true);
-  assert.match(SYSTEM_NO_DAEMON, /SYSTEM account/);
+  assert.match(SYSTEM_NO_DAEMON, /service account \(Windows SYSTEM, or root\)/);
   assert.match(SYSTEM_NO_DAEMON, /G9_ALLOW_SYSTEM_DAEMON=1/);
+  // (3.10) root on macOS/Linux is a service account too; a person's account is not.
+  assert.equal(serviceAccount({ platform: 'linux', uid: 0 }), 'root');
+  assert.equal(serviceAccount({ platform: 'darwin', uid: 501 }), null);
+  assert.equal(serviceAccount({ platform: 'win32', user: 'SYSTEM', home: 'C:\\Windows\\system32\\config\\systemprofile' }), 'SYSTEM');
+  assert.equal(serviceAccount({ platform: 'win32', user: 'imank', home: 'C:\\Users\\imank' }), null);
 });
 
 for (const { name, fn } of tests) {

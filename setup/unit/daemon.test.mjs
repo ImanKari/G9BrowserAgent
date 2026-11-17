@@ -1758,7 +1758,7 @@ test('mcp tools: fifteen tools, valid schemas, session on every tab tool, v2 ins
   }
   const tabs = TOOLS.find((t) => t.name === 'browser_tabs');
   assert.deepEqual(tabs.inputSchema.properties.action.enum,
-    ['list', 'open', 'close', 'focus', 'attach', 'detach', 'claim', 'release', 'finish', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch', 'keep_awake']);
+    ['list', 'open', 'close', 'focus', 'attach', 'detach', 'claim', 'release', 'finish', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch', 'keep_awake', 'restore']);
   const engine = TOOLS.find((t) => t.name === 'browser_engine');
   // acquire/release: a run HOLDS a launched engine across its tabs (engine leases, 2026-09-22).
   assert.deepEqual(engine.inputSchema.properties.action.enum, ['launch', 'list', 'stop', 'context', 'versions', 'warm', 'acquire', 'release']);

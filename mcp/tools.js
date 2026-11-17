@@ -83,6 +83,7 @@ export const TOOLS = [
         browser: str('For launch/warm: which browser. "auto" = pinned Chrome for Testing if installed, else Edge, else Chrome.', { enum: ['auto', 'edge', 'chrome', 'cft'] }),
         headless: bool('For launch: run with no window (default from settings, normally true). Headed needs a desktop that nobody minimises.'),
         profile: str('For launch/warm: profile name under the G9BrowserAgent data folder (default "automation"). A profile holds cookies and history between runs; one browser at a time per profile.'),
+        profileFrom: str('For launch: start a profile of YOUR OWN with the cookies (sign-ins) of this one — e.g. a profile signed in to ChatGPT — so agents stop sharing, and waiting on, one browser. profile names the copy (default "<profileFrom>-<n>", the first free); it keeps the cookies from then on. Local storage is not copied.'),
         keepSessionCookies: bool('For launch: keep the profile’s session cookies (no expiry) across a stop and the next launch, so a sign-in kept partly in them (Google, YouTube…) survives; the old tabs still do not come back. false = a fresh session each launch.', true),
         stealth: str('For launch/context: "off", "human" or "stealth". Stealth never enables the page JS runtime domain (no page console capture) and adds no automation switches.', { enum: ['off', 'human', 'stealth'] }),
         humanize: HUMANIZE,
@@ -109,12 +110,12 @@ export const TOOLS = [
   {
     name: 'browser_tabs',
     description:
-      'Tabs across ALL engines: list, open (makes it your current tab), close, focus, attach (the tab the user is on), claim/release ownership, finish (your task is done: releases your tabs; the last working agent detaches the debugger from the user\'s browser), detach, popout, handoff (to a launched browser), session names, wait for a popup, watch (a live view for the user), keep_awake. In the user\'s browser a tab opens in the BACKGROUND: the browser only delivers input to the tab it is SHOWING, so a background tab can be read but not clicked — focus it first, or popout/handoff it. Guides: start, sharing, background.',
+      'Tabs across ALL engines: list, open (makes it your current tab), close, focus, attach (the tab the user is on), claim/release ownership, finish (your task is done: releases your tabs; the last working agent detaches the debugger from the user\'s browser), detach, popout, handoff (to a launched browser), session names, wait for a popup, watch (a live view for the user), keep_awake, restore (after a daemon restart: reopen the launched tabs you had, old id → new). In the user\'s browser a tab opens in the BACKGROUND: the browser only delivers input to the tab it is SHOWING, so a background tab can be read but not clicked — focus it first, or popout/handoff it. Guides: start, sharing, background.',
     inputSchema: {
       type: 'object',
       properties: {
         action: str('What to do.', {
-          enum: ['list', 'open', 'close', 'focus', 'attach', 'detach', 'claim', 'release', 'finish', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch', 'keep_awake'],
+          enum: ['list', 'open', 'close', 'focus', 'attach', 'detach', 'claim', 'release', 'finish', 'popout', 'handoff', 'session', 'sessions', 'end_session', 'wait', 'watch', 'keep_awake', 'restore'],
           default: 'list',
         }),
         on: bool('For watch: false closes the live view again. For keep_awake: false ends it.', true),
@@ -126,6 +127,7 @@ export const TOOLS = [
         engine: str('For open/session/attach: "extension", "launched", or an engineId from browser_engine. For handoff: the launched engine to receive the tab. Default for open: the extension if connected, else a launched browser (launched on demand).'),
         context: str('For open/handoff: a contextId from browser_engine action:"context" (launched engines only). Handoff defaults to a fresh isolated context.'),
         focus: bool('For open/session: bring the tab to the front in its window. For popout/watch: create the new window in front and focused (default: unfocused, so the user keeps the keyboard).', false),
+        newWindow: bool('For open in the user\'s browser: open it straight in a window of its own (popout), where it is shown and takes input without taking the user\'s current window.', false),
         force: bool('For claim: take the tab over from another agent. Only when the user asked for it; it is logged.', false),
         detach: bool('For release (the user’s browser): also end G9’s debugger session on the released tabs, so the page no longer has a debugger attached (captcha and bot checks look for one). false keeps it attached.', true),
         leaveWithoutAsking: bool('For close: accept the page’s "Leave site?" (beforeunload) prompt instead of stopping at it.', false),
@@ -244,7 +246,7 @@ export const TOOLS = [
   {
     name: 'browser_navigate',
     description:
-      'Navigate (goto, reload, back, forward) or WAIT for a condition — text, selector, page predicate, a ref\'s state, network idle, or something to disappear. Waiting is condition-based with a deadline: never sleep and hope. Guide: act.',
+      'Navigate (goto, reload, back, forward) or WAIT for a condition — text, selector, page predicate, a ref\'s state, a network response, network idle, or something to disappear. Waiting is condition-based with a deadline: never sleep and hope. Fastest correct signal first: the URL changing, a ref from browser_snapshot, response:"<url part>", then text:/selector: (open shadow roots included), a predicate last (it does NOT see shadow roots). A DOM wait whose page stops changing ends early with code "stalled". Guide: act.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -252,8 +254,10 @@ export const TOOLS = [
         url: str('For action:"goto".'),
         hard: bool('For action:"reload" — bypass the cache.', false),
         steps: num('For back/forward.', { default: 1 }),
-        text: str('For action:"wait" — wait until this text appears in the page.'),
-        selector: str('For action:"wait" — wait until this CSS selector matches.'),
+        text: str('For action:"wait" — wait until this text appears in the page (open shadow roots and same-origin frames included).'),
+        selector: str('For action:"wait" — wait until this CSS selector matches (in the document or any open shadow root).'),
+        response: str('For action:"wait" — wait for a network response whose URL contains this (or matches /regex/flags), started at most 10 s before the wait (the click that sent it came just before) or during it: the request the page itself waits on. Returns its url and status.'),
+        stallMs: num('For action:"wait" — end early with code "stalled" once the condition is still false and the page has had no DOM change and no request start or end for this long. Default 30000 for text/selector/ref, off for predicate; 0 never stalls (a server push that changes nothing until it arrives).'),
         gone: bool('For action:"wait" — invert: wait until it DISAPPEARS. Useful for spinners.', false),
         idle: bool('For action:"wait" — wait until the DOM is mutation-free for 500ms and no captured request is in flight.', false),
         predicate: str('For action:"wait" — a JavaScript expression evaluated in the PAGE (main world; a promise is awaited), polled until truthy. Returns the final value and the time it took.'),
@@ -300,12 +304,16 @@ export const TOOLS = [
   {
     name: 'browser_console',
     description:
-      'Console: read buffered output (log, warn, error, uncaught exceptions with stack frames; filter by level/contains, poll with since), clear it before a repro, or evaluate JavaScript in the PAGE\'s main world (the page can see it). Long work: job:true runs on in the page (job_status, job_cancel, jobs). In a stealth context page console capture is unavailable and says so. Guides: console, debug.',
+      'Console: read buffered output (log, warn, error, uncaught exceptions with stack frames; filter by level/contains, poll with since), clear it before a repro, or evaluate JavaScript in the PAGE\'s main world (the page can see it). Long work: job:true runs on in the page (job_status, job_cancel, jobs). Helpers you need after every reload: action:"inject". A long script: expressionFile (a path), so it never fills your context. In a stealth context page console capture is unavailable and says so. Guides: console, debug.',
     inputSchema: {
       type: 'object',
       properties: {
-        action: str('"read" (default), "evaluate", "job_status", "job_cancel" or "jobs".', { enum: ['read', 'evaluate', 'job_status', 'job_cancel', 'jobs'], default: 'read' }),
-        expression: str('For action:"evaluate" — JavaScript to run in the page. Async expressions are awaited. In a job, __g9job is the job (progress, signal, cancelled).'),
+        action: str('"read" (default), "evaluate", "job_status", "job_cancel", "jobs"; (3.10) "inject" keeps a script on the tab — it runs before the page\'s own scripts on every load —, "injected" lists them, "uninject" removes one (name) or all.', { enum: ['read', 'evaluate', 'job_status', 'job_cancel', 'jobs', 'inject', 'injected', 'uninject'], default: 'read' }),
+        expression: str('For action:"evaluate" or "inject" — JavaScript to run in the page. Async expressions are awaited. In a job, __g9job is the job (progress, signal, cancelled).'),
+        expressionFile: str('For action:"evaluate" or "inject", instead of expression — an absolute path of a script file on the machine running G9BrowserAgent (at most 1 MB). The script never passes through your context; only the result does.'),
+        name: str('For action:"inject" — a name for the script (a script of the same name is replaced); for "uninject" — which one to remove.'),
+        runNow: bool('For action:"inject" — also run it once in the page open now.', true),
+        all: bool('For action:"uninject" — remove every injected script of the tab.', false),
         job: bool('For action:"evaluate" — run it as a job: answer at once with a jobId.', false),
         jobId: str('For job_status/job_cancel.'),
         timeoutMs: num('For action:"evaluate" — how long an awaited result may take (default 20000; up to 14400000 = 4 h). For a job: its budget before it is reported overdue.'),

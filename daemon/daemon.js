@@ -21,7 +21,10 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 import { VERSION, REPO_ROOT, majorOf } from '../lib/version.mjs';
-import { installId } from '../lib/runtime.mjs';
+import { installId, serviceAccount } from '../lib/runtime.mjs';
+
+/** (3.10) "SYSTEM" / "root" when a service runs this daemon, else null. */
+const SERVICE_ACCOUNT = serviceAccount();
 
 /** This installation, stable across restarts (an AppImage's resource root is a new mount every start). */
 const INSTALL_ID = installId({ root: REPO_ROOT });
@@ -36,6 +39,7 @@ import { installExtension } from './extension-update.js';
 import { loadProject, projectForClient } from './project.js';
 import { FlowLibrary } from './flows.js';
 import { HostWatch } from './hostwatch.js';
+import { Survivors, engineRecord } from './survivors.js';
 import { layout, writeFileAtomicSync } from './paths.js';
 import { EngineManager } from '../engine/manager.js';
 
@@ -95,8 +99,32 @@ export class Daemon {
       log,
       version: VERSION,
       timeoutMs,
-      info: () => ({ pid: process.pid, port: this.port, home: this.home.replace(/\\/g, '/'), repoRoot: REPO_ROOT, installId: INSTALL_ID, startedAt: this.startedAt }),
+      info: () => ({ pid: process.pid, port: this.port, home: this.home.replace(/\\/g, '/'), repoRoot: REPO_ROOT, installId: INSTALL_ID, startedAt: this.startedAt, serviceAccount: SERVICE_ACCOUNT }),
     });
+    // (3.10) The launched engines and tabs a restart would take, told to their agents by the next daemon.
+    this.survivors = new Survivors({
+      file: this.paths.survivors,
+      bootId: this.bootId,
+      log,
+      snapshot: async () => {
+        const listed = this.engines.list().filter((e) => !e.stopping && e.profile);
+        const isolated = new Set(listed.flatMap((e) => (e.contexts ?? []).filter((c) => !c.isDefault).map((c) => c.contextId)));
+        const engines = listed.map(engineRecord);
+        const rows = engines.length ? await this.engines.listTabs().catch(() => []) : [];
+        const tabs = rows.filter((r) => r.attachable !== false).map((r) => {
+          const owner = this.registry.ownerOf(r.tabId);
+          const ownerClient = owner ? this.registry.getClient(owner) : null;
+          return {
+            tabId: r.tabId, engine: r.engine, url: r.url, title: r.title,
+            owner: owner ?? null, ownerName: ownerClient?.name ?? null, ownerIdentity: ownerClient?.identity ?? null,
+            ...(r.contextId && isolated.has(r.contextId) ? { isolatedContext: true } : {}),
+            ...(this.registry.sessionOf(r.tabId) ? { session: this.registry.sessionOf(r.tabId) } : {}),
+          };
+        });
+        return { engines, tabs };
+      },
+    });
+    this.router.survivors = this.survivors;
     // (3.8.7) The memory of the local servers the agents test, and of this daemon.
     this.hostWatch = new HostWatch({ settings: () => this.settings.get().hostWatch, log });
     this.router.hostWatch = this.hostWatch;
@@ -197,6 +225,10 @@ export class Daemon {
       pid: process.pid, port: this.port, version: VERSION, startedAt: this.startedAt, home: this.home.replace(/\\/g, '/'),
     }, null, 2)}\n`);
     this.log(`[g9d] v${VERSION} listening on ws://127.0.0.1:${this.port}/g9 (pid ${process.pid}, home ${this.home})`);
+    if (SERVICE_ACCOUNT) {
+      this.log(`[g9d] WARNING: this daemon runs as ${SERVICE_ACCOUNT} (a service started it): its browsers, downloads and data folder are that account's, ` +
+        'not the signed-in person\'s (Edge does not run as SYSTEM). The person\'s G9BrowserAgent app should start the daemon instead.');
+    }
     if (this.project.found) this.log(`[g9d] default project: ${this.project.path}`);
     for (const problem of this.settings.loadProblems) this.log(`[g9d] settings: ${problem}`);
 
@@ -209,6 +241,7 @@ export class Daemon {
     });
     this.scheduler.start();
     this.hostWatch.start();
+    this.survivors.start();
     this.idleTimer = setInterval(() => this.#idleCheck(), this.idleExitMs ? Math.max(100, Math.min(30_000, Math.floor(this.idleExitMs / 4))) : 30_000);
     this.idleTimer.unref?.();
     return { port: this.port };
@@ -220,6 +253,8 @@ export class Daemon {
       this.log(`[g9d] shutting down: ${reason}`);
       clearInterval(this.idleTimer);
       this.hostWatch.stop();
+      // (3.10) Before the engines are stopped: what they held is what the next daemon tells their agents.
+      await this.survivors.stop();
       this.scheduler.stop();
       for (const handle of [...this.watchers.keys()]) await this.#stopWatching(handle).catch(() => {});
       await this.engines.shutdown().catch((err) => this.log(`[g9d] engine shutdown: ${err.message}`));
@@ -275,6 +310,8 @@ export class Daemon {
       startedAt: this.startedAt,
       bootId: this.bootId,
       uptimeMs: Date.now() - this.startedAt,
+      // (3.10) A daemon a service started (Windows SYSTEM, root): its browsers and downloads are not the person's.
+      ...(SERVICE_ACCOUNT ? { serviceAccount: SERVICE_ACCOUNT } : {}),
     };
   }
 
@@ -398,6 +435,11 @@ export class Daemon {
     const restarted = typeof c.previous?.bootId === 'string' && c.previous.bootId !== this.bootId;
     if (role === 'agent' && restarted && c.previous.hadCurrent === true && adopted?.current == null) {
       client.lostCurrent = { tabId: null, why: 'the daemon restarted, so every tab has a new id' };
+    }
+    // (3.10) The launched tabs this agent held in the previous daemon: told on its next result, restorable.
+    if (role === 'agent' && restarted) {
+      client.lostOnRestart = this.survivors.claimLost({ bootId: c.previous.bootId, agentId: c.previous.agentId ?? null, identity: client.identity });
+      if (client.lostOnRestart) client.lostNoticePending = true;
     }
 
     conn.send({

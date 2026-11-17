@@ -408,6 +408,50 @@ await test('(3.9.6) reducedMotion and colorScheme go in ONE setEmulatedMedia cal
   ]);
 });
 
+await test('(3.10) inject keeps a named script on the tab (addScriptToEvaluateOnNewDocument), lists, replaces and removes it', async () => {
+  const injectModule = await import('../extension/tools/inject.js');
+  const mark = commandLog.length;
+  const first = await injectModule.inject(7, { expression: 'window.g9h = 1', name: 'helpers', runNow: false });
+  assert.equal(first.injected, 'helpers');
+  const again = await injectModule.inject(7, { expression: 'window.g9h = 2', name: 'helpers', runNow: false });
+  assert.equal(again.replaced, true);
+  const sent = commandLog.slice(mark).map((c) => c.method);
+  assert.deepEqual(sent.filter((m) => /ScriptToEvaluateOnNewDocument/.test(m)),
+    ['Page.addScriptToEvaluateOnNewDocument', 'Page.removeScriptToEvaluateOnNewDocument', 'Page.addScriptToEvaluateOnNewDocument']);
+  assert.equal(commandLog.slice(mark).find((c) => c.method === 'Page.addScriptToEvaluateOnNewDocument').params.source, 'window.g9h = 1');
+  assert.deepEqual((await injectModule.injected(7)).scripts.map((s) => s.name), ['helpers']);
+  await assert.rejects(() => injectModule.uninject(7, { name: 'nope' }), /\[code: not_found\]|No script named/);
+  assert.deepEqual((await injectModule.uninject(7, { all: true })).removed, ['helpers']);
+  assert.deepEqual((await injectModule.injected(7)).scripts, []);
+  await assert.rejects(() => injectModule.inject(7, { expression: 'x', name: 'bad name!' }), /name must be/);
+});
+
+await test('(3.10) wait response: a URL path stays a URL part; only /body/flags with a regex character is a regex', async () => {
+  const { responseRegex } = await import('../extension/tools/navigate.js');
+  assert.equal(responseRegex('/api/missing'), null, 'live: "missing" was taken for regex flags');
+  assert.equal(responseRegex('/api/v1/'), null);
+  assert.ok(responseRegex('/chat\\/.+\\/stream/i'));
+  assert.equal(responseRegex('/chat\\/.+\\/stream/i')[2], 'i');
+});
+
+await test('(3.10) expressionFile: the daemon reads an absolute path (≤ 1 MB) into expression; relative, missing or both are refused', async () => {
+  const { expressionFromFile } = await import('../daemon/router.js');
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'g9-exprfile-'));
+  try {
+    const file = path.join(dir, 'helpers.js');
+    fs.writeFileSync(file, '﻿(() => 6 * 7)()');
+    assert.deepEqual(await expressionFromFile({ action: 'evaluate', expressionFile: file }), { action: 'evaluate', expression: '(() => 6 * 7)()' });
+    await assert.rejects(() => expressionFromFile({ expressionFile: 'helpers.js' }), /absolute path/);
+    await assert.rejects(() => expressionFromFile({ expressionFile: path.join(dir, 'missing.js') }), /cannot be read/);
+    await assert.rejects(() => expressionFromFile({ expressionFile: file, expression: 'x' }), /not both/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 await test('emulation reports failures and retains reset state for retry', async () => {
   failLocale = true;
   await assert.rejects(() => emulateModule.emulate(7, { locale: 'bad_locale' }), /Bad locale/);

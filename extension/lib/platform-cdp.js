@@ -1091,6 +1091,9 @@ const tabs = {
     }
     if (active) {
       await engine.conn.send('Target.activateTarget', { targetId: tab.targetId }).catch(() => {});
+      // (3.10) And the page-level "front" (Page.bringToFront): activateTarget alone left a headless tab that a page had
+      // opened over it hidden, drawing no frames (suggestions box, 2026-11-07).
+      if (tab.sessionId) await engine.conn.send('Page.bringToFront', {}, tab.sessionId, { timeoutMs: REFRESH_TIMEOUT_MS }).catch(() => {});
       tab.activatedAt = ++activationClock;
     }
     return toTab(tab);

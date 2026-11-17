@@ -608,6 +608,7 @@ daemon's result (DAEMON_PROTOCOL §3):
 | `navigated` | the action left the page while `expectSamePage` was set |
 | `dialog` | a JavaScript dialog blocks the page |
 | `timeout` | the call was stopped; its effect is unknown |
+| `stalled` | (3.10) a wait ended early: its condition is false and the page stopped changing; `stallMs:0` waits on |
 | `halted` / `owned` | Stop is pressed / another agent owns the tab |
 
 **`drag`** takes `toPercent` (0–100 along the control's track) or `toX`/`toY` (viewport pixels)

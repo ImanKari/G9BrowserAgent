@@ -31,6 +31,7 @@ import { importFlow, approvedBundle } from '../lib/flowsync.js';
 import * as tabsTool from './tabs.js';
 import { snapshot, find } from './snapshot.js';
 import * as jobs from './jobs.js';
+import * as inject from './inject.js';
 import { fetchResource } from './fetch.js';
 import { runBatch } from './batch.js';
 import * as interact from './interact.js';
@@ -125,6 +126,22 @@ export function summarize(tool, args = {}) {
   return bits.length ? `${tool}(${bits.join(' ')})` : tool;
 }
 
+/**
+ * (3.10) `{ painting: false, visibility: "hidden", note }` when the page is hidden, `{}` when it is visible (or the
+ * question cannot be answered quickly). Suggestions box, 2026-11-07: a headless tab behind a page-opened tab drew no
+ * frames while evaluations kept answering, so measurements silently described an old page.
+ */
+async function paintingState(tabId) {
+  const state = await inWorld(tabId, 'document.visibilityState', { timeoutMs: 2_000 }).catch(() => null);
+  if (state !== 'hidden') return {};
+  return {
+    painting: false,
+    visibility: 'hidden',
+    note: 'This page is hidden (a tab behind another one, or a minimised window): it draws no frames, so layout, animation ' +
+      'and timer results may describe an old state. browser_tabs action:"focus" brings it to the front.',
+  };
+}
+
 // --------------------------------------------------------------- the table
 
 /**
@@ -149,12 +166,18 @@ export const TOOLS = {
           if (!args.url) throw new Error('action:"open" needs a url.');
           const opened = await tabsTool.openTab(args.url, { active: args.focus ?? false });
           if (args.name) await tabsTool.nameSession(args.name, opened.tabId);
-          return { ...opened, ...(args.name ? { session: args.name } : {}) };
+          // (3.10) newWindow: straight into a window of its own (popout), where it is shown and takes input — an opened
+          // tab landed inactive behind another popped-out window and had to be popped out separately (field report).
+          const popped = args.newWindow === true ? await tabsTool.popout(opened.tabId, {}) : null;
+          return { ...opened, ...(args.name ? { session: args.name } : {}), ...(popped ? { newWindow: true, popout: popped } : {}) };
         }
         case 'close':
           return tabsTool.closeTab(requireTabId(args), { leaveWithoutAsking: args.leaveWithoutAsking === true });
-        case 'focus':
-          return { focused: (await tabsTool.focusTab(requireTabId(args))).id };
+        case 'focus': {
+          const focusedId = (await tabsTool.focusTab(requireTabId(args))).id;
+          // (3.10) Say whether the page now draws: a headless tab behind another one stayed hidden after focus.
+          return { focused: focusedId, ...(await paintingState(focusedId)) };
+        }
         case 'attach':
           return tabsTool.attachTab(args.tabId ?? null);
         case 'popout':
@@ -281,9 +304,19 @@ export const TOOLS = {
         if (args.job === true) return jobs.startJob(tabId, args.expression, { timeoutMs: args.timeoutMs });
         // (3.4) timeoutMs: an awaited promise may take minutes, up to 4 h.
         const timeoutMs = args.timeoutMs != null ? Math.max(1_000, Math.min(jobs.MAX_JOB_MS, Number(args.timeoutMs) || 30_000)) : null;
+        const evalStarted = Date.now();
         const value = await evaluate(tabId, args.expression, timeoutMs ? { timeoutMs } : {});
-        return { value: value === undefined ? '(undefined)' : value };
+        const tookMs = Date.now() - evalStarted;
+        return {
+          value: value === undefined ? '(undefined)' : value, ...(await paintingState(tabId)),
+          // (3.10) A long awaited evaluate holds the tab (and its queue) for its whole run: say so, and what to use.
+          ...(tookMs > 30_000 ? { tookMs, hint: 'This evaluate held the tab for ' + Math.round(tookMs / 1000) + ' s: other calls on this tab waited behind it. For long work use job:true (it answers at once and runs on in the page).' } : {}),
+        };
       }
+      // (3.10) Scripts kept on the tab across reloads (tools/inject.js).
+      if (args.action === 'inject') return inject.inject(tabId, args);
+      if (args.action === 'injected') return inject.injected(tabId);
+      if (args.action === 'uninject') return inject.uninject(tabId, args);
       if (args.action === 'job_status') return jobs.jobStatus(tabId, args);
       if (args.action === 'job_cancel') return jobs.cancelJob(tabId, args);
       if (args.action === 'jobs') return jobs.listJobs();
@@ -820,7 +853,7 @@ const READ_ONLY_RECORDING = new Set(['list', 'get', 'status', 'signature', 'know
 const READ_ONLY_ISSUE = new Set(['list', 'get', 'attachment']);
 const READ_ONLY_NETWORK_ACTIONS = new Set(['downloads', 'pin_status', 'intercept_status']);
 /** (3.4) Console actions that only read: a job's status and the job list. */
-const READ_ONLY_CONSOLE_ACTIONS = new Set(['read', 'job_status', 'jobs']);
+const READ_ONLY_CONSOLE_ACTIONS = new Set(['read', 'job_status', 'jobs', 'injected']);
 
 /**
  * Does this call only READ? The daemon lets any agent read any tab, and claims

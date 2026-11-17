@@ -28,6 +28,7 @@ export const ERROR_CODES = Object.freeze({
   navigated: 'the action took the page to another URL while expectSamePage was set',
   dialog: 'a JavaScript dialog blocks the page; handle it with browser_dialog',
   timeout: 'the call did not finish in time and was stopped; its effect is unknown — verify before retrying',
+  stalled: 'a wait ended early: its condition is false and the page has stopped changing — check with browser_snapshot (stallMs:0 waits on regardless)',
   halted: 'the user pressed Stop; wait for Resume',
   owned: 'another agent owns the tab',
 });

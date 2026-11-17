@@ -12,7 +12,8 @@ import { inWorld, callInWorld } from '../lib/world.js';
 import { withLeave } from '../lib/leave.js';
 import { levelFor, perform, callSignalFor } from '../lib/humanize.js';
 import { createRng, planGap } from '../humanize/index.js';
-import { clearBuffers, network } from './observe.js';
+import { clearBuffers, network, requestsSince } from './observe.js';
+import { codedError } from '../lib/errcode.js';
 import { clearDiffBases } from './snapshot.js';
 
 /**
@@ -164,6 +165,13 @@ export function pollInterval(elapsedMs, pollMs = null) {
   return 2_000;
 }
 
+/**
+ * (3.10) How much of a satisfied predicate's value a wait returns: 64 KB of JSON (it was 2,000 characters, and an
+ * agent asked ChatGPT for compressed answers to fit — suggestions box, 2026-11-16). browser_console evaluate returns
+ * a value whole; a job's status carries up to 256 KB.
+ */
+export const PREDICATE_VALUE_MAX = 64 * 1024;
+
 /** A value for a result: JSON-able, at most `max` characters of JSON. */
 export function boundedValue(value, max = 2_000) {
   if (value === undefined) return '(undefined)';
@@ -187,6 +195,120 @@ function checkCancelled(tabId) {
 const REF_STATES = new Set(['visible', 'hidden', 'enabled', 'disabled', 'gone', 'present', 'checked', 'unchecked']);
 
 /**
+ * (3.10) The composed tree, for `text:` and `selector:` waits: the document, every OPEN shadow root and every
+ * same-origin frame, found again on each look. `document.body.innerText` and `querySelector` see none of the shadow
+ * roots (field report, 2026-11-07: a scan score drawn in nested shadow roots; a text wait on the page body polled 445
+ * times for ten minutes while the score was on screen). Runs in G9BrowserAgent's isolated world: the page sees nothing.
+ * Closed shadow roots and cross-origin frames stay out of reach — browser_snapshot (the accessibility tree) sees them.
+ */
+const DEEP_SOURCE = `
+  const g9Roots = () => {
+    const roots = [document];
+    for (let i = 0; i < roots.length && i < 500; i++) {
+      let all;
+      try { all = roots[i].querySelectorAll('*'); } catch { continue; }
+      for (const el of all) {
+        if (el.shadowRoot) roots.push(el.shadowRoot);
+        if (el.tagName === 'IFRAME' || el.tagName === 'FRAME') {
+          try { const d = el.contentDocument; if (d && d.documentElement) roots.push(d); } catch { /* cross-origin */ }
+        }
+      }
+    }
+    return roots;
+  };
+  const g9Text = () => g9Roots().map((r) => r.nodeType === 9
+    ? (r.body ? r.body.innerText : (r.documentElement ? r.documentElement.innerText : ''))
+    : Array.from(r.children).map((e) => (e.tagName === 'STYLE' || e.tagName === 'SCRIPT') ? '' : (e.innerText ?? e.textContent ?? '')).join('\\n')).join('\\n');
+  const g9Query = (sel) => { for (const r of g9Roots()) { if (r.querySelector(sel)) return true; } return false; };
+`;
+
+/** (3.10) The page expression a text/selector wait checks: true when present, in the composed tree. */
+export function presenceExpression({ text, selector }) {
+  const check = selector ? `g9Query(${JSON.stringify(selector)})` : `g9Text().includes(${JSON.stringify(text)})`;
+  return `(() => { ${DEEP_SOURCE} try { return ${check}; } catch (e) { return { error: String(e && e.message || e) }; } })()`;
+}
+
+/**
+ * (3.10) The page's activity while a wait runs: DOM mutations in the document AND in every open shadow root (a
+ * MutationObserver on the document sees no shadow content), read and re-armed on each look, plus the network.
+ * Kept on the isolated world's window, never the page's.
+ */
+const WATCH_SOURCE = `(() => {
+  ${DEEP_SOURCE}
+  const w = window.__g9Watch || (window.__g9Watch = { last: Date.now(), seen: new WeakSet(), observers: [] });
+  for (const r of g9Roots()) {
+    if (w.seen.has(r)) continue;
+    w.seen.add(r);
+    const o = new MutationObserver(() => { w.last = Date.now(); });
+    try { o.observe(r.nodeType === 9 ? r.documentElement : r, { childList: true, subtree: true, attributes: true, characterData: true }); w.observers.push(o); } catch { /* gone */ }
+  }
+  return Date.now() - w.last;
+})()`;
+
+const UNWATCH_SOURCE = `(() => { const w = window.__g9Watch; if (!w) return false; for (const o of w.observers) o.disconnect(); delete window.__g9Watch; return true; })()`;
+
+/** The default quiet time after which a DOM condition that is still false is reported as stalled. */
+export const DEFAULT_STALL_MS = 30_000;
+
+/**
+ * (3.10) The network's part of "is anything happening": a signature that changes when a request starts or ends,
+ * and how many are in flight. A buffer read (no page round trip).
+ */
+async function networkActivity(tabId) {
+  try {
+    const all = await network(tabId, { limit: 1 });
+    const pending = await network(tabId, { status: 'pending', limit: 1000 });
+    const newest = all.requests?.[0];
+    return { signature: `${all.total}:${newest?.requestId ?? ''}:${newest?.status ?? ''}:${pending.returned}`, pending: pending.returned };
+  } catch {
+    return { signature: '', pending: 0 };
+  }
+}
+
+/**
+ * (3.10) Stall bookkeeping for one wait: the page is "quiet" while no DOM mutation (shadow roots included) and no
+ * request starting or ending is seen; `stalled()` is true once it has been quiet for `stallMs` with the condition
+ * still false. → also the telemetry a result carries ({ quietForMs, pendingRequests }).
+ */
+function stallTracker(tabId, stallMs) {
+  let networkSig = null;
+  let networkQuietSince = Date.now();
+  let quietForMs = 0;
+  let pendingRequests = 0;
+  return {
+    async look() {
+      const [domQuiet, net] = await Promise.all([
+        evaluate(tabId, WATCH_SOURCE).then((v) => (Number.isFinite(v) ? v : 0)).catch(() => 0),
+        networkActivity(tabId),
+      ]);
+      if (net.signature !== networkSig) {
+        networkSig = net.signature;
+        networkQuietSince = Date.now();
+      }
+      pendingRequests = net.pending;
+      // A request starting or ending is activity; one that stays open unchanged is not (a long-poll, or a record
+      // whose end capture never saw — live: a cross-origin frame's request listed as pending forever).
+      quietForMs = Math.min(domQuiet, Date.now() - networkQuietSince);
+    },
+    stalled: () => stallMs > 0 && quietForMs >= stallMs,
+    telemetry: () => ({ quietForMs, pendingRequests }),
+    stop: () => evaluate(tabId, UNWATCH_SOURCE).catch(() => false),
+  };
+}
+
+function stalledError(what, { waitedMs, polls, quietForMs, lastValue, hint }) {
+  const err = new Error(
+    `Stalled: ${what} is still not true after ${Math.round(waitedMs / 1000)} s, and the page has been quiet for ` +
+      `${Math.round(quietForMs / 1000)} s (no DOM change, shadow roots included, and no request starting or ending; ${polls} looks)` +
+      (lastValue !== undefined ? `; the last value was ${JSON.stringify(boundedValue(lastValue, 200))}` : '') +
+      `. A condition on a page that has stopped changing will not become true by waiting. ${hint} ` +
+      'If you expect a server push that changes nothing until it arrives, wait again with stallMs:0.',
+  );
+  Object.assign(err, { errorCode: 'stalled', waitedMs, polls, quietForMs });
+  return err;
+}
+
+/**
  * Wait for a condition. Exactly one of text/selector/ref-gone/idle should be
  * given; `idle` means "no network activity and no DOM mutations for a beat",
  * which is the closest thing to "the page finished doing whatever it was doing".
@@ -201,40 +323,120 @@ const REF_STATES = new Set(['visible', 'hidden', 'enabled', 'disabled', 'gone', 
  */
 export async function waitFor(tabId, {
   text, selector, gone = false, idle = false, predicate = null, ref = null, state = null, pollMs = null, url = null,
-  timeoutMs = 15_000,
+  response = null, stallMs = null, timeoutMs = 15_000,
 } = {}) {
   timeoutMs = Math.max(1, Math.min(MAX_WAIT_MS, Number(timeoutMs) || 15_000));
-  const deadline = Date.now() + timeoutMs;
+  // (3.10) DOM conditions stall by default; a predicate (it may read anything) only when asked.
+  const stall = (dflt) => (stallMs == null ? dflt : Math.max(0, Number(stallMs) || 0));
 
   if (idle) return waitForIdle(tabId, timeoutMs);
-  if (predicate != null && predicate !== '') return waitForPredicate(tabId, String(predicate), { timeoutMs, pollMs });
-  if (ref) return waitForRefState(tabId, String(ref), { state: state ?? (gone ? 'gone' : 'visible'), timeoutMs, pollMs, url });
+  if (response != null && response !== '') return waitForResponse(tabId, String(response), { timeoutMs, pollMs });
+  if (predicate != null && predicate !== '') return waitForPredicate(tabId, String(predicate), { timeoutMs, pollMs, stallMs: stall(0) });
+  if (ref) return waitForRefState(tabId, String(ref), { state: state ?? (gone ? 'gone' : 'visible'), timeoutMs, pollMs, url, stallMs: stall(DEFAULT_STALL_MS) });
 
-  if (!text && !selector) throw new Error('waitFor needs text, selector, predicate, ref (+ state), or idle:true.');
+  if (!text && !selector) throw new Error('waitFor needs text, selector, predicate, ref (+ state), response or idle:true.');
+  return waitForPresence(tabId, { text, selector, gone, timeoutMs, pollMs, stallMs: stall(DEFAULT_STALL_MS) });
+}
 
-  const expr = selector
-    ? `!!document.querySelector(${JSON.stringify(selector)})`
-    : `document.body && document.body.innerText.includes(${JSON.stringify(text)})`;
-
+/**
+ * (3.10) text / selector, in the composed tree (DEEP_SOURCE), with stall detection: a DOM condition on a page whose
+ * DOM has not changed (shadow roots included) and whose network is quiet for `stallMs` cannot become true by
+ * waiting, so the wait ends there with code "stalled" instead of at the deadline.
+ * → { satisfied, waitedMs, polls, quietForMs, pendingRequests }
+ */
+async function waitForPresence(tabId, { text, selector, gone, timeoutMs, pollMs, stallMs }) {
   const started = Date.now();
+  const deadline = started + timeoutMs;
+  const tracker = stallTracker(tabId, stallMs);
+  const expr = presenceExpression({ text, selector });
+  const what = `${selector ? `selector ${selector}` : `text "${text}"`} to ${gone ? 'disappear' : 'appear'}`;
+  let polls = 0;
+  try {
+    while (Date.now() < deadline) {
+      checkCancelled(tabId);
+      polls += 1;
+      let present = null;
+      try {
+        present = await evaluate(tabId, expr);
+      } catch {
+        // Mid-navigation the context is destroyed; retry.
+      }
+      if (present && typeof present === 'object' && present.error) {
+        throw codedError('bad_argument', `The ${selector ? 'selector' : 'text'} cannot be checked: ${present.error}. Nothing was waited for.`);
+      }
+      if (present === !gone) {
+        return { satisfied: true, waitedMs: Date.now() - started, polls, ...tracker.telemetry() };
+      }
+      await tracker.look();
+      if (tracker.stalled()) {
+        throw stalledError(`${what}`, {
+          waitedMs: Date.now() - started, polls, ...tracker.telemetry(),
+          hint: 'Look with browser_snapshot (it reads the accessibility tree: closed shadow roots and cross-origin frames included), then wait on a ref from it, or on response:"<url part>" for the request the page waits on.',
+        });
+      }
+      await sleep(Math.min(timeoutMs > 60_000 ? pollInterval(Date.now() - started, pollMs) : 120, Math.max(1, deadline - Date.now())));
+    }
+  } finally {
+    await tracker.stop();
+  }
+  const err = new Error(
+    `Timed out after ${timeoutMs}ms waiting for ${what} (${polls} looks, open shadow roots and same-origin frames included). ` +
+      'Take a browser_snapshot to see the current state.',
+  );
+  Object.assign(err, { waitedMs: Date.now() - started, polls });
+  throw err;
+}
+
+/**
+ * (3.10) Is a `response:` pattern a /regex/flags? Only with valid flags AND a regex character in its body: a URL path
+ * looks the same — "/api/missing" (flags "missing") and "/api/v1/" are URL parts, "/chat\/.+\/stream/" is a regex.
+ * → [, body, flags] or null. Pure.
+ */
+export function responseRegex(pattern) {
+  const m = /^\/(.+)\/([dgimsuyv]*)$/.exec(String(pattern));
+  return m && /[\\^$.*+?()[\]{}|]/.test(m[1]) ? m : null;
+}
+
+/**
+ * (3.10) How far before the wait a request may have started and still count: a wait runs after the call that caused
+ * the request (a click), because calls on one tab run one at a time — "only requests after the wait" missed it (live).
+ */
+export const RESPONSE_LOOKBACK_MS = 10_000;
+
+/**
+ * (3.10) Wait for a network response whose URL contains `pattern` (or matches it, as /regex/flags), started at most
+ * RESPONSE_LOOKBACK_MS before the wait: the request the page itself waits on, often the fastest correct "done" signal.
+ * → { satisfied, response: { url, status, requestId, method, startedMs }, waitedMs, polls }
+ */
+async function waitForResponse(tabId, pattern, { timeoutMs, pollMs }) {
+  const re = responseRegex(pattern);
+  let matcher;
+  try {
+    matcher = re ? ((u) => new RegExp(re[1], re[2]).test(u)) : ((u) => u.includes(pattern));
+    matcher('');
+  } catch (err) {
+    throw codedError('bad_argument', `response must be a URL part or a /regex/: ${err.message}. Nothing was waited for.`);
+  }
+  const started = Date.now();
+  const deadline = started + timeoutMs;
+  const since = started - RESPONSE_LOOKBACK_MS;
+  let polls = 0;
   while (Date.now() < deadline) {
     checkCancelled(tabId);
-    let present = false;
-    try {
-      present = await evaluate(tabId, `(() => { try { return ${expr}; } catch { return false; } })()`);
-    } catch {
-      // Mid-navigation the context is destroyed; retry.
+    polls += 1;
+    const requests = await requestsSince(tabId, since).catch(() => []);
+    const hit = requests.find((r) => matcher(r.url ?? ''));
+    if (hit) {
+      return { satisfied: true, response: hit, waitedMs: Date.now() - started, polls };
     }
-    if (present === !gone) {
-      return { satisfied: true, waitedMs: timeoutMs - (deadline - Date.now()) };
-    }
-    await sleep(Math.min(timeoutMs > 60_000 ? pollInterval(Date.now() - started, pollMs) : 120, Math.max(1, deadline - Date.now())));
+    await sleep(Math.min(pollMs > 0 ? pollInterval(0, pollMs) : 200, Math.max(1, deadline - Date.now())));
   }
-
-  throw new Error(
-    `Timed out after ${timeoutMs}ms waiting for ${selector ? `selector ${selector}` : `text "${text}"`} to ` +
-      `${gone ? 'disappear' : 'appear'}. Take a browser_snapshot to see the current state.`,
+  const err = new Error(
+    `Timed out after ${timeoutMs}ms waiting for a response whose URL ${re ? 'matches' : 'contains'} ${JSON.stringify(pattern)} ` +
+      `(${polls} looks; requests that started up to ${RESPONSE_LOOKBACK_MS / 1000} s before the wait count). browser_network action:"list" shows what the page requested.`,
   );
+  Object.assign(err, { waitedMs: Date.now() - started, polls });
+  throw err;
 }
 
 /**
@@ -242,32 +444,51 @@ export async function waitFor(tabId, {
  * deadline); a look that throws (the page between two documents, the app not booted yet) is retried,
  * and the last error is reported if the deadline passes. → { satisfied, value, waitedMs, polls }
  */
-async function waitForPredicate(tabId, expression, { timeoutMs, pollMs }) {
+async function waitForPredicate(tabId, expression, { timeoutMs, pollMs, stallMs = 0 }) {
   const started = Date.now();
   const deadline = started + timeoutMs;
+  const tracker = stallTracker(tabId, stallMs);
   let polls = 0;
   let lastValue;
   let lastError = null;
-  while (Date.now() < deadline) {
-    checkCancelled(tabId);
-    polls += 1;
-    try {
-      lastValue = await evaluateInPage(tabId, expression, {
-        timeoutMs: Math.max(1_000, Math.min(30_000, deadline - Date.now())),
-      });
-      lastError = null;
-      if (lastValue) {
-        return { satisfied: true, value: boundedValue(lastValue), waitedMs: Date.now() - started, polls };
+  let previous;
+  try {
+    while (Date.now() < deadline) {
+      checkCancelled(tabId);
+      polls += 1;
+      try {
+        lastValue = await evaluateInPage(tabId, expression, {
+          timeoutMs: Math.max(1_000, Math.min(30_000, deadline - Date.now())),
+        });
+        lastError = null;
+        if (lastValue) {
+          return { satisfied: true, value: boundedValue(lastValue, PREDICATE_VALUE_MAX), waitedMs: Date.now() - started, polls, ...tracker.telemetry() };
+        }
+      } catch (err) {
+        if (/halted by the user/i.test(String(err?.message))) throw err;
+        lastError = String(err?.message ?? err).slice(0, 300);
       }
-    } catch (err) {
-      if (/halted by the user/i.test(String(err?.message))) throw err;
-      lastError = String(err?.message ?? err).slice(0, 300);
+      if (stallMs > 0) {
+        // (3.10) Stalled only when the value stayed the same, as well as the page.
+        const same = polls > 1 && JSON.stringify(lastValue) === JSON.stringify(previous);
+        previous = lastValue;
+        await tracker.look();
+        if (same && tracker.stalled()) {
+          throw stalledError('the predicate', {
+            waitedMs: Date.now() - started, polls, ...tracker.telemetry(), lastValue,
+            hint: 'A predicate is plain JavaScript in the page: document.body.innerText and querySelector do not see shadow roots — text:/selector: waits and browser_snapshot refs do.',
+          });
+        }
+      }
+      await sleep(Math.min(pollInterval(Date.now() - started, pollMs), Math.max(1, deadline - Date.now())));
     }
-    await sleep(Math.min(pollInterval(Date.now() - started, pollMs), Math.max(1, deadline - Date.now())));
+  } finally {
+    if (stallMs > 0) await tracker.stop();
   }
   const err = new Error(
     `Timed out after ${timeoutMs}ms waiting for the predicate to become truthy (${polls} looks). ` +
       (lastError ? `The last look threw: ${lastError}` : `The last value was ${JSON.stringify(boundedValue(lastValue, 300))}.`) +
+      ' A predicate does not see inside shadow roots (document.body.innerText, querySelector); text:/selector: waits and browser_snapshot do.' +
       ' Take a browser_snapshot to see the current state.',
   );
   err.waitedMs = Date.now() - started;
@@ -279,15 +500,22 @@ async function waitForPredicate(tabId, expression, { timeoutMs, pollMs }) {
  * longer in the page (or the page left); every other state needs the element present. The check runs
  * in G9BrowserAgent's isolated world. → { satisfied, state, waitedMs, polls }
  */
-async function waitForRefState(tabId, ref, { state, timeoutMs, pollMs, url }) {
+async function waitForRefState(tabId, ref, { state, timeoutMs, pollMs, url, stallMs = 0 }) {
   if (!REF_STATES.has(state)) {
     throw new Error(`state must be one of ${[...REF_STATES].join(', ')} (got ${JSON.stringify(state)}).`);
   }
   const node = await resolveRef(tabId, ref, url);
   const started = Date.now();
   const deadline = started + timeoutMs;
+  const tracker = stallTracker(tabId, stallMs);
   let polls = 0;
   let last = null;
+  try {
+    return await refLoop();
+  } finally {
+    if (stallMs > 0) await tracker.stop();
+  }
+  async function refLoop() {
   while (Date.now() < deadline) {
     checkCancelled(tabId);
     polls += 1;
@@ -316,13 +544,23 @@ async function waitForRefState(tabId, ref, { state, timeoutMs, pollMs, url }) {
                 : state === 'disabled' ? facts.disabled
                   : state === 'checked' ? facts.checked
                     : !facts.checked);
-    if (ok) return { satisfied: true, ref, state, waitedMs: Date.now() - started, polls };
+    if (ok) return { satisfied: true, ref, state, waitedMs: Date.now() - started, polls, ...tracker.telemetry() };
+    if (stallMs > 0) {
+      await tracker.look();
+      if (tracker.stalled()) {
+        throw stalledError(`${ref} to be ${state}`, {
+          waitedMs: Date.now() - started, polls, ...tracker.telemetry(), lastValue: last,
+          hint: 'Take a browser_snapshot to see what the page shows instead.',
+        });
+      }
+    }
     await sleep(Math.min(pollInterval(Date.now() - started, pollMs), Math.max(1, deadline - Date.now())));
   }
   throw new Error(
     `Timed out after ${timeoutMs}ms waiting for ${ref} to be ${state} (${polls} looks; last seen: ${JSON.stringify(last)}). ` +
       'Take a browser_snapshot to see the current state.',
   );
+  }
 }
 
 /** Load-state wait with a hard deadline. */

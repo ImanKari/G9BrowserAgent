@@ -321,6 +321,46 @@ export async function readableFile(file, { home, seen = new Set() } = {}) {
 /** Header names worth showing an agent from a fetch (the rest cost tokens and say little). */
 const FETCH_HEADERS = ['content-type', 'content-length', 'content-disposition', 'last-modified', 'etag', 'location', 'cache-control'];
 
+/** (3.10) What an agent is told about the launched tabs it lost when the daemon restarted. */
+export function lostNotice(lost) {
+  return {
+    lostTabs: lost.tabs.map((t) => ({
+      previousTabId: t.tabId, url: t.url, title: t.title,
+      profile: lost.engines.find((e) => e.engineId === t.engine)?.profile ?? null,
+      ...(t.session ? { session: t.session } : {}),
+    })),
+    note: 'The G9BrowserAgent daemon restarted since your last call, and the launched browsers stopped with it: the tabs above are gone and ' +
+      'every tab id is new. browser_tabs action:"restore" launches the same profiles again and reopens these pages (old id → new); ' +
+      'what was typed but not saved, and an isolated context\'s cookies, are not coming back.',
+  };
+}
+
+/** (3.10) The cap of a script read from expressionFile. */
+export const EXPRESSION_FILE_MAX_BYTES = 1024 * 1024;
+
+/**
+ * (3.10) browser_console expressionFile → expression: the daemon reads the file (an absolute path on its machine, at most
+ * 1 MB, UTF-8), so a 5–7 KB helper never passes through the agent's context (suggestions box, 2026-11-07).
+ */
+export async function expressionFromFile(args) {
+  const { expressionFile, ...rest } = args;
+  const file = String(expressionFile ?? '');
+  const refuse = (why) => Object.assign(new Error(`expressionFile: ${why}`), { errorCode: 'bad_argument' });
+  if (rest.expression != null && rest.expression !== '') throw refuse('pass expression OR expressionFile, not both.');
+  if (!path.isAbsolute(file)) throw refuse(`it must be an absolute path on the machine running G9BrowserAgent (got ${JSON.stringify(file)}).`);
+  let stat;
+  try {
+    stat = await fsp.stat(file);
+  } catch (err) {
+    throw refuse(`${file} cannot be read (${err.code ?? err.message}).`);
+  }
+  if (!stat.isFile()) throw refuse(`${file} is not a file.`);
+  if (stat.size > EXPRESSION_FILE_MAX_BYTES) throw refuse(`${file} is ${stat.size} bytes; at most ${EXPRESSION_FILE_MAX_BYTES}.`);
+  const expression = (await fsp.readFile(file, 'utf8')).replace(/^﻿/, '');
+  if (!expression.trim()) throw refuse(`${file} is empty.`);
+  return { ...rest, expression };
+}
+
 function stripRouting(args) {
   const { session, engine, context, ...rest } = args ?? {};
   return rest;
@@ -844,6 +884,11 @@ export class Router {
    * memory warning rides once on each agent's next result, as `hostWarning`.
    */
   #withHostWarning(client, args, result) {
+    // (3.10) After a daemon restart: what this agent lost, once (daemon/survivors.js).
+    if (client.lostNoticePending && client.lostOnRestart && result && typeof result === 'object' && !Array.isArray(result)) {
+      client.lostNoticePending = false;
+      result = { ...result, daemonRestarted: lostNotice(client.lostOnRestart) };
+    }
     const watch = this.hostWatch;
     if (!watch) return result;
     watch.note(args.url);
@@ -858,7 +903,13 @@ export class Router {
     return result;
   }
 
-  #dispatch(client, tool, args) {
+  async #dispatch(client, tool, args) {
+    // (3.10) expressionFile: the daemon reads the script, so it never passes through the agent's context.
+    if (tool === 'browser_console' && args.expressionFile != null) args = await expressionFromFile(args);
+    return this.#route(client, tool, args);
+  }
+
+  #route(client, tool, args) {
     // (3.5) Bytes out of the browser's machine: answered by the daemon, no tab needed.
     if (tool === 'browser_network' && args.action === 'read_file') return this.#readFile(args);
     // (3.6, TEMPORARY) A suggestion for G9BrowserAgent itself, sent to the suggestions box.
@@ -1388,6 +1439,9 @@ export class Router {
         };
       }
 
+      case 'restore':
+        return this.#restore(client);
+
       case 'focus': {
         // (3.4) Bringing a tab to the front is not page work: it does not wait behind a stuck call.
         const handle = await this.#explicit(client, args, 'focus');
@@ -1796,13 +1850,13 @@ export class Router {
 
     let opened;
     if (useExtension) {
-      const result = await this.relay(extClient, 'browser_tabs', { action: 'open', url, focus: args.focus ?? false }, caller);
+      const result = await this.relay(extClient, 'browser_tabs', { action: 'open', url, focus: args.focus ?? false, ...(args.newWindow === true ? { newWindow: true } : {}) }, caller);
       if (!Number.isInteger(result?.tabId)) throw new Error('The extension opened a tab but did not report its id.');
-      opened = { tabId: result.tabId, engine: extClient.id, url: result.url ?? url };
+      opened = { tabId: result.tabId, engine: extClient.id, url: result.url ?? url, ...(result?.newWindow ? { newWindow: true } : {}) };
       // In the person's browser a tab opens in the BACKGROUND unless asked otherwise, and a browser
       // delivers input only to the tab it shows: said here, or the agent's first click is refused
       // with a "tab hidden" it had no way to expect (docs review, 2026-09-22).
-      if (args.focus !== true) {
+      if (args.focus !== true && !result?.newWindow) {
         opened.background = true;
         opened.hint = 'This tab opened in the background: it can be read (snapshot, console, network, viewport screenshot) ' +
           'but not clicked or typed into. Call browser_tabs action:"focus" first, or open with focus:true.';
@@ -1815,6 +1869,74 @@ export class Router {
     this.registry.ensureOwnership(opened.tabId, client.id);
     this.registry.setCurrent(client.id, opened.tabId);
     return opened;
+  }
+
+  /**
+   * (3.10) browser_status `load`: calls running and waiting (per tab, with who owns the tab), the longest running
+   * call, the last minute's times, and a note when one tab or one call holds others up.
+   */
+  #load() {
+    const calls = this.callLog.load();
+    const queued = [...this.registry.queueDepth.entries()]
+      .filter(([, n]) => n > 1)
+      .map(([tabId, n]) => ({ tabId, waiting: n - 1, owner: this.registry.ownerOf(tabId) ?? null, engine: this.registry.engineOf(tabId) }))
+      .sort((a, b) => b.waiting - a.waiting);
+    const out = { ...calls, callsWaiting: queued.reduce((a, q) => a + q.waiting, 0), ...(queued.length ? { queues: queued.slice(0, 10) } : {}) };
+    const slow = calls.longestRunning && calls.longestRunning.runningMs > 60_000;
+    if (slow || out.callsWaiting > 3) {
+      out.note = (slow ? `Call ${calls.longestRunning.callId} (${calls.longestRunning.tool}${calls.longestRunning.action ? ` ${calls.longestRunning.action}` : ''}, ${this.registry.describe(calls.longestRunning.agentId) ?? calls.longestRunning.agentId}) has run ${Math.round(calls.longestRunning.runningMs / 1000)} s. ` : '') +
+        (out.callsWaiting > 3 ? `${out.callsWaiting} calls wait behind others on the same tab (calls on one tab run one at a time; other tabs and engines are not held up). ` : '') +
+        'A slow answer now is the daemon\'s load, not necessarily your page.';
+    }
+    return out;
+  }
+
+  /**
+   * (3.10) browser_tabs action:"restore": the launched tabs this agent held before the daemon restarted
+   * (daemon/survivors.js), reopened — each profile launched again as it was (or the engine already running it
+   * used), each page opened in its default context. → { restored: [{ previousTabId, tabId, url, engine }], failed? }
+   */
+  async #restore(client) {
+    const lost = client.lostOnRestart;
+    if (!lost?.tabs?.length) {
+      throw Object.assign(new Error('Nothing to restore: no launched tab of yours was lost in a daemon restart (or it was restored already).'), { errorCode: 'not_found' });
+    }
+    client.lostNoticePending = false;
+    const recordOf = new Map(lost.engines.map((e) => [e.engineId, e]));
+    const engineFor = new Map();
+    const restored = [];
+    const failed = [];
+    for (const t of lost.tabs) {
+      try {
+        const rec = recordOf.get(t.engine);
+        if (!rec?.profile) throw new Error('its engine\'s profile is unknown');
+        let engineId = engineFor.get(t.engine);
+        if (!engineId) {
+          const running = this.engines.list().find((e) => e.profile === rec.profile && !e.stopping);
+          engineId = running?.engineId ?? (await this.engines.launch({
+            profile: rec.profile, browser: rec.browser ?? undefined, headless: rec.headless, stealth: rec.stealth ?? undefined,
+            ...(rec.locale ? { locale: rec.locale } : {}), ...(rec.timezone ? { timezone: rec.timezone } : {}),
+          })).engineId;
+          engineFor.set(t.engine, engineId);
+        }
+        const opened = await this.engines.openTab(engineId, null, t.url || 'about:blank');
+        this.registry.ensureOwnership(opened.tabId, client.id);
+        if (t.session) {
+          try { this.registry.nameSession(String(t.session), opened.tabId); } catch { /* the name is taken now */ }
+        }
+        restored.push({
+          previousTabId: t.tabId, tabId: opened.tabId, url: t.url, engine: engineId, profile: rec.profile,
+          ...(t.session ? { session: t.session } : {}),
+          ...(t.isolatedContext ? { note: 'It was in an isolated context; it is back in the profile\'s default context, without that context\'s cookies.' } : {}),
+        });
+      } catch (err) {
+        failed.push({ previousTabId: t.tabId, url: t.url, error: String(err?.message ?? err) });
+      }
+    }
+    const left = lost.tabs.filter((t) => failed.some((f) => f.previousTabId === t.tabId));
+    client.lostOnRestart = left.length ? { ...lost, tabs: left } : null;
+    if (restored.length) this.registry.setCurrent(client.id, restored[0].tabId);
+    return { restored, ...(failed.length ? { failed } : {}), ...(restored.length ? { current: restored[0].tabId } : {}) };
   }
 
   async #attach(client, args) {
@@ -1949,7 +2071,8 @@ export class Router {
         return { engines: this.engineRows() };
       case 'launch': {
         const { action: _a, lease, stopWhenReleased, ...opts } = args;
-        const info = await this.engines.launch(opts);
+        // (3.10) profileFrom: a profile of the agent's own, with the cookies (sign-ins) of another.
+        const info = opts.profileFrom ? await this.engines.launchFromProfile(opts) : await this.engines.launch(opts);
         if (lease !== true || !info?.engineId) return info;
         // A lease says "I use this browser across my tabs": the daemon stops an engine launched
         // with stopWhenReleased once every lease is released and no connected agent owns a tab
@@ -2174,12 +2297,18 @@ export class Router {
         pid: info.pid,
         port: info.port,
         home: info.home,
+        // (3.10) A daemon a service started: said where every agent looks first.
+        ...(info.serviceAccount ? { serviceAccount: info.serviceAccount, serviceAccountNote: `This daemon runs as ${info.serviceAccount}: its browsers, downloads and data folder are not the signed-in person's (Edge does not run as SYSTEM). Tell the person: shutting it down in the G9BrowserAgent app (Settings) lets the app start one under their account.` } : {}),
         uptimeMs: info.startedAt ? Date.now() - info.startedAt : null,
         project: client.project?.found ? client.project.path : null,
         flowLibrary: client.project?.flowsDir ?? null,
         ...(client.project?.problems?.length ? { projectProblems: client.project.problems } : {}),
       },
-      you: { agentId: client.id, name: client.name, current: this.registry.current(client.id), ...this.#takeNotice(client) },
+      you: {
+        agentId: client.id, name: client.name, current: this.registry.current(client.id), ...this.#takeNotice(client),
+        // (3.10) Launched tabs lost in a daemon restart, until restored.
+        ...(client.lostOnRestart ? { lostOnRestart: lostNotice(client.lostOnRestart) } : {}),
+      },
       owned: this.registry.ownedBy(client.id),
       halted: {
         global: g.halted,
@@ -2205,6 +2334,7 @@ export class Router {
       ...(targetError ? { targetError } : {}),
       ...(skew ? { versionMismatch: skew } : {}),
       ...(this.hostWatch?.warnings().length ? { hostWarnings: this.hostWatch.warnings() } : {}),
+      load: this.#load(),
     };
     if (status.hostWarnings) client.hostSeen = this.hostWatch.generation; // seen here: not repeated on the next result
     status.hint = statusHint(status, { engineStatus, g, me });

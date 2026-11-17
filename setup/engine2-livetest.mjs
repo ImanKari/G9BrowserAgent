@@ -629,6 +629,31 @@ async function sectionLaunch() {
     'headless screen: 1920x1080 with a taskbar work area, and the window inside it (not 800x600, not avail = screen)', short(geo));
   check(geo.vis === 'visible', 'the agent tab is visible (so input reaches it)', geo.vis);
   measure(`headless geometry as the page sees it: ${short(geo)}`);
+  // (3.10) Waits see open shadow roots, and a DOM wait on a page that stopped changing ends early ("stalled").
+  // On a tab of its own, closed afterwards: the main tab's console and network counts stay as the checks below expect.
+  const waitTab = (await must(A, 'browser_tabs', { action: 'open', url: S.testUrl })).tabId;
+  await must(A, 'browser_navigate', { action: 'wait', selector: '#e2lab', tabId: waitTab, timeoutMs: 20_000 });
+  await sleep(900);
+  await pageEval(A, waitTab, `(() => { const h = document.createElement('div'); h.id = 'e2host'; document.body.appendChild(h);
+    const r = h.attachShadow({ mode: 'open' }); r.innerHTML = '<span>score 0 / 67</span><button id="e2shadowbtn">Inner</button>';
+    const n = document.createElement('div'); r.appendChild(n); n.attachShadow({ mode: 'open' }).innerHTML = '<b>nested-deep-77</b>'; return true; })()`);
+  const shadowText = await A.call('browser_navigate', { action: 'wait', text: '0 / 67', tabId: waitTab, timeoutMs: 5_000 });
+  const nestedText = await A.call('browser_navigate', { action: 'wait', text: 'nested-deep-77', tabId: waitTab, timeoutMs: 5_000 });
+  const shadowSel = await A.call('browser_navigate', { action: 'wait', selector: '#e2shadowbtn', tabId: waitTab, timeoutMs: 5_000 });
+  check(shadowText.ok && nestedText.ok && shadowSel.ok && shadowText.data?.satisfied && shadowSel.data?.satisfied,
+    'wait text/selector find content in open shadow roots, nested ones included', short([shadowText.text, nestedText.text, shadowSel.text], 400));
+  const t0 = Date.now();
+  const stalled = await A.call('browser_navigate', { action: 'wait', text: 'never-on-this-page-9f3', tabId: waitTab, timeoutMs: 60_000, stallMs: 3_000 });
+  const stalledMs = Date.now() - t0;
+  check(!stalled.ok && /\[code: stalled\]/.test(stalled.text) && stalledMs < 20_000,
+    'a text wait on a quiet page ends early with code "stalled" (not at its 60 s deadline)', `${stalledMs} ms: ${short(stalled.text, 300)}`);
+  // As an agent does it: the action that sends the request first (a click, here a fetch), the wait after it.
+  await pageEval(A, waitTab, 'setTimeout(() => fetch("/api/missing?after=1").catch(() => 0), 400), true');
+  const resp = await A.call('browser_navigate', { action: 'wait', response: '/api/missing?after=1', tabId: waitTab, timeoutMs: 15_000 });
+  check(resp.ok && resp.data?.response?.status === 404 && /\/api\/missing\?after=1/.test(resp.data?.response?.url ?? ''),
+    'wait response: returns the request the page made just before or during the wait, with its status', short(resp.text, 300));
+  await must(A, 'browser_tabs', { action: 'close', tabId: waitTab });
+  await must(A, 'browser_tabs', { action: 'focus', tabId: S.tabMain });
   const hits = await (await fetch(`${S.web}/e2/stats`)).json();
   check((hits.hits['/testpage.html'] ?? 0) >= 1 && (hits.hits['/crossframe.html'] ?? 0) >= 1 && (hits.hits['/api/missing'] ?? 0) >= 1,
     'the server saw the page, its cross-origin frame and /api/missing requested', short({ page: hits.hits['/testpage.html'], frame: hits.hits['/crossframe.html'], missing: hits.hits['/api/missing'] }));
@@ -2235,6 +2260,27 @@ async function sectionStealthEngine() {
   check(stop.ok && !!gone, 'stealth engine stopped: no process left on its profile', short(stop.data ?? stop.text));
 }
 
+/** (3.10) launch profileFrom: the source signs in (a cookie), the copy launches with it while the source is NOT running. */
+async function sectionProfileFrom() {
+  const { A } = S;
+  const src = await A.call('browser_engine', { action: 'launch', browser: 'edge', headless: true, profile: 'e2src' }, 240_000);
+  check(src.ok, 'launch the source profile', src.ok ? src.data.engineId : src.text);
+  if (!src.ok) return;
+  const t = await must(A, 'browser_tabs', { action: 'open', url: S.testUrl, engine: src.data.engineId });
+  await must(A, 'browser_navigate', { action: 'wait', selector: '#e2lab', tabId: t.tabId, timeoutMs: 20_000 });
+  await pageEval(A, t.tabId, 'document.cookie = "g9copied=yes-3-10; max-age=3600; path=/", true');
+  await must(A, 'browser_engine', { action: 'stop', engineId: src.data.engineId });
+  const copy = await A.call('browser_engine', { action: 'launch', browser: 'edge', headless: true, profileFrom: 'e2src' }, 300_000);
+  check(copy.ok && /^e2src-\d+$/.test(copy.data?.profile ?? '') && copy.data?.cookiesCopied >= 1,
+    'launch profileFrom:"e2src" (source not running) starts "e2src-1" with its cookies', short(copy.ok ? { profile: copy.data.profile, cookiesCopied: copy.data.cookiesCopied } : copy.text));
+  if (!copy.ok) return;
+  const ct = await must(A, 'browser_tabs', { action: 'open', url: S.testUrl, engine: copy.data.engineId });
+  await must(A, 'browser_navigate', { action: 'wait', selector: '#e2lab', tabId: ct.tabId, timeoutMs: 20_000 });
+  const cookie = await pageEval(A, ct.tabId, 'document.cookie');
+  check(/g9copied=yes-3-10/.test(String(cookie)), 'the copy sees the source\'s cookie on the page', short(cookie));
+  await must(A, 'browser_engine', { action: 'stop', engineId: copy.data.engineId });
+}
+
 /**
  * Edge opens edge://downloads-hub by itself after a download. The product now
  * writes browser.show_hub_popup_on_download_start:false into every profile
@@ -2480,6 +2526,7 @@ try {
   await run('handoff', 'handoff import (synthetic Engine 1 export)', sectionHandoff);
   await run('clean', 'isolated-world cleanliness', async () => { await ensureStealthTab(); await sectionCleanliness(); });
   await run('stealth', 'a stealth engine', sectionStealthEngine);
+  await run('profilefrom', 'launch profileFrom: a profile of its own with another profile\'s cookies', sectionProfileFrom);
   await run('locale', 'a de-DE persona, relaunch without restored tabs, context locale rules', sectionLocale);
   await run('hub', 'Edge downloads-hub without / with the profile preference (raw launches, A/B)', sectionHubExperiment);
   await run('stop', 'engine stop leaves no browser process', sectionEngineStop, { core: true });

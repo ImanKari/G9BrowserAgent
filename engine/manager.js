@@ -879,6 +879,59 @@ export class EngineManager {
     if (r.saved) this.log(`[engine2] ${e.info.engineId}: kept ${r.saved} session cookie(s) of profile ${e.info.profile} for its next launch`);
   }
 
+  /**
+   * (3.10) launch profileFrom: a profile of its own for an agent, signed in like another one. The source profile's
+   * cookies are read from the engine running it, or — when none does — from a short headless launch of it (stopped
+   * again); then `opts.profile` (default "<source>-<n>", the first free one) is launched and the cookies are set in it,
+   * so they stay in that profile. Suggestions box, 2026-11-16: every agent shared one signed-in ChatGPT profile, and a
+   * profile allows one browser at a time, so agents waited on each other.
+   * → the launch result + { copiedFrom, cookiesCopied }
+   */
+  async launchFromProfile(opts = {}) {
+    const from = String(opts.profileFrom);
+    const { profile: profileModule } = await this.#engineModules();
+    const params = pick(profileModule, 'cookieParams');
+    let target = opts.profile ? String(opts.profile) : null;
+    if (target === from) throw new Error(`profileFrom and profile are both "${from}": pick another name for the copy, or launch "${from}" itself.`);
+    if (!target) {
+      const taken = new Set([...this.engines.values()].map((e) => e.info.profile));
+      const listProfiles = pick(profileModule, 'list');
+      for (const p of (await Promise.resolve(listProfiles?.({ home: this.home })).catch(() => [])) ?? []) taken.add(typeof p === 'string' ? p : p?.name);
+      for (let n = 1; n < 1000 && !target; n += 1) if (!taken.has(`${from}-${n}`)) target = `${from}-${n}`;
+    }
+    let cookies;
+    const running = [...this.engines.values()].find((e) => e.info.profile === from && !e.closing && e.ready !== false);
+    if (running) {
+      ({ cookies } = await running.conn.send('Storage.getCookies', {}, null, { timeoutMs: 10_000 }));
+    } else {
+      const source = await this.launch({ profile: from, headless: true, stealth: 'off', browser: opts.browser });
+      try {
+        const e = this.engines.get(source.engineId);
+        ({ cookies } = await e.conn.send('Storage.getCookies', {}, null, { timeoutMs: 10_000 }));
+      } finally {
+        await this.stop(source.engineId).catch((err) => this.log(`[engine2] profileFrom: stopping ${source.engineId}: ${err.message}`));
+      }
+    }
+    const { profileFrom: _from, ...launchOpts } = opts;
+    const info = await this.launch({ ...launchOpts, profile: target });
+    const e = this.engines.get(info.engineId);
+    const list = params ? params(cookies) : [];
+    let copied = 0;
+    try {
+      if (list.length) await e.conn.send('Storage.setCookies', { cookies: list });
+      copied = list.length;
+    } catch {
+      for (const c of list) {
+        try { await e.conn.send('Storage.setCookies', { cookies: [c] }); copied += 1; } catch { /* this browser refuses it */ }
+      }
+    }
+    this.log(`[engine2] ${info.engineId}: profile ${target} launched with ${copied} cookie(s) copied from ${from}`);
+    return {
+      ...info, copiedFrom: from, cookiesCopied: copied,
+      note: `Profile "${target}" now holds the cookies of "${from}" (sign-ins included) and keeps them; the two are independent from here on. Local storage and IndexedDB were not copied.`,
+    };
+  }
+
   /** (3.6) Set the session cookies the profile's last graceful stop kept. → how many were set. */
   async #restoreSessionCookies(engineId, profileName) {
     const e = this.engines.get(engineId);

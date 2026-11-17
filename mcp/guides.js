@@ -128,9 +128,14 @@ blindly repeat a state-changing action whose outcome is unknown — check first.
 ## Navigation and waiting — never sleep
 \`browser_navigate\`: goto (\`url\`, \`waitUntil\`), reload (\`hard\`), back/forward (\`steps\`), and **wait**:
 \`text\`, \`selector\`, \`predicate\` (a page expression polled until truthy), \`ref\` + \`state\`
-(visible/hidden/enabled/disabled/checked/unchecked/gone/present), \`idle\` (DOM quiet 500 ms, no request in
-flight), \`gone:true\` to wait for something to disappear (spinners). \`timeoutMs\` up to 2 h for a wait.
-\`leaveWithoutAsking:true\` passes a "Leave site?" prompt.
+(visible/hidden/enabled/disabled/checked/unchecked/gone/present), \`response\` (a request the page makes, by URL
+part or /regex/), \`idle\` (DOM quiet 500 ms, no request in flight), \`gone:true\` to wait for something to
+disappear (spinners). \`timeoutMs\` up to 2 h. \`leaveWithoutAsking:true\` passes a "Leave site?" prompt.
+**Wait on the fastest correct signal**: the URL changing > a ref from a snapshot (probe once:
+\`browser_snapshot name:"…"\`, then wait on its ref) > \`response:"/api/…"\` > \`text\`/\`selector\` (they search open
+shadow roots and same-origin frames) > a predicate, last: \`document.body.innerText\` and \`querySelector\` do NOT
+see shadow roots. A text/selector/ref wait on a page that has stopped changing (no DOM change, no request, for
+\`stallMs\`, default 30 s) ends early with code "stalled" — look with a snapshot; \`stallMs:0\` waits on.
 
 ## Dialogs
 An open alert/confirm/prompt/beforeunload freezes ITS tab: calls on it fail fast, naming the dialog, until
@@ -162,7 +167,14 @@ Return small values (\`JSON.stringify\` of what you need), not whole objects.
 ending (not a navigation). Inside it, \`__g9job.progress(fraction, note)\` reports progress and
 \`__g9job.signal\` is aborted by \`job_cancel\`. \`job_status jobId:"…" waitMs:…\` reads state, progress and the
 bounded result (waiting up to 10 min); \`jobs\` lists them. For long in-page work in a background tab of the
-user's browser, keep it awake: \`browser_tabs action:"keep_awake"\` (or \`open keepAwake:true\`).
+user's browser, keep it awake: \`browser_tabs action:"keep_awake"\` (or \`open keepAwake:true\`). An evaluate
+that holds the tab over 30 s says so: the other calls on that tab waited behind it.
+
+## Helpers that survive reloads, scripts from a file
+\`action:"inject" name:"helpers" expression:"…"\` keeps a script on the tab: it runs before the page's own scripts
+on every load (and once now); \`injected\` lists, \`uninject name:"…"\` (or \`all:true\`) removes. \`expressionFile\`
+(an absolute path on the machine running G9BrowserAgent) replaces \`expression\` for evaluate and inject, so a
+long script never passes through your context. A result with \`painting:false\` comes from a hidden page.
 
 ## Debugging recipes
 - **"It throws somewhere"**: \`browser_console clear:true\` → reproduce (interact) → \`browser_console
@@ -286,6 +298,14 @@ the user's browser after a one-minute grace (a new call within it cancels that).
   snapshot first. \`browser_tabs action:"close"\` never waits behind a stuck call.
 - Stateless HTTP clients: a new MCP session with the same client name (or X-G9-Agent header) takes over the
   previous session's tabs; current tab and session names keep working.
+- Slow answers: \`browser_status\` \`load\` shows calls running and waiting (per tab), the longest call and the
+  last minute's times — the daemon's load, or your page. After a daemon restart your next result carries
+  \`daemonRestarted\`: \`browser_tabs action:"restore"\` reopens your launched tabs (old id → new).
+
+## A signed-in browser of your own
+One profile opens in one browser at a time. Do not share a signed-in profile (ChatGPT…) with other agents:
+\`browser_engine action:"launch" profileFrom:"<signed-in profile>"\` starts a profile of your own with its
+cookies (sign the source in once: \`warm\`, or \`handoff\` a tab of the user's browser into it).
 `),
 
   background: G('Background work: launched browsers, handoff, popout', 'Work that goes on while the user uses their computer; engines, profiles, live view.', `
@@ -418,6 +438,12 @@ site names, secrets or personal data. One suggestion per point, as it happens; a
 - In the user's browser a background tab can be read but not clicked (guide "start").
 - A stealth context cannot read the page's console output (guide "stealth").
 - An argument a tool does not take is refused with the closest real one ("did you mean scope?").
+- What a result carries: evaluate returns its value whole; a satisfied predicate wait up to 64 KB of JSON; a
+  job's status up to 256 KB. Return what you need (\`JSON.stringify\` of a part), not whole objects.
+- An injected script lasts while G9BrowserAgent stays attached to the tab; a daemon restart stops the launched
+  browsers (\`browser_tabs action:"restore"\` reopens your tabs, guide "sharing").
+- A daemon a service started (Windows SYSTEM, root) is not the person's: \`browser_status\` says
+  \`serviceAccount\`. Edge does not run as SYSTEM, and its downloads land where the person cannot read them.
 `),
 };
 

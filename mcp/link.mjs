@@ -20,7 +20,7 @@ import { WsClient } from '../lib/ws-client.mjs';
 import { timeoutFor } from '../daemon/router.js';
 import { resolveHome, updatingMarker } from '../daemon/paths.js';
 import { runningDaemonFor } from '../daemon/home-lock.js';
-import { scriptCommand, isAppImageRuntime, ensureBootstrap, runsAsWindowsSystem } from '../lib/runtime.mjs';
+import { scriptCommand, isAppImageRuntime, ensureBootstrap, serviceAccount } from '../lib/runtime.mjs';
 
 export const HOST = process.env.G9_HOST || '127.0.0.1';
 export const PORT = (() => {
@@ -41,16 +41,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * person then worked through it — Edge exits 1002 there, a headed browser opens on no one's desktop, downloads land
  * in the SYSTEM profile the person cannot read. G9_ALLOW_SYSTEM_DAEMON=1 allows it (a machine where SYSTEM is the
  * only account that runs agents).
+ *
+ * (3.10) The same for root on macOS and Linux (a launchd or systemd job hosting the shim). The browser node image
+ * runs its services as the desktop user, not root (docker/root/etc/s6-overlay).
  */
-export function systemMayStartDaemon({ system = runsAsWindowsSystem(), env = process.env } = {}) {
+export function systemMayStartDaemon({ system = serviceAccount() != null, env = process.env } = {}) {
   return !system || env.G9_ALLOW_SYSTEM_DAEMON === '1';
 }
 
 export const SYSTEM_NO_DAEMON =
-  `No G9BrowserAgent daemon is running on port ${PORT}, and this MCP client runs as the Windows SYSTEM account, so it does not ` +
-  'start one: a SYSTEM daemon\'s browsers, downloads and Edge would not be the signed-in person\'s. Sign in and start the ' +
+  `No G9BrowserAgent daemon is running on port ${PORT}, and this MCP client runs as a service account (Windows SYSTEM, or root), so it ` +
+  'does not start one: a service daemon\'s browsers, downloads and data folder would not be the signed-in person\'s. Sign in and start the ' +
   'G9BrowserAgent app (it starts the daemon at sign-in), then retry; G9_ALLOW_SYSTEM_DAEMON=1 in this MCP server\'s environment ' +
-  'allows a SYSTEM daemon on a machine where SYSTEM is the only account that runs agents.';
+  'allows it on a machine where that account is the only one that runs agents.';
 
 /**
  * Who is on the port, when it is not a daemon that accepts us. The v1 bridge

@@ -36,6 +36,7 @@ const TAB_KEYS = (tabId) => [
   `netrules:${tabId}`,
   `downloads:${tabId}`,
   `emulate-ua:${tabId}`,
+  `inject:${tabId}`, // (3.10) tools/inject.js: the scripts died with the tab
 ];
 
 /**

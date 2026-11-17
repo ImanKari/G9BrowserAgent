@@ -41,6 +41,8 @@ export function layout(home) {
     daemonLog: path.join(home, 'logs', 'daemon.log'),
     installLog: path.join(home, 'logs', 'install.log'),
     updating: path.join(home, 'updating.json'),
+    /** (3.10) daemon/survivors.js: the launched engines and tabs a restart would take. */
+    survivors: path.join(home, 'state', 'launched.json'),
   };
 }
 

@@ -165,7 +165,7 @@ An input action that failed with a delivery state (`browser_interact`: `"not-del
 ***(3.6)*** Every error an agent can act on carries a **code** (`extension/lib/errcode.js`
 `ERROR_CODES`: `not_found`, `ambiguous`, `bad_argument`, `unknown_argument`, `no_snapshot`,
 `stale_ref`, `not_delivered`, `tab_hidden`, `missed`, `partial`, `not_verified`, `navigated`,
-`dialog`, `timeout`, `halted`, `owned`): a `[code: …]` tag in the text, after any `[delivery: …]` /
+`dialog`, `timeout`, `stalled`, `halted`, `owned`): a `[code: …]` tag in the text, after any `[delivery: …]` /
 `[recovered]` tag, and a `code` field in the result. An engine's `ok:false` result carries `code` the
 same way, and the daemon passes it on.
 
